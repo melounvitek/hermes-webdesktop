@@ -259,12 +259,9 @@ class GatewaySlashCommandsMixin(
         cp = _checkpoint_agent_kwargs(_load_gateway_config())
         if not cp["checkpoints_enabled"]:
             return None
-        return CheckpointManager(
-            enabled=True,
-            max_snapshots=cp["checkpoint_max_snapshots"],
-            max_total_size_mb=cp["checkpoint_max_total_size_mb"],
-            max_file_size_mb=cp["checkpoint_max_file_size_mb"],
-        )
+        # AIAgent kwargs are ``checkpoint_<field>``; CheckpointManager takes the bare field names.
+        return CheckpointManager(enabled=True, **{k[len("checkpoint_"):]: v for k, v in cp.items()
+                                                  if k.startswith("checkpoint_")})
 
     def _write_approval_setter(self, section: str, event: MessageEvent):
         """``set_mode_fn`` for /memory and /skills: persist ``<section>.write_approval``. Raw read is

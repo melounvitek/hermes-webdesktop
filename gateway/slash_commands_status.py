@@ -51,8 +51,11 @@ def _clip(text: str, limit: int) -> str:
     return text[: limit - 3] + "..." if len(text) > limit else text
 
 
-def _chat_msgs(history) -> list[dict]:
-    return [m for m in history if m.get("role") in {"user", "assistant"} and m.get("content")]
+def _transcript_estimate(history) -> tuple[int, int]:
+    """``(approx_tokens, message_count)`` over the user/assistant messages of a transcript."""
+    from agent.model_metadata import estimate_messages_tokens_rough
+    msgs = [m for m in history if m.get("role") in {"user", "assistant"} and m.get("content")]
+    return estimate_messages_tokens_rough(msgs), len(msgs)
 
 
 async def _quiet(call, default=None):
@@ -317,14 +320,12 @@ class GatewayStatusCommandsMixin:
         if used > 0 and context_length > 0:
             pct = _pct(used, context_length)
             filled = int(round(pct / 100 * 24))
-            bar = "█" * max(0, filled) + "░" * max(0, 24 - filled)
             lines = [
-                t("gateway.context.header"),
-                "",
+                t("gateway.context.header"), "",
                 t("gateway.context.model", model=model_name or "?"),
                 t("gateway.context.window", total=_fmt(context_length)),
                 t("gateway.context.in_use", used=_fmt(used), total=_fmt(context_length), pct=f"{pct:.0f}"),
-                t("gateway.context.bar", bar=bar),
+                t("gateway.context.bar", bar="█" * max(0, filled) + "░" * max(0, 24 - filled)),
                 t("gateway.context.headroom", headroom=_fmt(max(0, context_length - used))),
                 "",
             ]
@@ -344,26 +345,21 @@ class GatewayStatusCommandsMixin:
 
         # Last resort: rough estimate from transcript
         history = await self.async_session_store.load_transcript(session_entry.session_id)
-        if history:
-            from agent.model_metadata import estimate_messages_tokens_rough
-            msgs = _chat_msgs(history)
-            return "\n".join([
-                t("gateway.context.header"),
-                "",
-                t("gateway.context.estimated", count=_fmt(estimate_messages_tokens_rough(msgs)),
-                  messages=len(msgs)),
-                t("gateway.context.detail_after_first"),
-            ])
-        return t("gateway.context.no_data")
+        if not history:
+            return t("gateway.context.no_data")
+        approx, count = _transcript_estimate(history)
+        return "\n".join([
+            t("gateway.context.header"), "",
+            t("gateway.context.estimated", count=_fmt(approx), messages=count),
+            t("gateway.context.detail_after_first"),
+        ])
 
     async def _resolve_context_figures(self, agent, ctx, session_entry, source):
         """``(used, context_length, model_name)`` for /context: used = compressor -> SessionStore;
         model = agent -> SessionDB row; window = compressor -> gateway model route -> model metadata."""
-        used = _n(ctx, "last_prompt_tokens") if ctx is not None else 0
-        context_length = _n(ctx, "context_length") if ctx is not None else 0
+        used = _n(ctx, "last_prompt_tokens") or _int_value(getattr(session_entry, "last_prompt_tokens", 0))
+        context_length = _n(ctx, "context_length")
         model_name = _clean_str(getattr(agent, "model", "")) if agent is not None else ""
-        if not used:
-            used = _int_value(getattr(session_entry, "last_prompt_tokens", 0))
         if not model_name and self._session_db:
             row = await _quiet(lambda: self._session_db.get_session(session_entry.session_id))
             model_name = _clean_str(row.get("model", "")) if isinstance(row, dict) else ""
@@ -460,11 +456,8 @@ class GatewayStatusCommandsMixin:
         if view.identity_line:
             lines += ["", view.identity_line]
         if view.topup_url:
-            lines += [
-                "",
-                f"Manage billing on the portal: {view.topup_url}",
-                "Top up and manage billing in the browser — your balance updates here after.",
-            ]
+            lines += ["", f"Manage billing on the portal: {view.topup_url}",
+                      "Top up and manage billing in the browser — your balance updates here after."]
         return "\n".join(lines)
 
     def _context_breakdown_block(self, agent, source, expanded: bool) -> list[str]:
@@ -583,12 +576,11 @@ class GatewayStatusCommandsMixin:
         session_entry = await self.async_session_store.get_or_create_session(source)
         history = await self.async_session_store.load_transcript(session_entry.session_id)
         if history:
-            from agent.model_metadata import estimate_messages_tokens_rough
-            msgs = _chat_msgs(history)
+            approx, count = _transcript_estimate(history)
             return _with_account_blocks([
                 t("gateway.usage.header_session_info"),
-                t("gateway.usage.label_messages", count=len(msgs)),
-                t("gateway.usage.label_estimated_context", count=_fmt(estimate_messages_tokens_rough(msgs))),
+                t("gateway.usage.label_messages", count=count),
+                t("gateway.usage.label_estimated_context", count=_fmt(approx)),
                 t("gateway.usage.detailed_after_first"),
             ])
         if account_lines or credits_lines:
