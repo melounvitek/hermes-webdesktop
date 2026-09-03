@@ -26,15 +26,12 @@ DEFAULT_CONTEXT_MESSAGES = 10
 _MESSAGE_CHAR_CAP = 12_000
 
 _REVIEW_GOAL = (
-    "Act as an independent senior reviewer. Thoroughly review the work "
-    "presented in the conversation excerpt provided in your context: "
-    "investigate any code, pull request, branch, commit, documentation, "
-    "design, or other artifact it references (open the PR, read the "
-    "diff, run the code or tests where feasible) rather than judging "
-    "from the excerpt alone. Produce a full, structured review: what "
-    "the work does, whether it is correct and complete, concrete "
-    "defects or risks found (with file/line references where possible), "
-    "what was verified vs. only read, and a clear final verdict with recommended next steps."
+    "Act as an independent senior reviewer. Thoroughly review the work presented in the conversation excerpt "
+    "provided in your context: investigate any code, pull request, branch, commit, documentation, design, or other "
+    "artifact it references (open the PR, read the diff, run the code or tests where feasible) rather than judging "
+    "from the excerpt alone. Produce a full, structured review: what the work does, whether it is correct and "
+    "complete, concrete defects or risks found (with file/line references where possible), what was verified vs. "
+    "only read, and a clear final verdict with recommended next steps."
 )
 
 
@@ -123,9 +120,8 @@ def build_review_task(
 ) -> tuple:
     """Compose the reviewer subagent's (goal, context) pair."""
     lines = [
-        "You were spawned by the /review command. The following is an "
-        "excerpt of the most recent conversation between the user and "
-        "their primary agent. It is your starting evidence — the work to "
+        "You were spawned by the /review command. The following is an excerpt of the most recent conversation "
+        "between the user and their primary agent. It is your starting evidence — the work to "
         "review is referenced in it.",
         "",
         "--- Recent conversation (oldest first) ---",

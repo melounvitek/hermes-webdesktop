@@ -26,22 +26,19 @@ _PER_MESSAGE_CHAR_CAP = 2000
 _TRANSCRIPT_CHAR_BUDGET = 24000
 
 _FORK_PROMPT = (
-    "The user asked a quick SIDE question with /btw while the main work continues in the original session.\nRules:\n"
-    "- Answer ONLY the side question, using the conversation above as "
-    "context. Do not continue, redo, or critique the main task.\n"
-    "- Do NOT call any tools — they are disabled for this side question. Answer directly in text.\n"
-    "- If the conversation does not contain enough information to answer, say so plainly instead of guessing.\n"
-    "- Be concise and direct."
+    "The user asked a quick SIDE question with /btw while the main work continues in the original "
+    "session.\nRules:\n- Answer ONLY the side question, using the conversation above as context. Do not continue, "
+    "redo, or critique the main task.\n- Do NOT call any tools — they are disabled for this side question. Answer "
+    "directly in text.\n- If the conversation does not contain enough information to answer, say so plainly instead "
+    "of guessing.\n- Be concise and direct."
 )
 
 _ONESHOT_INSTRUCTIONS = (
-    "You are the same AI assistant that is currently working inside the "
-    "conversation transcribed below. The user has asked a quick SIDE question "
-    "with /btw while the main work continues.\nRules:\n"
-    "- Answer ONLY the side question. Do not continue, redo, or critique the main task.\n"
-    "- Use the transcript as your primary context; it is a snapshot and may not include the very latest activity.\n"
-    "- If the transcript does not contain enough information to answer, say so plainly instead of guessing.\n"
-    "- Be concise and direct."
+    "You are the same AI assistant that is currently working inside the conversation transcribed below. The user "
+    "has asked a quick SIDE question with /btw while the main work continues.\nRules:\n- Answer ONLY the side "
+    "question. Do not continue, redo, or critique the main task.\n- Use the transcript as your primary context; it "
+    "is a snapshot and may not include the very latest activity.\n- If the transcript does not contain enough "
+    "information to answer, say so plainly instead of guessing.\n- Be concise and direct."
 )
 
 _ROLE_LABELS = {"user": "USER", "assistant": "ASSISTANT", "tool": "TOOL RESULT"}
