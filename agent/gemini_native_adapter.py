@@ -83,8 +83,8 @@ def bare_gemini_model_id(model: str) -> str:
 
 
 def gemini_requires_tool_call_ids(model: str) -> bool:
-    """Gemini 3+ needs explicit functionCall/functionResponse ids so replayed
-    parallel tool calls pair with their responses; 2.x rejects the field."""
+    """Gemini 3+ needs explicit functionCall/functionResponse ids so replayed parallel tool calls
+    pair with their responses; 2.x rejects the field."""
     match = re.match(r"gemini-(\d+)", bare_gemini_model_id(model).lower())
     return match is not None and int(match.group(1)) >= 3
 
@@ -98,8 +98,7 @@ def is_native_gemini_base_url(base_url: str) -> bool:
 def probe_gemini_tier(
     api_key: str, base_url: str = DEFAULT_GEMINI_BASE_URL, *, model: str = "gemini-3.7-flash", timeout: float = 10.0
 ) -> str:
-    """Probe a Google AI Studio key; return ``"free"``, ``"paid"`` or ``"unknown"``
-    (probe failed — callers should proceed without blocking)."""
+    """Probe a Google AI Studio key → ``"free"`` | ``"paid"`` | ``"unknown"`` (probe failed; callers proceed without blocking)."""
     key = (api_key or "").strip()
     if not key:
         return "unknown"
@@ -148,17 +147,14 @@ def is_standard_key_auth_error(status: int, error_message: str, reason: str = ""
 class GeminiAPIError(Exception):
     """Error shape compatible with Hermes retry/error classification."""
 
-    def __init__(
-        self, message: str, *, code: str = "gemini_api_error", status_code: Optional[int] = None,
-        response: Optional[httpx.Response] = None, retry_after: Optional[float] = None, details: Optional[Dict[str, Any]] = None,
-    ) -> None:
+    def __init__(self, message: str, *, code: str = "gemini_api_error", status_code: Optional[int] = None,
+                 response: Optional[httpx.Response] = None, retry_after: Optional[float] = None, details: Optional[Dict[str, Any]] = None):
         super().__init__(message)
         self.code, self.status_code, self.response = code, status_code, response
         self.retry_after, self.details = retry_after, details or {}
 
 
 # ── OpenAI → Gemini request translation ──────────────────────────────────────
-
 def _text_of(item: Any) -> Optional[str]:
     """Text of an OpenAI content item (plain str or ``{"type": "text"}`` dict), else None."""
     if isinstance(item, dict) and item.get("type") == "text" and isinstance(item.get("text"), str):
@@ -185,18 +181,18 @@ def _inline_data_part(item: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         return None
 
 
+def _multimodal_part(item: Any) -> Optional[Dict[str, Any]]:
+    text = _text_of(item)
+    if text or isinstance(item, str):
+        return {"text": text}
+    return _inline_data_part(item) if isinstance(item, dict) else None
+
+
 def _extract_multimodal_parts(content: Any) -> List[Dict[str, Any]]:
-    if not isinstance(content, list):
-        text = _coerce_content_to_text(content)
-        return [{"text": text}] if text else []
-    parts: List[Dict[str, Any]] = []
-    for item in content:
-        text = _text_of(item)
-        if text or isinstance(item, str):
-            parts.append({"text": text})
-        elif isinstance(item, dict) and (image := _inline_data_part(item)):
-            parts.append(image)
-    return parts
+    if isinstance(content, list):
+        return [p for p in map(_multimodal_part, content) if p]
+    text = _coerce_content_to_text(content)
+    return [{"text": text}] if text else []
 
 
 def _tool_call_extra_signature(tool_call: Dict[str, Any]) -> Optional[str]:
@@ -406,7 +402,6 @@ def build_gemini_request(
 
 
 # ── Gemini → OpenAI response translation ─────────────────────────────────────
-
 def _tool_call_extra_from_part(part: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     sig = part.get("thoughtSignature")
     return {"google": {"thought_signature": sig}} if isinstance(sig, str) and sig else None

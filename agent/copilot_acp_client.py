@@ -293,8 +293,8 @@ class CopilotACPClient:
         return _completion_to_stream_chunks(completion) if stream else completion
 
     def _spawn(self) -> subprocess.Popen[str]:
-        # Fast-fail when the CLI rejects --acp (else the parent waits the full child timeout for
-        # stdout that never arrives). ``None`` falls through to the spawn's established start error.
+        # Fast-fail when the CLI rejects --acp (else the parent waits the full child timeout for stdout that
+        # never arrives). ``None`` falls through to the spawn's established start error.
         if _acp_supported(self._acp_command, self._acp_args) is False:
             preview = " ".join(self._acp_args[:3]) if self._acp_args else "(none)"
             raise RuntimeError(
