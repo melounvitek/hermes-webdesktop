@@ -23,10 +23,9 @@ class PromptCachePlan:
 def envelope_tool_part_cache_markers_supported(provider: str | None, base_url: str | None) -> bool:
     """Whether the envelope-layout route honors part-level markers on role:tool.
 
-    OpenRouter (and Nous Portal) relocate a part-level ``cache_control`` onto the
-    ``tool_result`` block; LiteLLM-style proxies copy parts verbatim, so the marker lands at
-    ``tool_result.content[0]`` — a non-retryable 400. There, tool messages carry no part
-    markers and the breakpoint budget reallocates to the nearest eligible message.
+    OpenRouter/Nous Portal relocate a part-level ``cache_control`` onto the ``tool_result``
+    block; LiteLLM-style proxies copy parts verbatim, so it lands at ``tool_result.content[0]``
+    (non-retryable 400). There, role:tool carries no part markers and the budget reallocates.
     """
     from agent.agent_runtime_helpers import _is_litellm_route
 
@@ -40,9 +39,8 @@ def _text_part(text: str, cache_marker: dict | None = None) -> dict:
     return part
 
 
-def _apply_cache_marker(
-    msg: dict, cache_marker: dict, native_anthropic: bool = False, tool_part_markers: bool = True,
-) -> None:
+def _apply_cache_marker(msg: dict, cache_marker: dict, native_anthropic: bool = False,
+                        tool_part_markers: bool = True) -> None:
     """Add cache_control to a single message, handling all format variations."""
     role = msg.get("role", "")
     content = msg.get("content")
@@ -71,10 +69,9 @@ def _apply_cache_marker(
 def _can_carry_marker(msg: dict, native_anthropic: bool, tool_part_markers: bool = True) -> bool:
     """True if a marker on this message is actually honored by the provider.
 
-    Native Anthropic honors every message. The envelope layout only honors markers inside
-    content parts, so empty-content messages would waste a breakpoint; with
-    ``tool_part_markers=False`` every role:tool message is excluded too (400). Must agree
-    with :func:`_apply_cache_marker`, which marks only the LAST part.
+    Native Anthropic honors every message; the envelope layout only honors markers inside
+    content parts (empty content wastes a breakpoint) and ``tool_part_markers=False`` excludes
+    role:tool too (400). Must agree with :func:`_apply_cache_marker` (marks the LAST part).
     """
     if native_anthropic:
         return True
@@ -117,18 +114,15 @@ def is_qwen_model(model: str) -> bool:
 def effective_cache_ttl(ttl: str | None, *, model: str = "", provider: str = "") -> str:
     """Clamp a requested cache TTL to what the destination route supports (``None`` → ``5m``).
 
-    Qwen/Alibaba routes drop the ``1h`` tier, so ``1h`` regresses to ``5m`` there — except
-    on ``MEASURED_1H_PROVIDERS`` (minus ``NO_1H_TIER_MODELS``). The measured-route check
-    runs BEFORE the generic Qwen clamp, which would otherwise swallow every Qwen model on it.
+    Qwen/Alibaba routes drop ``1h`` (→ ``5m``) except on ``MEASURED_1H_PROVIDERS`` minus
+    ``NO_1H_TIER_MODELS``; that check runs BEFORE the generic Qwen clamp, which would swallow it.
     """
     if ttl != "1h":
         return ttl or "5m"
     provider_lower = (provider or "").lower()
     if provider_lower in MEASURED_1H_PROVIDERS:
         return "5m" if _flat_model(model) in NO_1H_TIER_MODELS else "1h"
-    if is_qwen_model(model) or provider_lower in ALIBABA_FAMILY_PROVIDERS:
-        return "5m"
-    return "1h"
+    return "5m" if is_qwen_model(model) or provider_lower in ALIBABA_FAMILY_PROVIDERS else "1h"
 
 
 def _apply_system_cache_markers(
@@ -137,19 +131,17 @@ def _apply_system_cache_markers(
 ) -> int:
     """Mark the static system prefix (and optionally the full prompt); returns markers applied.
 
-    The system prompt stays one stored string, split only in the outgoing request.
-    ``mark_suffix=False`` is the tool-cache-plan layout (suffix budget spent on the tools
-    array). ``fallback_to_whole=False`` marks nothing when the split is impossible. When the
-    prompt IS the prefix the whole message is one block — never an empty text block (400).
+    The stored system prompt stays one string, split only in the request. ``mark_suffix=False``
+    is the tool-cache-plan layout (suffix budget spent on the tools array); ``fallback_to_whole=
+    False`` marks nothing when the split is impossible. When the prompt IS the prefix the whole
+    message is one block — never an empty text block (400).
     """
     content = message.get("content")
     if isinstance(static_system_prefix, str) and static_system_prefix and isinstance(content, str) and content.startswith(static_system_prefix):
         suffix = content[len(static_system_prefix):]
         if suffix.strip():
-            message["content"] = [
-                _text_part(static_system_prefix, cache_marker),
-                _text_part(suffix, cache_marker if mark_suffix else None),
-            ]
+            message["content"] = [_text_part(static_system_prefix, cache_marker),
+                                  _text_part(suffix, cache_marker if mark_suffix else None)]
             return 2 if mark_suffix else 1
     elif not fallback_to_whole:
         return 0
@@ -158,20 +150,17 @@ def _apply_system_cache_markers(
 
 
 def _has_part_marker(content: Any) -> bool:
-    return isinstance(content, list) and any(
-        isinstance(part, dict) and "cache_control" in part for part in content
-    )
+    return isinstance(content, list) and any(isinstance(part, dict) and "cache_control" in part for part in content)
 
 
 def strip_anthropic_cache_control(api_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Remove ``cache_control`` markers and undo decoration-produced list shapes (in place).
 
-    Used before re-decorating after a mid-turn provider failover. Flattening back to a
-    string is restricted to the exact shapes :func:`apply_anthropic_cache_control` produces
-    from string content — a single text part, the two-part ``[static, volatile]`` system
-    split, or the two-part skill split — so the ``""``-join is provably byte-exact. Marker
-    removal is copy-on-write on part dicts: parts can alias caller-held lists and stripping
-    must never rewrite the stored transcript.
+    Used before re-decorating after a mid-turn failover. Flattening to a string is restricted
+    to the exact shapes :func:`apply_anthropic_cache_control` produces from string content
+    (single text part, two-part system split, two-part skill split) so the ``""``-join is
+    byte-exact. Marker removal is copy-on-write on part dicts: parts can alias caller-held
+    lists and stripping must never rewrite the stored transcript.
     """
     for msg in api_messages:
         if not isinstance(msg, dict):
@@ -183,21 +172,16 @@ def strip_anthropic_cache_control(api_messages: List[Dict[str, Any]]) -> List[Di
         role = msg.get("role")
         # The skill split is the only decoration marking the FIRST part of a user message,
         # so the shape alone identifies it even after the prefix registry evicted the entry.
-        skill_split_shape = (
-            role == "user" and len(content) == 2
-            and all(isinstance(p, dict) for p in content)
-            and "cache_control" in content[0] and "cache_control" not in content[1]
-        )
+        skill_split_shape = (role == "user" and len(content) == 2 and all(isinstance(p, dict) for p in content)
+                             and "cache_control" in content[0] and "cache_control" not in content[1])
         if _has_part_marker(content):
             content = msg["content"] = [
                 {k: v for k, v in part.items() if k != "cache_control"}
-                if isinstance(part, dict) and "cache_control" in part else part
-                for part in content
+                if isinstance(part, dict) and "cache_control" in part else part for part in content
             ]
         plain_text_parts = content and all(
             isinstance(part, dict) and part.get("type", "text") == "text"
-            and isinstance(part.get("text"), str) and set(part.keys()) <= {"type", "text"}
-            for part in content
+            and isinstance(part.get("text"), str) and set(part.keys()) <= {"type", "text"} for part in content
         )
         if plain_text_parts and (len(content) == 1 or (role == "system" and len(content) == 2) or skill_split_shape):
             msg["content"] = "".join(part["text"] for part in content)
@@ -215,11 +199,8 @@ def strip_anthropic_tool_cache_control(tools: List[Dict[str, Any]] | None) -> Li
 
 def _count_cache_markers(messages: List[Dict[str, Any]], tools: List[Dict[str, Any]]) -> int:
     """Count the wire-visible cache markers in a request-local plan."""
-    def _marked(items: Any) -> int:
-        return sum(1 for item in items if isinstance(item, dict) and "cache_control" in item)
-
     parts = [p for m in messages if isinstance(m, dict) and isinstance(m.get("content"), list) for p in m["content"]]
-    return _marked(messages) + _marked(parts) + _marked(tools)
+    return sum(1 for item in [*messages, *parts, *tools] if isinstance(item, dict) and "cache_control" in item)
 
 
 def _completed_transaction_endpoint_indexes(messages: List[Dict[str, Any]], *, native_anthropic: bool) -> List[int]:
@@ -251,13 +232,9 @@ def _completed_transaction_endpoint_indexes(messages: List[Dict[str, Any]], *, n
             index = _tool_run_end(index)
             continue
 
-        if (role == "user" and index + 1 < len(messages)) or (
-            role == "assistant" and message.get("content") in (None, "")
-        ):
-            index += 1
-            continue
-
-        if _can_carry_marker(message, native_anthropic):
+        open_turn = (role == "user" and index + 1 < len(messages)) or (
+            role == "assistant" and message.get("content") in (None, ""))
+        if not open_turn and _can_carry_marker(message, native_anthropic):
             endpoints.append(index)
         index += 1
     return endpoints
@@ -277,18 +254,15 @@ def build_prompt_cache_plan(
     if not direct_native_tool_cache or not planned_tools:
         planned_messages = apply_anthropic_cache_control(
             messages, cache_ttl=cache_ttl, native_anthropic=native_anthropic,
-            static_system_prefix=static_system_prefix, tool_part_markers=tool_part_markers,
-        )
+            static_system_prefix=static_system_prefix, tool_part_markers=tool_part_markers)
         return PromptCachePlan(messages=planned_messages, tools=planned_tools)
 
     marker = _build_marker(cache_ttl)
     if messages and isinstance(messages[0], dict) and messages[0].get("role") == "system":
         # Tool-cache layout: only the static prefix carries a system-side marker; the
         # volatile suffix's budget is spent on the tools array.
-        _apply_system_cache_markers(
-            messages[0], marker, static_system_prefix,
-            native_anthropic=True, mark_suffix=False, fallback_to_whole=False,
-        )
+        _apply_system_cache_markers(messages[0], marker, static_system_prefix,
+                                    native_anthropic=True, mark_suffix=False, fallback_to_whole=False)
     planned_tools[-1]["cache_control"] = dict(marker)
     for endpoint in _completed_transaction_endpoint_indexes(messages, native_anthropic=True)[-2:]:
         _apply_cache_marker(messages[endpoint], marker, native_anthropic=True)
@@ -302,11 +276,10 @@ def apply_anthropic_cache_control(
 ) -> List[Dict[str, Any]]:
     """Apply Anthropic cache-control markers to API messages.
 
-    With a matching ``static_system_prefix`` the prefix and the full system prompt each get
-    a marker and the remaining two go to the latest cacheable non-system messages; without
-    it, the legacy system-and-3 layout applies. Idempotent: pre-existing markers are
-    stripped from a per-message copy first (shallow copy suffices — stripping is
-    copy-on-write on parts). Returns a shallow list copy with deep copies of modified messages.
+    With a matching ``static_system_prefix`` the prefix and full system prompt each get a
+    marker and the remaining two go to the latest cacheable non-system messages; otherwise
+    the legacy system-and-3 layout applies. Idempotent: pre-existing markers are stripped from
+    a per-message copy first. Returns a shallow list copy with deep copies of modified messages.
     """
     if not api_messages:
         return api_messages
@@ -321,15 +294,11 @@ def apply_anthropic_cache_control(
     breakpoints_used = 0
     if messages[0].get("role") == "system":
         messages[0] = copy.deepcopy(messages[0])
-        breakpoints_used = _apply_system_cache_markers(
-            messages[0], marker, static_system_prefix, native_anthropic=native_anthropic,
-        )
+        breakpoints_used = _apply_system_cache_markers(messages[0], marker, static_system_prefix,
+                                                       native_anthropic=native_anthropic)
 
-    non_sys = [
-        i for i in range(len(messages))
-        if messages[i].get("role") != "system"
-        and _can_carry_marker(messages[i], native_anthropic=native_anthropic, tool_part_markers=tool_part_markers)
-    ]
+    non_sys = [i for i, m in enumerate(messages) if m.get("role") != "system"
+               and _can_carry_marker(m, native_anthropic=native_anthropic, tool_part_markers=tool_part_markers)]
     for idx in non_sys[-(4 - breakpoints_used):]:
         messages[idx] = copy.deepcopy(messages[idx])
         _apply_cache_marker(messages[idx], marker, native_anthropic=native_anthropic, tool_part_markers=tool_part_markers)

@@ -38,10 +38,8 @@ def resolve_native_compaction_capabilities(
     """Resolve the native-compaction capability for a runtime destination (a resolved ``False``
     is distinct from "unresolved" and must survive model switches unchanged)."""
     direct_default = (provider or "").strip().lower() == "openai" and not base_url
-    eligible = is_native_compaction_model(model) and (
-        direct_default or is_direct_openai_route(base_url, is_codex_backend=is_codex_backend)
-    )
-    return {"native_compaction": eligible}
+    return {"native_compaction": is_native_compaction_model(model) and (
+        direct_default or is_direct_openai_route(base_url, is_codex_backend=is_codex_backend))}
 
 
 def is_direct_openai_route(base_url: Optional[str], *, is_codex_backend: bool = False) -> bool:
@@ -74,10 +72,8 @@ def resolve_compact_threshold(configured_threshold: Any, local_trigger_tokens: A
     fires first. Booleans are never thresholds.
     """
     local = _positive_int(local_trigger_tokens)
-    upper = None
-    if local is not None:
-        upper = max(1_024, local - LOCAL_TRIGGER_SAFETY_MARGIN if local > LOCAL_TRIGGER_SAFETY_MARGIN else int(local * 0.8))
-
+    upper = None if local is None else max(
+        1_024, local - LOCAL_TRIGGER_SAFETY_MARGIN if local > LOCAL_TRIGGER_SAFETY_MARGIN else int(local * 0.8))
     configured = _positive_int(configured_threshold, reject=(bool, float))
     if configured is None:
         return upper if upper is not None else DEFAULT_COMPACT_THRESHOLD
@@ -92,19 +88,17 @@ _checkpoint_suppression_logged = False
 def _warn_native_compaction_suppressed_by_checkpoint_gate() -> None:
     """Log once per process; the suppression itself is re-evaluated per request."""
     global _checkpoint_suppression_logged
-    if _checkpoint_suppression_logged:
-        return
-    _checkpoint_suppression_logged = True
-    logger.warning(
-        "compression.checkpoint_required is enabled: server-side native "
-        "compaction (context_management) is disabled for this agent so the "
-        "checkpoint-aware Hermes compressor stays authoritative."
-    )
+    if not _checkpoint_suppression_logged:
+        _checkpoint_suppression_logged = True
+        logger.warning(
+            "compression.checkpoint_required is enabled: server-side native "
+            "compaction (context_management) is disabled for this agent so the "
+            "checkpoint-aware Hermes compressor stays authoritative."
+        )
 
 
-def native_compaction_context_management(
-    agent: Any, *, is_codex_backend: bool, is_xai_responses: bool = False, is_github_responses: bool = False,
-) -> Optional[List[Dict[str, Any]]]:
+def native_compaction_context_management(agent: Any, *, is_codex_backend: bool, is_xai_responses: bool = False,
+                                         is_github_responses: bool = False) -> Optional[List[Dict[str, Any]]]:
     """Return the ``context_management`` payload for this request, or None ("do not send").
 
     Every gate is re-checked per request so a mid-session model switch or the in-session
@@ -129,10 +123,8 @@ def native_compaction_context_management(
         return None
 
     compressor = getattr(agent, "context_compressor", None)
-    threshold = resolve_compact_threshold(
-        getattr(agent, "codex_responses_compact_threshold", None),
-        getattr(compressor, "threshold_tokens", None) if compressor is not None else None,
-    )
+    local_trigger = getattr(compressor, "threshold_tokens", None) if compressor is not None else None
+    threshold = resolve_compact_threshold(getattr(agent, "codex_responses_compact_threshold", None), local_trigger)
     return [{"type": "compaction", "compact_threshold": threshold}]
 
 
@@ -151,28 +143,20 @@ def _extract_item_text(item: Any) -> Optional[str]:
     """Measurable text from a Responses item (string/multipart/metadata), or None."""
     if not isinstance(item, dict):
         return None
-
     content = item.get("content")
     if content is None and "output_text" in item:
         content = item.get("output_text")
-
     if isinstance(content, str):
         return content if content.strip() else None
-
     if not isinstance(content, list):
         return None
     parts = []
     for part in content:
-        if isinstance(part, str):
-            candidates = (part,)
-        elif isinstance(part, dict):
+        candidates: tuple = (part,)  # non-str, non-dict parts filter out below
+        if isinstance(part, dict):
             part_meta = part.get("metadata")
-            candidates = (
-                part.get("text") or part.get("input_text") or part.get("output_text"),
-                part_meta.get("text") if isinstance(part_meta, dict) else None,
-            )
-        else:
-            continue
+            candidates = (part.get("text") or part.get("input_text") or part.get("output_text"),
+                          part_meta.get("text") if isinstance(part_meta, dict) else None)
         parts.extend(c.strip() for c in candidates if isinstance(c, str) and c.strip())
     text = " ".join(parts)
     return text if text.strip() else None
@@ -183,11 +167,8 @@ def _has_retainable_image_content(item: Any) -> bool:
     adapter-owned shape counts, so empty multipart placeholders never become durable history)."""
     content = item.get("content") if isinstance(item, dict) else None
     return isinstance(content, list) and any(
-        isinstance(part, dict)
-        and str(part.get("type") or "").strip().lower() == "input_image"
-        and isinstance(part.get("image_url"), str)
-        and part["image_url"].strip()
-        for part in content
+        isinstance(part, dict) and str(part.get("type") or "").strip().lower() == "input_image"
+        and isinstance(part.get("image_url"), str) and part["image_url"].strip() for part in content
     )
 
 
@@ -204,8 +185,7 @@ def prune_pre_checkpoint_items(
     items: List[Dict[str, Any]],
     retained_user_token_budget: int = RETAINED_USER_MESSAGE_TOKEN_BUDGET,
     retained_summary_token_budget: int = RETAINED_SUMMARY_TOKEN_BUDGET,
-    enable_summary_retention: bool = True,
-    item_sources: Optional[List[Any]] = None,
+    enable_summary_retention: bool = True, item_sources: Optional[List[Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Restructure Responses input around the newest compaction checkpoint.
 
@@ -214,12 +194,12 @@ def prune_pre_checkpoint_items(
 
         [checkpoint run] + [retained user & summary messages (newest-first budget)] + [post]
 
-    - The NEWEST contiguous run of checkpoints wins.
+    - The NEWEST contiguous run of checkpoints wins; relative order is preserved.
     - User messages are kept verbatim within ``retained_user_token_budget``; the boundary
       message is head-truncated when it only partially fits (string content only). A
       recognized image-only user message is retained whole at one-token cost.
     - Summaries are retained whole within ``retained_summary_token_budget``, never sliced
-      (framing would corrupt) and never duplicated. Relative order is preserved.
+      (framing would corrupt) and never duplicated.
     - ``item_sources`` (parallel to ``items``) is the raw chat message each item came from.
       Conversion can be lossy for summaries (merge-into-tail carrier → typed
       ``function_call_output``; assistant carrier shadowed by a stale replay), so a source
@@ -246,48 +226,39 @@ def prune_pre_checkpoint_items(
     seen_summary_texts: set = set()
 
     def _retain_summary(text: Optional[str], retained_item: Dict[str, Any]) -> None:
-        """Retain a summary whole when it fits the budget and is not a duplicate."""
+        """Retain a summary whole when it fits the budget and is not a duplicate (never sliced)."""
         nonlocal summary_remaining
         if not text or summary_remaining <= 0 or text in seen_summary_texts:
             return
         cost = _approx_tokens(text)
-        if cost > summary_remaining:
-            return  # never slice a summary's structural framing
-        seen_summary_texts.add(text)
-        retained_reversed.append(retained_item)
-        summary_remaining -= cost
+        if cost <= summary_remaining:
+            seen_summary_texts.add(text)
+            retained_reversed.append(retained_item)
+            summary_remaining -= cost
 
     for item, source in zip(reversed(pre), reversed(pre_sources)):
         if not isinstance(item, dict):
             continue
-
         # Source-based detection sees past a lossy conversion; it only fires
         # when the source itself is a provenance-tagged summary carrier.
         if enable_summary_retention and isinstance(source, dict) and _is_summary_item(source):
             text = flatten_message_text(source.get("content"))
             _src_role = source.get("role")
-            _retain_summary(text if text.strip() else None, {
-                "role": _src_role if _src_role in ("user", "assistant") else "assistant",
-                "content": text,
-            })
+            _retain_summary(text if text.strip() else None,
+                            {"role": _src_role if _src_role in ("user", "assistant") else "assistant", "content": text})
             continue
-
         # Typed non-message items never carry role=user or a summary flag.
         if "type" in item and item.get("type") != "message":
             continue
-
         is_summary = enable_summary_retention and _is_summary_item(item)
         is_user = item.get("role") == "user"
-
         if not is_user and not is_summary:
             continue
-
         text = _extract_item_text(item)
         if text is None:
             if not (is_user and _has_retainable_image_content(item)):
                 continue
             text = ""
-
         if is_summary:
             _retain_summary(text, item)
         elif user_remaining > 0:
@@ -302,11 +273,8 @@ def prune_pre_checkpoint_items(
                 user_remaining = 0
 
     result = items[first_cp : last_cp + 1] + list(reversed(retained_reversed)) + items[last_cp + 1 :]
-
-    logger.debug(
-        "Pruned pre-checkpoint items: %d input -> %d retained (user_rem=%d, summary_rem=%d)",
-        len(items), len(result), user_remaining, summary_remaining,
-    )
+    logger.debug("Pruned pre-checkpoint items: %d input -> %d retained (user_rem=%d, summary_rem=%d)",
+                 len(items), len(result), user_remaining, summary_remaining)
     return result
 
 
@@ -320,10 +288,9 @@ _REJECTION_MARKERS = (
 def is_native_compaction_rejection(error: Any, status_code: Any = None) -> bool:
     """True when a provider error is a STRUCTURED rejection of ``context_management``.
 
-    Drives one-shot recovery (strip, disable for the session, retry), so matching is
-    narrow: a transient 5xx that merely ECHOES the request must not downgrade native
-    compaction. Requires ``status_code`` 400 (or unknown) AND the field name with rejection
-    language.
+    Drives one-shot recovery (strip, disable for the session, retry), so matching is narrow:
+    a transient 5xx that merely ECHOES the request must not downgrade native compaction.
+    Requires ``status_code`` 400 (or unknown) AND the field name with rejection language.
     """
     text = str(error or "").lower()
     if "context_management" not in text and "compact_threshold" not in text:
@@ -337,11 +304,8 @@ def is_native_compaction_rejection(error: Any, status_code: Any = None) -> bool:
 
 
 def has_compaction_checkpoint(items: Any) -> bool:
-    """Does this ``codex_reasoning_items`` sidecar carry a compaction checkpoint?
-
-    A compaction item is cumulative context that exists in exactly one place: anything
-    that rewrites or discards the sidecar must ask this first or lose the history.
-    """
+    """Does this ``codex_reasoning_items`` sidecar carry a compaction checkpoint? A checkpoint is
+    cumulative context living in exactly one place: rewrite/discard the sidecar only after asking."""
     return isinstance(items, list) and any(_is_compaction_item(item) for item in items)
 
 
@@ -352,9 +316,8 @@ def merge_interim_reasoning_items(prior_items: Any, new_items: Any) -> List[Dict
     overwrite drops the only copy: newer items win, prior checkpoints are prepended unless
     the newer payload has its own.
     """
-    kept_checkpoints = [
-        item for item in (prior_items if isinstance(prior_items, list) else []) if _is_compaction_item(item)
-    ]
+    prior = prior_items if isinstance(prior_items, list) else []
+    kept_checkpoints = [item for item in prior if _is_compaction_item(item)]
     new_list = list(new_items) if isinstance(new_items, list) else []
     if has_compaction_checkpoint(new_list) or not kept_checkpoints:
         return new_list
