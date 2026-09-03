@@ -8,28 +8,19 @@ main process (native window enumeration) -> ``window.read.respond``.
 
 from typing import Callable, Optional
 
-from tools.desktop_ui import passthrough_json
-from tools.registry import registry, tool_error
+from tools.read_terminal_tool import read_pane
+from tools.registry import registry
 
 
 def read_window_below_tool(callback: Optional[Callable] = None) -> str:
     """Return the window underneath the Hermes window as a JSON string."""
-    if callback is None:
-        return tool_error(
-            "read_window_below is only available in the Hermes desktop app."
-        )
-
-    try:
-        raw = callback()
-    except Exception as exc:
-        return tool_error(f"Failed to read the window below: {exc}")
-
-    if not raw:
-        return tool_error(
-            "Could not determine the window underneath (the desktop app did "
-            "not answer, or window enumeration is unavailable on this system)."
-        )
-    return passthrough_json(raw)
+    return read_pane(callback, (), (
+        "read_window_below is only available in the Hermes desktop app.",
+        "",
+        "Failed to read the window below: ",
+        "Could not determine the window underneath (the desktop app did "
+        "not answer, or window enumeration is unavailable on this system).",
+    ))
 
 
 READ_WINDOW_BELOW_SCHEMA = {
@@ -43,8 +34,7 @@ READ_WINDOW_BELOW_SCHEMA = {
         "retrying. Metadata only; never captures pixels."
     ),
     "parameters": {
-        "type": "object",
-        "properties": {},
+        "type": "object", "properties": {}
     },
 }
 

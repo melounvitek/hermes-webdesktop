@@ -12,10 +12,6 @@ from tools.open_preview_tool import _normalize_target, open_preview_tool
 from tools.registry import registry, tool_error
 
 
-def preview_open(url: str, label: str = "") -> str:
-    return open_preview_tool(url=url, label=label)
-
-
 def preview_close(url: str = "") -> str:
     target = _normalize_target(url or "")
     return desktop_ui.emit_or_error(
@@ -28,19 +24,17 @@ def preview_close(url: str = "") -> str:
 
 
 _ACTIONS = {
-    "open": lambda args: preview_open(url=args.get("url", ""), label=args.get("label", "")),
+    "open": lambda args: open_preview_tool(url=args.get("url", ""), label=args.get("label", "")),
     "close": lambda args: preview_close(url=args.get("url", "")),
     # read needs the GUI callback and is dispatched at the agent level.
     "read": lambda args: tool_error(
-        "preview read must run inside a desktop session (no GUI callback here)."
-    ),
+        "preview read must run inside a desktop session (no GUI callback here)."),
 }
 
 
 def _handle_preview(args, **kw):
     """Non-read actions only: action=read is dispatched at the agent level."""
-    action = (args.get("action") or "").strip()
-    fn = _ACTIONS.get(action)
+    fn = _ACTIONS.get((args.get("action") or "").strip())
     if fn is None:
         return tool_error("action must be one of: open, close, read.")
     return fn(args)

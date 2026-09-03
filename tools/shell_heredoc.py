@@ -1,23 +1,11 @@
-"""Conservative heredoc masking for shell-command scanners.
-
-Guards that scan raw command text (the foreground background-'&' guard in
-``tools/terminal_tool.py``, blocked-command checks, ``cron/lifecycle_guard``)
-false-positive on heredoc *bodies*, which are usually inline data. Naively
-stripping every body is unsafe the other way (fake ``<<`` in quotes can
-swallow a real operator; unquoted bodies expand; ``bash <<'EOF'`` executes).
-
-A body is masked ONLY when: every delimiter on the opener is quoted (no
-expansion); every heredoc is terminated by an exact delimiter line; the
-opener is a single command (no ``;``/``|``/``&`` and no ``$(...)``, backtick
-or process substitution); and the consumer is an allowlisted non-shell
-interpreter (``_INERT_HEREDOC_CONSUMER_RE``). Otherwise the command is
-returned untouched: a false positive is acceptable, hiding real shell syntax
-from a guard is not. Masked bodies become an equal number of newlines so
-``re.MULTILINE`` scanning keeps its line structure.
-
-Adapted from Wolfram Ravenwolf's security-hardened rework of PR #63788
-(commit 69c7663c6de6b6cb05bf99203fa39673efe01ccf).
-"""
+"""Conservative heredoc masking for shell-command scanners (terminal '&' guard, blocked-command
+checks, cron lifecycle_guard) that false-positive on heredoc *bodies*. Stripping every body is
+unsafe the other way (a fake ``<<`` in quotes can swallow a real operator; unquoted bodies
+expand; ``bash <<'EOF'`` executes), so a body is masked ONLY when every delimiter is quoted,
+every heredoc has an exact terminator line, the opener is a single command (no ``;|&``,
+``$(...)``, backticks or process substitution) and the consumer is an allowlisted non-shell
+interpreter. Otherwise the command is returned untouched: a false positive is acceptable,
+hiding shell syntax from a guard is not. Masked bodies keep their newline count (re.MULTILINE)."""
 
 from __future__ import annotations
 
@@ -27,13 +15,9 @@ import re
 # THAT interpreter. Optional VAR=... assignments, ``env`` and a path prefix are
 # allowed. Deliberately narrow: anything unmatched keeps its body visible.
 _INERT_HEREDOC_CONSUMER_RE = re.compile(
-    r"^\s*"
-    r"(?:[A-Z_][A-Z0-9_]*=\S+\s+)*"
-    r"(?:env\s+)?"
-    r"(?:[A-Za-z0-9_./-]+/)?"
+    r"^\s*(?:[A-Z_][A-Z0-9_]*=\S+\s+)*(?:env\s+)?(?:[A-Za-z0-9_./-]+/)?"
     r"(?:python(?:3(?:\.\d+)*)?|osascript|cat)(?=\s|$)",
-    re.IGNORECASE,
-)
+    re.IGNORECASE)
 
 
 def _span_end(command: str, cursor: int, closer: str) -> int:
@@ -62,8 +46,7 @@ def _mask_simple_quotes(command: str) -> str:
                 break
             result.append("''")
             cursor = closing + 1
-            continue
-        if char == '"':
+        elif char == '"':
             end = _span_end(command, cursor, '"')
             if not command[cursor:end].endswith('"'):
                 result.append(command[cursor:])
@@ -71,14 +54,13 @@ def _mask_simple_quotes(command: str) -> str:
             segment = command[cursor:end]
             result.append(segment if "$(" in segment or "`" in segment else '""')
             cursor = end
-            continue
-        if char == "`":
+        elif char == "`":
             end = _span_end(command, cursor, "`")
             result.append(command[cursor:end])
             cursor = end
-            continue
-        result.append(char)
-        cursor += 1
+        else:
+            result.append(char)
+            cursor += 1
     return "".join(result)
 
 
@@ -88,9 +70,8 @@ def _parse_heredoc_operator(command: str, index: int):
         return None
 
     cursor = index + 2
-    strip_tabs = False
-    if cursor < len(command) and command[cursor] == "-":
-        strip_tabs = True
+    strip_tabs = cursor < len(command) and command[cursor] == "-"
+    if strip_tabs:
         cursor += 1
     while cursor < len(command) and command[cursor] in " \t":
         cursor += 1
@@ -142,11 +123,8 @@ def _parse_heredoc_operator(command: str, index: int):
 
 
 def _scan_heredoc_command_unit(command: str, start: int):
-    """Scan one logical command -> ``(end, specs, unknown_operator, has_list_operator)``.
-
-    ``unknown_operator``: an unparseable ``<<`` (caller must fail closed).
-    ``has_list_operator``: unquoted ``;``/``|``/``&`` on the opener.
-    """
+    """Scan one logical command -> ``(end, specs, unknown_operator, has_list_operator)``:
+    an unparseable ``<<`` (caller must fail closed) / unquoted ``;|&`` on the opener."""
     cursor = start
     quote = None
     comment = False
@@ -161,7 +139,6 @@ def _scan_heredoc_command_unit(command: str, start: int):
                 return cursor, specs, unknown_operator, has_list_operator
             cursor += 1
             continue
-
         if quote is not None:
             if quote in {'"', "`"} and char == "\\" and cursor + 1 < len(command):
                 cursor += 2
@@ -170,7 +147,6 @@ def _scan_heredoc_command_unit(command: str, start: int):
                 quote = None
             cursor += 1
             continue
-
         if char == "\\" and cursor + 1 < len(command):
             # Includes line continuations: the logical command keeps going.
             cursor += 2
@@ -207,11 +183,7 @@ def _scan_heredoc_command_unit(command: str, start: int):
 
 
 def _find_heredoc_close(
-    command: str,
-    body_start: int,
-    delimiter: str,
-    strip_tabs: bool,
-) -> int | None:
+        command: str, body_start: int, delimiter: str, strip_tabs: bool) -> int | None:
     """Return the position after an exact shell heredoc terminator line."""
     cursor = body_start
     while True:
@@ -238,8 +210,7 @@ def strip_inert_heredoc_bodies(command: str) -> str:
 
     while command_start <= last_opener_index:
         command_end, specs, unknown_operator, has_list_operator = (
-            _scan_heredoc_command_unit(command, command_start)
-        )
+            _scan_heredoc_command_unit(command, command_start))
         if unknown_operator:
             return command
         if not specs:

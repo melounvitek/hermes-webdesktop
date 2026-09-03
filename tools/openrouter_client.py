@@ -11,7 +11,6 @@ def check_api_key() -> bool:
     """
     try:
         from agent.secret_scope import UnscopedSecretError, get_secret
-
         try:
             return bool(get_secret("OPENROUTER_API_KEY"))
         except UnscopedSecretError:
