@@ -1,8 +1,6 @@
-"""Last-resort page-level salvage for an unreadable session database schema.
-
-The SQLite command-line shell ships a page-level ``.recover`` command that walks raw pages and
-rebuilds rows it cannot attribute to a schema into ``lost_and_found`` tables of the shape::
-"""
+"""Last-resort page-level salvage for an unreadable session database schema, via the sqlite3 shell's
+``.recover`` (rows it cannot attribute to a schema land in ``lost_and_found`` tables:
+``rootpgno, pgno, nfield, id, c0..cN``)."""
 
 from __future__ import annotations
 
@@ -14,8 +12,12 @@ import tempfile
 from pathlib import Path
 from typing import Any, Optional
 
-# Hermes session ids are timestamps: 20260812_135332_ab12cd. This is the
-# strongest sentinel available for classifying schema-less rows.
+from hermes_cli.session_recovery import (
+    _AUXILIARY_TABLE_SCHEMAS, _AUXILIARY_TABLES, _CANONICAL_TABLES, _immediate_transaction, _quoted_columns,
+    _table_columns,
+)
+
+# Hermes session ids are timestamps (20260812_135332_ab12cd): the strongest sentinel for schema-less rows.
 SESSION_ID_PATTERN = re.compile(r"^\d{8}_\d{6}_")
 
 MESSAGE_ROLES = frozenset({"user", "assistant", "tool", "system"})
@@ -27,9 +29,7 @@ KNOWN_SOURCES = frozenset({
     "tool", "subagent", "cron", "recovered", "imported", "acp",
 })
 
-# Historical physical layouts of the sessions table. Columns are only ever
-# appended (ALTER TABLE ADD COLUMN), so an older record is a strict prefix of
-# the current column order.
+# Historical sessions layouts. Columns are only ever appended, so an older record is a strict prefix.
 SESSIONS_LAYOUT_NFIELDS = frozenset({55, 54, 52})
 SESSIONS_LEGACY_MINIMAL_NFIELD = 14
 SESSION_MODEL_USAGE_NFIELD = 18
@@ -56,22 +56,14 @@ class LostAndFoundError(RuntimeError):
 
 
 def find_sqlite3_cli() -> Optional[str]:
-    """Return a ``.recover``-capable sqlite3 CLI path, or None.
-
-    PATH presence is not enough: distro builds can ship a shell without the ``sqlite_dbpage``
-    virtual table ``.recover`` needs, failing every recovery. Probe on a scratch DB once instead
-    of discovering it mid-recovery.
-    """
-
+    """A ``.recover``-capable sqlite3 CLI path, or None. PATH presence is not enough: distro builds can
+    lack the ``sqlite_dbpage`` virtual table ``.recover`` needs, so probe on a scratch DB once."""
     binary = shutil.which("sqlite3")
-    if binary is None:
-        return None
-    return binary if _cli_supports_recover(binary) else None
+    return binary if binary is not None and _cli_supports_recover(binary) else None
 
 
 def _cli_supports_recover(binary: str) -> bool:
     """True when ``binary`` can run ``.recover`` (has sqlite_dbpage)."""
-
     scratch_dir = tempfile.mkdtemp(prefix="hermes-recover-probe-")
     scratch = Path(scratch_dir) / "probe.db"
     try:
@@ -83,9 +75,7 @@ def _cli_supports_recover(binary: str) -> bool:
         finally:
             conn.close()
         probe = subprocess.run([binary, "-readonly", str(scratch), ".recover"], capture_output=True, timeout=30)
-        if probe.returncode != 0:
-            return False
-        return b"sqlite_dbpage" not in probe.stderr
+        return probe.returncode == 0 and b"sqlite_dbpage" not in probe.stderr
     except (OSError, subprocess.SubprocessError, sqlite3.Error):
         return False
     finally:
@@ -100,21 +90,15 @@ def run_cli_lost_and_found_recover(
     timeout: float = 3600.0,
 ) -> dict[str, Any]:
     """Run ``sqlite3 <source> .recover`` streamed into a fresh scratch DB."""
-
     attempts: list[dict[str, Any]] = []
     for command in (".recover --ignore-freelist", ".recover"):
         if lf_path.exists():
             lf_path.unlink()
         dump = subprocess.Popen(
-            [sqlite3_bin, "-readonly", str(source), command],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            [sqlite3_bin, "-readonly", str(source), command], stdout=subprocess.PIPE, stderr=subprocess.PIPE
         )
         load = subprocess.Popen(
-            [sqlite3_bin, str(lf_path)],
-            stdin=dump.stdout,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.PIPE,
+            [sqlite3_bin, str(lf_path)], stdin=dump.stdout, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE
         )
         assert dump.stdout is not None
         dump.stdout.close()  # let dump receive SIGPIPE if load dies
@@ -127,17 +111,14 @@ def run_cli_lost_and_found_recover(
             load.kill()
             raise LostAndFoundError(f"sqlite3 .recover timed out after {timeout:.0f}s")
         attempt = {
-            "command": command,
-            "dump_returncode": dump.returncode,
-            "load_returncode": load.returncode,
+            "command": command, "dump_returncode": dump.returncode, "load_returncode": load.returncode,
             "dump_stderr_tail": dump_err.decode("utf-8", "replace")[-2000:],
             "load_stderr_tail": load_err.decode("utf-8", "replace")[-2000:],
         }
         attempts.append(attempt)
-        if _lost_and_found_db_usable(lf_path):
-            attempt["usable"] = True
+        attempt["usable"] = _lost_and_found_db_usable(lf_path)
+        if attempt["usable"]:
             return {"binary": sqlite3_bin, "attempts": attempts}
-        attempt["usable"] = False
 
     raise LostAndFoundError(
         "sqlite3 .recover did not produce a usable lost_and_found database: "
@@ -163,18 +144,10 @@ def _lost_and_found_db_usable(lf_path: Path) -> bool:
         return False
 
 
-def _table_columns(conn: sqlite3.Connection, table: str) -> list[str]:
-    return [str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")')]
-
-
 def _notnull_defaults(conn: sqlite3.Connection, table: str) -> dict[int, Any]:
-    """Map column index -> substitute value for NOT NULL columns.
-
-    Page-level salvage can return NULLs where the live schema says NOT NULL (torn cells, old rows).
-    Dropping a whole row over one damaged optional counter would defeat the lane, so such NULLs
-    get the schema default (or '' / 0 when none is declared).
-    """
-
+    """Column index -> substitute for NOT NULL columns. Salvage can return NULLs where the schema says
+    NOT NULL (torn cells, old rows); dropping a row over one damaged counter would defeat the lane, so
+    such NULLs get the schema default (or '' / 0 when none is declared)."""
     substitutes: dict[int, Any] = {}
     for index, row in enumerate(conn.execute(f'PRAGMA table_info("{table}")')):
         if not row[3]:  # notnull flag
@@ -214,28 +187,19 @@ def classify_lost_and_found_row(nfield: int, cells: tuple[Any, ...]) -> Optional
     """Classify one lost_and_found record by field count + sentinel values."""
 
     if len(cells) >= 3 and cells[0] is None:
-        # Rowid-alias tables store their INTEGER PRIMARY KEY as NULL in the
-        # record; messages is the only canonical table shaped like that with
-        # a session id second and a role third.
-        if (isinstance(cells[1], str) and cells[1] and isinstance(cells[2], str) and cells[2] in MESSAGE_ROLES):
+        # Rowid-alias tables store their INTEGER PRIMARY KEY as NULL; messages is the only canonical
+        # table shaped like that with a session id second and a role third.
+        if isinstance(cells[1], str) and cells[1] and isinstance(cells[2], str) and cells[2] in MESSAGE_ROLES:
             return "messages"
         return None
-
     if not _is_session_id(cells[0] if cells else None):
         return None
-
     second = cells[1] if len(cells) > 1 else None
-    if nfield == SESSION_MODEL_USAGE_NFIELD:
-        # 18 fields, session id first, model string second.
+    if nfield == SESSION_MODEL_USAGE_NFIELD:  # session id first, model string second
         return "session_model_usage" if isinstance(second, str) and second else None
-
-    # Known sessions layouts, or an unknown historical one (>= 30 fields): a
-    # session-id first cell plus a recognizable source string is still strong
-    # enough for a prefix map.
+    # Known sessions layouts, or an unknown historical one (>= 30 fields): session id + source is enough.
     if (
-        nfield in SESSIONS_LAYOUT_NFIELDS
-        or nfield == SESSIONS_LEGACY_MINIMAL_NFIELD
-        or nfield >= 30
+        nfield in SESSIONS_LAYOUT_NFIELDS or nfield == SESSIONS_LEGACY_MINIMAL_NFIELD or nfield >= 30
     ) and _looks_like_source(second):
         return "sessions"
     return None
@@ -257,41 +221,29 @@ def _insert_prefix_row(
 ) -> bool:
     if notnull_substitutes:
         values = [
-            notnull_substitutes[index]
-            if value is None and index in notnull_substitutes
-            else value
+            notnull_substitutes[index] if value is None and index in notnull_substitutes else value
             for index, value in enumerate(values)
         ]
-    columns = dest_columns[: len(values)]
-    quoted = ", ".join(f'"{column}"' for column in columns)
-    placeholders = ", ".join("?" for _ in columns)
+    quoted, placeholders = _quoted_columns(dest_columns[: len(values)])
     cursor = dest.execute(f'INSERT OR IGNORE INTO "{table}" ({quoted}) VALUES ({placeholders})', values)
     return cursor.rowcount == 1
 
 
 def _copy_direct_tables(lf_conn: sqlite3.Connection, dest: sqlite3.Connection) -> dict[str, int]:
     """Copy rows .recover managed to attribute to real canonical tables."""
-
-    # Lazy import: session_recovery imports this module inside a function, so
-    # a module-level import here would be circular.
-    from hermes_cli.session_recovery import (_AUXILIARY_TABLE_SCHEMAS, _AUXILIARY_TABLES, _CANONICAL_TABLES)
-
     copied: dict[str, int] = {}
     for table in (*_CANONICAL_TABLES, *_AUXILIARY_TABLES):
         source_columns = _table_columns(lf_conn, table)
         if not source_columns:
             continue
         dest_columns = _table_columns(dest, table)
-        if not dest_columns and table in _AUXILIARY_TABLE_SCHEMAS:
-            # Lazily-created gateway table: base SessionDB never made it on
-            # the fresh destination, so create it before copying.
+        if not dest_columns and table in _AUXILIARY_TABLE_SCHEMAS:  # lazily-created gateway table
             _AUXILIARY_TABLE_SCHEMAS[table](dest)
             dest_columns = _table_columns(dest, table)
         columns = [c for c in dest_columns if c in source_columns]
         if not columns:
             continue
-        quoted = ", ".join(f'"{c}"' for c in columns)
-        placeholders = ", ".join("?" for _ in columns)
+        quoted, placeholders = _quoted_columns(columns)
         rows = lf_conn.execute(f'SELECT {quoted} FROM "{table}"').fetchall()
         if not rows:
             copied[table] = 0
@@ -305,24 +257,15 @@ def _copy_direct_tables(lf_conn: sqlite3.Connection, dest: sqlite3.Connection) -
 
 def map_lost_and_found_rows(lf_conn: sqlite3.Connection, dest: sqlite3.Connection) -> dict[str, Any]:
     """Best-effort mapping of a .recover output DB into a fresh SessionDB."""
-
     report: dict[str, Any] = {
-        "direct_table_rows": {},
-        "mapped": {"sessions": 0, "messages": 0, "session_model_usage": 0},
-        "legacy_minimal_sessions": 0,
-        "unmapped_rows": 0,
-        "insert_conflicts": 0,
-        "lost_and_found_tables": [],
+        "direct_table_rows": {}, "mapped": {"sessions": 0, "messages": 0, "session_model_usage": 0},
+        "legacy_minimal_sessions": 0, "unmapped_rows": 0, "insert_conflicts": 0, "lost_and_found_tables": [],
     }
-
-    dest.execute("BEGIN IMMEDIATE")
-    try:
+    with _immediate_transaction(dest):
         report["direct_table_rows"] = _copy_direct_tables(lf_conn, dest)
 
-        # Per-kind destination columns + NOT NULL substitutes. Never fabricate
-        # identity fields: a row whose session id / role / source cell is
-        # genuinely NULL was already rejected by classify_lost_and_found_row,
-        # so the substitutions only fill NOT NULL bookkeeping counters/flags.
+        # Per-kind destination columns + NOT NULL substitutes. Identity fields are never fabricated:
+        # rows with a NULL session id / role / source were already rejected by classify_lost_and_found_row.
         targets: dict[str, tuple[list[str], dict[int, Any]]] = {}
         for kind_name, protected in (("sessions", (0, 1)), ("messages", (1, 2)), ("session_model_usage", (0, 1))):
             defaults = _notnull_defaults(dest, kind_name)
@@ -340,8 +283,7 @@ def map_lost_and_found_rows(lf_conn: sqlite3.Connection, dest: sqlite3.Connectio
         report["lost_and_found_tables"] = lf_tables
 
         for lf_table in lf_tables:
-            lf_columns = _table_columns(lf_conn, lf_table)
-            if lf_columns[:3] != ["rootpgno", "pgno", "nfield"]:
+            if _table_columns(lf_conn, lf_table)[:3] != ["rootpgno", "pgno", "nfield"]:
                 continue
             for row in lf_conn.execute(f'SELECT * FROM "{lf_table}"'):
                 try:
@@ -357,37 +299,28 @@ def map_lost_and_found_rows(lf_conn: sqlite3.Connection, dest: sqlite3.Connectio
                     continue
                 columns, defaults = targets[kind]
                 try:
-                    if kind == "messages":
-                        # Rowid-alias PK is NULL in the record; use the lost_and_found rowid.
-                        values = [lf_rowid, *cells[1 : min(nfield, len(columns))]]
-                        inserted = _insert_prefix_row(dest, kind, columns, values, defaults)
-                    elif kind == "session_model_usage":
-                        values = list(cells[: len(columns)])
-                        inserted = _insert_prefix_row(dest, kind, columns, values, defaults)
-                    elif nfield == SESSIONS_LEGACY_MINIMAL_NFIELD:
-                        # A pre-modern layout whose column order is unknown:
-                        # salvage identity + timing rather than guessing 14
-                        # positional meanings.
-                        inserted = bool(
+                    if kind == "sessions" and nfield == SESSIONS_LEGACY_MINIMAL_NFIELD:
+                        # Pre-modern layout with unknown column order: salvage identity + timing only.
+                        inserted = (
                             dest.execute(
                                 "INSERT OR IGNORE INTO sessions "
                                 "(id, source, started_at, title) "
                                 "VALUES (?, ?, ?, ?)",
                                 (
                                     cells[0],
-                                    cells[1] if _looks_like_source(cells[1])
-                                    else "recovered",
+                                    cells[1] if _looks_like_source(cells[1]) else "recovered",
                                     _heuristic_started_at(cells),
-                                    "[best-effort recovered] legacy session "
-                                    "row (layout unknown)",
+                                    "[best-effort recovered] legacy session row (layout unknown)",
                                 ),
                             ).rowcount
                             == 1
                         )
-                        if inserted:
-                            report["legacy_minimal_sessions"] += 1
+                        report["legacy_minimal_sessions"] += int(inserted)
                     else:
-                        values = list(cells[: min(nfield, len(columns))])
+                        # messages: the rowid-alias PK is NULL in the record; use the lost_and_found rowid.
+                        values = list(cells[:len(columns)])
+                        if kind == "messages":
+                            values[0] = lf_rowid
                         inserted = _insert_prefix_row(dest, kind, columns, values, defaults)
                 except sqlite3.DatabaseError:
                     report["unmapped_rows"] += 1
@@ -396,24 +329,14 @@ def map_lost_and_found_rows(lf_conn: sqlite3.Connection, dest: sqlite3.Connectio
                     report["mapped"][kind] += 1
                 else:
                     report["insert_conflicts"] += 1
-        dest.execute("COMMIT")
-    except BaseException:
-        dest.execute("ROLLBACK")
-        raise
     return report
 
 
 def stub_missing_parent_sessions(dest: sqlite3.Connection) -> dict[str, Any]:
-    """Fabricate placeholder parents for salvaged child rows.
-
-    Salvaged children (messages, model-usage rows) are NEVER deleted for foreign-key cleanup — a
-    fabricated parent is cheaper than losing the only surviving copy of the user's data. Stubs are
-    clearly marked.
-    """
-
+    """Fabricate clearly-marked placeholder parents for salvaged child rows: children (messages,
+    model-usage rows) are NEVER deleted for FK cleanup — a stub parent beats losing the only copy."""
     result: dict[str, Any] = {"sessions_stubbed": 0, "messages_retained": 0, "usage_rows_retained": 0}
-    dest.execute("BEGIN IMMEDIATE")
-    try:
+    with _immediate_transaction(dest):
         orphan_ids: dict[str, dict[str, Any]] = {}
         for session_id, first_ts, count in dest.execute(
             "SELECT m.session_id, MIN(m.timestamp), COUNT(*) FROM messages AS m "
@@ -435,9 +358,9 @@ def stub_missing_parent_sessions(dest: sqlite3.Connection) -> dict[str, Any]:
         sequence = 1
         for session_id, info in sorted(orphan_ids.items()):
             while True:
-                title = (f"[best-effort recovered {sequence}] session metadata " "was unreadable")
+                title = f"[best-effort recovered {sequence}] session metadata was unreadable"
                 sequence += 1
-                if (dest.execute("SELECT 1 FROM sessions WHERE title = ? LIMIT 1", (title,),).fetchone() is None):
+                if dest.execute("SELECT 1 FROM sessions WHERE title = ? LIMIT 1", (title,)).fetchone() is None:
                     break
             dest.execute(
                 "INSERT INTO sessions (id, source, started_at, title, "
@@ -461,16 +384,11 @@ def stub_missing_parent_sessions(dest: sqlite3.Connection) -> dict[str, Any]:
             "(SELECT 1 FROM system_prompts "
             "WHERE system_prompts.hash = sessions.system_prompt_hash)"
         )
-        dest.execute("COMMIT")
-    except BaseException:
-        dest.execute("ROLLBACK")
-        raise
     return result
 
 
 def rebuild_fts_indexes(dest: sqlite3.Connection) -> dict[str, str]:
     """Rebuild derived FTS indexes from the salvaged canonical rows."""
-
     results: dict[str, str] = {}
     for table in ("messages_fts", "messages_fts_trigram", "messages_fts_cjk"):
         if not _table_columns(dest, table):
