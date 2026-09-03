@@ -1,8 +1,8 @@
 """Top-level argparse construction for the hermes CLI.
 
 Only the top-level parser and the ``chat`` subparser live here. Every other subparser (model,
-gateway, sessions, …) is built inline in ``main.py`` because its dispatch is tightly coupled to
-module-level ``cmd_*`` functions.
+gateway, sessions, …) is built by ``hermes_cli/subcommands/<group>.py`` and wired in
+``main._build_cli_parser`` with its ``cmd_*`` handler injected.
 """
 
 import argparse
@@ -120,20 +120,8 @@ For more help on a command:
 """
 
 
-def build_top_level_parser():
-    """Build the top-level parser, the subparsers action, and the ``chat`` subparser.
-
-    Returns ``(parser, subparsers, chat_parser)``; the caller wires
-    ``chat_parser.set_defaults(func= cmd_chat)`` and registers further subparsers via
-    ``subparsers.add_parser(...)``.
-    """
-    parser = argparse.ArgumentParser(
-        prog="hermes",
-        description="Hermes Agent - AI assistant with tool-calling capabilities",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=_EPILOGUE,
-    )
-
+def _add_top_level_flags(parser: argparse.ArgumentParser) -> None:
+    """Top-level (pre-subcommand) flags; ``-m/--provider`` pair with ``-z`` without ``chat``."""
     parser.add_argument(
         "--version", "-V", action="store_true", help="Show version and exit"
     )
@@ -326,11 +314,9 @@ def build_top_level_parser():
         help="With --tui: run TypeScript sources via tsx (skip dist build)",
     )
 
-    subparsers = parser.add_subparsers(dest="command", help="Command to run")
 
-    # =========================================================================
-    # chat command
-    # =========================================================================
+def _build_chat_parser(subparsers) -> argparse.ArgumentParser:
+    """The ``chat`` subparser (also the implicit default command)."""
     chat_parser = subparsers.add_parser(
         "chat",
         help="Interactive chat with the agent",
@@ -592,5 +578,26 @@ def build_top_level_parser():
         default=argparse.SUPPRESS,
         help="With --tui: run TypeScript sources via tsx (skip dist build)",
     )
+    return chat_parser
+
+
+def build_top_level_parser():
+    """Build the top-level parser, the subparsers action, and the ``chat`` subparser.
+
+    Returns ``(parser, subparsers, chat_parser)``; the caller wires
+    ``chat_parser.set_defaults(func= cmd_chat)`` and registers further subparsers via
+    ``subparsers.add_parser(...)``.
+    """
+    parser = argparse.ArgumentParser(
+        prog="hermes",
+        description="Hermes Agent - AI assistant with tool-calling capabilities",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=_EPILOGUE,
+    )
+
+    _add_top_level_flags(parser)
+
+    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+    chat_parser = _build_chat_parser(subparsers)
 
     return parser, subparsers, chat_parser
