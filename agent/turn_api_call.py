@@ -243,8 +243,7 @@ def nous_rate_limit_guard(
                 return _verdict("return", {
                     "final_response": (
                         f"⏳ {_nous_msg}\n\n"
-                        "No fallback provider available. "
-                        "Try again after the reset, or add a "
+                        "No fallback provider available. Try again after the reset, or add a "
                         "fallback provider in config.yaml."
                     ),
                     "messages": messages,

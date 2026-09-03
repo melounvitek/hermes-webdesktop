@@ -64,8 +64,7 @@ def _retry_empty(
     n = agent._empty_content_retries
     wait_time = jittered_backoff(n, base_delay=5.0, max_delay=60.0)
     logger.warning(
-        "Empty response (no content or reasoning) — "
-        "retry %d/%d in %.1fs (model=%s)",
+        "Empty response (no content or reasoning) — retry %d/%d in %.1fs (model=%s)",
         n, budget, wait_time, agent.model,
     )
     _budget_note = (
@@ -115,8 +114,7 @@ def _terminal_empty(agent: Any, assistant_message: Any, finish_reason: str, mess
 
     if not reasoning_text:
         logger.warning(
-            "Empty response (no content or reasoning) "
-            "after %d retries. No fallback available. "
+            "Empty response (no content or reasoning) after %d retries. No fallback available. "
             "model=%s provider=%s",
             agent._empty_content_retries, agent.model,
             agent.provider,
@@ -130,20 +128,15 @@ def _terminal_empty(agent: Any, assistant_message: Any, finish_reason: str, mess
 
     reasoning_preview = reasoning_text[:500] + "..." if len(reasoning_text) > 500 else reasoning_text
     logger.warning(
-        "Reasoning-only response (no visible content) "
-        "after exhausting retries and fallback. "
-        "Reasoning: %s", reasoning_preview,
+        "Reasoning-only response (no visible content) after exhausting retries and fallback. Reasoning: %s", reasoning_preview,
     )
     agent._emit_status(
-        "⚠️ Model produced reasoning but no visible "
-        "response after all retries. Returning empty."
+        "⚠️ Model produced reasoning but no visible response after all retries. Returning empty."
     )
     return (
-        "⚠️ The model produced only internal reasoning and "
-        "no final answer, despite retries"
+        "⚠️ The model produced only internal reasoning and no final answer, despite retries"
         + (" and fallback" if agent._fallback_chain else "")
-        + ". Its last reasoning, which may contain the "
-        "answer:\n\n" + reasoning_preview
+        + ". Its last reasoning, which may contain the answer:\n\n" + reasoning_preview
     )
 
 
@@ -175,8 +168,7 @@ def recover_empty_response(
         _turn_exit_reason = "partial_stream_recovery"
         _recovered = agent._strip_think_blocks(_partial_streamed).strip()
         logger.info(
-            "Partial stream content delivered (%d chars) "
-            "— using as final response",
+            "Partial stream content delivered (%d chars) — using as final response",
             len(_recovered),
         )
         agent._emit_status("↻ Stream interrupted — using delivered content " "as final response")
@@ -239,8 +231,7 @@ def recover_empty_response(
     if _has_structured and agent._thinking_prefill_retries < 2:
         agent._thinking_prefill_retries += 1
         logger.info(
-            "Thinking-only response (no visible content) — "
-            "prefilling to continue (%d/2)",
+            "Thinking-only response (no visible content) — prefilling to continue (%d/2)",
             agent._thinking_prefill_retries,
         )
         agent._buffer_status(
@@ -266,23 +257,19 @@ def recover_empty_response(
 
     if _truly_empty and _deterministic_empty:
         logger.warning(
-            "Deterministic empty response detected "
-            "(consecutive zero-output completions, "
-            "model=%s provider=%s finish_reason=%s) — "
-            "skipping remaining retries",
+            "Deterministic empty response detected (consecutive zero-output completions, "
+            "model=%s provider=%s finish_reason=%s) — skipping remaining retries",
             agent.model, agent.provider, finish_reason,
         )
         agent._buffer_status(
-            "⚠️ Model is deterministically returning empty "
-            "(zero output tokens) — skipping further retries "
+            "⚠️ Model is deterministically returning empty (zero output tokens) — skipping further retries "
             "to avoid repeat charges"
         )
 
     # Exhausted retries — try the next provider in the chain before "(empty)".
     if _truly_empty and agent._fallback_chain:
         logger.warning(
-            "Empty response after %d retries — "
-            "attempting fallback (model=%s, provider=%s)",
+            "Empty response after %d retries — attempting fallback (model=%s, provider=%s)",
             agent._empty_content_retries, agent.model,
             agent.provider,
         )
@@ -292,8 +279,7 @@ def recover_empty_response(
             agent._empty_content_retries = 0
             agent._buffer_status(f"↻ Switched to fallback: {agent.model} " f"({agent.provider})")
             logger.info(
-                "Fallback activated after empty responses: "
-                "now using %s on %s",
+                "Fallback activated after empty responses: now using %s on %s",
                 agent.model, agent.provider,
             )
             # OUTER loop: `continue` re-runs preflight against the fallback's window;

@@ -31,40 +31,26 @@ _FIRST_TRUNCATED_FINAL = "First response truncated due to output length limit"
 
 _THINKING_EXHAUSTED = (
     "💭 Reasoning exhausted the output token budget — no visible response was produced.",
-    "⚠️ **Thinking Budget Exhausted**\n\n"
-    "The model used all its output tokens on reasoning "
-    "and had none left for the actual response.\n\n"
-    "To fix this:\n"
+    "⚠️ **Thinking Budget Exhausted**\n\nThe model used all its output tokens on reasoning "
+    "and had none left for the actual response.\n\nTo fix this:\n"
     "→ Lower reasoning effort: `/reasoning low` or `/reasoning minimal`\n"
     "→ Or switch to a larger/non-reasoning model with `/model`",
     "Model used all output tokens on reasoning with none left "
-    "for the response. Try lowering reasoning effort or "
-    "increasing max_tokens.",
+    "for the response. Try lowering reasoning effort or increasing max_tokens.",
 )
 _REPETITION_DOMINATED = (
-    "🔁 Response dominated by repeated text — stopping instead of "
-    "continuing a degenerate response.",
-    "⚠️ **Response Stopped — Repetition Detected**\n\n"
-    "The model fell into a repetition loop while "
-    "writing this response, so continuing would only "
-    "produce more repeated text. The partial response "
-    "was discarded.\n\n"
-    "→ Switch to a different model with `/model`\n"
-    "→ Or resend your message (your conversation "
-    "history is preserved)",
-    "Model output entered a repetition loop and was "
-    "truncated mid-loop; refusing to continue a "
+    "🔁 Response dominated by repeated text — stopping instead of continuing a degenerate response.",
+    "⚠️ **Response Stopped — Repetition Detected**\n\nThe model fell into a repetition loop while "
+    "writing this response, so continuing would only produce more repeated text. The partial response "
+    "was discarded.\n\n→ Switch to a different model with `/model`\n"
+    "→ Or resend your message (your conversation history is preserved)",
+    "Model output entered a repetition loop and was truncated mid-loop; refusing to continue a "
     "degenerate response.",
 )
 _CEILING_NO_TEXT = (
-    "⚠️ **No visible answer was produced.** The "
-    "model hit its output-token limit on every "
-    "continuation attempt — its reasoning "
-    "consumed the entire budget each time.\n\n"
-    "To fix this:\n"
-    "→ Lower reasoning effort: `/reasoning low` "
-    "or `/reasoning none`\n"
-    "→ Or raise max_tokens for this model"
+    "⚠️ **No visible answer was produced.** The model hit its output-token limit on every "
+    "continuation attempt — its reasoning consumed the entire budget each time.\n\nTo fix this:\n"
+    "→ Lower reasoning effort: `/reasoning low` or `/reasoning none`\n→ Or raise max_tokens for this model"
 )
 
 
@@ -526,8 +512,7 @@ def handle_content_policy_refusal(
     agent._flush_status_buffer()
     _refusal_log = _refusal_text[:500] + "..." if len(_refusal_text) > 500 else _refusal_text
     logger.warning(
-        "%sModel declined to respond (finish_reason=content_filter). "
-        "model=%s provider=%s refusal=%s",
+        "%sModel declined to respond (finish_reason=content_filter). model=%s provider=%s refusal=%s",
         agent.log_prefix, agent.model, agent.provider,
         _refusal_log or "(no text)",
     )
@@ -536,8 +521,7 @@ def handle_content_policy_refusal(
         f"Model's explanation: {_refusal_text}" if _refusal_text else "The model returned no explanation."
     )
     _refusal_response = (
-        "⚠️  The model declined to respond to this request "
-        "(safety refusal — not a Hermes/gateway failure).\n\n"
+        "⚠️  The model declined to respond to this request (safety refusal — not a Hermes/gateway failure).\n\n"
         f"{_refusal_detail}\n\n"
         f"{_CONTENT_POLICY_RECOVERY_HINT}"
     )
