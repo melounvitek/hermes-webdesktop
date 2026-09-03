@@ -704,21 +704,17 @@ def _managed_local_load_notice(agent, api_kwargs: dict) -> "Optional[str]":
         model = str(api_kwargs.get("model", ""))
         progress = get_loading_progress().get(model)
         if progress is not None:
-            return (
-                f"⏳ loading {model} into memory — {progress['percent']}% "
-                "(responses start once the model is loaded)"
-            )
+            return (f"⏳ loading {model} into memory — {progress['percent']}% "
+                "(responses start once the model is loaded)")
         prefill = get_prefill_progress(model)
-        if prefill is not None:
-            processed = int(prefill["processed"])
-            total = estimate_request_context_tokens(api_kwargs)
-            if total and total >= processed:
-                pct = max(0, min(100, round(processed / total * 100)))
-                return f"⚙ processing prompt — {pct}%"
-            # Counter past the estimate (estimator undercounted): no honest
-            # denominator, so no percent — the UI shows label-only.
-            return "⚙ processing prompt"
-        return None
+        if prefill is None:
+            return None
+        processed = int(prefill["processed"])
+        total = estimate_request_context_tokens(api_kwargs)
+        if total and total >= processed:
+            return f"⚙ processing prompt — {max(0, min(100, round(processed / total * 100)))}%"
+        # Counter past the estimate (estimator undercounted): no honest denominator, label-only.
+        return "⚙ processing prompt"
     except Exception:  # noqa: BLE001 — a status nicety must never break a call
         return None
 
@@ -965,9 +961,7 @@ class _RequestClientRegistry:
         return None
 
     def set_stream_handle(self, stream):
-        if self._stream_close_callable(stream) is None:
-            return stream
-        return self.set_client(stream, kind="stream")
+        return stream if self._stream_close_callable(stream) is None else self.set_client(stream, kind="stream")
 
     def _close_stream_handle(self, stream, reason: str) -> None:
         close = self._stream_close_callable(stream)
@@ -1276,9 +1270,9 @@ class _NonStreamRequest:
             poll_count += 1
             # Every ~30s: gateway inactivity heartbeat + rewrite the status line
             # so users see WHAT the wait is (the "infinite thinking" complaint).
-            if poll_count % 100 == 0:  # 100 × 0.3s = 30s
-                self._emit_wait_notice(time.time() - self.call_start)
             elapsed = time.time() - self.call_start
+            if poll_count % 100 == 0:  # 100 × 0.3s = 30s
+                self._emit_wait_notice(elapsed)
             last_event_ts = getattr(agent, "_codex_stream_last_event_ts", None)
             if wd.ttfb_enabled and elapsed > wd.ttfb_timeout and last_event_ts is None:
                 self._ttfb_kill(elapsed)
@@ -1768,10 +1762,9 @@ def _fallback_api_mode_resolved(agent, fb_provider: str, fb_model: str, fb_base_
         return "anthropic_messages"
     if agent._is_azure_openai_url(fb_base_url):
         return "chat_completions"  # Azure serves gpt-5.x on /chat/completions — no Responses API.
-    if agent._is_direct_openai_url(fb_base_url):
+    # Provider exceptions (Copilot gpt-5-mini) stay inside the requires-responses predicate.
+    if agent._is_direct_openai_url(fb_base_url) or agent._provider_model_requires_responses_api(fb_model, provider=fb_provider):
         return "codex_responses"
-    if agent._provider_model_requires_responses_api(fb_model, provider=fb_provider):
-        return "codex_responses"  # provider exceptions (Copilot gpt-5-mini) stay inside the predicate
     host = base_url_hostname(fb_base_url)
     if fb_provider == "bedrock" or (host.startswith("bedrock-runtime.") and base_url_host_matches(fb_base_url, "amazonaws.com")):
         return "bedrock_converse"
@@ -1787,10 +1780,8 @@ def _rebind_fallback_credential_pool(agent, fb_provider: str, fb_model: str) -> 
         if pool_provider and pool_provider != fb_provider:
             logger.info(
                 "Fallback to %s/%s: clearing primary credential pool (pool_provider=%s) to prevent cross-provider contamination",
-                fb_provider, fb_model, pool_provider,
-            )
-            agent._credential_pool = None
-            agent._credential_pool_entry_id = None
+                fb_provider, fb_model, pool_provider)
+            agent._credential_pool = agent._credential_pool_entry_id = None
     if getattr(agent, "_credential_pool", None) is None:
         try:
             from agent.credential_pool import load_pool
@@ -1866,13 +1857,11 @@ def _swap_fallback_clients(agent, fb_client, fb_provider: str, fb_model: str, fb
         from agent.anthropic_adapter import build_anthropic_client, resolve_anthropic_token, _is_oauth_token
         is_anthropic = fb_provider == "anthropic"
         effective_key = fb_client.api_key or (resolve_anthropic_token() if is_anthropic else None) or ""
-        agent.api_key = effective_key
-        agent._anthropic_api_key = effective_key
+        agent.api_key = agent._anthropic_api_key = effective_key
         agent._anthropic_base_url = fb_base_url
-        agent._anthropic_client = build_anthropic_client(effective_key, agent._anthropic_base_url, timeout=timeout)
+        agent._anthropic_client = build_anthropic_client(effective_key, fb_base_url, timeout=timeout)
         agent._is_anthropic_oauth = _is_oauth_token(effective_key) if is_anthropic else False
-        agent.client = None
-        agent._client_kwargs = {}
+        agent.client, agent._client_kwargs = None, {}
         return
     agent.api_key = fb_client.api_key
     agent.client = fb_client
