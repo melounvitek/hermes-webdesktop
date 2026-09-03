@@ -63,6 +63,10 @@ def _manifest_file() -> Path:
     return _live(MANIFEST_FILE, _MANIFEST_FILE_AT_IMPORT, lambda: _skills_dir() / ".bundled_manifest")
 
 
+def _rel_skills_posix(path: Path) -> str:
+    return path.relative_to(_skills_dir()).as_posix()
+
+
 # Written by `hermes profile create --no-skills` / installer `--no-skills`: sync seeds
 # only essential skills. Mirrors hermes_cli.profiles.NO_BUNDLED_SKILLS_MARKER (no CLI import here).
 NO_BUNDLED_SKILLS_MARKER = ".no-bundled-skills"
@@ -89,7 +93,6 @@ def _build_external_skill_index() -> Set[str]:
     """Names (directory and frontmatter) of every skill provided by external_dirs,
     so sync_skills never shadows an externally-delegated skill."""
     from agent.skill_utils import get_external_skills_dirs, _external_dirs_cache_clear
-
     _external_dirs_cache_clear()  # so a config edit (or a test patch) is seen
     external_names: Set[str] = set()
     for ext_dir in get_external_skills_dirs():
@@ -155,18 +158,6 @@ def _dir_hash(directory: Path) -> str:
     return hasher.hexdigest()
 
 
-def _index_active_skills() -> Dict[str, List[Path]]:
-    """Index every skill in the user's tree by frontmatter name (for rename recovery)."""
-    index: Dict[str, List[Path]] = {}
-    for md in _iter_active_skill_mds():
-        index.setdefault(_read_skill_name(md, md.parent.name), []).append(md.parent)
-    return index
-
-
-def _rel_skills_posix(path: Path) -> str:
-    return path.relative_to(_skills_dir()).as_posix()
-
-
 def _move_dir(src: Path, dest: Path) -> None:
     dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(src), str(dest))
@@ -185,10 +176,11 @@ def _recover_renamed_skill(st: "_SyncState", skill_name: str, dest: Path) -> Opt
     origin_hash = st.manifest.get(skill_name, "")
     if not origin_hash:
         return None
-    if st.active_index is None:
-        st.active_index = _index_active_skills()
+    if st.active_index is None:  # by frontmatter name
+        st.active_index = {}
+        for md in _iter_active_skill_mds():
+            st.active_index.setdefault(_read_skill_name(md, md.parent.name), []).append(md.parent)
         st.hub_paths = _read_hub_install_paths()
-
     for candidate in st.active_index.get(skill_name, []):
         if candidate == dest or not candidate.is_dir():
             continue
@@ -277,8 +269,7 @@ def _install_new_skill(st: _SyncState, skill_name: str, skill_src: Path, dest: P
             else:
                 st.say(
                     f"  ⚠ {skill_name}: bundled version shipped but you already have a local skill by this name — "
-                    f"yours was kept. Run `hermes skills reset {skill_name}` to replace it with the bundled version."
-                )
+                    f"yours was kept. Run `hermes skills reset {skill_name}` to replace it with the bundled version.")
         else:
             _copy_dir(skill_src, dest)
             st.copied.append(skill_name)
@@ -299,13 +290,14 @@ def _replace_skill_dir(skill_src: Path, dest: Path) -> None:
         shutil.copytree(skill_src, dest)
     except OSError:
         # Clear a partially-written dest so it can't shadow or block the restore.
-        if backup.exists() and dest.exists():
-            try:
-                _rmtree_writable(dest)
-            except OSError:
-                logger.warning("Could not clear partial copy %s during restore", dest, exc_info=True)
-        if backup.exists() and not dest.exists():
-            shutil.move(str(backup), str(dest))
+        if backup.exists():
+            if dest.exists():
+                try:
+                    _rmtree_writable(dest)
+                except OSError:
+                    logger.warning("Could not clear partial copy %s during restore", dest, exc_info=True)
+            if not dest.exists():
+                shutil.move(str(backup), str(dest))
         raise
     try:
         _rmtree_writable(backup)
@@ -379,15 +371,12 @@ def sync_skills(quiet: bool = False) -> dict:
         if skill_name in suppressed and skill_name not in ESSENTIAL_SKILLS:
             st.suppressed.append(skill_name)
             continue
-
         dest = _compute_relative_dest(skill_src, bundled_dir)
         bundled_hash = _dir_hash(skill_src)
-
         # Recoveries run BEFORE classification so a missing dest isn't misread as user-deleted.
         _recover_orphan_backup(dest)
         if not dest.exists() and skill_name in st.manifest and _recover_renamed_skill(st, skill_name, dest):
             st.relocated.append(skill_name)
-
         if skill_name in external_index:
             _defer_to_external(st, skill_name, dest, bundled_hash)
         elif skill_name not in st.manifest:
@@ -396,7 +385,6 @@ def sync_skills(quiet: bool = False) -> dict:
             _update_existing_skill(st, skill_name, skill_src, dest, bundled_hash)
         else:
             st.skipped += 1  # in manifest but not on disk — user deleted it
-
     # Clean manifest entries for skills removed upstream. Skipped when opted out: bundled_skills
     # is only the essential set there, so cleaning would drop tracking for everything else.
     cleaned = [] if essential_only else sorted(set(st.manifest) - {name for name, _ in bundled_skills})
@@ -405,7 +393,6 @@ def sync_skills(quiet: bool = False) -> dict:
     _seed_category_descriptions(
         bundled_dir,
         {_compute_relative_dest(src, bundled_dir).parent for _, src in bundled_skills} if essential_only else None)
-
     _write_manifest(st.manifest)
     return {
         "copied": st.copied, "updated": st.updated, "skipped": st.skipped, "user_modified": st.user_modified,

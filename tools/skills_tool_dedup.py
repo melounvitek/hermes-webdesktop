@@ -25,8 +25,7 @@ _SKILL_VIEW_DEDUP_MESSAGE = (
 
 def _skill_view_fingerprint(payload: dict) -> tuple | None:
     """Stat the skill file a successful skill_view served, for change detection."""
-    src = payload.get("_source_path")
-    if not src:
+    if not (src := payload.get("_source_path")):
         return None
     try:
         st = os.stat(src)
@@ -37,14 +36,11 @@ def _skill_view_fingerprint(payload: dict) -> tuple | None:
 
 def _record_skill_view(task_id, name, file_path, payload: dict) -> None:
     """Record a served skill_view so an identical repeat can be deduped."""
-    if not task_id:
-        return
     # Never dedup setup-needed views: readiness depends on config/env state that
     # changes without the file changing; the model must see the refreshed status.
-    if payload.get("setup_needed") or payload.get("readiness_status") == "setup_needed":
+    if not task_id or payload.get("setup_needed") or payload.get("readiness_status") == "setup_needed":
         return
-    fp = _skill_view_fingerprint(payload)
-    if fp is None:
+    if (fp := _skill_view_fingerprint(payload)) is None:
         return
     key = (str(payload.get("name") or name), file_path or "")
     with _skill_view_tracker_lock:
@@ -59,19 +55,17 @@ def _check_skill_view_dedup(task_id, name, file_path) -> str | None:
     is unchanged on disk; None otherwise."""
     if not task_id:
         return None
+    n = str(name)
     with _skill_view_tracker_lock:
-        cache = _skill_view_tracker.get(str(task_id))
-        if not cache:
+        if not (cache := _skill_view_tracker.get(str(task_id))):
             return None
         # Record key is the RESOLVED name; match raw and resolved forms so
         # 'category/skill' and bare-name views coalesce.
         for key, (src, mtime_ns, size) in list(cache.items()):
             rec_name, rec_fp = key
-            if rec_fp != (file_path or ""):
-                continue
-            n = str(name)
-            if rec_name != n and not n.endswith("/" + rec_name) \
-                    and not rec_name.endswith("/" + n) and n.split(":")[-1] != rec_name:
+            if rec_fp != (file_path or "") or (
+                    rec_name != n and not n.endswith("/" + rec_name)
+                    and not rec_name.endswith("/" + n) and n.split(":")[-1] != rec_name):
                 continue
             try:
                 st = os.stat(src)

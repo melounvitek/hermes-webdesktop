@@ -42,7 +42,6 @@ def reset_bundled_skill(name: str, restore: bool = False) -> dict:
     if not in_manifest and not is_bundled:
         return _fail("not_in_manifest", f"'{name}' is not a tracked bundled skill. Nothing to reset. "
                      f"(Hub-installed skills use `hermes skills uninstall`.)")
-
     # Delete the user's copy BEFORE touching the manifest so a failed rmtree can't
     # leave the skill in a manifest-less limbo.
     deleted_user_copy = False
@@ -51,19 +50,16 @@ def reset_bundled_skill(name: str, restore: bool = False) -> dict:
             return _fail("bundled_missing", f"'{name}' has no bundled source — manifest entry preserved "
                          f"but cannot restore from bundled (skill was removed upstream).")
         dest = ss._compute_relative_dest(bundled_by_name[name], bundled_dir)
-        if dest.exists():
+        if deleted_user_copy := dest.exists():
             try:
                 ss._rmtree_writable(dest)
             except OSError as e:
                 return _fail("not_reset", f"Could not delete user copy at {dest}: {e}. "
                              f"Manifest entry preserved — nothing was changed.")
-            deleted_user_copy = True
-
     if in_manifest:
         del manifest[name]
         ss._write_manifest(manifest)
     synced = ss.sync_skills(quiet=True)
-
     if not restore:
         action, message = "manifest_cleared", (f"Cleared manifest entry for '{name}'. Future `hermes update` runs "
                                                f"will re-baseline against your current copy and accept upstream changes.")
@@ -78,8 +74,7 @@ def list_user_modified_bundled_skills() -> List[dict]:
     """Bundled skills ``hermes update`` keeps because the user edited them (same test
     the sync loop uses). Name-sorted ``{"name", "dest", "bundled_src"}`` dicts."""
     ss = _ss()
-    manifest = ss._read_manifest()
-    if not manifest:
+    if not (manifest := ss._read_manifest()):
         return []
     bundled_dir = ss._get_bundled_dir()
     modified: List[dict] = []
@@ -107,20 +102,17 @@ def diff_bundled_skill(name: str) -> dict:
     modified, message, diffs}``; each diff is ``{"path", "status", "diff"}`` with status
     modified / added (only in user copy) / removed (only in bundled) / binary."""
     import difflib
-
     ss, _, bundled_dir, bundled_by_name = _bundled_state()
 
     def _fail(found: bool, message: str) -> dict:
         return {"ok": False, "name": name, "found": found, "modified": False, "diffs": [], "message": message}
 
-    bundled_src = bundled_by_name.get(name)
-    if bundled_src is None:
+    if (bundled_src := bundled_by_name.get(name)) is None:
         return _fail(False, f"'{name}' is not a tracked bundled skill (no stock version to "
                      f"diff against). Hub-installed skills use `hermes skills inspect`.")
     dest = ss._compute_relative_dest(bundled_src, bundled_dir)
     if not dest.exists():
         return _fail(True, f"No local copy of '{name}' found at {dest}.")
-
     user_files = set(_skill_file_list(dest))
     stock_files = set(_skill_file_list(bundled_src))
     diffs: List[dict] = []
@@ -140,7 +132,6 @@ def diff_bundled_skill(name: str) -> dict:
                     stock_text.splitlines(keepends=True), user_text.splitlines(keepends=True),
                     fromfile=f"stock/{rel}", tofile=f"yours/{rel}"))
                 diffs.append({"path": rel, "status": "modified", "diff": text})
-
     message = (f"'{name}' differs from the stock version in {len(diffs)} file(s)." if diffs
                else f"'{name}' matches the stock version.")
     return {"ok": True, "name": name, "found": True, "modified": bool(diffs), "diffs": diffs, "message": message}
@@ -205,10 +196,8 @@ def remove_pristine_bundled_skills(dry_run: bool = False) -> dict:
                 continue
             manifest.pop(name, None)
         removed.append(name)
-
     if not dry_run and removed:
         ss._write_manifest(manifest)
-
     verb = "Would remove" if dry_run else "Removed"
     return {
         "ok": True, "removed": removed, "skipped": skipped, "dry_run": dry_run,

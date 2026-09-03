@@ -34,7 +34,6 @@ def _is_remote_env_backend(backend: str) -> bool:
         return False
     try:
         from agent.terminal_env_registry import provider_flag
-
         return bool(provider_flag(backend, "is_remote", False))
     except Exception:
         return False
@@ -48,7 +47,7 @@ def _normalize_prerequisite_values(value: Any) -> List[str]:
 
 def _collect_prerequisite_values(frontmatter: Dict[str, Any]) -> Tuple[List[str], List[str]]:
     prereqs = frontmatter.get("prerequisites")
-    if not prereqs or not isinstance(prereqs, dict):
+    if not isinstance(prereqs, dict) or not prereqs:
         return [], []
     return (
         _normalize_prerequisite_values(prereqs.get("env_vars")),
@@ -73,10 +72,7 @@ def _normalize_setup_metadata(frontmatter: Dict[str, Any]) -> Dict[str, Any]:
         return {"help": None, "collect_secrets": []}
     collect_secrets: List[Dict[str, Any]] = []
     for item in _as_dict_list(setup.get("collect_secrets")):
-        if not isinstance(item, dict):
-            continue
-        env_var = str(item.get("env_var") or "").strip()
-        if not env_var:
+        if not isinstance(item, dict) or not (env_var := str(item.get("env_var") or "").strip()):
             continue
         entry: Dict[str, Any] = {
             "env_var": env_var,
@@ -93,13 +89,19 @@ def _get_required_environment_variables(
     """Merge required_environment_variables, setup.collect_secrets and legacy
     prerequisites.env_vars into one deduped, validated list (first entry wins)."""
     setup = _normalize_setup_metadata(frontmatter)
-    required: List[Dict[str, Any]] = []
-    seen: set[str] = set()
-
-    def _append_required(entry: Dict[str, Any]) -> None:
+    required: Dict[str, Dict[str, Any]] = {}  # env name -> entry, insertion-ordered, first wins
+    declared = _as_dict_list(frontmatter.get("required_environment_variables"))
+    entries = [{"name": i} if isinstance(i, str) else i for i in declared if isinstance(i, (str, dict))]
+    entries += [
+        {"name": i.get("env_var"), "prompt": i.get("prompt"), "help": i.get("provider_url") or setup.get("help")}
+        for i in setup["collect_secrets"]]
+    if legacy_env_vars is None:
+        legacy_env_vars, _ = _collect_prerequisite_values(frontmatter)
+    entries += [{"name": v} for v in legacy_env_vars]
+    for entry in entries:
         env_name = str(entry.get("name") or entry.get("env_var") or "").strip()
-        if not env_name or env_name in seen or not _ENV_VAR_NAME_RE.match(env_name):
-            return
+        if not env_name or env_name in required or not _ENV_VAR_NAME_RE.match(env_name):
+            continue
         normalized: Dict[str, Any] = {
             "name": env_name,
             "prompt": str(entry.get("prompt") or f"Enter value for {env_name}").strip()}
@@ -110,24 +112,8 @@ def _get_required_environment_variables(
             normalized["required_for"] = required_for
         if entry.get("optional"):
             normalized["optional"] = True
-        seen.add(env_name)
-        required.append(normalized)
-
-    for item in _as_dict_list(frontmatter.get("required_environment_variables")):
-        if isinstance(item, str):
-            _append_required({"name": item})
-        elif isinstance(item, dict):
-            _append_required(item)
-    for item in setup["collect_secrets"]:
-        _append_required({
-            "name": item.get("env_var"),
-            "prompt": item.get("prompt"),
-            "help": item.get("provider_url") or setup.get("help")})
-    if legacy_env_vars is None:
-        legacy_env_vars, _ = _collect_prerequisite_values(frontmatter)
-    for env_var in legacy_env_vars:
-        _append_required({"name": env_var})
-    return required
+        required[env_name] = normalized
+    return list(required.values())
 
 
 def _capture_result(missing_names, setup_skipped=False, gateway_setup_hint=None):
@@ -138,7 +124,6 @@ def _capture_required_environment_variables(
     skill_name: str, missing_entries: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Prompt for missing secrets via the registered capture callback (if any)."""
     from tools import skills_tool as _st
-
     if not missing_entries:
         return _capture_result([])
     missing_names = [entry["name"] for entry in missing_entries]
@@ -151,8 +136,6 @@ def _capture_required_environment_variables(
     callback = _st._secret_capture_callback
     if callback is None:
         return _capture_result(missing_names)
-
-    setup_skipped = False
     remaining_names: List[str] = []
     for entry in missing_entries:
         metadata = {"skill_name": skill_name, **{k: entry[k] for k in ("help", "required_for") if entry.get(k)}}
@@ -162,11 +145,9 @@ def _capture_required_environment_variables(
             logger.warning(f"Secret capture callback failed for {entry['name']}", exc_info=True)
             callback_result = {"success": False, "stored_as": entry["name"], "validated": False, "skipped": True}
         ok = isinstance(callback_result, dict) and callback_result.get("success")
-        if ok and not callback_result.get("skipped"):
-            continue
-        setup_skipped = True
-        remaining_names.append(entry["name"])
-    return _capture_result(remaining_names, setup_skipped)
+        if not (ok and not callback_result.get("skipped")):
+            remaining_names.append(entry["name"])
+    return _capture_result(remaining_names, bool(remaining_names))
 
 
 def _is_gateway_surface() -> bool:
@@ -189,37 +170,29 @@ def _env_snapshot_or_load(env_snapshot):
 
 def _is_env_var_persisted(var_name: str, env_snapshot: Dict[str, str] | None = None) -> bool:
     env_snapshot = _env_snapshot_or_load(env_snapshot)
-    if var_name in env_snapshot:
-        return bool(env_snapshot.get(var_name))
-    return bool(os.getenv(var_name))
+    return bool(env_snapshot[var_name] if var_name in env_snapshot else os.getenv(var_name))
 
 
 def _remaining_required_environment_names(
-    required_env_vars: List[Dict[str, Any]],
-    capture_result: Dict[str, Any],
-    *,
+    required_env_vars: List[Dict[str, Any]], capture_result: Dict[str, Any], *,
     env_snapshot: Dict[str, str] | None = None) -> List[str]:
     missing_names = set(capture_result["missing_names"])
     env_snapshot = _env_snapshot_or_load(env_snapshot)
     return [
-        e["name"]
-        for e in required_env_vars
-        if not e.get("optional")
+        e["name"] for e in required_env_vars if not e.get("optional")
         and (e["name"] in missing_names or not _is_env_var_persisted(e["name"], env_snapshot))]
 
 
 def _gateway_setup_hint() -> str:
     try:
         from gateway.platforms.base import GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE
-
         return GATEWAY_SECRET_CAPTURE_UNSUPPORTED_MESSAGE
     except Exception:
         return f"Secure secret entry is not available. Load this skill in the local CLI to be prompted, or add the key to {display_hermes_home()}/.env manually."
 
 
 def _build_setup_note(
-    readiness_status: SkillReadinessStatus, missing: List[str], setup_help: str | None = None
-) -> str | None:
+    readiness_status: SkillReadinessStatus, missing: List[str], setup_help: str | None = None) -> str | None:
     if readiness_status != SkillReadinessStatus.SETUP_NEEDED:
         return None
     note = f"Setup needed before using this skill: missing {', '.join(missing) if missing else 'required prerequisites'}."

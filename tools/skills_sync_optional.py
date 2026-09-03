@@ -19,7 +19,6 @@ logger = logging.getLogger("tools.skills_sync")
 def _ss():
     """Live ``tools.skills_sync`` module (imported lazily: it re-exports this module)."""
     from tools import skills_sync
-
     return skills_sync
 
 
@@ -28,7 +27,6 @@ def _content_hash(directory: Path) -> str:
     if guard deps are unavailable."""
     try:
         from tools.skills_guard import content_hash
-
         return content_hash(directory)
     except Exception:
         return _ss()._dir_hash(directory)
@@ -36,8 +34,7 @@ def _content_hash(directory: Path) -> str:
 
 def _safe_rel_install_path(path: Path, base: Path) -> str:
     """Normalized relative POSIX path; rejects traversal/absolute paths."""
-    posix = path.relative_to(base).as_posix()
-    pure = PurePosixPath(posix)
+    pure = PurePosixPath(posix := path.relative_to(base).as_posix())
     parts = [part for part in pure.parts if part not in {"", "."}]
     if pure.is_absolute() or not parts or ".." in parts:
         raise ValueError(f"Unsafe optional skill path: {posix}")
@@ -96,12 +93,9 @@ def _optional_skill_index() -> Dict[str, Tuple[str, str, Path]]:
     ss = _ss()
     optional_dir = ss._get_optional_dir()
     index: Dict[str, Tuple[str, str, Path]] = {}
-    if not optional_dir.exists():
-        return index
-    for skill_md, src, install_path in _iter_optional_skills(optional_dir, root_relative=True):
-        value = (src.name, install_path, src)
-        index[src.name] = value
-        index[ss._read_skill_name(skill_md, src.name)] = value
+    if optional_dir.exists():
+        for skill_md, src, install_path in _iter_optional_skills(optional_dir, root_relative=True):
+            index[src.name] = index[ss._read_skill_name(skill_md, src.name)] = (src.name, install_path, src)
     return index
 
 
@@ -124,10 +118,8 @@ def _find_active_copies(folder_name: str, src_frontmatter: str, dest: Path) -> L
     ss = _ss()
     names = {folder_name, src_frontmatter}
     return [
-        md.parent
-        for md in ss._iter_active_skill_mds(sort=True)
-        if md.parent != dest and (md.parent.name == folder_name or ss._read_skill_name(md, md.parent.name) in names)
-    ]
+        md.parent for md in ss._iter_active_skill_mds(sort=True)
+        if md.parent != dest and (md.parent.name == folder_name or ss._read_skill_name(md, md.parent.name) in names)]
 
 
 def restore_official_optional_skill(name: str, *, restore: bool = False) -> dict:
@@ -143,12 +135,10 @@ def restore_official_optional_skill(name: str, *, restore: bool = False) -> dict
     else:
         message = f"Official optional skill not found: {name}" if index else "No official optional skills directory found."
         return {"ok": False, "message": message, "restored": [], "backfilled": [], "backed_up": []}
-
     restored: List[str] = []
     backed_up: List[str] = []
     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
     backup_root = ss._skills_dir() / ".restore-backups" / f"official-optional-{timestamp}"
-
     for folder_name, install_path, src in targets if restore else []:
         dest = ss._skills_dir() / Path(*install_path.split("/"))
         canonical_ok = dest.exists() and ss._dir_hash(dest) == ss._dir_hash(src)
@@ -161,7 +151,6 @@ def restore_official_optional_skill(name: str, *, restore: bool = False) -> dict
         if not dest.exists():
             ss._copy_dir(src, dest)
             restored.append(folder_name)
-
     return {
         "ok": True, "message": "Official optional skill repair complete.", "restored": restored,
         "backfilled": _backfill_optional_provenance(quiet=True), "backed_up": backed_up,
@@ -187,8 +176,7 @@ def _relocated_dest(src_name: str, index: Dict[str, List[Path]]) -> Optional[Tup
     """The active tree may hold a skill under a DIFFERENT category path than the repo
     (upstream reorganized; the installed copy kept its location). Fall back to a UNIQUE
     same-directory-name match; ambiguity gives no basis to pick. ``(dest, install_path)`` or None."""
-    candidates = index.get(src_name, [])
-    if len(candidates) != 1:
+    if len(candidates := index.get(src_name, [])) != 1:
         return None
     dest = candidates[0]
     try:
@@ -206,13 +194,11 @@ def _backfill_optional_provenance(quiet: bool = False) -> List[str]:
     optional_dir = ss._get_optional_dir()
     if not optional_dir.exists():
         return []
-
     data = _load_hub_lock()
     if data is None:
         data = {"version": 1, "installed": {}}
     installed = data.setdefault("installed", {})
     existing_paths = {entry.get("install_path") for entry in _hub_lock_entries(data)}
-
     backfilled: List[str] = []
     installed_dir_index: Optional[Dict[str, List[Path]]] = None
     for _skill_md, src, install_path in _iter_optional_skills(optional_dir, root_relative=False):
@@ -223,13 +209,11 @@ def _backfill_optional_provenance(quiet: bool = False) -> List[str]:
         if not dest.is_dir():
             if installed_dir_index is None:
                 installed_dir_index = _index_installed_skill_dirs_by_name()
-            found = _relocated_dest(src.name, installed_dir_index)
-            if found is None:
+            if (found := _relocated_dest(src.name, installed_dir_index)) is None:
                 continue
             dest, install_path = found  # still requires a byte-identical hash below
         if install_path in existing_paths or ss._dir_hash(dest) != ss._dir_hash(src):
             continue
-
         timestamp = datetime.now(timezone.utc).isoformat()
         installed[lock_name] = {
             "source": "official",
@@ -246,7 +230,6 @@ def _backfill_optional_provenance(quiet: bool = False) -> List[str]:
         backfilled.append(lock_name)
         if not quiet:
             print(f"  = {lock_name} (official optional provenance backfilled)")
-
     if backfilled:
         _write_hub_lock(_hub_lock_path(), data)
     return backfilled

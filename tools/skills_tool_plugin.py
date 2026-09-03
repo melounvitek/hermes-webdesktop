@@ -49,20 +49,29 @@ def _truncate_description(description: str) -> str:
     return description
 
 
+def _safe_frontmatter(path: Path | None = None, *, content: str | None = None) -> Dict[str, Any]:
+    """Frontmatter of *path* (or of *content*), ``{}`` on any read/parse failure.
+    Parses via ``tools.skills_tool._parse_frontmatter`` so test patches are honored."""
+    from tools import skills_tool as _st
+    with suppress(Exception):
+        return _st._parse_frontmatter(_read_skill_text(path) if content is None else content)[0]
+    return {}
+
+
 def _available_skill_files(skill_dir: Path) -> Dict[str, List[str]]:
     """Non-SKILL.md files grouped by support dir (+ "other" for known source
     extensions at other locations); empty groups dropped."""
-    groups: Dict[str, List[str]] = {k: [] for k in (*_SUPPORT_DIRS, "other")}
+    groups: Dict[str, List[str]] = {}
     for f in skill_dir.rglob("*"):
         if not f.is_file() or f.name == "SKILL.md":
             continue
         rel = str(f.relative_to(skill_dir))
         top = rel.split("/", 1)[0] if "/" in rel else None
         if top in _SUPPORT_DIRS:
-            groups[top].append(rel)
+            groups.setdefault(top, []).append(rel)
         elif f.suffix in _SKILL_FILE_EXTS:
-            groups["other"].append(rel)
-    return {k: v for k, v in groups.items() if v}
+            groups.setdefault("other", []).append(rel)
+    return {k: groups[k] for k in (*_SUPPORT_DIRS, "other") if k in groups}
 
 
 def _serve_skill_file(
@@ -74,7 +83,6 @@ def _serve_skill_file(
     available-files listing on not-found (local skills); ``read_error_prefix`` wraps
     non-decode read errors (plugin) instead of propagating to the caller's handler."""
     from tools.path_security import has_traversal_component, validate_within_dir
-
     extra = {"hint": hint} if hint else {}
     if has_traversal_component(file_path):
         return _fail("Path traversal ('..') is not allowed.", **extra)
@@ -133,7 +141,6 @@ def _serve_plugin_skill(
     """Read a plugin-provided skill, apply guards, return JSON."""
     from hermes_cli.plugins import _get_disabled_plugins, get_plugin_manager
     from tools import skills_tool as _st
-
     if namespace in _get_disabled_plugins():
         return _fail(f"Plugin '{namespace}' is disabled. Re-enable with: hermes plugins enable {namespace}")
     qualified_name = f"{namespace}:{bare}"
@@ -141,9 +148,7 @@ def _serve_plugin_skill(
         content = _read_skill_text(skill_md)
     except Exception as e:
         return _fail(f"Failed to read skill '{qualified_name}': {e}")
-    parsed_frontmatter: Dict[str, Any] = {}
-    with suppress(Exception):
-        parsed_frontmatter, _ = _st._parse_frontmatter(content)
+    parsed_frontmatter = _safe_frontmatter(content=content)
     if _st._is_skill_disabled(qualified_name):
         return _fail(f"Skill '{qualified_name}' is disabled.")
     if not _st.skill_matches_platform(parsed_frontmatter):
@@ -152,7 +157,6 @@ def _serve_plugin_skill(
             readiness_status=SkillReadinessStatus.UNSUPPORTED.value)
     if file_path:
         return _serve_skill_file(skill_md.parent, file_path, qualified_name, read_error_prefix=True)
-
     if any(p in content.lower() for p in _INJECTION_PATTERNS):
         logger.warning(
             "Plugin skill '%s:%s' contains patterns that may indicate prompt injection", namespace, bare)
@@ -166,10 +170,8 @@ def _serve_plugin_skill(
         banner += "]\n\n"
     except Exception:
         banner = ""
-    rendered_content = content
-    if preprocess:
-        rendered_content = _preprocess_skill(
-            content, skill_md.parent, session_id, "Could not preprocess plugin skill %s:%s", namespace, bare)
+    rendered_content = content if not preprocess else _preprocess_skill(
+        content, skill_md.parent, session_id, "Could not preprocess plugin skill %s:%s", namespace, bare)
     return _json({
         "success": True,
         "name": qualified_name,
@@ -181,7 +183,6 @@ def _serve_plugin_skill(
 
 def _plugin_skill_linked_files(skill_root: Path) -> Dict[str, List[str]] | None:
     from tools.path_security import validate_within_dir
-
     linked: Dict[str, List[str]] = {}
     for category in _SUPPORT_DIRS:
         base = skill_root / category
