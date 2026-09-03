@@ -60,10 +60,9 @@ def _locales_dir() -> Path:
     the path it looked at rather than raise.
     """
     override = os.getenv("HERMES_BUNDLED_LOCALES", "").strip()
+    if override and Path(override).is_dir():
+        return Path(override)
     if override:
-        candidate = Path(override)
-        if candidate.is_dir():
-            return candidate
         logger.warning(
             "HERMES_BUNDLED_LOCALES points to a non-directory path (%s); "
             "falling back to bundled/source locale resolution", override,
@@ -125,13 +124,11 @@ def _config_language_cached() -> str | None:
     """``display.language`` from config.yaml, read once per process (``t()`` is a hot path)."""
     try:
         from hermes_cli.config import load_config_readonly
-        cfg = load_config_readonly()
-        lang = (cfg.get("display") or {}).get("language")
-        if lang:
-            return _normalize_lang(lang)
+        lang = (load_config_readonly().get("display") or {}).get("language")
+        return _normalize_lang(lang) if lang else None
     except Exception as exc:
         logger.debug("Could not read display.language from config: %s", exc)
-    return None
+        return None
 
 
 def reset_language_cache() -> None:

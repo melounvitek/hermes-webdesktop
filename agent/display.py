@@ -46,7 +46,7 @@ def _hex_rgb(h: str) -> tuple[int, int, int]:
 
 
 def _get_skin():
-    """Get the active skin config, or None if not available (lazy import avoids cycles)."""
+    """Active skin config, or None when unavailable (lazy import avoids cycles)."""
     try:
         from hermes_cli.skin_engine import get_active_skin
         return get_active_skin()
@@ -380,9 +380,9 @@ def _preview_browser_exec(args: dict, max_len: int) -> str | None:
 
 def _preview_delegate_task(args: dict, max_len: int) -> str | None:
     action_preview = _delegate_action_preview(args)
+    tasks = args.get("tasks")
     if action_preview is not None:
         return _truncate_preview(action_preview, max_len)
-    tasks = args.get("tasks")
     if tasks and isinstance(tasks, list):
         goals = _delegate_task_goals(tasks, per_goal_len=40)
         preview = f"{len(goals)} tasks: " + " | ".join(goals) if goals else f"{len(tasks)} parallel tasks"
@@ -413,10 +413,8 @@ def _preview_shell(key: str):
 
 def _preview_read_file(args: dict, max_len: int) -> str | None:
     path = args.get("path") or args.get("file") or args.get("filepath")
-    if path is None:
-        return None
-    label = Path(str(path).replace("\\", "/")).name or str(path)
-    return _truncate_preview(f"{label} {_read_file_line_label(args)}".strip(), max_len) or None
+    label = (Path(str(path).replace("\\", "/")).name or str(path)) if path is not None else None
+    return None if label is None else _truncate_preview(f"{label} {_read_file_line_label(args)}".strip(), max_len) or None
 
 
 def _preview_memory(args: dict, _max_len: int) -> str:
@@ -531,7 +529,8 @@ def build_status_phrase(tool_name: str, args: dict | None, max_len: int = 49) ->
         return None
     verb = _TOOL_VERBS.get(tool_name)
     phrase = f"is {verb[0].lower()}{verb[1:]}" if verb else f"is using {tool_name}"
-    preview = build_tool_preview(tool_name, args, max_len=None) if args and verb and tool_name not in _TOOL_VERBS_NO_PREVIEW else None
+    with_preview = args and verb and tool_name not in _TOOL_VERBS_NO_PREVIEW
+    preview = build_tool_preview(tool_name, args, max_len=None) if with_preview else None
     if preview:  # previews can contain newlines (terminal commands); keep the first line
         phrase = f"{phrase}{tool_verb_connector(tool_name)}{preview.splitlines()[0].strip()}"
     return phrase[: max_len - 2].rstrip() + "…" if len(phrase) > max_len - 1 else phrase + "…"
@@ -660,8 +659,7 @@ def _emit_inline_diff(diff_text: str, print_fn) -> bool:
     if print_fn is None or not diff_text:
         return False
     try:
-        print_fn("  ┊ review diff")
-        for line in diff_text.rstrip("\n").splitlines():
+        for line in ["  ┊ review diff", *diff_text.rstrip("\n").splitlines()]:
             print_fn(line)
         return True
     except Exception:
@@ -819,9 +817,8 @@ class KawaiiSpinner:
             return False
 
     def _is_patch_stdout_proxy(self) -> bool:
-        """True when stdout is prompt_toolkit's StdoutProxy, which queues writes and
-        injects newlines around each flush so the \\r overwrite never lands; the CLI
-        drives its own TUI spinner widget in that mode, so we stay silent."""
+        """True for prompt_toolkit's StdoutProxy: it injects newlines around each flush so the
+        \\r overwrite never lands, and the CLI drives its own TUI spinner widget in that mode."""
         try:
             from prompt_toolkit.patch_stdout import StdoutProxy
             return isinstance(self._out, StdoutProxy)

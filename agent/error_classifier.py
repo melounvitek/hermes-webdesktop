@@ -403,7 +403,7 @@ _MESSAGE_TAIL_RULES = (
 # but does not set should_fallback (unlike the message/status paths).
 _ERROR_CODE_VERDICTS: Dict[str, Verdict] = {
     **dict.fromkeys(("resource_exhausted", "throttled", "rate_limit_exceeded"),
-                    _v(FailoverReason.rate_limit, should_rotate_credential=True)),
+                    _v(_R.rate_limit, should_rotate_credential=True)),
     **dict.fromkeys(_BILLING_ERROR_CODES, _V_BILLING),
     **dict.fromkeys(("model_not_found", "model_not_available", "invalid_model"), _V_MODEL_NOT_FOUND),
     **dict.fromkeys(("context_length_exceeded", "max_tokens_exceeded"), _V_CONTEXT_OVERFLOW),
@@ -463,10 +463,8 @@ def _plugin_verdict(c: _Ctx) -> Optional[Verdict]:
         logger.debug("Plugin error classification unavailable: %s", exc)
         return None
     if verdict is not None:
-        logger.info(
-            "API error classified by plugin hook: %s (provider=%s, status=%s)",
-            verdict["reason"].value, c.provider, c.status_code,
-        )
+        logger.info("API error classified by plugin hook: %s (provider=%s, status=%s)",
+                    verdict["reason"].value, c.provider, c.status_code)
     return verdict
 
 
@@ -480,13 +478,13 @@ def _provider_special_cases(c: _Ctx) -> Optional[Verdict]:
     # Anthropic thinking-block 400s (signature mismatch after transcript
     # mutation). Not gated on provider — OpenRouter proxies Anthropic errors.
     if status == 400 and "thinking" in msg and any(p in msg for p in _THINKING_MUTATION_WORDS):
-        return _v(FailoverReason.thinking_signature)
+        return _v(_R.thinking_signature)
     # Anthropic long-context tier gate (429 "extra usage" + "long context").
     if status == 429 and "extra usage" in msg and "long context" in msg:
-        return _v(FailoverReason.long_context_tier, should_compress=True)
+        return _v(_R.long_context_tier, should_compress=True)
     # Anthropic OAuth rejects the 1M beta header; run_agent retries without it.
     if status == 400 and "long context beta" in msg and "not yet available" in msg:
-        return _v(FailoverReason.oauth_long_context_beta_forbidden)
+        return _v(_R.oauth_long_context_beta_forbidden)
     # llama.cpp grammar rejects regex ``pattern``/``format`` in tool schemas; the
     # retry loop strips them. Exclude the Qwen/vLLM "No user query found" error
     # local engines wrap as "Unable to generate parser for this template" —
@@ -495,7 +493,7 @@ def _provider_special_cases(c: _Ctx) -> Optional[Verdict]:
         "unable to generate parser" in msg and "template" in msg
     )
     if status == 400 and grammar_hit and _NO_USER_QUERY_SIGNAL not in msg:
-        return _v(FailoverReason.llama_cpp_grammar_pattern)
+        return _v(_R.llama_cpp_grammar_pattern)
     # xAI Grok entitlement as an SSE ``type=error`` frame: no status, matches no
     # pattern list, would otherwise burn max_retries as ``unknown``.
     if "do not have an active grok subscription" in msg or ("out of available resources" in msg and "grok" in msg):
@@ -507,11 +505,10 @@ def _moa_special_cases(c: _Ctx) -> Optional[Verdict]:
     # Local MoA streaming adapter-shape bugs are not a provider outage; falling
     # back would silently replace the MoA route with a single model (#55933).
     if c.provider_slug == "moa" and any(s in str(c.error) for s in _MOA_ADAPTER_SHAPE_BUGS):
-        return _v(FailoverReason.format_error, retryable=False)
+        return _v(_R.format_error, retryable=False)
     # Persisted MoA preset name that was renamed/deleted — deterministic config error.
     from agent.errors import MoAPresetNotFoundError
-
-    return _v(FailoverReason.model_not_found, retryable=False) if isinstance(c.error, MoAPresetNotFoundError) else None
+    return _v(_R.model_not_found, retryable=False) if isinstance(c.error, MoAPresetNotFoundError) else None
 
 
 def _by_error_code(c: _Ctx) -> Optional[Verdict]:
@@ -524,14 +521,13 @@ def _by_error_code(c: _Ctx) -> Optional[Verdict]:
 
 
 def _by_message(c: _Ctx) -> Optional[Verdict]:
-    """Message patterns when no status code settled it."""
-    verdict = _first_match(c.msg, _MESSAGE_HEAD_RULES)
-    if verdict is not None:
-        return verdict
-    # Status-less usage limits need the same disambiguation as 402.
-    if any(p in c.msg for p in _USAGE_LIMIT_PATTERNS):
-        return _classify_402(c.msg, dict)
-    return _first_match(c.msg, _MESSAGE_TAIL_RULES)
+    """Message patterns when no status code settled it; status-less usage
+    limits get the same disambiguation as 402."""
+    head = _first_match(c.msg, _MESSAGE_HEAD_RULES)
+    if head is not None:
+        return head
+    usage_limit = any(p in c.msg for p in _USAGE_LIMIT_PATTERNS)
+    return _classify_402(c.msg, dict) if usage_limit else _first_match(c.msg, _MESSAGE_TAIL_RULES)
 
 
 def _by_transport(c: _Ctx) -> Optional[Verdict]:
@@ -539,10 +535,9 @@ def _by_transport(c: _Ctx) -> Optional[Verdict]:
     msg = c.msg
     # Cert failure → fail fast (checked first: also contains "[ssl:"); transient
     # alert → retry, before disconnects so a flaky handshake never compresses.
-    if any(p in msg for p in _SSL_CERT_VERIFY_PATTERNS):
-        return _V_SSL_CERT
-    if any(p in msg for p in _SSL_TRANSIENT_PATTERNS):
-        return _V_TIMEOUT
+    ssl = _first_match(msg, ((_SSL_CERT_VERIFY_PATTERNS, _V_SSL_CERT), (_SSL_TRANSIENT_PATTERNS, _V_TIMEOUT)))
+    if ssl is not None:
+        return ssl
     # Disconnect + large session → probable overflow rejection, not a hiccup.
     if any(p in msg for p in _SERVER_DISCONNECT_PATTERNS) and not c.status_code:
         # Reasoning models: far more likely the gateway idle-killed a long
@@ -554,10 +549,9 @@ def _by_transport(c: _Ctx) -> Optional[Verdict]:
     # Stale-call circuit breaker (_check_stale_giveup RuntimeError before any
     # network call): as ``unknown`` it would burn every retry instantly.
     if c.error_type == "RuntimeError" and "consecutive stale attempts" in msg and "aborting this call" in msg:
-        return _v(FailoverReason.timeout, retryable=False, should_fallback=True)
-    if c.error_type in _TRANSPORT_ERROR_TYPES or isinstance(c.error, (TimeoutError, ConnectionError, OSError)):
-        return _V_TIMEOUT
-    return None
+        return _v(_R.timeout, **_ABORT_FALLBACK)
+    transport = c.error_type in _TRANSPORT_ERROR_TYPES or isinstance(c.error, (TimeoutError, ConnectionError, OSError))
+    return _V_TIMEOUT if transport else None
 
 
 def _by_status(c: _Ctx) -> Optional[Verdict]:
@@ -593,10 +587,8 @@ def classify_api_error(
         approx_tokens, context_length, num_messages,
     )
     verdict = next((v for v in (stage(c) for stage in _STAGES) if v is not None), _V_UNKNOWN)
-    return ClassifiedError(**{
-        "status_code": status_code, "provider": provider, "model": model,
-        "message": _extract_message(error, body), **verdict,
-    })
+    base = {"status_code": status_code, "provider": provider, "model": model, "message": _extract_message(error, body)}
+    return ClassifiedError(**{**base, **verdict})
 
 
 # ── Status code handlers ────────────────────────────────────────────────
@@ -604,9 +596,8 @@ def classify_api_error(
 def _status_403(c: _Ctx) -> Verdict:
     # OpenRouter 403 "key limit exceeded" and similar plan/credit exhaustion are billing.
     xai_spend = c.provider_slug == "xai-oauth" and c.code == _XAI_SPENDING_LIMIT_ERROR_CODE
-    if xai_spend or any(p in c.msg for p in ("key limit exceeded", "spending limit") + _BILLING_PATTERNS):
-        return _V_BILLING
-    return _V_AUTH_FALLBACK
+    billing = xai_spend or any(p in c.msg for p in ("key limit exceeded", "spending limit") + _BILLING_PATTERNS)
+    return _V_BILLING if billing else _V_AUTH_FALLBACK
 
 
 def _status_404(c: _Ctx) -> Verdict:
@@ -628,7 +619,7 @@ def _status_429(c: _Ctx) -> Verdict:
     if _is_openrouter_upstream_error(c.body, c.provider_slug):
         upstream = _extract_upstream_provider_name(c.body)
         ctx = {"upstream_provider": upstream} if upstream else {}
-        return _v(FailoverReason.upstream_rate_limit, should_fallback=True, error_context=ctx)
+        return _v(_R.upstream_rate_limit, should_fallback=True, error_context=ctx)
     # Quota walls as 429 (Anthropic ``usage_limit_reached``, "quota", billing
     # phrases) are billing ONLY when the body is not itself a rate-limit phrase
     # ("Rate limit exceeded" contains "limit exceeded") and carries no reset/
@@ -636,11 +627,8 @@ def _status_429(c: _Ctx) -> Verdict:
     quota_wall = c.code == "usage_limit_reached" or any(
         p in c.msg for p in ("usage_limit_reached",) + _USAGE_LIMIT_PATTERNS + _BILLING_PATTERNS
     )
-    if (
-        quota_wall
-        and not any(p in c.msg for p in _RATE_LIMIT_PATTERNS)
-        and not _has_usage_limit_transient_signal(c.msg, c.body, c.headers)
-    ):
+    explicit_rate_limit = any(p in c.msg for p in _RATE_LIMIT_PATTERNS)
+    if quota_wall and not explicit_rate_limit and not _has_usage_limit_transient_signal(c.msg, c.body, c.headers):
         return _V_BILLING
     return _V_RATE_LIMIT
 
@@ -685,12 +673,10 @@ def _classify_400(c: _Ctx) -> Verdict:
     # cannot fix it. litellm/Bedrock proxies use errorCode=INVALID_REQUEST_BODY.
     if any(p in msg for p in _INVALID_MESSAGE_BODY_PATTERNS) or code == "invalid_request_body":
         logger.warning(
-            "Malformed message array 400 (invalid request body) classified as "
-            "format_error, NOT context overflow — failing fast + falling back "
-            "instead of entering the compression loop. This usually means an "
-            "empty-content assistant stub is in the transcript; num_messages=%s "
-            "approx_tokens=%s. error=%.200s",
-            c.num_messages, c.approx_tokens, msg,
+            "Malformed message array 400 (invalid request body) classified as format_error, NOT context "
+            "overflow — failing fast + falling back instead of entering the compression loop. This usually "
+            "means an empty-content assistant stub is in the transcript; num_messages=%s approx_tokens=%s. "
+            "error=%.200s", c.num_messages, c.approx_tokens, msg,
         )
         return _V_FORMAT_ERROR
     verdict = _first_match(msg, _400_TAIL_RULES)
