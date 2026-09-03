@@ -98,16 +98,13 @@ def _run_phase_command(
     on_output: Callable[[str], None] | None = None,
 ) -> PhaseResult:
     started = time.monotonic()
-    timed_out = False
     try:
         proc = subprocess.run(command, cwd=str(root), timeout=timeout, **_SUBPROCESS_KW)
-        output = proc.stdout or ""
-        exit_code: int | None = proc.returncode
+        output, exit_code, timed_out = proc.stdout or "", proc.returncode, False
     except subprocess.TimeoutExpired as exc:
         raw = exc.output
         output = raw.decode("utf-8", errors="replace") if isinstance(raw, bytes) else (raw or "")
-        exit_code = None
-        timed_out = True
+        exit_code, timed_out = None, True
     duration = time.monotonic() - started
     if on_output and output:
         on_output(output)

@@ -63,19 +63,16 @@ class Recipe:
             kind = "unknown"
 
         start = raw.get("start") or raw.get("startCommand")
-        start = start.strip() if isinstance(start, str) and start.strip() else None
-
         port_raw = raw.get("port") or raw.get("startPort")
         if isinstance(port_raw, str) and port_raw.strip().isdigit():
             port_raw = int(port_raw.strip())
-        port = port_raw if isinstance(port_raw, int) and 0 < port_raw < 65536 else None
-
         readiness = raw.get("readinessPath") or raw.get("readiness_path") or "/"
-        if not (isinstance(readiness, str) and readiness.startswith("/")):
-            readiness = "/"
 
         return cls(
-            name=name.strip(), kind=kind.strip(), start=start, port=port, readiness_path=readiness,
+            name=name.strip(), kind=kind.strip(),
+            start=start.strip() if isinstance(start, str) and start.strip() else None,
+            port=port_raw if isinstance(port_raw, int) and 0 < port_raw < 65536 else None,
+            readiness_path=readiness if isinstance(readiness, str) and readiness.startswith("/") else "/",
             bootstrap=_as_strings(raw.get("bootstrap") or raw.get("installCommands")),
             build=_as_strings(raw.get("build") or raw.get("buildCommands")),
             test=_as_strings(raw.get("test") or raw.get("testCommands")),
@@ -158,20 +155,15 @@ def _detect_node_recipe(root: Path, pkg: dict[str, Any]) -> Recipe:
         ("node", "Node.js app", None),
     )
 
-    start_script = next((s for s in ("dev", "start") if scripts.get(s)), None)
-    start = port = None
-    if start_script:
-        start = _script_runner(package_manager, start_script)
-        port = _infer_port_from_command(scripts[start_script]) or default_port
-
-    def runners(names: tuple[str, ...]) -> list[str]:
+    def runners(*names: str) -> list[str]:
         return _dedupe([_script_runner(package_manager, s) for s in names if scripts.get(s)])
 
+    start_script = next((s for s in ("dev", "start") if scripts.get(s)), None)
     return Recipe(
-        name=label, kind=kind, start=start, port=port,
+        name=label, kind=kind, start=runners(start_script)[0] if start_script else None,
+        port=(_infer_port_from_command(scripts[start_script]) or default_port) if start_script else None,
         bootstrap=[_NODE_INSTALL.get(package_manager or "", "npm install")],
-        build=runners(("build", "typecheck")),
-        test=runners(("test", "check", "lint")),
+        build=runners("build", "typecheck"), test=runners("test", "check", "lint"),
         evidence=_dedupe([
             "Detected package.json",
             f"Package manager: {package_manager}" if package_manager else None,
@@ -201,10 +193,8 @@ def _detect_python_recipe(root: Path) -> Recipe | None:
         return Recipe(
             name="Django app", kind="django", bootstrap=[install], test=["python manage.py test"],
             start="python manage.py runserver 0.0.0.0:8000", port=8000,
-            evidence=_dedupe([
-                "Detected manage.py" if manage_py else "Detected Django dependency",
-                "Detected pyproject.toml" if pyproject else None,
-            ]),
+            evidence=["Detected manage.py" if manage_py else "Detected Django dependency"]
+            + (["Detected pyproject.toml"] if pyproject else []),
         )
     if "fastapi" in lower or "uvicorn" in lower:
         app_module = (_first_existing(root, ("main.py", "app.py")) or "main.py").removesuffix(".py") + ":app"
@@ -247,10 +237,7 @@ def _detect_rust_recipe(root: Path) -> Recipe | None:
 
 def _detect_java_recipe(root: Path) -> Recipe | None:
     if (root / "pom.xml").exists():
-        return Recipe(
-            name="Maven project", kind="maven", build=["mvn package"], test=["mvn test"],
-            evidence=["Detected pom.xml"],
-        )
+        return Recipe(name="Maven project", kind="maven", build=["mvn package"], test=["mvn test"], evidence=["Detected pom.xml"])
     if _first_existing(root, ("build.gradle", "build.gradle.kts")):
         gradle = "./gradlew" if (root / "gradlew").exists() else "gradle"
         return Recipe(

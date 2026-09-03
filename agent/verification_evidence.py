@@ -316,8 +316,7 @@ def _is_under(token: str, base: str | Path | None) -> bool:
         path = Path(token).expanduser()
         if not path.is_absolute():
             return False
-        resolved = path.resolve()
-        base_path = Path(base).expanduser().resolve()
+        resolved, base_path = path.resolve(), Path(base).expanduser().resolve()
         return resolved == base_path or base_path in resolved.parents
     except Exception:
         return False
@@ -342,11 +341,9 @@ def _ad_hoc_script_args(tokens: list[str], root: str | Path | None) -> Optional[
     if command in _INTERPRETERS:
         # Skip interpreter flags; the first positional must be the script.
         for idx, token in enumerate(candidate_tokens[1:], start=1):
-            if token == "--":
-                continue
             if _is_temp_script_path(token, root):
                 return candidate_tokens[idx + 1:]
-            if not token.startswith("-"):
+            if token != "--" and not token.startswith("-"):
                 return None
     return None
 
@@ -443,19 +440,16 @@ def classify_verification_command(
 
     verify_commands = list(facts.get("verifyCommands") or [])
     match = _find_canonical_match(command, verify_commands, int(exit_code))
-    is_ad_hoc = False
-    if match is None:
-        ad_hoc_args = None if verify_commands else _find_ad_hoc_match(command, facts.get("root"), int(exit_code))
-        if ad_hoc_args is None:
+    if match is not None:
+        canonical, trailing_args = match
+        kind = _kind_for_command(canonical)
+        scope = "targeted" if any(map(_looks_like_target, trailing_args)) else "full"
+    else:
+        if verify_commands or _find_ad_hoc_match(command, facts.get("root"), int(exit_code)) is None:
             return None
-        is_ad_hoc = True
-        match = ("ad-hoc verification script", ad_hoc_args)
-
-    canonical, trailing_args = match
+        canonical, kind, scope = "ad-hoc verification script", "ad_hoc", "targeted"
     return VerificationEvidence(
-        command=command, canonical_command=canonical,
-        kind="ad_hoc" if is_ad_hoc else _kind_for_command(canonical),
-        scope="targeted" if is_ad_hoc or any(map(_looks_like_target, trailing_args)) else "full",
+        command=command, canonical_command=canonical, kind=kind, scope=scope,
         status="passed" if int(exit_code) == 0 else "failed", exit_code=int(exit_code),
         cwd=str(Path(cwd or ".").resolve()), root=_root_for(facts, cwd),
         session_id=str(session_id or "default"), output_summary=_summarize_output(output),
@@ -493,8 +487,8 @@ def record_verify_run(
 def _insert_evidence(evidence: VerificationEvidence) -> dict[str, Any]:
     """Insert a classified evidence row and repoint the workspace state."""
     created_at = _utc_now()
+    e = evidence
     with _DB_LOCK, _transaction() as conn:
-        e = evidence
         cur = conn.execute(
             "INSERT INTO verification_events("
             " created_at, session_id, cwd, root, command, canonical_command,"
@@ -514,12 +508,12 @@ def _insert_evidence(evidence: VerificationEvidence) -> dict[str, Any]:
             " last_event_id = excluded.last_event_id,"
             " last_edit_at = NULL,"
             " changed_paths_json = '[]'",
-            (evidence.session_id, evidence.root, event_id),
+            (e.session_id, e.root, event_id),
         )
-        _prune_old_events(conn, session_id=evidence.session_id, root=evidence.root)
+        _prune_old_events(conn, session_id=e.session_id, root=e.root)
         conn.commit()
 
-    return {"id": event_id, **evidence.__dict__, "created_at": created_at}
+    return {"id": event_id, **e.__dict__, "created_at": created_at}
 
 
 def mark_workspace_edited(
@@ -540,9 +534,9 @@ def mark_workspace_edited(
             "SELECT changed_paths_json FROM verification_state WHERE session_id = ? AND root = ?",
             (sid, root),
         ).fetchone()
-        existing = set(_load_changed_paths(row["changed_paths_json"])) if row is not None else set()
         # Merge with what was already recorded, bounded to the last 200 paths.
-        merged = sorted(existing | set(changed_paths))[-200:]
+        existing = _load_changed_paths(row["changed_paths_json"]) if row is not None else []
+        merged = sorted(set(existing) | set(changed_paths))[-200:]
         conn.execute(
             "INSERT INTO verification_state("
             " session_id, root, last_event_id, last_edit_at, changed_paths_json"
