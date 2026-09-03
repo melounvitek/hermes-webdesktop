@@ -40,6 +40,19 @@ from agent.session_activity import ActivityProvenance, normalize_activity_proven
 
 logger = logging.getLogger(__name__)
 
+
+@contextlib.contextmanager
+def _swallow(message: str, *, exc_info: bool = False):
+    """Run a best-effort block; on Exception log ``message`` at DEBUG and continue."""
+    try:
+        yield
+    except Exception as exc:
+        if exc_info:
+            logger.debug(message, exc_info=True)
+        else:
+            logger.debug(message, exc)
+
+
 # Terminal outcomes from host/hygiene timeout or cooldown writers. Detached
 # heartbeat workers must not clobber these (timeout unobservable). Seeing one
 # latches the heartbeat silent so a later UNKNOWN rewrite can't re-arm a zombie.
@@ -79,10 +92,8 @@ def _emit_compaction_done(agent: Any) -> None:
     status_callback = getattr(agent, "status_callback", None)
     if not status_callback:
         return
-    try:
+    with _swallow('status_callback error in compaction completion', exc_info=True):
         status_callback("compacted", COMPACTION_DONE_STATUS)
-    except Exception:
-        logger.debug("status_callback error in compaction completion", exc_info=True)
 
 
 # Every ROUTINE compression status line lives here: suppressed on chat platforms
@@ -301,7 +312,7 @@ def _rollback_durable_cooldown(
             raise RuntimeError("exact compression cooldown rollback API is unavailable")
         restorer(session_db, session_id, copy.deepcopy(durable_state))
         return
-    try:
+    with _swallow('compression cooldown persistence rollback failed', exc_info=True):
         deadline = float(snapshot["_summary_failure_cooldown_until"] or 0.0)
         remaining = max(0.0, deadline - time.monotonic())
         if remaining > 0:
@@ -312,10 +323,6 @@ def _rollback_durable_cooldown(
             clearer = getattr(type(session_db), "clear_compression_failure_cooldown", None)
             if callable(clearer):
                 clearer(session_db, session_id)
-    except Exception:
-        # Legacy/third-party compatibility path: its existing APIs
-        # do not provide a verifiable transaction contract.
-        logger.debug("compression cooldown persistence rollback failed", exc_info=True)
 
 
 def _restore_compressor_attempt_state(
@@ -1053,10 +1060,8 @@ def _await_in_flight_commit(
             )
             if not overrun_surfaced and on_commit_overrun is not None:
                 overrun_surfaced = True
-                try:
+                with _swallow('compress_context commit-overrun callback failed', exc_info=True):
                     on_commit_overrun(waited, ceiling)
-                except Exception:
-                    logger.debug("compress_context commit-overrun callback failed", exc_info=True)
         try:
             return future.result(timeout=remaining)
         except concurrent.futures.TimeoutError:
@@ -1210,10 +1215,8 @@ def run_compress_context_with_progress_timeout(
             fence.retain_compression_lock_until_worker_done()
 
         if on_timeout_cause is not None:
-            try:
+            with _swallow('compress_context timeout-cause callback failed', exc_info=True):
                 on_timeout_cause(total_exhausted, fence.progress_observed)
-            except Exception:
-                logger.debug("compress_context timeout-cause callback failed", exc_info=True)
 
         if not _cancel_or_join_worker(fence):
             result = _await_in_flight_commit(
@@ -1245,10 +1248,8 @@ def run_compress_context_with_progress_timeout(
             if recovered is not None:
                 return recovered
         if on_timeout is not None:
-            try:
+            with _swallow('compress_context timeout callback failed', exc_info=True):
                 on_timeout(idle, waited, since_progress)
-            except Exception:
-                logger.debug("compress_context timeout callback failed", exc_info=True)
         else:
             logger.warning(
                 "Context compression made no progress for %.1fs (total wait %.1fs, ceiling %.1fs); continuing without "
@@ -1329,7 +1330,7 @@ def _emit_compression_attempt_telemetry(
     commit_started_at: float | None = None,
 ) -> None:
     """Emit one content-free JSON log line for a compression attempt."""
-    try:
+    with _swallow('failed to emit compression attempt telemetry: %s'):
         telemetry = getattr(agent.context_compressor, "_last_compression_telemetry", None)
         if not isinstance(telemetry, dict):
             telemetry = {}
@@ -1356,8 +1357,6 @@ def _emit_compression_attempt_telemetry(
         logger.info(
             "context compression attempt telemetry: %s", json.dumps(payload, sort_keys=True, separators=(",", ":"))
         )
-    except Exception as exc:
-        logger.debug("failed to emit compression attempt telemetry: %s", exc)
 
 
 def _existing_system_prompt(agent: Any, system_message: str) -> str:
@@ -1506,10 +1505,8 @@ def _mark_compression_blocked_transient(agent: Any, compressor: Any) -> None:
     reason_fn = getattr(compressor, "_compression_block_reason", None)
     reason = None
     if callable(reason_fn):
-        try:
+        with _swallow('compression block-reason read failed', exc_info=True):
             reason = reason_fn()
-        except Exception:
-            logger.debug("compression block-reason read failed", exc_info=True)
     if isinstance(reason, str) and (reason.startswith("cooldown") or reason.startswith("structural_backoff")):
         logger.info(
             "Skipping automatic compression re-entry: transient guard "
@@ -1579,7 +1576,7 @@ def _adopt_live_compression_child(
 
     on_session_start = getattr(agent.context_compressor, "on_session_start", None)
     if callable(on_session_start):
-        try:
+        with _swallow('context engine compression-child adoption failed: %s'):
             on_session_start(
                 child_session_id,
                 boundary_reason="compression",
@@ -1588,20 +1585,16 @@ def _adopt_live_compression_child(
                 platform=getattr(agent, "platform", None) or "cli",
                 conversation_id=getattr(agent, "_gateway_session_key", None),
             )
-        except Exception as exc:
-            logger.debug("context engine compression-child adoption failed: %s", exc)
     else:
         bind_state = getattr(agent.context_compressor, "bind_session_state", None)
         if callable(bind_state):
             with contextlib.suppress(Exception):
                 bind_state(session_db=session_db, session_id=child_session_id)
-    try:
+    with _swallow('memory manager compression-child adoption failed: %s'):
         if agent._memory_manager:
             agent._memory_manager.on_session_switch(
                 child_session_id, parent_session_id=parent_session_id, reset=False, reason="compression"
             )
-    except Exception as exc:
-        logger.debug("memory manager compression-child adoption failed: %s", exc)
 
     return recovered
 
@@ -1742,7 +1735,7 @@ class _CompressionActivityHeartbeat:
         return False
 
     def _touch(self, desc: str, *, allow_terminal_overwrite: bool = False, force_persist: bool = False) -> None:
-        try:
+        with _swallow('compression activity heartbeat touch failed', exc_info=True):
             if not allow_terminal_overwrite:
                 if self._should_suppress():
                     return
@@ -1757,8 +1750,6 @@ class _CompressionActivityHeartbeat:
                 if not allow_terminal_overwrite and self._should_suppress():
                     return
                 touch(desc, provenance=ActivityProvenance.AGENT_COMPRESSION, force_persist=force_persist)
-        except Exception:
-            logger.debug("compression activity heartbeat touch failed", exc_info=True)
 
     def _run(self) -> None:
         while not self._stop.wait(self._interval_seconds):
@@ -2444,14 +2435,12 @@ def _notify_context_engine_compression_complete(agent: Any, *, new_session_id: s
     """Notify the active context engine after a durable compression commit."""
     # Opt-in relay session-span segmentation. Observer semantics — failure must
     # never undo or delay the committed compression.
-    try:
+    with _swallow('relay segment rotation notification failed', exc_info=True):
         from agent import relay_runtime
 
         relay_runtime.SESSION_COORDINATOR.notify_session_compacted(
             profile_key=relay_runtime.current_profile_key(), session_id=new_session_id, old_session_id=old_session_id
         )
-    except Exception:
-        logger.debug("relay segment rotation notification failed", exc_info=True)
     callback = getattr(agent.context_compressor, "on_session_start", None)
     if not callable(callback):
         return False
@@ -2588,15 +2577,11 @@ class _CompressionLease:
             if getattr(self._agent, "_active_compression_lock_holder", None) == self.holder:
                 self._agent._active_compression_lock_holder = None
             if self._refresher is not None:
-                try:
+                with _swallow('compression lock refresher stop failed: %s'):
                     self._refresher.stop()
-                except Exception as _stop_err:
-                    logger.debug("compression lock refresher stop failed: %s", _stop_err)
             if self.db is not None and self.sid and self.holder:
-                try:
+                with _swallow('compression lock release failed: %s'):
                     self.db.release_compression_lock(self.sid, self.holder)
-                except Exception as _rel_err:
-                    logger.debug("compression lock release failed: %s", _rel_err)
 
     def release(self) -> None:
         """Finish lifecycle cleanup and release the OLD session lock once."""
@@ -2679,10 +2664,8 @@ def _try_acquire_durable_lock(lease: _CompressionLease, try_acquire: Any, commit
                 lease.watermark = None
         return acquired
     except Exception as _lock_err:
-        try:
+        with _swallow('compression lock cleanup after failed acquire failed: %s'):
             lease.db.release_compression_lock(lease.sid, lease.holder)
-        except Exception as _release_err:
-            logger.debug("compression lock cleanup after failed acquire failed: %s", _release_err)
         lease.holder = None
         logger.warning(
             "compression lock acquisition raised unexpectedly for "
@@ -3209,10 +3192,8 @@ def _salvage_or_refuse_grown_transcript(
         _emit_aborted_attempt_telemetry(agent, attempt_started_at, "would_grow")
         # Count the refusal as an ineffective-compaction strike so the anti-thrash
         # breaker latches; otherwise auto-compress retries the same summary every turn.
-        try:
+        with _swallow('could not record rejected-compaction strike', exc_info=True):
             agent.context_compressor.record_rejected_compaction()
-        except Exception:
-            logger.debug("could not record rejected-compaction strike", exc_info=True)
         _restore_prune_rearm_tokens(agent.context_compressor, attempt_snapshot)
         return None, _existing_sp
     return compressed, None
@@ -3241,31 +3222,23 @@ def _carry_session_state_to_child(agent: Any, old_session_id: str, old_title: An
     one session look like many); its provenance is read BEFORE the transfer clears the
     ancestor's row, then restored so an inherited auto-title stays upgradeable.
     """
-    try:
+    with _swallow('Could not migrate goal on compression: %s'):
         from hermes_cli.goals import migrate_goal_to_session
 
         migrate_goal_to_session(old_session_id, agent.session_id, reason="compression")
-    except Exception as _goal_err:
-        logger.debug("Could not migrate goal on compression: %s", _goal_err)
-    try:
+    with _swallow('Could not migrate heartbeat on compression: %s'):
         from hermes_cli.heartbeat import migrate_heartbeat_to_session
 
         migrate_heartbeat_to_session(old_session_id, agent.session_id)
-    except Exception as _hb_err:
-        logger.debug("Could not migrate heartbeat on compression: %s", _hb_err)
-    try:
+    with _swallow('Could not migrate loop on compression: %s'):
         from hermes_cli.loops import migrate_loop_to_session
 
         migrate_loop_to_session(old_session_id, agent.session_id, reason="compression")
-    except Exception as _loop_err:
-        logger.debug("Could not migrate loop on compression: %s", _loop_err)
     if not old_title:
         return
     _src = None
-    try:
+    with _swallow('Could not read title provenance: %s'):
         _src = agent._session_db.get_session_title_source(old_session_id)
-    except Exception as _src_err:
-        logger.debug("Could not read title provenance: %s", _src_err)
     try:
         agent._session_db.set_session_title(agent.session_id, old_title)
     except (ValueError, Exception) as e:
@@ -3273,10 +3246,8 @@ def _carry_session_state_to_child(agent: Any, old_session_id: str, old_title: An
         return
     # set_session_title() records "user"; restore the original authority.
     if _src is not None:
-        try:
+        with _swallow('Could not propagate title provenance: %s'):
             agent._session_db.set_session_title_source(agent.session_id, _src)
-        except Exception as _src_err:
-            logger.debug("Could not propagate title provenance: %s", _src_err)
 
 
 def _publish_rotated_compaction(
@@ -3446,15 +3417,13 @@ def _finish_compaction_boundary(
     # The heartbeat's terminal stamp landed on the PARENT before the id re-pointed;
     # clear labels (keep last_activity_at) so the archived row isn't falsely fresh.
     if _old_sid and session_commit_succeeded:
-        try:
+        with _swallow("failed to clear archived compression parent's activity labels (ignored)", exc_info=True):
             _labels_db = getattr(agent, "_session_db", None)
             _clear_labels = getattr(
                 type(_labels_db) if _labels_db is not None else None, "clear_session_activity_labels", None
             )
             if callable(_clear_labels):
                 _clear_labels(_labels_db, _old_sid)
-        except Exception:
-            logger.debug("failed to clear archived compression parent's activity labels (ignored)", exc_info=True)
 
     # Plugin engines use boundary_reason="compression" to keep lineage/checkpoint
     # state. Fires in BOTH modes: in-place passes the same id, the boundary is real.
@@ -3470,13 +3439,11 @@ def _finish_compaction_boundary(
 
     # Providers refresh cached per-session state; reset=False, conversation goes on.
     # Fires in BOTH modes so buffers don't double-count dropped turns in-place.
-    try:
+    with _swallow('memory manager on_session_switch (compression): %s'):
         if _is_boundary and agent._memory_manager:
             agent._memory_manager.on_session_switch(
                 agent.session_id or "", parent_session_id=_boundary_parent, reset=False, reason="compression"
             )
-    except Exception as _me_err:
-        logger.debug("memory manager on_session_switch (compression): %s", _me_err)
 
     # Route via _emit_status so the warning reaches gateway platforms; store it on
     # _compression_warning so a late-bound status_callback can replay it.
@@ -3491,7 +3458,7 @@ def _finish_compaction_boundary(
     # session:compress lets hooks ingest the old session before it's lost;
     # in_place=True tells them the same id was compacted rather than rotated.
     if getattr(agent, "event_callback", None):
-        try:
+        with _swallow('event_callback error on session:compress: %s'):
             agent.event_callback(
                 "session:compress",
                 {
@@ -3502,8 +3469,6 @@ def _finish_compaction_boundary(
                     "compression_count": agent.context_compressor.compression_count,
                 },
             )
-        except Exception as e:
-            logger.debug("event_callback error on session:compress: %s", e)
 
     # Rotation-independent flag: the gateway uses it (not an id diff) to re-baseline
     # transcript handling (history_offset=0 + rewrite on the same id) in-place.
@@ -3585,12 +3550,10 @@ def _candidate_rejected(
         )
         # Unchanged output would fail identically next turn; arm structural backoff so
         # auto-compress stops re-firing each turn (success lifts it, force overrides).
-        try:
+        with _swallow('no-progress backoff arm failed', exc_info=True):
             _no_progress_recorder = getattr(agent.context_compressor, "_record_structural_no_op", None)
             if callable(_no_progress_recorder):
                 _no_progress_recorder("compaction returned the transcript unchanged (no_progress)")
-        except Exception:
-            logger.debug("no-progress backoff arm failed", exc_info=True)
         _emit_aborted_attempt_telemetry(agent, attempt_started_at, "no_progress")
         return True
 
@@ -3768,12 +3731,10 @@ def _commit_compaction(
                 logger.warning("Session DB compression split failed — new session will NOT be indexed: %s", e)
             # Arm the failure cooldown so the next turn can't rerun the doomed compression;
             # try/except so a stub compressor can't mask the original error in this handler.
-            try:
+            with _swallow('could not record split-failure cooldown', exc_info=True):
                 agent.context_compressor._record_compression_failure_cooldown(
                     _SPLIT_FAILURE_COOLDOWN_SECONDS, f"session_split_failed: {e}"
                 )
-            except Exception:
-                logger.debug("could not record split-failure cooldown", exc_info=True)
     return _CommitOutcome(
         compressed=compressed,
         commit_started_at=commit_started_at,
@@ -4298,10 +4259,8 @@ def _record_codex_compaction_failure(agent: Any, error: str) -> None:
     recorder = getattr(compressor, "_record_compression_failure_cooldown", None)
     if not callable(recorder):
         return
-    try:
+    with _swallow('codex compaction cooldown persist failed', exc_info=True):
         recorder(_SUMMARY_FAILURE_COOLDOWN_SECONDS, error)
-    except Exception:
-        logger.debug("codex compaction cooldown persist failed", exc_info=True)
 
 
 def _compress_context_via_codex_app_server(
@@ -4374,7 +4333,7 @@ def _compress_context_via_codex_app_server(
         _record_codex_compaction_failure(agent, str(getattr(result, "error", None) or "compaction interrupted"))
         return messages, _existing_system_prompt(agent, system_message)
 
-    try:
+    with _swallow('codex compaction bookkeeping failed', exc_info=True):
         from agent.codex_runtime import _record_codex_app_server_compaction, _record_codex_app_server_usage
 
         _record_codex_app_server_compaction(agent, result, approx_tokens=approx_tokens, force=True)
@@ -4382,8 +4341,6 @@ def _compress_context_via_codex_app_server(
         # armed until a later turn; minimal test engines may lack update_from_response.
         if hasattr(agent.context_compressor, "update_from_response"):
             _record_codex_app_server_usage(agent, result)
-    except Exception:
-        logger.debug("codex compaction bookkeeping failed", exc_info=True)
 
     _reset_read_dedup_caches(task_id, skills=False)
 
