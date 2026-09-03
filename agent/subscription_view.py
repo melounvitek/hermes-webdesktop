@@ -257,11 +257,6 @@ _DEV_FIXTURE_ALIASES = {"logged_out": "logged-out", "loggedout": "logged-out", "
                         "top-tier": "top", "member": "not-admin"}
 
 
-def _dev_current(**over: Any) -> CurrentSubscription:
-    base = dict(tier_id="plus", tier_name="Plus", monthly_credits=Decimal("1000"), credits_remaining=Decimal("420"), cycle_ends_at="2026-07-01")
-    return CurrentSubscription(**{**base, **over})
-
-
 def _dev_tiers(current_id: Optional[str]) -> tuple[SubscriptionTier, ...]:
     """Sample plan catalog for fixtures (marks ``current_id`` as the active tier)."""
     return tuple(
@@ -271,6 +266,16 @@ def _dev_tiers(current_id: Optional[str]) -> tuple[SubscriptionTier, ...]:
         )
         for tid, name, order, dpm, mc in _DEV_TIER_SPECS
     )
+
+
+def _dev_plan(tier_id: str, remaining: str, **over: Any) -> dict[str, Any]:
+    """``current`` + ``tiers`` fixture fields for being on ``tier_id`` with ``remaining`` credits left."""
+    tid, name, _order, _dpm, mc = next(spec for spec in _DEV_TIER_SPECS if spec[0] == tier_id)
+    current = CurrentSubscription(
+        tier_id=tid, tier_name=name, monthly_credits=Decimal(mc), credits_remaining=Decimal(remaining),
+        cycle_ends_at="2026-07-01", **over,
+    )
+    return dict(current=current, tiers=_dev_tiers(tid))
 
 
 def dev_fixture_subscription_state() -> Optional[SubscriptionState]:
@@ -284,20 +289,13 @@ def dev_fixture_subscription_state() -> Optional[SubscriptionState]:
         return SubscriptionState(logged_in=False)
 
     common = dict(logged_in=True, org_name="Acme Inc", org_id="org_acme", role="OWNER", portal_url=_DEV_FIXTURE_PORTAL)
-    plus = dict(current=_dev_current(), tiers=_dev_tiers("plus"))
     states: dict[str, dict[str, Any]] = {
         "free": dict(current=None, tiers=_dev_tiers(None)),
-        "mid": plus,
-        "top": dict(
-            current=_dev_current(tier_id="ultra", tier_name="Ultra", monthly_credits=Decimal("7000"), credits_remaining=Decimal("5000")),
-            tiers=_dev_tiers("ultra"),
-        ),
-        "not-admin": {**plus, "role": "MEMBER"},
-        "downgrade": dict(
-            current=_dev_current(tier_id="super", tier_name="Super", monthly_credits=Decimal("3000"), credits_remaining=Decimal("1500"), pending_downgrade_tier_name="Plus", pending_downgrade_at="2026-07-15"),
-            tiers=_dev_tiers("super"),
-        ),
-        "cancel": dict(current=_dev_current(cancel_at_period_end=True, cancellation_effective_at="2026-07-01"), tiers=_dev_tiers("plus")),
+        "mid": _dev_plan("plus", "420"),
+        "top": _dev_plan("ultra", "5000"),
+        "not-admin": {**_dev_plan("plus", "420"), "role": "MEMBER"},
+        "downgrade": _dev_plan("super", "1500", pending_downgrade_tier_name="Plus", pending_downgrade_at="2026-07-15"),
+        "cancel": _dev_plan("plus", "420", cancel_at_period_end=True, cancellation_effective_at="2026-07-01"),
         "team": dict(context="team", current=None, org_name="Acme Engineering", org_id="org_eng"),
     }
     if name not in states:
