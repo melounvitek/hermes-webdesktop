@@ -17,11 +17,7 @@ from typing import Any, Protocol
 from gateway.hosted_room_driver import TaskIdentity
 from gateway.hosted_room_peer import HostedMemberDispatch, PROTOCOL_VERSION
 from tui_gateway.hosted_room_driver import (
-    ROOM_SESSION_SOURCE,
-    HostedRoomBinding,
-    InternalSessionRPC,
-    room_session_title,
-)
+    ROOM_SESSION_SOURCE, HostedRoomBinding, InternalSessionRPC, room_session_title)
 
 
 class HostedRoomPeerClient(Protocol):
@@ -30,13 +26,7 @@ class HostedRoomPeerClient(Protocol):
     def bind_room_scope(self, **scope: Any) -> None: ...
 
     def prepare(
-        self,
-        *,
-        room_id: str,
-        profile: str,
-        source: str,
-        grant: str,
-        create: bool,
+        self, *, room_id: str, profile: str, source: str, grant: str, create: bool,
         expected_session_id: str | None = None,
     ) -> Mapping[str, Any] | None: ...
 
@@ -71,12 +61,8 @@ class FailoverHostedRoomPeerClient:
     """Try alternate links without changing target or logical task identity."""
 
     def __init__(
-        self,
-        candidates: Sequence[RoomLinkCandidate],
-        *,
-        reprobe_interval_seconds: float = 60,
-        clock: Callable[[], float] = time.monotonic,
-    ) -> None:
+        self, candidates: Sequence[RoomLinkCandidate], *, reprobe_interval_seconds: float = 60,
+        clock: Callable[[], float] = time.monotonic) -> None:
         if not candidates:
             raise ValueError("at least one RoomLink candidate is required")
         if len({candidate.target_install_id for candidate in candidates}) != 1:
@@ -158,17 +144,9 @@ class PeerMemberRoute:
 
 
 def build_member_dispatch(
-    *,
-    binding: HostedRoomBinding,
-    route: PeerMemberRoute,
-    room_id: str,
-    task_id: str,
-    target_profile: str,
-    execution_generation: int,
-    source_event_seq: int,
-    prompt: str,
-    trace_id: str,
-) -> HostedMemberDispatch:
+    *, binding: HostedRoomBinding, route: PeerMemberRoute, room_id: str, task_id: str,
+    target_profile: str, execution_generation: int, source_event_seq: int, prompt: str,
+    trace_id: str) -> HostedMemberDispatch:
     """Build the fully fenced member dispatch shared by submit and recovery."""
     return HostedMemberDispatch.from_mapping({
         "protocol_version": PROTOCOL_VERSION,
@@ -187,23 +165,16 @@ def build_member_dispatch(
         "prompt_digest": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
         "capability_digest": route.capability_digest,
         "execution_policy_digest": route.execution_policy_digest,
-        "trace_id": trace_id,
-    })
+        "trace_id": trace_id})
 
 
 class PeerHostedRoomTransport(InternalSessionRPC):
     """Translate runtime session operations into recipient-validated peer RPC."""
 
     def __init__(
-        self,
-        *,
-        binding: HostedRoomBinding,
-        route: PeerMemberRoute,
-        client: HostedRoomPeerClient,
-        source_event_seq: int = 1,
-        task_id: str | None = None,
-        execution_generation: int | None = None,
-    ) -> None:
+        self, *, binding: HostedRoomBinding, route: PeerMemberRoute,
+        client: HostedRoomPeerClient, source_event_seq: int = 1, task_id: str | None = None,
+        execution_generation: int | None = None) -> None:
         self.binding = binding
         self.route = route
         self.client = client
@@ -217,14 +188,11 @@ class PeerHostedRoomTransport(InternalSessionRPC):
         bind_scope = getattr(self.client, "bind_room_scope", None)
         if callable(bind_scope):
             bind_scope(
-                room_id=self.binding.room_id,
-                home_install_id=self.route.home_install_id,
+                room_id=self.binding.room_id, home_install_id=self.route.home_install_id,
                 authority_gateway_id=self.binding.gateway_id,
-                authority_epoch=self.binding.authority_epoch,
-                member_id=self.route.member_id,
+                authority_epoch=self.binding.authority_epoch, member_id=self.route.member_id,
                 target_install_id=self.route.target_install_id,
-                target_profile=self.route.target_profile,
-            )
+                target_profile=self.route.target_profile)
 
     def _validate_coordinates(self, *, profile: str, source: str, title: str | None = None) -> None:
         if source != ROOM_SESSION_SOURCE:
@@ -234,15 +202,13 @@ class PeerHostedRoomTransport(InternalSessionRPC):
         if title is not None and title != room_session_title(self.binding.room_id):
             raise ValueError("peer room transport title does not match room identity")
 
+    def _scoped(self, **extra: Any) -> dict[str, Any]:
+        """Room id + grant keyword arguments shared by every scoped client call."""
+        return {"room_id": self.binding.room_id, "grant": self.route.grant, **extra}
+
     def _prepare(self, *, profile: str, source: str, create: bool, **extra):
         return self.client.prepare(
-            room_id=self.binding.room_id,
-            profile=profile,
-            source=source,
-            grant=self.route.grant,
-            create=create,
-            **extra,
-        )
+            **self._scoped(profile=profile, source=source, create=create, **extra))
 
     def resolve_exact(self, *, profile: str, title: str, source: str) -> Mapping[str, Any] | None:
         self._validate_coordinates(profile=profile, source=source, title=title)
@@ -259,38 +225,24 @@ class PeerHostedRoomTransport(InternalSessionRPC):
     def resume(self, *, profile: str, session_id: str, source: str) -> Mapping[str, Any]:
         self._validate_coordinates(profile=profile, source=source)
         session = self._prepare(
-            profile=profile, source=source, create=False, expected_session_id=session_id
-        )
+            profile=profile, source=source, create=False, expected_session_id=session_id)
         if session is None:
             raise RuntimeError("peer room session is unavailable")
         self._session_id = session_id
         return session
 
     def submit(
-        self,
-        *,
-        profile: str,
-        session_id: str,
-        prompt: str,
-        source: str,
-        task: TaskIdentity,
-        execution_generation: int,
-        on_terminal: Callable[[Mapping[str, Any]], None],
+        self, *, profile: str, session_id: str, prompt: str, source: str, task: TaskIdentity,
+        execution_generation: int, on_terminal: Callable[[Mapping[str, Any]], None],
     ) -> Mapping[str, Any]:
         self._validate_coordinates(profile=profile, source=source)
         if self._session_id not in {None, session_id}:
             raise ValueError("peer room session changed during admission")
         dispatch = build_member_dispatch(
-            binding=self.binding,
-            route=self.route,
-            room_id=task.room_id,
-            task_id=task.task_id,
-            target_profile=profile,
-            execution_generation=execution_generation,
-            source_event_seq=self.source_event_seq,
-            prompt=prompt,
-            trace_id=self.route.trace_id or f"trace-{uuid.uuid4().hex}",
-        )
+            binding=self.binding, route=self.route, room_id=task.room_id, task_id=task.task_id,
+            target_profile=profile, execution_generation=execution_generation,
+            source_event_seq=self.source_event_seq, prompt=prompt,
+            trace_id=self.route.trace_id or f"trace-{uuid.uuid4().hex}")
         self._dispatch = dispatch
         self._session_id = session_id
         result = self.client.dispatch(dispatch=dispatch.as_mapping(), grant=self.route.grant)
@@ -300,21 +252,11 @@ class PeerHostedRoomTransport(InternalSessionRPC):
 
     def history(self, *, profile: str, session_id: str, source: str) -> Sequence[Mapping[str, Any]]:
         self._validate_coordinates(profile=profile, source=source)
-        return self.client.history(
-            room_id=self.binding.room_id,
-            profile=profile,
-            session_id=session_id,
-            grant=self.route.grant,
-        )
+        return self.client.history(**self._scoped(profile=profile, session_id=session_id))
 
     def info(self, *, profile: str, session_id: str, source: str) -> Mapping[str, Any]:
         self._validate_coordinates(profile=profile, source=source)
-        return self.client.status(
-            room_id=self.binding.room_id,
-            profile=profile,
-            session_id=session_id,
-            grant=self.route.grant,
-        )
+        return self.client.status(**self._scoped(profile=profile, session_id=session_id))
 
     def interrupt(
         self, *, profile: str, session_id: str, source: str, expected_task_id: str
@@ -325,14 +267,11 @@ class PeerHostedRoomTransport(InternalSessionRPC):
             if (
                 self.task_id != expected_task_id
                 or not self.execution_generation
-                or not hasattr(self.client, "stop_receipt")
-            ):
+                or not hasattr(self.client, "stop_receipt")):
                 return None
             return self.client.stop_receipt(
-                task_id=expected_task_id,
-                execution_generation=self.execution_generation,
-                grant=self.route.grant,
-            )
+                task_id=expected_task_id, execution_generation=self.execution_generation,
+                grant=self.route.grant)
         if dispatch.task_id != expected_task_id:
             return None
         return self.client.stop(dispatch=dispatch.as_mapping(), grant=self.route.grant)
