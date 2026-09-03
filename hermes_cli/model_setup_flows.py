@@ -308,9 +308,7 @@ def _model_flow_nous(config, current_model="", args=None):
     # Portal URL is needed for upgrade links and the recommendations endpoints.
     _nous_portal_url = ""
     with contextlib.suppress(Exception):
-        _nous_state = get_provider_auth_state("nous")
-        if _nous_state:
-            _nous_portal_url = _nous_state.get("portal_base_url", "")
+        _nous_portal_url = (get_provider_auth_state("nous") or {}).get("portal_base_url", "")
 
     catalog = _nous_model_catalog(free_tier, _nous_portal_url, model_ids, pricing)
     if catalog is None:
@@ -352,8 +350,7 @@ def _model_flow_openai_codex(config, current_model=""):
     _codex_token = None
     with contextlib.suppress(Exception):
         _codex_status = get_codex_auth_status()
-        if _codex_status.get("logged_in"):
-            _codex_token = _codex_status.get("api_key")
+        _codex_token = _codex_status.get("api_key") if _codex_status.get("logged_in") else None
     if not _codex_token:
         with contextlib.suppress(Exception):
             from hermes_cli.auth import resolve_codex_runtime_credentials
