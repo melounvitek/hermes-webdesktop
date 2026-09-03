@@ -776,26 +776,26 @@ def _provider_request(
     return final
 
 
+def _rewrite_tools(body: dict[str, Any], match: Callable[[dict], bool], rewrite: Callable[[dict], dict]) -> None:
+    """Rewrite each dict tool that ``match``es (in place on ``body["tools"]`` when it is a list)."""
+    tools = body.get("tools")
+    if isinstance(tools, list):
+        body["tools"] = [rewrite(t) if isinstance(t, dict) and match(t) else t for t in tools]
+
+
 def _codex_codec_tools(body: dict[str, Any]) -> None:
     # The Responses SDK accepts ``tools=None`` as "no tools" while Relay's typed codec
     # wants an array or an absent field; only the codec-facing copy is normalized.
     if body.get("tools") is None:
         body.pop("tools", None)
-    elif isinstance(body.get("tools"), list):
-        body["tools"] = [
-            {"type": "function", "function": {key: value for key, value in tool.items() if key != "type"}}
-            if isinstance(tool, dict) and tool.get("type") == "function" and "function" not in tool else tool
-            for tool in body["tools"]
-        ]
+    _rewrite_tools(
+        body, lambda t: t.get("type") == "function" and "function" not in t,
+        lambda t: {"type": "function", "function": {k: v for k, v in t.items() if k != "type"}},
+    )
 
 
 def _chat_codec_tools(body: dict[str, Any]) -> None:
-    tools = body.get("tools")
-    if isinstance(tools, list):
-        body["tools"] = [
-            {"type": "function", **tool}
-            if isinstance(tool, dict) and "function" in tool and "type" not in tool else tool for tool in tools
-        ]
+    _rewrite_tools(body, lambda t: "function" in t and "type" not in t, lambda t: {"type": "function", **t})
 
 
 # api_mode -> in-place normalizer producing the codec-facing ``tools`` shape.
@@ -853,15 +853,11 @@ def _codec_round_trip_request_body(
 
 def _provider_request_body(content: dict[str, Any], metadata: dict[str, Any] | None) -> dict[str, Any]:
     body = dict(content)
-    if _api_mode(metadata) != "codex_responses":
-        return body
-    tools = body.get("tools")
-    if not isinstance(tools, list):
-        return body
-    body["tools"] = [
-        {"type": "function", **dict(tool["function"])} if isinstance(tool, dict)
-        and tool.get("type") == "function" and isinstance(tool.get("function"), dict) else tool for tool in tools
-    ]
+    if _api_mode(metadata) == "codex_responses":
+        _rewrite_tools(
+            body, lambda t: t.get("type") == "function" and isinstance(t.get("function"), dict),
+            lambda t: {"type": "function", **dict(t["function"])},
+        )
     return body
 
 
