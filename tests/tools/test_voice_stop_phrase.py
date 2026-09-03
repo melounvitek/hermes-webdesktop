@@ -90,10 +90,8 @@ class TestContinuousLoopStopPhrase:
         fake_result = {"success": True, "transcript": transcript_text}
         with patch.object(v, "_continuous_active", True), \
              patch.object(v, "_continuous_recorder", _FakeRecorder()), \
-             patch.object(v, "_continuous_on_transcript", delivered.append), \
-             patch.object(v, "_continuous_on_status", None), \
-             patch.object(v, "_continuous_on_silent_limit",
-                          lambda: silent_limit_fired.append(True)), \
+             patch.object(v, "_continuous_callbacks",
+                          (delivered.append, None, lambda: silent_limit_fired.append(True), None)), \
              patch.object(v, "_continuous_no_speech_count", 0), \
              patch.object(v, "transcribe_recording", return_value=fake_result), \
              patch.object(v, "_play_beep", lambda **kw: None), \
@@ -140,11 +138,8 @@ class TestContinuousLoopStopPhraseSignal:
         fake_result = {"success": True, "transcript": transcript_text}
         with patch.object(v, "_continuous_active", True), \
              patch.object(v, "_continuous_recorder", self._FakeRecorder()), \
-             patch.object(v, "_continuous_on_transcript", delivered.append), \
-             patch.object(v, "_continuous_on_status", None), \
-             patch.object(v, "_continuous_on_silent_limit",
-                          lambda: silent_limit_fired.append(True)), \
-             patch.object(v, "_continuous_on_stop_phrase", on_stop_phrase), \
+             patch.object(v, "_continuous_callbacks",
+                          (delivered.append, None, lambda: silent_limit_fired.append(True), on_stop_phrase)), \
              patch.object(v, "_continuous_no_speech_count", 0), \
              patch.object(v, "transcribe_recording", return_value=fake_result), \
              patch.object(v, "_play_beep", lambda **kw: None), \

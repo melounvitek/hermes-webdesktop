@@ -20,17 +20,16 @@ class EnvVarUpdate(BaseModel):
     key: str
     value: str
     profile: Optional[str] = None
-    # Bearer key for the connectivity probe when ``key == "OPENAI_BASE_URL"`` (auth-gated
-    # ``/v1/models`` otherwise looks "reachable but empty"). Ignored by plain PUT /api/env.
+    # Bearer for the OPENAI_BASE_URL connectivity probe (auth-gated /v1/models otherwise looks
+    # "reachable but empty"); ignored by plain PUT /api/env.
     api_key: str = ""
 
 class EnvVarDelete(BaseModel):
     key: str
     profile: Optional[str] = None
 
-class EnvVarReveal(BaseModel):
-    key: str
-    profile: Optional[str] = None
+class EnvVarReveal(EnvVarDelete):
+    pass
 
 class MemoryProviderConfigUpdate(BaseModel):
     values: Dict[str, Any] = {}
@@ -94,20 +93,17 @@ class ManagedFileDelete(BaseModel):
     recursive: bool = False
 
 class ModelAssignment(BaseModel):
-    """Payload for POST /api/model/set — assign a provider/model to a slot.
+    """POST /api/model/set — assign a provider/model to a slot.
 
-    scope="main"        → writes model.provider + model.default
-    scope="auxiliary"   → writes auxiliary.<task>.provider + auxiliary.<task>.model
-    scope="auxiliary" with task=""  → applied to every auxiliary.* slot
-    scope="auxiliary" with task="__reset__"  → resets every slot to provider="auto"
+    scope="main" → model.provider + model.default; scope="auxiliary" → auxiliary.<task>.*
+    (task="" = every auxiliary slot, task="__reset__" = reset every slot to provider="auto").
     """
     scope: str
     provider: str
     model: str
     task: str = ""
-    # Custom/local endpoint URL + key, honored on main AND auxiliary slots: the runtime
-    # resolvers read model.base_url / auxiliary.<task>.base_url (+ .api_key) from config
-    # and ignore OPENAI_BASE_URL, so this is what actually wires a local endpoint.
+    # Custom/local endpoint URL + key, honored on main AND auxiliary slots: the runtime resolvers
+    # read model.base_url / auxiliary.<task>.base_url (+ .api_key) and ignore OPENAI_BASE_URL.
     base_url: str = ""
     api_key: str = ""
     confirm_expensive_model: bool = False
@@ -131,10 +127,8 @@ class _MoaReferenceControls(BaseModel):
         """Reject JSON booleans/non-finite values before float coercion."""
         if value is None or value == "":
             return None
-        if isinstance(value, bool):
-            raise ValueError("reference_timeout must be a finite positive number")
         try:
-            timeout = float(value)
+            timeout = float(value) if not isinstance(value, bool) else math.nan
         except (TypeError, ValueError) as exc:
             raise ValueError("reference_timeout must be a finite positive number") from exc
         if not math.isfinite(timeout) or timeout <= 0:
@@ -231,12 +225,8 @@ class TTSSpeakRequest(BaseModel):
     text: str
 
 class TTSLeaseRequest(BaseModel):
-    """Body for ``POST /api/audio/tts-lease``.
-
-    ``lease`` names the toggle/surface holding the lease (``desktop:read-aloud``,
-    ``desktop:conversation``); ``active`` True acquires + warms, False releases.
-    """
-
+    """POST /api/audio/tts-lease: ``lease`` names the toggle/surface holding the lease
+    (``desktop:read-aloud``, ``desktop:conversation``); ``active`` True acquires + warms, False releases."""
     lease: str
     active: bool = True
 
@@ -262,13 +252,9 @@ class SessionRename(BaseModel):
     profile: Optional[str] = None  # session owned by another profile (opens its state.db)
 
 class SessionOwnerBackfill(BaseModel):
-    """Body for POST /api/sessions/owner-backfill (#94724 legacy migration).
-
-    ``profile`` scopes WHICH profile's state.db is stamped (same semantics as
-    every other session route); the stamped value is always that store's own
-    serving-profile identity — the caller cannot inject an arbitrary owner.
-    """
-
+    """POST /api/sessions/owner-backfill (legacy migration). ``profile`` scopes WHICH state.db is
+    stamped; the stamped value is always that store's own serving-profile identity — the caller
+    cannot inject an arbitrary owner."""
     profile: Optional[str] = None
 
 class SessionPrune(BaseModel):
@@ -388,8 +374,8 @@ class BackupRequest(BaseModel):
 
 class ImportRequest(BaseModel):
     archive: str
-    # --force for `hermes import`: the spawned action has stdin=DEVNULL, so the CLI's
-    # "Continue? [y/N]" prompt would hit EOF and abort. The dashboard confirms in its own modal.
+    # --force: the spawned `hermes import` has stdin=DEVNULL, so its "Continue? [y/N]" prompt would
+    # hit EOF and abort; the dashboard confirms in its own modal.
     force: bool = False
 
 class HookCreate(BaseModel):
@@ -424,13 +410,11 @@ class ProfileCreate(BaseModel):
     description: Optional[str] = None
     provider: Optional[str] = None
     model: Optional[str] = None
-    # Profile-builder additions, applied best-effort AFTER the profile directory exists so a
-    # hiccup never 500s the create.
+    # Profile-builder additions, applied best-effort AFTER the profile dir exists (a hiccup never 500s).
     mcp_servers: List["MCPServerCreate"] = []
-    # Skills to KEEP: non-empty = replace semantics (unlisted seeded skills disabled).
-    keep_skills: List[str] = []
-    # Hub identifiers installed async via `hermes -p <name> skills install` (skills_hub.SKILLS_DIR
-    # is import-time-bound, so HERMES_HOME can't redirect it); PIDs go back for the UI to poll.
+    keep_skills: List[str] = []  # skills to KEEP: non-empty = replace semantics (unlisted seeded ones disabled)
+    # Installed async via `hermes -p <name> skills install` (skills_hub.SKILLS_DIR is import-time-bound,
+    # so HERMES_HOME can't redirect it); PIDs go back for the UI to poll.
     hub_skills: List[str] = []
 
 class ProfileRename(BaseModel):
