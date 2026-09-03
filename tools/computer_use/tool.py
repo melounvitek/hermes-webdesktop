@@ -45,8 +45,7 @@ _BLOCKED_KEY_COMBOS = {
 }
 _KEY_ALIASES = {"command": "cmd", "control": "ctrl", "alt": "option", "⌘": "cmd", "⌥": "option",
                 "windows": "win", "super": "win", "meta": "win"}
-# Dangerous shell patterns for the `type` action (last one: fork bomb).
-_BLOCKED_TYPE_PATTERNS = [re.compile(p, re.IGNORECASE) for p in (
+_BLOCKED_TYPE_PATTERNS = [re.compile(p, re.IGNORECASE) for p in (  # dangerous shell patterns for `type` (last one: fork bomb)
     r"curl\s+[^|]*\|\s*bash", r"curl\s+[^|]*\|\s*sh", r"wget\s+[^|]*\|\s*bash",
     r"\bsudo\s+rm\s+-[rf]", r"\brm\s+-rf\s+/\s*$", r":\s*\(\)\s*\{\s*:\|:\s*&\s*\}")]
 
@@ -80,9 +79,8 @@ def _input_target_mismatch(backend, requested_app: str) -> Optional[str]:
 # ── Backend selection — env-swappable for tests ─────────────────────────────
 
 # Per-Hermes-session cached backends (own cua-driver session, native target, refs, grant namespace).
-# `_backend` is the backward-compatible empty-session injection hook (older tests).
 _backend_lock = threading.Lock()
-_backend: Optional[ComputerUseBackend] = None
+_backend: Optional[ComputerUseBackend] = None  # backward-compatible empty-session injection hook (older tests)
 _backends: Dict[str, ComputerUseBackend] = {}
 _backend_call_locks: Dict[str, threading.RLock] = {}
 _backend_permission_modes: Dict[str, str] = {}
@@ -442,8 +440,6 @@ def _classify_action_result(res: ActionResult) -> Dict[str, Any]:
     return {"decision": "verify_fresh_state",
             "hint": "Transport succeeded but the effect is unproven. Re-capture and confirm before continuing."}
 
-_VERDICT_FIELDS = ("verified", "effect", "escalation", "path", "degraded", "delivery_mode", "code")
-
 def _present(**fields: Any) -> Dict[str, Any]:
     return {k: v for k, v in fields.items() if v}  # only the truthy optional fields, in the given order
 
@@ -451,21 +447,19 @@ def _action_payload(res: ActionResult) -> Dict[str, Any]:
     # cua-driver's structured verdict fields only when returned (None = old driver). ok is transport success;
     # effect/escalation are the semantic verdict.
     return {"ok": res.ok, "action": res.action, **_present(message=res.message),
-            **{k: v for k in _VERDICT_FIELDS if (v := getattr(res, k)) is not None}, **_present(meta=res.meta),
+            **{k: v for k in ("verified", "effect", "escalation", "path", "degraded", "delivery_mode", "code")
+               if (v := getattr(res, k)) is not None}, **_present(meta=res.meta),
             "verdict": _classify_action_result(res)}
 
 def _text_response(res: ActionResult) -> str:
     return json.dumps(_action_payload(res))
 
-# AX `elements` cap: dense UIs publish 500+ nodes (one capture would exhaust context); the full tree spills to a file.
-_DEFAULT_MAX_ELEMENTS = 100
-# Some providers reject images below 8x8 before the model sees the result; such captures fall back to text.
-_MIN_PROVIDER_IMAGE_DIMENSION = 8
+_DEFAULT_MAX_ELEMENTS = 100  # AX `elements` cap: dense UIs publish 500+ nodes (one capture would exhaust context); the full tree spills to a file
+_MIN_PROVIDER_IMAGE_DIMENSION = 8  # some providers reject images below 8x8 before the model sees the result; such captures fall back to text
 # Some AX trees (Discord/Slack via UIA, Electron chat clients) expose ENTIRE message bodies as labels; uncapped
 # they blew the tool-result budget and leaked private chat text. Labels identify a control, not text extraction.
 _MAX_ELEMENT_LABEL_CHARS = 120
-# Bounded cache trails: every dense capture can spill, and CLI-only sessions never run the gateway's media cleanup.
-_MAX_SPILL_FILES = _MAX_CAPTURE_FILES = 20
+_MAX_SPILL_FILES = _MAX_CAPTURE_FILES = 20  # bounded cache trails: every dense capture can spill, and CLI-only sessions never run the gateway's media cleanup
 
 def _capture_image_format(cap: CaptureResult) -> Tuple[str, str]:
     # (MIME, file extension): cua-driver's explicit MIME type, else sniff the base64 prefix (JPEG starts with /9j/,
@@ -518,18 +512,12 @@ def _bounds_hints(elements: List[UIElement], image_width: int, image_height: int
 
 def _bounds_scale(elements: List[UIElement], image_width: int, image_height: int) -> Optional[float]:
     return _bounds_hints(elements, image_width, image_height)[0]
-
 def _bounds_space_note(elements: List[UIElement], image_width: int, image_height: int) -> Optional[str]:
     return _bounds_hints(elements, image_width, image_height)[1]
 
-def _view(cap: CaptureResult, visible: List[UIElement], width: int, height: int, **facts: Any) -> SimpleNamespace:
-    """One capture's derived facts, computed once for every response branch: ``visible`` is the capped element list,
-    ``dims_omitted`` an image below the provider minimum; ``facts`` override the None/False defaults."""
-    return SimpleNamespace(**{**dict(cap=cap, visible=visible, total=len(cap.elements), width=width, height=height,
-                                     truncated=len(cap.elements) - len(visible), bounds_scale=None, bounds_note=None,
-                                     elements_file=None, screenshot_path=None, dims_omitted=None, has_image=False), **facts})
-
 def _capture_view(cap: CaptureResult, max_elements: int) -> SimpleNamespace:
+    """One capture's derived facts, computed once for every response branch: ``visible`` is the capped element list,
+    ``dims_omitted`` an image below the provider minimum."""
     visible, dims = cap.elements[:max_elements], None
     with contextlib.suppress(Exception):  # (width, height) of the inline PNG/JPEG screenshot, else the backend's
         dims = image_dimensions_from_bytes(base64.b64decode(cap.png_b64, validate=False)) if cap.png_b64 else None
@@ -539,10 +527,11 @@ def _capture_view(cap: CaptureResult, max_elements: int) -> SimpleNamespace:
     lost_detail = len(cap.elements) > len(visible) or any(len(e.label) > _MAX_ELEMENT_LABEL_CHARS for e in visible)
     too_small = bool(dims) and min(dims) < _MIN_PROVIDER_IMAGE_DIMENSION
     has_image = bool(cap.png_b64) and cap.mode != "ax" and not too_small
-    return _view(cap, visible, width, height, bounds_scale=scale, bounds_note=note,
-                 elements_file=_spill_elements_to_file(cap) if lost_detail else None,
-                 screenshot_path=_persist_capture_image(cap) if has_image else None,
-                 dims_omitted=dims if too_small else None, has_image=has_image)
+    return SimpleNamespace(cap=cap, visible=visible, total=len(cap.elements), width=width, height=height,
+                           truncated=len(cap.elements) - len(visible), bounds_scale=scale, bounds_note=note,
+                           elements_file=_spill_elements_to_file(cap) if lost_detail else None,
+                           screenshot_path=_persist_capture_image(cap) if has_image else None,
+                           dims_omitted=dims if too_small else None, has_image=has_image)
 
 def _capture_summary_lines(v: SimpleNamespace) -> List[str]:
     """Human-readable capture summary; line ORDER is contract. Lists only what `elements` surfaces, otherwise the
@@ -688,9 +677,8 @@ def _spill_elements_to_file(cap: CaptureResult) -> Optional[str]:
 
 # ── auxiliary.vision routing for captured screenshots ───────────────────────
 
-# Longest image side handed to the aux vision model. Full-resolution desktop captures tokenize heavily and can
-# overflow small local-model context windows; ~1456px keeps SOM badges legible while cutting vision latency.
-_MAX_VISION_DIM = 1456
+_MAX_VISION_DIM = 1456  # longest image side handed to the aux vision model: full-resolution desktop captures tokenize heavily
+# and can overflow small local-model context windows; ~1456px keeps SOM badges legible while cutting vision latency.
 
 def _shrink_capture_for_vision(raw: bytes, ext: str, max_dim: int = _MAX_VISION_DIM) -> tuple[bytes, Optional[str]]:
     """Downscale encoded image bytes so the longest side is <= max_dim -> ``(bytes, scale_note)``. note is None when
@@ -791,8 +779,9 @@ def _route_capture_through_aux_vision(
         return None
     # Same element cap as every other capture branch; dumping cap.elements in full would bypass max_elements
     # exactly for non-vision main models. Dimensions are the backend's on this branch.
-    view = _view(cap, cap.elements if visible_elements is None else visible_elements, cap.width, cap.height,
-                 truncated=truncated_elements, elements_file=elements_file, screenshot_path=screenshot_path)
+    view = SimpleNamespace(cap=cap, visible=cap.elements if visible_elements is None else visible_elements,
+                           total=len(cap.elements), width=cap.width, height=cap.height, truncated=truncated_elements,
+                           elements_file=elements_file, screenshot_path=screenshot_path, bounds_scale=None)
     return _text_capture_payload(view, summary, {"vision_analysis": analysis_text,
                                                  "vision_analysis_routed_via": "auxiliary.vision"})
 
