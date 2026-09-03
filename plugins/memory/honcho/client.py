@@ -1,8 +1,8 @@
-"""Honcho client initialization and configuration.
+"""Honcho client construction and ``HonchoClientConfig`` resolution.
 
-Config file resolution: $HERMES_HOME/honcho.json -> ~/.honcho/config.json -> env
-vars (HONCHO_API_KEY, HONCHO_ENVIRONMENT). Within a file, explicit host-block
-fields win over flat/global fields, which win over defaults.
+Config file resolution: $HERMES_HOME/honcho.json -> ~/.honcho/config.json -> env vars
+(HONCHO_API_KEY, HONCHO_ENVIRONMENT). Within a file, host-block fields win over
+flat/global fields, which win over defaults.
 """
 
 from __future__ import annotations
@@ -22,18 +22,11 @@ from agent.secret_scope import get_secret
 from hermes_cli.profiles import _get_default_hermes_home
 from hermes_constants import get_hermes_home
 
-# Cache/slot cluster lives in client_cache.py; the names are re-exported here
-# because tests and reset bookkeeping reach them through this module.
+# Cache/slot cluster lives in client_cache.py; re-exported because tests and reset
+# bookkeeping reach these names through this module.
 from plugins.memory.honcho.client_cache import (  # noqa: F401
-    _DEFAULT_HTTP_TIMEOUT,
-    _apply_fresh_oauth_token,
-    _client_cache_key,
-    _client_slots,
-    _client_slots_lock,
-    _credential_fingerprint,
-    _honcho_json_timeout_memo,
-    _refresh_cached_oauth,
-    _slot_for,
+    _DEFAULT_HTTP_TIMEOUT, _apply_fresh_oauth_token, _client_cache_key, _client_slots, _client_slots_lock,
+    _credential_fingerprint, _honcho_json_timeout_memo, _refresh_cached_oauth, _slot_for,
 )
 
 if TYPE_CHECKING:
@@ -45,11 +38,8 @@ HOST = "hermes"
 
 
 def _sanitize_url(url: str | None) -> str | None:
-    """Return url, or None (with a warning) if it carries non-printable ASCII.
-
-    A stray terminal escape in a pasted URL otherwise makes the SDK raise at
-    client construction and poisons startup.
-    """
+    """``url``, or None (with a warning) if it carries non-printable ASCII: a stray terminal
+    escape in a pasted URL otherwise makes the SDK raise at client construction."""
     if url is None or all(0x20 <= ord(c) < 0x7F for c in url):
         return url
     logger.warning("Honcho base_url contains non-printable characters and will be ignored: %r", url)
@@ -74,17 +64,13 @@ def _host_block(raw: dict, host: str) -> dict:
 
 
 def resolve_active_host() -> str:
-    """Derive the Honcho host key: HERMES_HONCHO_HOST env, else the active profile.
-
-    The config's ``defaultHost`` is honored only for the default profile, so
-    named profiles stay isolated instead of all sharing one host.
-    """
+    """Honcho host key: HERMES_HONCHO_HOST env, else the active profile. The config's
+    ``defaultHost`` is honored only for the default profile so named profiles stay isolated."""
     explicit = os.environ.get("HERMES_HONCHO_HOST", "").strip()
     if explicit:
         return explicit
     try:
         from hermes_cli.profiles import get_active_profile_name
-
         profile_host = profile_host_key(get_active_profile_name())
     except Exception:
         profile_host = HOST
@@ -109,12 +95,9 @@ def resolve_global_config_path() -> Path:
 
 
 def resolve_config_path() -> Path:
-    """Return the active Honcho config path.
-
-    $HERMES_HOME/honcho.json -> default profile's honcho.json (host blocks
-    accumulate there via setup/clone) -> ~/.honcho/config.json (also the
-    first-time-setup write target when nothing exists).
-    """
+    """Active Honcho config path: $HERMES_HOME/honcho.json -> default profile's honcho.json
+    (host blocks accumulate there via setup/clone) -> ~/.honcho/config.json (also the
+    first-time-setup write target when nothing exists)."""
     local_path = get_hermes_home() / "honcho.json"
     if local_path.exists():
         return local_path
@@ -156,12 +139,11 @@ def _first_set(*vals, default):
 
 def _first_parsed(vals, caster: Callable[[Any], Any], default):
     """First non-None value that ``caster`` accepts, else default."""
-    for val in vals:
-        if val is not None:
-            try:
-                return caster(val)
-            except (ValueError, TypeError):
-                pass
+    for val in (v for v in vals if v is not None):
+        try:
+            return caster(val)
+        except (ValueError, TypeError):
+            pass
     return default
 
 
@@ -242,11 +224,9 @@ class _HostLookup:
 
 
 def _is_local_base_url(base_url: str | None) -> bool:
-    """True for loopback/RFC1918/link-local/ULA/CGNAT self-hosted Honcho URLs.
-
-    Local deployments can run without auth but the SDK needs a non-empty
-    api_key, so LAN/VPN URLs get the same placeholder-key treatment as localhost.
-    """
+    """True for loopback/RFC1918/link-local/ULA/CGNAT self-hosted Honcho URLs. Local
+    deployments can run without auth but the SDK needs a non-empty api_key, so LAN/VPN
+    URLs get the same placeholder-key treatment as localhost."""
     if not base_url:
         return False
     try:
@@ -277,20 +257,15 @@ def _connection_fields(look: _HostLookup, host: str, path: Path) -> dict[str, An
     # Named-profile host blocks do NOT inherit the default host's apiKey (profiles
     # are credential-isolated); the failure is silent 401s, so warn loudly.
     if not api_key and host_block and host != HOST and _host_block(raw, HOST).get("apiKey"):
-        logger.warning(
-            "Honcho host block '%s' has no apiKey; the default '%s' host's key "
-            "is NOT inherited (profiles are credential-isolated). Set apiKey on "
-            "hosts.%s in %s or this profile runs unauthenticated.",
-            host, HOST, host, path,
-        )
+        logger.warning("Honcho host block '%s' has no apiKey; the default '%s' host's key "
+                       "is NOT inherited (profiles are credential-isolated). Set apiKey on "
+                       "hosts.%s in %s or this profile runs unauthenticated.", host, HOST, host, path)
     # The SDK's native format (and Claude Desktop) nests the URL at endpoint.baseUrl;
     # read it before the flat Hermes spellings.
     endpoint_block = raw.get("endpoint")
     native_base_url = endpoint_block.get("baseUrl") if isinstance(endpoint_block, dict) else None
-    base_url = _sanitize_url(
-        host_block.get("baseUrl") or host_block.get("base_url") or native_base_url
-        or raw.get("baseUrl") or raw.get("base_url") or _env_base_url()
-    )
+    base_url = _sanitize_url(host_block.get("baseUrl") or host_block.get("base_url") or native_base_url
+                             or raw.get("baseUrl") or raw.get("base_url") or _env_base_url())
     return {
         "workspace_id": look.pick("workspace") or host,
         "ai_peer": look.pick("aiPeer") or host,
@@ -314,9 +289,7 @@ def _behavior_fields(look: _HostLookup, explicitly_configured: bool) -> dict[str
     # Migration guard: configs that predate observationMode keep the old
     # "unified" default; fresh installs get "directional" (all observations on).
     observation_mode = _normalize_choice(
-        look.pick("observationMode") or ("unified" if explicitly_configured else "directional"),
-        _OBSERVATION_MODES,
-    )
+        look.pick("observationMode") or ("unified" if explicitly_configured else "directional"), _OBSERVATION_MODES)
     return {
         "peer_name": look.pick("peerName"),
         # pinUserPeer is the clearer name; the original pinPeerName stays accepted.
@@ -409,9 +382,8 @@ class HonchoClientConfig:
     raw: dict[str, Any] = field(default_factory=dict)
     # A hosts.<host> block or explicit enabled flag, vs auto-enabled from a stray env key.
     explicitly_configured: bool = False
-    # Provenance captured at resolution time. Bound consumers use these instead of
-    # re-resolving: the resolvers read a ContextVar that background threads can't
-    # see, so re-resolution there lands on the DEFAULT profile.
+    # Provenance captured at resolution time; bound consumers use these instead of
+    # re-resolving (the resolvers read a ContextVar background threads can't see).
     config_path: Path | None = None
     hermes_home: Path | None = None
 
@@ -426,24 +398,17 @@ class HonchoClientConfig:
         api_key = get_secret("HONCHO_API_KEY")
         base_url = _sanitize_url(_env_base_url())
         return cls(
-            host=resolved_host,
-            workspace_id=workspace_id,
-            api_key=api_key,
+            host=resolved_host, workspace_id=workspace_id, api_key=api_key, base_url=base_url,
             environment=os.environ.get("HONCHO_ENVIRONMENT", "production"),
-            base_url=base_url,
             timeout=_resolve_optional_float(os.environ.get("HONCHO_TIMEOUT")),
-            ai_peer=resolved_host,
-            enabled=bool(api_key or base_url),
-            config_path=resolve_config_path(),
-            hermes_home=get_hermes_home(),
+            ai_peer=resolved_host, enabled=bool(api_key or base_url),
+            config_path=resolve_config_path(), hermes_home=get_hermes_home(),
         )
 
     @classmethod
     def from_global_config(cls, host: str | None = None, config_path: Path | None = None) -> HonchoClientConfig:
-        """Create config from the resolved Honcho config path, falling back to env.
-
-        When host is None, derives it from the active Hermes profile.
-        """
+        """Config from the resolved Honcho config path, falling back to env. ``host=None``
+        derives it from the active Hermes profile."""
         resolved_host = host or resolve_active_host()
         path = config_path or resolve_config_path()
         if not path.exists():
@@ -459,14 +424,9 @@ class HonchoClientConfig:
         explicitly_configured = bool(host_block) or raw.get("enabled") is True
         look = _HostLookup(host_block, raw)
         return cls(
-            host=resolved_host,
-            **_connection_fields(look, resolved_host, path),
-            **_behavior_fields(look, explicitly_configured),
-            sessions=raw.get("sessions", {}),
-            raw=raw,
-            explicitly_configured=explicitly_configured,
-            config_path=path,
-            hermes_home=get_hermes_home(),
+            host=resolved_host, **_connection_fields(look, resolved_host, path), **_behavior_fields(look, explicitly_configured),
+            sessions=raw.get("sessions", {}), raw=raw, explicitly_configured=explicitly_configured,
+            config_path=path, hermes_home=get_hermes_home(),
         )
 
     @staticmethod
@@ -475,11 +435,8 @@ class HonchoClientConfig:
         import subprocess
 
         try:
-            root = subprocess.run(
-                ["git", "rev-parse", "--show-toplevel"],
-                capture_output=True, text=True, encoding='utf-8', errors='replace', cwd=cwd, timeout=5,
-                stdin=subprocess.DEVNULL,
-            )
+            root = subprocess.run(["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True,
+                                  encoding='utf-8', errors='replace', cwd=cwd, timeout=5, stdin=subprocess.DEVNULL)
         except (OSError, subprocess.TimeoutExpired):
             return None
         return Path(root.stdout.strip()).name if root.returncode == 0 else None
@@ -490,11 +447,9 @@ class HonchoClientConfig:
 
     @classmethod
     def _enforce_session_id_limit(cls, sanitized: str, original: str) -> str:
-        """Truncate to the limit with a ``-<sha256 prefix>`` suffix hashed over the ORIGINAL key.
-
-        Two long keys sharing a prefix stay distinct; two keys that sanitize
-        identically still collide intentionally (same logical session).
-        """
+        """Truncate to the limit with a ``-<sha256 prefix>`` suffix hashed over the ORIGINAL key:
+        two long keys sharing a prefix stay distinct; keys that sanitize identically still
+        collide intentionally (same logical session)."""
         max_len, hash_len = cls._HONCHO_SESSION_ID_MAX_LEN, cls._HONCHO_SESSION_ID_HASH_LEN
         if len(sanitized) <= max_len:
             return sanitized
@@ -506,19 +461,13 @@ class HonchoClientConfig:
         return f"{self.peer_name}-{name}" if self.session_peer_prefix and self.peer_name else name
 
     def resolve_session_name(
-        self,
-        cwd: str | None = None,
-        session_title: str | None = None,
-        session_id: str | None = None,
-        gateway_session_key: str | None = None,
+        self, cwd: str | None = None, session_title: str | None = None,
+        session_id: str | None = None, gateway_session_key: str | None = None,
     ) -> str | None:
-        """Resolve the Honcho session name.
-
-        Order: gateway session key (per-chat isolation no cwd/strategy gives) ->
-        per-session strategy's session_id (authoritative, so a generated title
-        never remaps a live conversation) -> sessions map override -> /title ->
-        per-repo (git root name) -> per-directory (basename) -> global (workspace).
-        """
+        """Resolve the Honcho session name. Order: gateway session key (per-chat isolation no
+        cwd/strategy gives) -> per-session strategy's session_id (authoritative, so a generated
+        title never remaps a live conversation) -> sessions map override -> /title ->
+        per-repo (git root name) -> per-directory (basename) -> global (workspace)."""
         import re
 
         def _slug(text: str) -> str:
@@ -542,12 +491,9 @@ class HonchoClientConfig:
 
 
 def spawn_context_thread(target, *, name: str, daemon: bool = True, args: tuple = ()) -> "_threading.Thread":
-    """Spawn a thread that inherits the caller's contextvars.
-
-    Profile isolation is a ContextVar (set_hermes_home_override); a plain
-    Thread starts with an EMPTY context, so ambient resolution on it would
-    silently land on the default profile.
-    """
+    """Thread that inherits the caller's contextvars: profile isolation is a ContextVar
+    (set_hermes_home_override) and a plain Thread starts EMPTY, so ambient resolution on it
+    would silently land on the default profile."""
     import contextvars
 
     ctx = contextvars.copy_context()
@@ -555,14 +501,11 @@ def spawn_context_thread(target, *, name: str, daemon: bool = True, args: tuple 
 
 
 def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
-    """Get or create the Honcho client for this config's identity.
-
-    Clients are cached PER IDENTITY (host, workspace, provenance paths, credential
-    fingerprint, timeout) so multi-profile processes don't share a first-config-wins
-    client. With no config, the active honcho.json is resolved — correct only on threads
-    that see the profile ContextVar; pass a bound config elsewhere. Thread-safe: each
-    identity's client is built exactly once under concurrent first calls (SingletonSlot).
-    """
+    """Get or create the Honcho client for this config's identity. Clients are cached PER
+    IDENTITY (host, workspace, provenance paths, credential fingerprint, timeout) so
+    multi-profile processes don't share a first-config-wins client. With no config the active
+    honcho.json is resolved — correct only on threads that see the profile ContextVar; pass a
+    bound config elsewhere. Each identity's client is built once under concurrent first calls."""
     key = _client_cache_key(config)
     slot = _slot_for(key)
     cached = slot.peek()
@@ -580,12 +523,9 @@ def get_honcho_client(config: HonchoClientConfig | None = None) -> Honcho:
     _apply_fresh_oauth_token(config)
 
     if not config.api_key and not config.base_url:
-        raise ValueError(
-            "Honcho API key not found. "
-            "Get your API key at https://app.honcho.dev, "
-            "then run 'hermes honcho setup' or set HONCHO_API_KEY. "
-            "For local instances, set HONCHO_BASE_URL instead."
-        )
+        raise ValueError("Honcho API key not found. Get your API key at https://app.honcho.dev, "
+                         "then run 'hermes honcho setup' or set HONCHO_API_KEY. "
+                         "For local instances, set HONCHO_BASE_URL instead.")
 
     return slot.get(lambda: _build_client(config))
 
@@ -601,11 +541,8 @@ def _build_client(config: HonchoClientConfig) -> "Honcho":
     try:
         from honcho import Honcho
     except ImportError:
-        raise ImportError(
-            "honcho-ai is required for Honcho integration. "
-            "Install it with: pip install honcho-ai  "
-            "(or run `hermes honcho setup` to configure)."
-        )
+        raise ImportError("honcho-ai is required for Honcho integration. Install it with: pip install honcho-ai  "
+                          "(or run `hermes honcho setup` to configure).")
 
     # config.yaml honcho.base_url / timeout fill whatever honcho.json left unset.
     base_url, timeout = config.base_url, config.timeout
@@ -628,11 +565,8 @@ def _build_client(config: HonchoClientConfig) -> "Honcho":
     else:
         # Name the SDK's environment fallback at INFO so a self-hosted user whose
         # config wasn't picked up notices they're talking to the public cloud.
-        logger.info(
-            "Initializing Honcho client (host: %s, workspace: %s, "
-            "base_url unset — SDK will resolve from environment=%s)",
-            config.host, config.workspace_id, config.environment,
-        )
+        logger.info("Initializing Honcho client (host: %s, workspace: %s, base_url unset — SDK will resolve from environment=%s)",
+                    config.host, config.workspace_id, config.environment)
 
     # Local instances need no key but the SDK wants a non-empty string: honor a
     # key set EXPLICITLY in honcho.json (host block or root) and treat an
@@ -642,10 +576,7 @@ def _build_client(config: HonchoClientConfig) -> "Honcho":
     if _is_local_base_url(base_url) and not (_host_block(raw, config.host).get("apiKey") or raw.get("apiKey")):
         api_key = "local"
 
-    kwargs: dict = {
-        "workspace_id": config.workspace_id, "api_key": api_key,
-        "environment": config.environment, "timeout": timeout,
-    }
+    kwargs: dict = {"workspace_id": config.workspace_id, "api_key": api_key, "environment": config.environment, "timeout": timeout}
     if base_url:
         # The SDK's route builders already carry the version prefix ("/v3/..."), so
         # strip a trailing version segment from any base_url to avoid "/v3/v3/...".

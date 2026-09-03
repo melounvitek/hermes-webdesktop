@@ -11,11 +11,7 @@ from datetime import datetime
 from typing import Any, TYPE_CHECKING
 
 from plugins.memory.honcho.client import get_honcho_client, spawn_context_thread
-from plugins.memory.honcho.session_auth import (  # noqa: F401 — re-exported public API
-    HonchoAuthError,
-    SessionAuthMixin,
-    _is_auth_error,
-)
+from plugins.memory.honcho.session_auth import HonchoAuthError, SessionAuthMixin, _is_auth_error  # noqa: F401 — re-exported
 from plugins.memory.honcho.session_context import SessionContextMixin
 from plugins.memory.honcho.session_migration import SessionMigrationMixin
 from plugins.memory.honcho.session_peers import SessionPeersMixin
@@ -44,32 +40,17 @@ class HonchoSession:
 
     def add_message(self, role: str, content: str, **kwargs: Any) -> None:
         """Add a message to the local cache."""
-        self.messages.append({
-            "role": role,
-            "content": content,
-            "timestamp": datetime.now().isoformat(),
-            **kwargs,
-        })
+        self.messages.append({"role": role, "content": content, "timestamp": datetime.now().isoformat(), **kwargs})
         self.updated_at = datetime.now()
 
 
-class HonchoSessionManager(
-    SessionAuthMixin, SessionPeersMixin, SessionContextMixin, SessionMigrationMixin,
-):
-    """Manages conversation sessions using Honcho.
-
-    Runs alongside hermes' SQLite state and file-based memory, adding persistent
-    cross-session user modeling. Auth retry, peer-ID resolution, recall (context/
-    search/conclusions/dialectic) and memory-file migration live in the mixins.
-    """
+class HonchoSessionManager(SessionAuthMixin, SessionPeersMixin, SessionContextMixin, SessionMigrationMixin):
+    """Conversation sessions backed by Honcho, alongside hermes' SQLite state and file memory.
+    Auth retry, peer-ID resolution, recall and memory-file migration live in the mixins."""
 
     def __init__(
-        self,
-        honcho: Honcho | None = None,
-        context_tokens: int | None = None,
-        config: Any | None = None,
-        runtime_user_peer_name: str | None = None,
-        runtime_user_peer_name_alt: str | None = None,
+        self, honcho: Honcho | None = None, context_tokens: int | None = None, config: Any | None = None,
+        runtime_user_peer_name: str | None = None, runtime_user_peer_name_alt: str | None = None,
     ):
         """``honcho`` defaults to the per-identity cached client; ``context_tokens`` caps
         context() calls (None = Honcho default); the runtime peer names are the gateway
@@ -117,13 +98,10 @@ class HonchoSessionManager(
 
     @property
     def honcho(self) -> Honcho:
-        """Get the Honcho client, refreshing a near-expiry OAuth token in place.
-
-        Always goes through ``get_honcho_client`` WITH this manager's bound config: a
-        long session can't outlive its 1h access token, and daemon threads (async
-        writer, prefetch, sync) can't see the ambient ContextVar profile, so a bare
-        ``get_honcho_client()`` would migrate them onto the first-built profile.
-        """
+        """The Honcho client, refreshing a near-expiry OAuth token in place. Always goes through
+        ``get_honcho_client`` WITH this manager's bound config: a long session can't outlive its
+        1h access token, and daemon threads can't see the ambient ContextVar profile, so a bare
+        ``get_honcho_client()`` would migrate them onto the first-built profile."""
         self._honcho = get_honcho_client(self._config)
         return self._honcho
 
@@ -144,40 +122,29 @@ class HonchoSessionManager(
 
     def _sdk_session(self, session_id: str) -> Any:
         """Get or create the SDK session (cached until a client rebuild clears the cache)."""
-        return self._cached_sdk_object(
-            self._sessions_cache, session_id, lambda: self.honcho.session(session_id),
-        )
+        return self._cached_sdk_object(self._sessions_cache, session_id, lambda: self.honcho.session(session_id))
 
     def _get_or_create_peer(self, peer_id: str) -> Any:
         """Get or create a Honcho peer (one get-or-create API call, then cached)."""
         return self._cached_sdk_object(
-            self._peers_cache, peer_id,
-            lambda: self._authed_call("peer setup", lambda: self.honcho.peer(peer_id)),
-        )
+            self._peers_cache, peer_id, lambda: self._authed_call("peer setup", lambda: self.honcho.peer(peer_id)))
 
     # ----- Session creation -----
 
     def _configure_session_peers(self, session_id: str, user_peer: Any, assistant_peer: Any) -> bool:
         """add_peers with the local observation config, then adopt the server's effective
-        config (set via the Honcho UI, it wins over local defaults).
-
-        Observation booleans are manager-scoped, so the last session init wins.
-        Returns False when auth died mid-way (already recorded by _authed_call).
-        """
+        config (set via the Honcho UI, it wins over local defaults). Observation booleans are
+        manager-scoped, so the last session init wins. Returns False when auth died mid-way
+        (already recorded by _authed_call)."""
         peers = (("user", user_peer), ("ai", assistant_peer))
         try:
             from honcho.session import SessionPeerConfig
             peer_entries = [
-                (peer, SessionPeerConfig(
-                    observe_me=getattr(self, f"_{kind}_observe_me"),
-                    observe_others=getattr(self, f"_{kind}_observe_others"),
-                ))
+                (peer, SessionPeerConfig(observe_me=getattr(self, f"_{kind}_observe_me"),
+                                         observe_others=getattr(self, f"_{kind}_observe_others")))
                 for kind, peer in peers
             ]
-            self._authed_call(
-                "session peer setup",
-                lambda: self._sdk_session(session_id).add_peers(peer_entries),
-            )
+            self._authed_call("session peer setup", lambda: self._sdk_session(session_id).add_peers(peer_entries))
             try:
                 server_cfgs = self._authed_call(
                     "peer configuration read",
@@ -188,11 +155,8 @@ class HonchoSessionManager(
                         value = getattr(server_cfg, field_name)
                         if value is not None:
                             setattr(self, f"_{kind}_{field_name}", value)
-                logger.debug(
-                    "Honcho observation synced from server: user(me=%s,others=%s) ai(me=%s,others=%s)",
-                    self._user_observe_me, self._user_observe_others,
-                    self._ai_observe_me, self._ai_observe_others,
-                )
+                logger.debug("Honcho observation synced from server: user(me=%s,others=%s) ai(me=%s,others=%s)",
+                             self._user_observe_me, self._user_observe_others, self._ai_observe_me, self._ai_observe_others)
             except HonchoAuthError:
                 raise
             except Exception as e:
@@ -208,20 +172,15 @@ class HonchoSessionManager(
         try:
             ctx = self._authed_call(
                 "session context load",
-                lambda: self._sdk_session(session_id).context(summary=True, tokens=self._context_tokens),
-            )
+                lambda: self._sdk_session(session_id).context(summary=True, tokens=self._context_tokens))
             existing_messages = ctx.messages or []
             if len(existing_messages) > 1:
                 timestamps = [m.created_at for m in existing_messages if m.created_at]
                 if timestamps and timestamps != sorted(timestamps):
-                    logger.warning(
-                        "Honcho messages not chronologically ordered for session '%s', sorting", session_id,
-                    )
+                    logger.warning("Honcho messages not chronologically ordered for session '%s', sorting", session_id)
                     existing_messages = sorted(existing_messages, key=lambda m: m.created_at or datetime.min)
             if existing_messages:
-                logger.info(
-                    "Honcho session '%s' retrieved (%d existing messages)", session_id, len(existing_messages),
-                )
+                logger.info("Honcho session '%s' retrieved (%d existing messages)", session_id, len(existing_messages))
             else:
                 logger.info("Honcho session '%s' created (new)", session_id)
             return existing_messages
@@ -231,23 +190,16 @@ class HonchoSessionManager(
             logger.warning("Honcho session '%s' loaded (failed to fetch context: %s)", session_id, e)
         return []
 
-    def _get_or_create_honcho_session(
-        self, session_id: str, user_peer: Any, assistant_peer: Any
-    ) -> tuple[Any, list]:
-        """Get or create a Honcho session with peers configured.
-
-        Returns (honcho_session, existing_messages); a cached session yields no messages.
-        """
+    def _get_or_create_honcho_session(self, session_id: str, user_peer: Any, assistant_peer: Any) -> tuple[Any, list]:
+        """(honcho_session, existing_messages) with peers configured; a cached session yields no messages."""
         with self._cache_lock:
             if session_id in self._sessions_cache:
                 logger.debug("Honcho session '%s' retrieved from cache", session_id)
                 return self._sessions_cache[session_id], []
 
         self._authed_call("session setup", lambda: self._sdk_session(session_id))
-        existing_messages: list = (
-            self._load_existing_messages(session_id)
-            if self._configure_session_peers(session_id, user_peer, assistant_peer) else []
-        )
+        existing_messages: list = (self._load_existing_messages(session_id)
+                                   if self._configure_session_peers(session_id, user_peer, assistant_peer) else [])
 
         with self._cache_lock:
             honcho_session = self._sessions_cache.get(session_id)
@@ -273,20 +225,13 @@ class HonchoSessionManager(
         honcho_session_id = self._sanitize_id(key)
         user_peer = self._get_or_create_peer(user_peer_id)
         assistant_peer = self._get_or_create_peer(assistant_peer_id)
-        _, existing_messages = self._get_or_create_honcho_session(
-            honcho_session_id, user_peer, assistant_peer
-        )
+        _, existing_messages = self._get_or_create_honcho_session(honcho_session_id, user_peer, assistant_peer)
 
         session = HonchoSession(
-            key=key, user_peer_id=user_peer_id, assistant_peer_id=assistant_peer_id,
-            honcho_session_id=honcho_session_id,
+            key=key, user_peer_id=user_peer_id, assistant_peer_id=assistant_peer_id, honcho_session_id=honcho_session_id,
             messages=[
-                {
-                    "role": "assistant" if msg.peer_id == assistant_peer_id else "user",
-                    "content": msg.content,
-                    "timestamp": msg.created_at.isoformat() if msg.created_at else "",
-                    "_synced": True,
-                }
+                {"role": "assistant" if msg.peer_id == assistant_peer_id else "user", "content": msg.content,
+                 "timestamp": msg.created_at.isoformat() if msg.created_at else "", "_synced": True}
                 for msg in existing_messages
             ],
         )
@@ -308,13 +253,8 @@ class HonchoSessionManager(
             assistant_peer = self._get_or_create_peer(session.assistant_peer_id)
             honcho_session = self._sessions_cache.get(session.honcho_session_id)
             if honcho_session is None:
-                honcho_session, _ = self._get_or_create_honcho_session(
-                    session.honcho_session_id, user_peer, assistant_peer
-                )
-            honcho_messages = [
-                (user_peer if m["role"] == "user" else assistant_peer).message(m["content"])
-                for m in new_messages
-            ]
+                honcho_session, _ = self._get_or_create_honcho_session(session.honcho_session_id, user_peer, assistant_peer)
+            honcho_messages = [(user_peer if m["role"] == "user" else assistant_peer).message(m["content"]) for m in new_messages]
             honcho_session.add_messages(honcho_messages)
             return len(honcho_messages)
 
@@ -356,11 +296,8 @@ class HonchoSessionManager(
                 logger.error("Honcho async writer error: %s", e)
 
     def save(self, session: HonchoSession) -> None:
-        """Save messages to Honcho, respecting write_frequency.
-
-        "async" enqueues for the background thread; "turn" flushes now; "session"
-        defers until flush_all(); int N flushes every N turns.
-        """
+        """Save messages per write_frequency: "async" enqueues for the background thread; "turn"
+        flushes now; "session" defers until flush_all(); int N flushes every N turns."""
         self._turn_counter += 1
         wf = self._write_frequency
         if wf == "async":
@@ -395,10 +332,7 @@ class HonchoSessionManager(
             return
         with self._async_thread_lock:
             if self._async_thread is None or not self._async_thread.is_alive():
-                self._async_thread = spawn_context_thread(
-                    self._async_writer_loop,
-                    name="honcho-async-writer",
-                )
+                self._async_thread = spawn_context_thread(self._async_writer_loop, name="honcho-async-writer")
                 self._async_thread.start()
 
     def stop_async_writer(self) -> None:
