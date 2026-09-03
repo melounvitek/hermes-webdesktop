@@ -497,8 +497,10 @@ class WakeWordDetector:
             try:
                 self._audio_q.put_nowait(chunk)
             except Exception:
-                with suppress(Exception):  # full: drop the oldest frame, then retry once
+                # Drop oldest on overflow so we stay real-time
+                with suppress(Exception):
                     self._audio_q.get_nowait()
+                with suppress(Exception):
                     self._audio_q.put_nowait(chunk)
 
     def start(self) -> None:
@@ -703,9 +705,12 @@ def _acquire_machine_lock(path: Optional[Path] = None):
 def _release_machine_lock(handle) -> None:
     if handle is None:
         return
-    with suppress(OSError):
+    try:
         _flock(handle, False)
-    handle.close()
+    except OSError:
+        pass
+    finally:
+        handle.close()
 
 
 def _teardown_locked(close: Callable[[], None]) -> None:

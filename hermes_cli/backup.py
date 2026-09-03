@@ -192,10 +192,17 @@ def _collect_memory_provider_external_paths() -> List[Path]:
         return []
     out: Dict[Path, Path] = {}  # resolved -> first declared spelling
     for raw in declared:
-        with suppress(Exception):
+        try:
             p = Path(raw).expanduser()
-            if p.exists():
-                out.setdefault(p.resolve(), p)
+        except Exception:
+            continue
+        if not p.exists():
+            continue
+        try:
+            resolved = p.resolve()
+        except (OSError, ValueError):
+            continue
+        out.setdefault(resolved, p)
     return list(out.values())
 
 
@@ -410,11 +417,14 @@ def _foreign_db_holder_pids(db_path: Path) -> Optional[List[int]]:
     def _canonical(path: str) -> str:
         return os.path.normcase(os.path.abspath(path.removesuffix(" (deleted)")))
 
-    def _holds_watched(fd_dir: str) -> bool:
-        for fd in os.listdir(fd_dir):
-            with suppress(OSError):
-                if _canonical(os.readlink(f"{fd_dir}/{fd}")) in watched:
-                    return True
+    def _holds_watched(fds: List[str], fd_dir: str) -> bool:
+        for fd in fds:
+            try:
+                target = os.readlink(f"{fd_dir}/{fd}")
+            except OSError:
+                continue
+            if _canonical(target) in watched:
+                return True
         return False
 
     canonical_db = _canonical(os.fspath(db_path))
@@ -425,9 +435,13 @@ def _foreign_db_holder_pids(db_path: Path) -> Optional[List[int]]:
         for pid_str in os.listdir("/proc"):
             if not pid_str.isdigit() or int(pid_str) == own_pid:
                 continue
-            with suppress(OSError):
-                if _holds_watched(f"/proc/{pid_str}/fd"):
-                    pids.append(int(pid_str))
+            fd_dir = f"/proc/{pid_str}/fd"
+            try:
+                fds = os.listdir(fd_dir)
+            except OSError:
+                continue
+            if _holds_watched(fds, fd_dir):
+                pids.append(int(pid_str))
     except OSError:
         return None
     return pids

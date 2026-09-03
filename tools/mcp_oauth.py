@@ -157,13 +157,15 @@ def _cached_redirect(storage: "HermesTokenStorage | None") -> "tuple[str | None,
     it gets ``redirect_uri does not match any registered URIs``."""
     uri = port = None
     for raw in (_cached_client_info(storage) or {}).get("redirect_uris") or []:
-        with contextlib.suppress(TypeError, ValueError):
+        try:
             parsed = urlparse(str(raw))
-            if uri is None and parsed.scheme == "https" and parsed.netloc:
-                uri = str(raw)
-            is_loopback_callback = parsed.scheme == "http" and parsed.path == "/callback" and parsed.hostname in {"127.0.0.1", "localhost"}
-            if port is None and is_loopback_callback and parsed.port is not None:
-                port = int(parsed.port)
+        except (TypeError, ValueError):
+            continue
+        if uri is None and parsed.scheme == "https" and parsed.netloc:
+            uri = str(raw)
+        is_loopback_callback = parsed.scheme == "http" and parsed.path == "/callback" and parsed.hostname in {"127.0.0.1", "localhost"}
+        if port is None and is_loopback_callback and parsed.port is not None:
+            port = int(parsed.port)
     return uri, port
 
 

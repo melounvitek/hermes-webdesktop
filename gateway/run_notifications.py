@@ -372,7 +372,7 @@ class GatewayNotificationsMixin:
                 chat_id = pending.get("chat_id")
                 session_key = pending.get("session_key")
                 if not (platform_str and chat_id):
-                    return None
+                    continue  # BASE: an incomplete marker falls through to the next path, not "unresolved"
                 platform = Platform(platform_str)
                 adapter = self.adapters.get(platform)
                 if not adapter:
