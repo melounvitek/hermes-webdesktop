@@ -120,10 +120,9 @@ def _export_session_cdp(env: dict, get_session_info: Callable[[str], Any], cache
                         fail_msg: Callable[[Exception], str], no_cdp_msg: str) -> Optional[str]:
     """Export the CDP endpoint from ``get_session_info(cache_key)``; error string on failure / no CDP."""
     try:
-        session_info = get_session_info(cache_key)
+        cdp = str((get_session_info(cache_key) or {}).get("cdp_url") or "")
     except Exception as e:
         return fail_msg(e)
-    cdp = str((session_info or {}).get("cdp_url") or "")
     if not cdp:
         return no_cdp_msg
     _set_cdp_env(env, cdp)
@@ -133,11 +132,7 @@ def _export_session_cdp(env: dict, get_session_info: Callable[[str], Any], cache
 def _blocked_url_in_code(code: str) -> Optional[str]:
     """Return an error if a URL literal fails the built-in navigation checks."""
     from tools.browser_tool import evaluate_url_safety
-    for url in _URL_RE.findall(code or ""):
-        err = evaluate_url_safety(url)
-        if err:
-            return err.get("error", "Blocked: unsafe URL")
-    return None
+    return next((err.get("error", "Blocked: unsafe URL") for err in map(evaluate_url_safety, _URL_RE.findall(code or "")) if err), None)
 
 
 def _base_subprocess_env() -> dict:
@@ -163,8 +158,7 @@ def _floor_subprocess_path(path: str) -> str:
         from tools.browser_tool import _merge_browser_path
         return _merge_browser_path(path or "")
     parts = [p for p in (path or "").split(os.pathsep) if p]
-    parts.extend(d for d in _FHS_BIN_DIRS if d not in set(parts) and os.path.isdir(d))
-    return os.pathsep.join(parts)
+    return os.pathsep.join(parts + [d for d in _FHS_BIN_DIRS if d not in set(parts) and os.path.isdir(d)])
 
 
 def _read_browser_cfg() -> dict:
@@ -186,9 +180,7 @@ def get_browser_backend() -> str:
     """Configured browser backend key ("" = unset → default). YAML 1.1 parses an
     unquoted ``off`` as False — that must mean BACKEND_DISABLED, not "unset"."""
     raw = _read_browser_cfg().get("backend")
-    if isinstance(raw, bool):
-        return BACKEND_DISABLED if raw is False else ""
-    return str(raw or "").strip().lower()
+    return (BACKEND_DISABLED if raw is False else "") if isinstance(raw, bool) else str(raw or "").strip().lower()
 
 
 def is_legacy_browser_use_cloud_config(browser_cfg: dict) -> bool:
@@ -211,9 +203,7 @@ def is_browser_use_cli_mode() -> bool:
     if _camofox_active():
         return False
     backend = get_browser_backend()
-    if backend:
-        return backend == _BACKEND_KEY
-    return is_legacy_browser_use_cloud_config(_read_browser_cfg()) or _find_cli() is not None
+    return backend == _BACKEND_KEY if backend else (is_legacy_browser_use_cloud_config(_read_browser_cfg()) or _find_cli() is not None)
 
 
 def default_downgrade_notice() -> Optional[str]:
@@ -273,7 +263,6 @@ def install_cli(timeout_s: int = 600) -> Tuple[bool, str]:
     def _managed_uv() -> Optional[str]:
         from hermes_cli.managed_uv import ensure_uv
         return str(ensure_uv() or "") or None
-
     uv_bin = _quiet(_managed_uv, None, "Managed uv bootstrap unavailable") or shutil.which("uv")
     if not uv_bin:
         return False, ("uv is not available and could not be bootstrapped. Install uv "
@@ -296,7 +285,6 @@ def install_cli(timeout_s: int = 600) -> Tuple[bool, str]:
     if result.returncode != 0:
         tail = "\n".join((result.stderr or result.stdout or "").strip().splitlines()[-3:])
         return False, f"`uv tool install browser-use` failed:\n{tail}"
-
     found = _find_cli()
     if not found or len(found) != 1:
         return False, ("install reported success but the browser-use binary is still not resolvable — "
@@ -306,9 +294,8 @@ def install_cli(timeout_s: int = 600) -> Tuple[bool, str]:
 
 def _workspace_dir(task_id: Optional[str]) -> Optional[str]:
     """Stable per-task scratch dir that persists across browser_exec calls"""
-    existing = os.environ.get("BH_AGENT_WORKSPACE")
-    if existing:
-        return existing
+    if os.environ.get("BH_AGENT_WORKSPACE"):
+        return os.environ["BH_AGENT_WORKSPACE"]
     try:
         safe = _TASK_ID_SAFE_RE.sub("_", str(task_id or "default"))[:80] or "default"
         path = Path(get_hermes_home()) / "cache" / "browser-use" / "workspace" / safe
@@ -336,7 +323,6 @@ def _native_screenshot_result(result: Dict[str, Any], path: str) -> Optional[Dic
     try:
         from tools.vision_tools import (_EMBED_MAX_DIMENSION, _EMBED_TARGET_BYTES,
                                         _resize_image_for_vision, _should_use_native_vision_fast_path)
-
         if not _should_use_native_vision_fast_path():
             return None
         # History-reuse cap: this data URL bakes into the tool result and is re-sent every later turn —
@@ -345,12 +331,8 @@ def _native_screenshot_result(result: Dict[str, Any], path: str) -> Optional[Dic
                                             max_dimension=_EMBED_MAX_DIMENSION, force_jpeg=True)
         text = json.dumps(result, ensure_ascii=False)
         attached = text + "\n\nThe screenshot from this call is attached — inspect it with your native vision."
-        return {
-            "_multimodal": True,
-            "content": [{"type": "text", "text": attached}, {"type": "image_url", "image_url": {"url": data_url}}],
-            "text_summary": text,
-            "meta": {"screenshot_path": path, "native_vision": True},
-        }
+        return {"_multimodal": True, "text_summary": text, "meta": {"screenshot_path": path, "native_vision": True},
+                "content": [{"type": "text", "text": attached}, {"type": "image_url", "image_url": {"url": data_url}}]}
     except Exception as e:
         logger.debug("Native screenshot attach failed (falling back to text): %s", e)
         return None
@@ -395,18 +377,15 @@ def _resolve_backend_cdp(env: dict, task_id: Optional[str], session_name: str = 
     """
     if _has_cdp_env(env):
         return None
-
     try:
         from tools.browser_tool import _get_cdp_override, _get_cloud_provider, _get_session_info
     except Exception as e:  # pragma: no cover — stubbed browser_tool in tests
         logger.debug("browser_tool backend resolution unavailable: %s", e)
         return None
-
     override = _quiet(_get_cdp_override, "")
     if override:
         _set_cdp_env(env, override)
         return None
-
     provider = _quiet(_get_cloud_provider, None, "Cloud provider lookup failed")
     if provider is None:
         return _resolve_lightpanda_cdp(env, task_id, session_name)
@@ -443,28 +422,22 @@ def _resolve_real_profile_cdp(env: dict, force_local: bool) -> Optional[str]:
     returned so a consented user is never silently downgraded."""
     if not _real_profile_consented() or _has_cdp_env(env):
         return None
-
     try:
         from tools.browser_tool import _get_cdp_override_raw, _get_cloud_provider, _real_profile_cdp
     except Exception as e:  # pragma: no cover — stubbed browser_tool in tests
         logger.debug("real-profile backend resolution unavailable: %s", e)
         return None
-
     if _quiet(_get_cdp_override_raw, ""):
         return None
-
-    # Only auto-upgrade genuinely-local attaches; any cloud path (provider, provider lookup
-    # failure, or legacy BU cloud config) stays on its backend unless the model passes local=true.
+    # Only auto-upgrade genuinely-local attaches; any cloud path (provider, provider lookup failure, or
+    # legacy BU cloud config) stays on its backend unless the model passes local=true.
     if not force_local and (_quiet(_get_cloud_provider, object()) is not None
                             or is_legacy_browser_use_cloud_config(_read_browser_cfg())):
         return None
-
     cdp, err = _real_profile_cdp()
-    if err:
-        return err
-    if cdp:
+    if cdp and not err:
         _set_cdp_env(env, cdp)
-    return None
+    return err or None
 
 
 def _route_backend(env: dict, session: str, task_id: Optional[str], local: bool) -> Optional[str]:
@@ -484,15 +457,12 @@ def _route_backend(env: dict, session: str, task_id: Optional[str], local: bool)
 
 def _windows_popen_kwargs() -> dict:
     """Hide the console the .cmd shim would flash on Windows (as browser_tool does)."""
-    if os.name != "nt":
-        return {}
-
     def _flags() -> dict:
         from hermes_cli._subprocess_compat import windows_hide_flags
         si = subprocess.STARTUPINFO()
         si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         return {"creationflags": windows_hide_flags(), "startupinfo": si}
-    return _quiet(_flags, {}, "Windows hide-flags unavailable")
+    return _quiet(_flags, {}, "Windows hide-flags unavailable") if os.name == "nt" else {}
 
 
 def _clamp_timeout(timeout_s: Any) -> int:
@@ -568,7 +538,6 @@ def browser_exec(code: str, session: str = "", timeout_s: int = _DEFAULT_TIMEOUT
         stderr = stderr[:_STDERR_CAP_CHARS] + "\n… (stderr truncated)"
     if stderr:
         result["stderr"] = stderr
-
     screenshot = _find_screenshot(proc.stdout, started)
     if screenshot:
         result["screenshot_path"] = screenshot
@@ -637,9 +606,8 @@ def _description_header() -> str:
     if _lazy_call("tools.browser_tool", "lightpanda_engine_status", (False, ""),
                   "lightpanda engine status unavailable")[0]:  # no screenshots, whatever the model sees
         return _HEADER_BASE + _HEADER_TEXT_ONLY + _HEADER_LIGHTPANDA
-    if _lazy_call("tools.vision_tools", "_should_use_native_vision_fast_path", False, ""):
-        return _HEADER_BASE + _HEADER_VISION
-    return _HEADER_BASE + _HEADER_TEXT_ONLY
+    vision = _lazy_call("tools.vision_tools", "_should_use_native_vision_fast_path", False, "")
+    return _HEADER_BASE + (_HEADER_VISION if vision else _HEADER_TEXT_ONLY)
 
 
 def _dynamic_schema_overrides() -> dict:

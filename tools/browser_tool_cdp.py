@@ -34,7 +34,6 @@ def _resolve_cdp_override(cdp_url: str) -> str:
     san = _bt._sanitize_url_for_logs
     try:
         import requests  # lazy — shared module object, test patches still apply
-
         response = requests.get(version_url, timeout=10)
         response.raise_for_status()
         payload = response.json()
@@ -76,11 +75,9 @@ def _get_dialog_policy_config() -> Tuple[str, float]:
     _bt = _origin()
     # Deferred so browser_tool imports in minimal environments.
     from tools.browser_supervisor import DEFAULT_DIALOG_POLICY, DEFAULT_DIALOG_TIMEOUT_S, _VALID_POLICIES
-
     policy, timeout_s = DEFAULT_DIALOG_POLICY, DEFAULT_DIALOG_TIMEOUT_S
     try:
         from hermes_cli.config import read_raw_config
-
         cfg = read_raw_config()
         browser_cfg = cfg.get("browser", {}) if isinstance(cfg, dict) else {}
         if not isinstance(browser_cfg, dict):
@@ -120,7 +117,6 @@ def _ensure_cdp_supervisor(task_id: str) -> None:
         return
     try:
         from tools.browser_supervisor import SUPERVISOR_REGISTRY  # type: ignore[import-not-found]
-
         policy, timeout_s = _bt._get_dialog_policy_config()
         SUPERVISOR_REGISTRY.get_or_start(task_id=task_id, cdp_url=cdp_url, dialog_policy=policy, dialog_timeout_s=timeout_s)
     except Exception as exc:
@@ -131,7 +127,6 @@ def _stop_cdp_supervisor(task_id: str) -> None:
     """Stop the CDP supervisor for ``task_id`` if one exists. No-op otherwise."""
     try:
         from tools.browser_supervisor import SUPERVISOR_REGISTRY  # type: ignore[import-not-found]
-
         SUPERVISOR_REGISTRY.stop(task_id)
     except Exception as exc:
         _origin().logger.debug("CDP supervisor stop for task=%s failed (non-fatal): %s", task_id, exc)

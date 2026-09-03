@@ -32,20 +32,16 @@ _CDP_PRIVATE_PAGE_ALLOWED_METHODS = {
 # spans inside such payloads and corrupt the decoded bytes; the payload is not free text
 # the model reads, so redaction protects no secret there.
 _CDP_ALWAYS_BINARY_PATHS: Dict[str, tuple] = {
-    "Page.captureScreenshot": (("data",),),
-    "Page.printToPDF": (("data",),),
-    "Network.streamResourceContent": (("bufferedData",),),
-    "HeadlessExperimental.beginFrame": (("screenshotData",),),
+    "Page.captureScreenshot": (("data",),), "Page.printToPDF": (("data",),),
+    "Network.streamResourceContent": (("bufferedData",),), "HeadlessExperimental.beginFrame": (("screenshotData",),),
     "CacheStorage.requestCachedResponse": (("response", "body"),),
 }
 
 # method → result paths that are opaque base64 ONLY when the carrying dict has a
 # ``base64Encoded`` sibling that is exactly ``True``; otherwise text → redacted.
 _CDP_FLAGGED_BINARY_PATHS: Dict[str, tuple] = {
-    "Network.getResponseBody": (("body",),),
-    "Fetch.getResponseBody": (("body",),),
-    "IO.read": (("data",),),
-    "Network.getRequestPostData": (("postData",),),
+    "Network.getResponseBody": (("body",),), "Fetch.getResponseBody": (("body",),),
+    "IO.read": (("data",),), "Network.getRequestPostData": (("postData",),),
 }
 
 
@@ -58,7 +54,6 @@ def _redact_cdp_output(value: Any, *, always_paths: tuple = (), flagged_paths: t
     ``Runtime.evaluate`` by-value object could spoof.
     """
     from agent.redact import redact_sensitive_text
-
     if isinstance(value, str):
         return redact_sensitive_text(value, force=True)
     if isinstance(value, (list, tuple)):
@@ -66,22 +61,15 @@ def _redact_cdp_output(value: Any, *, always_paths: tuple = (), flagged_paths: t
     if not isinstance(value, dict):
         return value
     base64_flagged = value.get("base64Encoded") is True
-
     def leaf(paths: tuple, key: str) -> bool:
         return any(len(p) == 1 and p[0] == key for p in paths)
-
     def descend(paths: tuple, key: str) -> tuple:
         return tuple(p[1:] for p in paths if len(p) > 1 and p[0] == key)
-
     redacted: Dict[str, Any] = {}
     for key, item in value.items():
         opaque = leaf(always_paths, key) or (leaf(flagged_paths, key) and base64_flagged)
-        if isinstance(item, str) and opaque:
-            redacted[key] = item
-        else:
-            redacted[key] = _redact_cdp_output(
-                item, always_paths=descend(always_paths, key), flagged_paths=descend(flagged_paths, key),
-            )
+        redacted[key] = item if isinstance(item, str) and opaque else _redact_cdp_output(
+            item, always_paths=descend(always_paths, key), flagged_paths=descend(flagged_paths, key))
     return redacted
 
 
@@ -105,7 +93,6 @@ def _run_async(coro):
         loop = None
     if loop and loop.is_running():
         import concurrent.futures
-
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             return pool.submit(asyncio.run, coro).result()
     return asyncio.run(coro)
@@ -115,7 +102,6 @@ def _resolve_cdp_endpoint() -> str:
     """Normalized CDP WebSocket URL via ``browser_tool._get_cdp_override``, or ""."""
     try:
         from tools.browser_tool import _get_cdp_override  # type: ignore[import-not-found]
-
         return (_get_cdp_override() or "").strip()
     except Exception as exc:  # pragma: no cover — defensive
         logger.debug("browser_cdp: failed to resolve CDP endpoint: %s", exc)
@@ -129,7 +115,6 @@ def _blocked(message: str, method: str) -> str:
 def _navigate_private_target(bt: Any, params: Dict[str, Any]) -> Optional[str]:
     """Blocked URL literal for ``Page.navigate`` params, else ``None``."""
     from tools.browser_tool_eval_policy import _url_blocked
-
     target_url = str(params.get("url") or "").strip()
     return target_url if target_url and _url_blocked(bt, target_url) else None
 
@@ -152,7 +137,6 @@ def _browser_cdp_private_guard(*, task_id: str, method: str, params: Dict[str, A
     """
     try:
         from tools import browser_tool as bt  # type: ignore[import-not-found]
-
         if not bt._eval_ssrf_guard_active(task_id):  # type: ignore[attr-defined]
             return None
         guard = _METHOD_PARAM_GUARDS.get(method)
@@ -164,27 +148,18 @@ def _browser_cdp_private_guard(*, task_id: str, method: str, params: Dict[str, A
         if method not in _CDP_PRIVATE_PAGE_ALLOWED_METHODS:
             blocked_url = bt._current_page_private_url(task_id)  # type: ignore[attr-defined]
             if blocked_url:
-                return _blocked(
-                    "Blocked: page URL targets a private or internal address "
-                    f"({blocked_url}). Raw CDP method {method!r} could expose private "
-                    "page content or state.",
-                    method,
-                )
+                return _blocked(f"Blocked: page URL targets a private or internal address ({blocked_url}). "
+                                f"Raw CDP method {method!r} could expose private page content or state.", method)
     except Exception as exc:  # noqa: BLE001
         logger.debug("browser_cdp: private-page guard probe failed: %s", exc)
     return None
 
 
-async def _cdp_call(
-    ws_url: str, method: str, params: Dict[str, Any], target_id: Optional[str], timeout: float,
-) -> Dict[str, Any]:
-    """Make a single CDP call, optionally attaching to a target first.
-
-    With ``target_id``, ``Target.attachToTarget(flatten=True)`` multiplexes a page-level
-    session over the browser-level WebSocket; without it ``method`` runs at browser level.
-    """
+async def _cdp_call(ws_url: str, method: str, params: Dict[str, Any], target_id: Optional[str],
+                    timeout: float) -> Dict[str, Any]:
+    """Make a single CDP call. With ``target_id``, ``Target.attachToTarget(flatten=True)`` multiplexes a
+    page-level session over the browser-level WebSocket; without it ``method`` runs at browser level."""
     assert websockets is not None  # guarded by _WS_AVAILABLE at call-site
-
     # max_size=None: CDP responses (e.g. DOM.getDocument) can be large; ping_interval=None: CDP
     # servers don't expect pings.
     async with websockets.connect(ws_url, max_size=None, open_timeout=timeout, close_timeout=5,
@@ -193,8 +168,7 @@ async def _cdp_call(
 
         async def _send(req: Dict[str, Any], what: str) -> Dict[str, Any]:
             nonlocal next_id
-            call_id = next_id
-            next_id += 1
+            call_id, next_id = next_id, next_id + 1
             await ws.send(json.dumps({"id": call_id, **req}))
             deadline = asyncio.get_running_loop().time() + timeout
             while True:  # ignore events / out-of-order responses
@@ -222,9 +196,8 @@ async def _cdp_call(
         return msg.get("result", {})
 
 
-def _browser_cdp_via_supervisor(
-    task_id: str, frame_id: str, method: str, params: Optional[Dict[str, Any]], timeout: float,
-) -> str:
+def _browser_cdp_via_supervisor(task_id: str, frame_id: str, method: str, params: Optional[Dict[str, Any]],
+                                timeout: float) -> str:
     """Route a CDP call through the live supervisor session for an OOPIF frame."""
     try:
         from tools.browser_supervisor import SUPERVISOR_REGISTRY  # type: ignore[import-not-found]
@@ -241,19 +214,16 @@ def _browser_cdp_via_supervisor(
     tree = supervisor.snapshot().frame_tree
     frame_info: Optional[Dict[str, Any]] = next(
         (f for f in [tree.get("top"), *(tree.get("children") or [])] if f and f.get("frame_id") == frame_id), None)
-    if frame_info is None:
-        # frame_tree is capped at 30 entries — check the raw frames dict too.
+    if frame_info is None:  # frame_tree is capped at 30 entries — check the raw frames dict too.
         with supervisor._state_lock:  # type: ignore[attr-defined]
             raw = supervisor._frames.get(frame_id)  # type: ignore[attr-defined]
-        if raw is not None:
-            frame_info = raw.to_dict()
+        frame_info = raw.to_dict() if raw is not None else None
     if frame_info is None:
         return tool_error(f"frame_id {frame_id!r} not found in supervisor state. "
                           "Call browser_snapshot to see current frame_tree.")
 
     child_sid = frame_info.get("session_id")
-    if not child_sid:
-        # Same-origin iframes have no dedicated session; reach them via contentWindow/contentDocument.
+    if not child_sid:  # same-origin iframes have no dedicated session; reach them via contentWindow/contentDocument
         return tool_error(f"frame_id {frame_id!r} is not an out-of-process iframe (no dedicated CDP session). "
                           "For same-origin iframes, use `browser_cdp(method='Runtime.evaluate', params={'expression': "
                           "\"document.querySelector('iframe').contentDocument.title\"})` at the top-level page instead.")
@@ -276,22 +246,13 @@ def _browser_cdp_via_supervisor(
                        "result": result_msg.get("result", {})}, ensure_ascii=False)
 
 
-def browser_cdp(
-    method: str,
-    params: Optional[Dict[str, Any]] = None,
-    target_id: Optional[str] = None,
-    frame_id: Optional[str] = None,
-    timeout: float = 30.0,
-    task_id: Optional[str] = None,
-) -> str:
-    """Send a raw CDP command (see ``CDP_DOCS_URL``).
-
-    ``target_id`` attaches a fresh stateless connection to a tab; ``frame_id`` (OOPIF from
-    ``browser_snapshot.frame_tree``) routes through the supervisor's live WebSocket instead
-    — the only reliable way to evaluate inside an iframe where fresh per-call connections
-    hit signed-URL expiry (Browserbase). Both paths share the same private-page/SSRF guard.
-    Returns JSON ``{"success": True, "method", "result"}`` or ``{"error": ...}``.
-    """
+def browser_cdp(method: str, params: Optional[Dict[str, Any]] = None, target_id: Optional[str] = None,
+                frame_id: Optional[str] = None, timeout: float = 30.0, task_id: Optional[str] = None) -> str:
+    """Send a raw CDP command (see ``CDP_DOCS_URL``). ``target_id`` attaches a fresh stateless connection
+    to a tab; ``frame_id`` (OOPIF from ``browser_snapshot.frame_tree``) routes through the supervisor's live
+    WebSocket instead — the only reliable way to evaluate inside an iframe where fresh per-call connections
+    hit signed-URL expiry (Browserbase). Both paths share the same private-page/SSRF guard. Returns JSON
+    ``{"success": True, "method", "result"}`` or ``{"error": ...}``."""
     effective_task_id = task_id or "default"
 
     if frame_id:
@@ -328,7 +289,6 @@ def browser_cdp(
     except (TypeError, ValueError):
         safe_timeout = 30.0
     safe_timeout = max(1.0, min(safe_timeout, 300.0))
-
     try:
         result = _run_async(_cdp_call(endpoint, method, call_params, target_id, safe_timeout))
     except asyncio.TimeoutError as exc:
@@ -413,10 +373,7 @@ def _browser_cdp_check() -> bool:
     surfaced). Raw (no-I/O) gate: check_fns run at every startup, and resolving the endpoint
     over HTTP here would block launch on a stale endpoint."""
     try:
-        from tools.browser_tool import (  # type: ignore[import-not-found]
-            _get_cdp_override_raw,
-            check_browser_requirements,
-        )
+        from tools.browser_tool import _get_cdp_override_raw, check_browser_requirements  # type: ignore[import-not-found]
     except ImportError as exc:  # pragma: no cover — defensive
         logger.debug("browser_cdp check: browser_tool import failed: %s", exc)
         return False
