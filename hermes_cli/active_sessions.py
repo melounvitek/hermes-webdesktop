@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import json
 import logging
+import collections
 import math
 import os
 import time
 import uuid
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator, Optional
@@ -32,16 +33,9 @@ def coerce_max_concurrent_sessions(value: Any, key: str = "max_concurrent_sessio
     if value is None:
         return None
     try:
-        if isinstance(value, bool):
+        if isinstance(value, bool) or (isinstance(value, float) and not value.is_integer()):
             raise ValueError(value)
-        if isinstance(value, float):
-            if not value.is_integer():
-                raise ValueError(value)
-            parsed = int(value)
-        elif isinstance(value, str):
-            parsed = int(value.strip(), 10)
-        else:
-            parsed = int(value)
+        parsed = int(value.strip(), 10) if isinstance(value, str) else int(value)
     except (TypeError, ValueError):
         logger.warning(
             "Ignoring invalid %s=%r (expected a positive integer; 0/null disables)", key, value
@@ -79,10 +73,7 @@ def summarize_holders(entries: list[dict[str, Any]]) -> str:
     """Compact "who is holding the slots" phrase, e.g. ``desktop x4, cli``."""
     if not entries:
         return ""
-    counts: dict[str, int] = {}
-    for entry in entries:
-        surface = str(entry.get("surface") or "unknown")
-        counts[surface] = counts.get(surface, 0) + 1
+    counts = collections.Counter(str(e.get("surface") or "unknown") for e in entries)
     held = ", ".join(
         f"{surface} x{n}" if n > 1 else surface
         for surface, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
@@ -177,7 +168,7 @@ def _lease_paths(
     if lease is not None and lease.state_path is not None and lease.lock_path is not None:
         return lease.state_path, lease.lock_path
     home = _registry_home(registry_home)
-    return _state_path(home), _lock_path(home)
+    return home / "runtime" / "active_sessions.json", home / "runtime" / "active_sessions.lock"
 
 
 def _flock(fh, *, lock: bool) -> None:
@@ -208,16 +199,11 @@ class _FileLock:
         return self
 
     def __exit__(self, exc_type, exc, tb):
-        if self._fh is None:
-            return
-        try:
-            _flock(self._fh, lock=False)
-        except Exception:
-            pass
-        try:
-            self._fh.close()
-        finally:
-            self._fh = None
+        fh, self._fh = self._fh, None
+        if fh is not None:
+            with suppress(Exception):
+                _flock(fh, lock=False)
+            fh.close()
 
 
 def _read_entries(path: Path, *, strict: bool = False) -> list[dict[str, Any]]:
@@ -330,7 +316,7 @@ def _pid_liveness(pid: Any, process_start_time: Any = None, *, lenient: bool = F
     try:
         pid_int = int(pid)
     except (TypeError, ValueError):
-        return unknown_dead
+        pid_int = 0
     if pid_int <= 0:
         return unknown_dead
     try:
@@ -493,6 +479,11 @@ def try_acquire_active_session(
         if pruned:
             logger.info("Pruned %d stale active session lease(s)", pruned)
 
+        def refuse(message: str, reason: str, log: str, *args) -> tuple[None, ActiveSessionRefusal]:
+            _write_entries(state_path, entries)  # persist the prune even when refusing
+            logger.info(log, *args)
+            return None, ActiveSessionRefusal(message, reason)
+
         # Correctness first, under the same lock that just pruned dead owners.
         # An empty key is exempt: treating "" as an identity would make every
         # unsaved draft exclude every other one.
@@ -508,26 +499,19 @@ def try_acquire_active_session(
                     entries[index] = entry
                     _write_entries(state_path, entries)
                     return lease, None
-                _write_entries(state_path, entries)
-                logger.info(
+                return refuse(
+                    session_already_owned_message(key, existing), SESSION_NOT_OWNED,
                     "Refused active session %s: already held by pid=%s surface=%s",
                     key, existing.get("pid"), existing.get("surface"),
-                )
-                return None, ActiveSessionRefusal(
-                    session_already_owned_message(key, existing), SESSION_NOT_OWNED
                 )
 
         # Capacity second, and only when an operator asked for one.
         if max_sessions is not None and len(entries) >= max_sessions:
-            active_count = len(entries)
-            _write_entries(state_path, entries)
-            logger.info(
-                "Active session limit reached: active=%d max=%d surface=%s",
-                active_count, max_sessions, surface,
-            )
-            return None, ActiveSessionRefusal(
-                active_session_limit_message(active_count, max_sessions, entries),
+            return refuse(
+                active_session_limit_message(len(entries), max_sessions, entries),
                 MAX_CONCURRENT_SESSIONS,
+                "Active session limit reached: active=%d max=%d surface=%s",
+                len(entries), max_sessions, surface,
             )
         entries.append(entry)
         _write_entries(state_path, entries)
@@ -577,26 +561,22 @@ def transfer_active_session(
         if loaded is None:
             return False
         entries = loaded[1]
-        updated = False
-        for entry in entries:
-            if str(entry.get("lease_id") or "") != lease.lease_id:
-                continue
-            entry["session_id"] = new_session_id
-            entry["updated_at"] = time.time()
+        own = next((e for e in entries if str(e.get("lease_id") or "") == lease.lease_id), None)
+        if own is not None:
+            own["session_id"] = new_session_id
+            own["updated_at"] = time.time()
             if metadata:
-                entry["metadata"] = _clean_metadata(metadata)
-            updated = True
-            break
-        if not updated and lease.track_liveness:
+                own["metadata"] = _clean_metadata(metadata)
+        elif lease.track_liveness:
             entries.append(_lease_entry(
                 lease_id=lease.lease_id, session_id=new_session_id, surface=lease.surface,
                 metadata=metadata, track_liveness=True,
             ))
-            updated = True
-        if updated:
-            _write_entries(state_path, entries)
-            lease.session_id = new_session_id
-        return updated
+        else:
+            return False
+        _write_entries(state_path, entries)
+        lease.session_id = new_session_id
+        return True
 
 
 def release_orphaned_leases(live_lease_ids: set[str]) -> int:
