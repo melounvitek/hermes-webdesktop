@@ -1287,15 +1287,12 @@ def _collect_auto_append_media_tags(
     history_media_paths: Optional[set] = None) -> tuple[List[str], bool]:
     """Collect real media tags from current-turn producer-tool results only.
 
-    Producer allowlist: docs/logs/search results contain example MEDIA: strings that must never
-    become attachments. Current-turn isolation: if mid-run compression shrank the list below the
-    history length the slice is untrustworthy, so scan every message (dedup via history_media_paths).
-    """
+    Producer allowlist: docs/logs/search results contain example MEDIA: strings that must never become
+    attachments. If mid-run compression shrank the list below the history length the slice is
+    untrustworthy, so scan every message (dedup via history_media_paths)."""
     history_media_paths = history_media_paths or set()
-    if history_offset and len(messages) >= history_offset:
-        new_messages = messages[history_offset:]
-    else:
-        new_messages = messages
+    new_messages = (messages[history_offset:]
+                    if history_offset and len(messages) >= history_offset else messages)
 
     tool_name_by_call_id = _tool_name_by_call_id(new_messages)
 
@@ -1309,8 +1306,7 @@ def _collect_auto_append_media_tags(
             continue
         content = str(msg.get("content") or "")
         tool_name = tool_name_by_call_id.get(call_id)
-        # JSON-payload tools (image_generate) return a local-file path in a known field, not a
-        # MEDIA: tag; extract it so delivery is deterministic even if the model omits the path.
+        # image_generate emits a JSON path field, not a MEDIA: tag; extract it: deterministic delivery.
         if tool_name == "image_generate" and "MEDIA:" not in content:
             try:
                 payload = json.loads(content)
@@ -1338,9 +1334,7 @@ def _collect_auto_append_media_tags(
 
 
 def _collect_history_media_paths(agent_history: List[Dict[str, Any]]) -> set:
-    """Collect every media path already delivered in prior assistant/tool output (dedup set).
-
-    Both the JSON-payload and assistant-message shapes must be covered or delivery repeats."""
+    """Dedup set of media paths already delivered (JSON-payload and assistant-message shapes alike)."""
     paths: set = set()
     tool_name_by_call_id = _tool_name_by_call_id(agent_history)
 
@@ -1355,16 +1349,13 @@ def _collect_history_media_paths(agent_history: List[Dict[str, Any]]) -> set:
 
     for msg in agent_history:
         role = msg.get("role")
-        if role == "assistant":
-            content = str(msg.get("content", "") or "")
-            if "MEDIA:" in content:
-                _add_text_media_paths(content)
-            continue
-        if role not in {"tool", "function"}:
+        if role not in ("assistant", "tool", "function"):
             continue
         content = str(msg.get("content", "") or "")
         if "MEDIA:" in content:
             _add_text_media_paths(content)
+            continue
+        if role == "assistant":
             continue
         cid = str(msg.get("tool_call_id") or msg.get("call_id") or "")
         if tool_name_by_call_id.get(cid) == "image_generate":
@@ -1381,10 +1372,8 @@ def _collect_history_media_paths(agent_history: List[Dict[str, Any]]) -> set:
     return paths
 
 def _ensure_ssl_certs() -> None:
-    """Set SSL_CERT_FILE when the system hides CA certs from Python (NixOS etc.).
-
-    Must run BEFORE any HTTP library (discord, aiohttp) is imported. A set-but-missing path makes
-    every later httpx/OpenAI client fail in ssl.load_verify_locations(), so treat it as unset."""
+    """Set SSL_CERT_FILE when the system hides CA certs from Python (NixOS etc.); must run BEFORE any
+    HTTP library is imported. A set-but-missing path breaks every later httpx client: treat as unset."""
     configured_cert = os.environ.get("SSL_CERT_FILE")
     if configured_cert:
         if os.path.exists(configured_cert):
@@ -1426,12 +1415,9 @@ def _ensure_ssl_certs() -> None:
             return
 
 def _home_target_env_var(platform_name: str) -> str:
-    """Return the home-target env var for a platform.
-
-    Built-in ``_HOME_TARGET_ENV_VARS``, then the plugin registry, then ``<PLATFORM>_HOME_CHANNEL``.
-    """
+    """Home-target env var: built-in ``_HOME_TARGET_ENV_VARS``, plugin registry, then
+    ``<PLATFORM>_HOME_CHANNEL``."""
     from cron.scheduler import _resolve_home_env_var
-
     return _resolve_home_env_var(platform_name) or f"{platform_name.upper()}_HOME_CHANNEL"
 
 
@@ -1477,19 +1463,14 @@ load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).resolve(
 
 
 def _reload_runtime_env_preserving_config_authority() -> None:
-    """Reload .env for fresh credentials without letting stale .env override config.
-
-    Long-lived gateways reload ~/.hermes/.env per turn for rotated keys; config.yaml stays
-    authoritative for budgets (else stale HERMES_MAX_ITERATIONS wins). Multiplex mode never reloads
-    .env globally (secrets come from the per-turn ``set_secret_scope``; mutating ``os.environ`` would
-    leak the default profile's keys to every profile) but still honors the max_turns bridge."""
+    """Reload .env per turn for rotated keys while config.yaml stays authoritative for budgets (else a
+    stale HERMES_MAX_ITERATIONS wins). Multiplex never reloads .env globally: secrets come from the
+    per-turn ``set_secret_scope`` and mutating ``os.environ`` would leak the default profile's keys to
+    every profile; it still honors the max_turns bridge."""
     from agent.secret_scope import is_multiplex_active
-    if is_multiplex_active():
-        _bridge_max_turns_from_config(_hermes_home)
-        return
-
-    load_hermes_dotenv(
-        hermes_home=_hermes_home, project_env=Path(__file__).resolve().parents[1] / '.env')
+    if not is_multiplex_active():
+        load_hermes_dotenv(
+            hermes_home=_hermes_home, project_env=Path(__file__).resolve().parents[1] / '.env')
     _bridge_max_turns_from_config(_hermes_home)
 
 
@@ -1507,10 +1488,9 @@ def _bridge_max_turns_from_config(home: "Path") -> None:
 
 
 def _current_max_iterations() -> int:
-    """Return the current per-turn iteration budget after runtime env refresh.
-
-    Uses ``resolve_turn_limit`` so ``agent.max_turns: none``/``unlimited`` (bridged as a string
-    into ``HERMES_MAX_ITERATIONS``) yields the unlimited sentinel instead of an ``int()`` crash."""
+    """Return the per-turn iteration budget after runtime env refresh; ``resolve_turn_limit`` maps
+    ``agent.max_turns: none``/``unlimited`` (bridged as a string) to the unlimited sentinel, not an
+    ``int()`` crash."""
     _reload_runtime_env_preserving_config_authority()
     from hermes_cli.config import resolve_turn_limit as _resolve_turn_limit
     return _resolve_turn_limit(os.getenv("HERMES_MAX_ITERATIONS"))
@@ -1520,45 +1500,35 @@ from contextlib import asynccontextmanager as _asynccontextmanager, contextmanag
 
 
 class MultiplexConfigError(RuntimeError):
-    """A profile multiplexer config is invalid.
-
-    Distinct from a transient adapter-connect failure: the operator must fix config.yaml, so it
-    propagates to the startup guard instead of being treated as retryable adapter noise."""
+    """Invalid profile multiplexer config: the operator must fix config.yaml, so it propagates to the
+    startup guard instead of being treated as retryable adapter-connect noise."""
 
 
 class SecondaryPortBindingConfigError(MultiplexConfigError):
-    """A secondary profile enabled a port-binding platform.
-
-    The default profile owns the single shared listener (serving every profile via /p/<profile>/),
-    so this is always a misconfiguration and is skipped rather than taking down the multiplexer."""
+    """A secondary profile enabled a port-binding platform: the default profile owns the single shared
+    listener (/p/<profile>/), so this is always a misconfiguration and is skipped, not fatal."""
 
 
 class HygieneTurnHoldExceeded(Exception):
-    """Hygiene-compression turn-hold budget elapsed while the summary model was still streaming.
-
-    Availability boundary, not a failure: must NOT take the idle-timeout failure path
-    (AGENT_COMPRESSION_TIMEOUT, "no output" message, failure cooldown ladder)."""
+    """Hygiene-compression turn-hold budget elapsed mid-stream. Availability boundary, not a failure:
+    must NOT take the idle-timeout path (AGENT_COMPRESSION_TIMEOUT, "no output", failure cooldown)."""
 
 
 def _multiplex_profile_homes(config: object) -> list[tuple[str, "Path"]]:
     """Return the authoritative profile set for one multiplex gateway config."""
     from hermes_cli.profiles import profiles_to_serve
-
     return list(profiles_to_serve(
         multiplex=True, profile_allowlist=getattr(config, "multiplex_profile_allowlist", None)))
 
 
 def _enable_multiplex_log_routing(config: object) -> bool:
-    """Route agent.log/errors.log/gateway.log records to their owning profile.
-
+    """Route agent.log/errors.log/gateway.log records to their owning profile (inert single-profile).
     ``setup_logging(mode="gateway")`` binds file handlers to the launch home, so under multiplexing
-    every secondary profile's records would land in the default profile's logs. Inert single-profile.
-    """
+    every secondary profile's records would land in the default profile's logs."""
     if not getattr(config, "multiplex_profiles", False):
         return False
     try:
         from hermes_logging import enable_profile_log_routing
-
         return enable_profile_log_routing([home for _name, home in _multiplex_profile_homes(config)])
     except Exception:
         logger.debug("could not enable per-profile log routing", exc_info=True)
@@ -1566,12 +1536,10 @@ def _enable_multiplex_log_routing(config: object) -> bool:
 
 
 def _handoff_watch_scopes(runner: object) -> list:
-    """``(profile_name, home)`` pairs whose ``state.db`` the watcher must poll.
-
-    ``/handoff`` writes into the store of the profile the CLI ran under; an unscoped watcher polls
-    only the ROOT store, so a secondary profile's handoff would never be seen (CLI times out).
-    ``(None, None)`` = root poll, always first; secondary profiles follow (default not repeated).
-    A raising resolver degrades to the root poll rather than silently disabling the watcher."""
+    """``(profile_name, home)`` pairs whose ``state.db`` the watcher must poll; ``(None, None)`` = root
+    poll, always first. ``/handoff`` writes into the store of the profile the CLI ran under; an unscoped
+    watcher polls only the ROOT store, so a secondary profile's handoff would never be seen (CLI times
+    out). A raising resolver degrades to the root poll rather than silently disabling the watcher."""
     scopes: list = [(None, None)]
     try:
         config = getattr(runner, "config", None)
@@ -1586,21 +1554,15 @@ def _handoff_watch_scopes(runner: object) -> list:
 
 
 async def _reclaim_stale(runner: object) -> None:
-    """Fail handoffs left in ``running`` by a gateway that died mid-dispatch.
-
-    Runs once per store at watcher startup. ``running`` is only set for one in-process dispatch, so
-    a leftover row belongs to a dead process and blocks ``request_handoff`` for that session forever.
-    Defensive: a raising reclaim would abort startup."""
-    session_db = getattr(runner, "_session_db", None)
-    if session_db is None:
-        return
-    reclaim = getattr(session_db, "reclaim_stale_running_handoffs", None)
+    """Fail handoffs left in ``running`` by a gateway that died mid-dispatch (once per store at startup).
+    ``running`` is only set for one in-process dispatch, so a leftover row belongs to a dead process and
+    blocks ``request_handoff`` for that session forever. Defensive: a raising reclaim aborts startup."""
+    reclaim = getattr(getattr(runner, "_session_db", None), "reclaim_stale_running_handoffs", None)
     if not callable(reclaim):
         return
     try:
         ids = await reclaim(
-            "gateway stopped mid-handoff; state reclaimed at startup. Re-run /handoff to try again."
-        )
+            "gateway stopped mid-handoff; state reclaimed at startup. Re-run /handoff to try again.")
     except Exception:
         logger.debug("Stale-handoff reclaim raised", exc_info=True)
         return
@@ -1611,10 +1573,8 @@ async def _reclaim_stale(runner: object) -> None:
 
 
 def _terminal_scope_cwd(default: str = "") -> str:
-    """Scope-aware TERMINAL_CWD read for footer/context surfaces.
-
-    Only an import failure falls back: an active refusal scope must raise, not use the launch cwd.
-    """
+    """Scope-aware TERMINAL_CWD read for footer/context surfaces. Only an import failure falls back:
+    an active refusal scope must raise, not use the launch cwd."""
     try:
         from tools.terminal_scope import terminal_env as _ts_env
     except ImportError:
@@ -1641,7 +1601,6 @@ def _profile_runtime_scope(
     profile_home: "Path", prepared_secret_scope: Optional[dict] = None, *,
     hydrate_secrets: bool = True):
     """Scope config/skills/memory AND credentials to a profile for one turn (multiplexed path only).
-
     ``set_hermes_home_override`` is a contextvar (reaches the agent worker via ``copy_context()``);
     ``set_secret_scope`` makes the profile ``.env`` the credential source without mutating
     ``os.environ``, so subprocesses never inherit cross-profile secrets."""
@@ -1654,13 +1613,10 @@ def _profile_runtime_scope(
     elif hydrate_secrets:
         secrets = _load_profile_secret_scope(Path(profile_home))
     else:
-        # Caller already hydrated external sources off-loop.
-        from agent.secret_scope import build_profile_secret_scope
-
+        from agent.secret_scope import build_profile_secret_scope  # caller already hydrated off-loop
         secrets = build_profile_secret_scope(Path(profile_home))
     secret_token = set_secret_scope(secrets)
-    # Third profile seam: install the routed profile's COMPLETE terminal policy (never ambient env),
-    # else terminal_tool reads process-global TERMINAL_* vars a prior turn pinned (first-writer-wins).
+    # Install the routed profile's COMPLETE terminal policy, never ambient TERMINAL_* a prior turn set.
     from tools.terminal_scope import install_and_reset_profile_terminal_scope
 
     with install_and_reset_profile_terminal_scope(Path(profile_home)):
@@ -1680,11 +1636,9 @@ async def _async_profile_runtime_scope(profile_home: "Path"):
 
 
 def load_gateway_config_for_runner() -> "GatewayConfig":
-    """Load gateway config for the process-level GatewayRunner.
-
-    With multiplexing on, reload under the default profile's ``_profile_runtime_scope`` so platform
-    tokens in that profile's ``.env`` resolve via the secret scope (as secondary profiles do);
-    unscoped, ``_getenv`` falls to ``os.environ``, which often lacks a token living only under
+    """Load gateway config for the process-level GatewayRunner. Multiplexed: reload under the default
+    profile's ``_profile_runtime_scope`` so platform tokens in its ``.env`` resolve via the secret
+    scope; unscoped ``_getenv`` falls to ``os.environ``, which often lacks a token living only under
     ``profiles/<name>/.env``. Off -> identical to ``load_gateway_config()``."""
     cfg = load_gateway_config()
     if not getattr(cfg, "multiplex_profiles", False):
@@ -1697,19 +1651,15 @@ def load_gateway_config_for_runner() -> "GatewayConfig":
         with _profile_runtime_scope(Path(home)):
             return load_gateway_config()
     except Exception:
-        logger.debug(
-            "multiplex default-scope config reload failed; using unscoped load", exc_info=True)
+        logger.debug("multiplex default-scope config reload failed; using unscoped load", exc_info=True)
         return cfg
 
 
 async def _discover_gateway_mcp_tools(config: object) -> None:
-    """Run startup MCP discovery for every profile this gateway serves.
-
-    ``discover_mcp_tools`` reads ``mcp_servers`` from ``get_hermes_home()``'s config, so an unscoped
-    call only connects the launch profile's servers. Single-profile gateways keep the unscoped call.
-    """
+    """Run startup MCP discovery for every profile this gateway serves: ``discover_mcp_tools`` reads
+    ``mcp_servers`` from ``get_hermes_home()``'s config, so an unscoped call only connects the launch
+    profile's servers (single-profile gateways keep the unscoped call)."""
     from tools.mcp_tool import discover_mcp_tools
-
     loop = asyncio.get_running_loop()
     if not getattr(config, "multiplex_profiles", False):
         await loop.run_in_executor(None, discover_mcp_tools)
@@ -1723,41 +1673,30 @@ async def _discover_gateway_mcp_tools(config: object) -> None:
 
 
 def _platform_has_bot_credential(platform: "Platform", platform_config: "PlatformConfig") -> bool:
-    """Return True when a token-authenticated platform has a usable bot credential.
-
-    Platforms that do not use ``PlatformConfig.token`` always return True so we
-    never skip them here (Signal session paths, port-binding HTTP adapters, etc.)."""
+    """Return True when a token-authenticated platform has a usable bot credential; platforms not using
+    ``PlatformConfig.token`` (Signal session paths, port-binding HTTP adapters) always return True."""
     from gateway.config import PLATFORM_TOKEN_ENV_NAMES, Platform
-
     if platform not in PLATFORM_TOKEN_ENV_NAMES:
         return True
-    token = getattr(platform_config, "token", None) or ""
-    if isinstance(token, str) and token.strip():
-        return True
-    # Some adapters also accept api_key as the primary credential.
-    api_key = getattr(platform_config, "api_key", None) or ""
-    if isinstance(api_key, str) and api_key.strip():
-        return True
-    # Matrix also authenticates by password (MATRIX_USER_ID + MATRIX_PASSWORD in ``extra``); a
-    # token-only check would evict a reconnectable config from the retry queue on the first transient
-    # failure. Mirror the adapter's gate, reading ONLY extra (build_config() copies env vars there):
-    # an env fallback would report "has credential" for every Matrix config (incl. empty-primary mux).
-    if platform is Platform.MATRIX:
-        extra = getattr(platform_config, "extra", None) or {}
-        if all(str(extra.get(key) or "").strip() for key in ("homeserver", "user_id", "password")):
+    for attr in ("token", "api_key"):  # some adapters accept api_key as the primary credential
+        value = getattr(platform_config, attr, None) or ""
+        if isinstance(value, str) and value.strip():
             return True
-    return False
+    # Matrix also authenticates by password; a token-only check would evict a reconnectable config from
+    # the retry queue. Read ONLY extra (build_config() copies env there): env fallback = every config OK.
+    if platform is not Platform.MATRIX:
+        return False
+    extra = getattr(platform_config, "extra", None) or {}
+    return all(str(extra.get(key) or "").strip() for key in ("homeserver", "user_id", "password"))
 
 
 _DOCKER_VOLUME_SPEC_RE = re.compile(r"^(?P<host>.+):(?P<container>/[^:]+?)(?::(?P<options>[^:]+))?$")
 _DOCKER_MEDIA_OUTPUT_CONTAINER_PATHS = {"/output", "/outputs"}
 
-# Internal bridge plumbing, not a user-facing config source: initialize from the canonical config
-# default after dotenv loading so an ambient process/.env value can never control lease safety.
+# Internal bridge, not a config source: seed from the canonical default after dotenv so an ambient
+# process/.env value can never control lease safety.
 from hermes_cli.config_defaults import DEFAULT_CONFIG as _DEFAULT_CONFIG
-
-os.environ["HERMES_TURN_LEASE_TIMEOUT"] = str(
-    _DEFAULT_CONFIG["agent"]["gateway_turn_lease_timeout"])
+os.environ["HERMES_TURN_LEASE_TIMEOUT"] = str(_DEFAULT_CONFIG["agent"]["gateway_turn_lease_timeout"])
 
 # Bridge config.yaml values into env so os.getenv() picks them up. config.yaml unconditionally wins
 # over .env for these keys; a `not in os.environ` guard would let stale .env entries shadow config.
@@ -1791,10 +1730,9 @@ def _bridge_section_to_env(section: Any, mapping: Dict[str, str]) -> None:
 
 
 def _bridge_max_turns_to_env(agent_cfg: Any) -> None:
-    """Bridge ``agent.max_turns`` preserving its raw spelling ("none", "unlimited", "120").
-
-    Python None (`null` / bare `key:`) clears a stale bridge instead: str(None) -> "None" would map
-    to the unlimited sentinel rather than "absent = default"."""
+    """Bridge ``agent.max_turns`` preserving its raw spelling ("none", "unlimited", "120"); Python None
+    (`null` / bare `key:`) clears a stale bridge instead, since str(None) -> "None" would map to the
+    unlimited sentinel rather than "absent = default"."""
     if not isinstance(agent_cfg, dict) or "max_turns" not in agent_cfg:
         return
     raw = agent_cfg["max_turns"]
@@ -1857,8 +1795,7 @@ def _bridge_terminal_config_to_env(_terminal_cfg: dict) -> None:
 
 
 def _bridge_auxiliary_config_to_env(_auxiliary_cfg: dict) -> None:
-    """Bridge auxiliary model/endpoint overrides (vision, approval, plugin tasks); compression reads
-    config.yaml directly."""
+    """Bridge auxiliary model/endpoint overrides (vision, approval, plugins); compression reads yaml."""
     _aux_bridged_keys = {"vision", "approval"}
     try:
         from hermes_cli.plugins import get_plugin_auxiliary_tasks
@@ -1897,12 +1834,9 @@ def _bridge_config_to_env(_cfg: dict) -> None:
     _bridge_section_to_env(_cfg.get("sessions", {}), _SESSIONS_ENV_BRIDGE)
     _display_cfg = _cfg.get("display", {})
     _bridge_section_to_env(_display_cfg, _DISPLAY_ENV_BRIDGE)
-    if (
-        isinstance(_display_cfg, dict)
-        # Documented service-manager override: env wins when already set (other display bridges stay
-        # config-authoritative for backwards compatibility).
-        and "busy_steer_ack_enabled" in _display_cfg
-        and "HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED" not in os.environ):
+    # Documented service-manager override: env wins when set (other display bridges stay config-first).
+    if (isinstance(_display_cfg, dict) and "busy_steer_ack_enabled" in _display_cfg
+            and "HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED" not in os.environ):
         os.environ["HERMES_GATEWAY_BUSY_STEER_ACK_ENABLED"] = str(_display_cfg["busy_steer_ack_enabled"])
     _tz_cfg = _cfg.get("timezone", "")
     if _tz_cfg and isinstance(_tz_cfg, str):
@@ -1914,23 +1848,20 @@ def _bridge_config_to_env(_cfg: dict) -> None:
     _gateway_cfg = _cfg.get("gateway", {})
     if isinstance(_gateway_cfg, dict):
         from gateway.media_policy import apply_media_policy_env
-
         apply_media_policy_env(_cfg)
         _trust_recent_seconds = _gateway_cfg.get("trust_recent_files_seconds")
         if _trust_recent_seconds is not None:
             os.environ["HERMES_MEDIA_TRUST_RECENT_SECONDS"] = str(_trust_recent_seconds)
         # platform_connect_timeout is an escape hatch, unlike the bridges above: env WINS if already set.
-        if (
-            "platform_connect_timeout" in _gateway_cfg
-            and not os.environ.get("HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT", "").strip()):
+        if ("platform_connect_timeout" in _gateway_cfg
+                and not os.environ.get("HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT", "").strip()):
             os.environ["HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT"] = str(_gateway_cfg["platform_connect_timeout"])
 
 
 def _load_bridge_config(config_path: Path) -> dict:
-    """Raw config read for the presence-sensitive env bridge, with the managed overlay applied.
-
-    Raw (not defaults-merged) so only keys the user wrote are bridged, else all of DEFAULT_CONFIG
-    would be exported. Managed overlay applies BEFORE bridging so pinned values win in env too."""
+    """Raw config read for the presence-sensitive env bridge, with the managed overlay applied. Raw (not
+    defaults-merged) so only keys the user wrote are bridged, else all of DEFAULT_CONFIG would be
+    exported; the overlay applies BEFORE bridging so pinned values win in env too."""
     from hermes_cli.config import _expand_env_vars, read_user_config_raw
     cfg = _expand_env_vars(read_user_config_raw(config_path))
     if not isinstance(cfg, dict):
@@ -2062,9 +1993,8 @@ def _best_effort(fn: Callable[[], Any], debug_msg: Optional[str] = None) -> Any:
         return None
 
 
-# Shutdown quiesce ceiling for the gateway-owned thread pool. Drain already waited for the agents;
-# what remains is short blocking work — anything slower is a stuck worker we must not wait on
-# (the caller clamps this to the watchdog leash anyway).
+# Shutdown quiesce ceiling for the gateway-owned thread pool. Drain already waited for the agents; what
+# remains is short blocking work; anything slower is a stuck worker not worth waiting on (leash-clamped).
 _EXECUTOR_QUIESCE_TIMEOUT = 2.0
 
 
@@ -2086,35 +2016,32 @@ def _own_policy_open_startup_violation(config) -> Optional[str]:
             continue
         dm_env, group_env, allow_all_env = open_env
         extra = getattr(platform_config, "extra", None) or {}
-        dm_policy = str(
-            extra.get("dm_policy") or (_getenv(dm_env, "pairing") if dm_env else "pairing")
-        ).strip().lower()
+        dm_policy = str(extra.get("dm_policy")
+                        or (_getenv(dm_env, "pairing") if dm_env else "pairing")).strip().lower()
         group_policy = str(
             extra.get("group_policy") or (_getenv(group_env, "pairing") if group_env else "pairing")
         ).strip().lower()
         if dm_policy != "open" and group_policy != "open":
             continue
         gateway_allow_all = _getenv("GATEWAY_ALLOW_ALL_USERS", "").lower() in {"true", "1", "yes"}
-        platform_opted_in = gateway_allow_all or (
-            allow_all_env and _getenv(allow_all_env, "").lower() in {"true", "1", "yes"})
-        if platform_opted_in:
+        if gateway_allow_all or (
+                allow_all_env and _getenv(allow_all_env, "").lower() in {"true", "1", "yes"}):
             continue
         return f"{platform.value}: open policy without allow-all opt-in"
     return None
 
 
-# Sentinel placed into _running_agents *before* any await when a session starts processing, so a
-# second message can't slip past the "already running" guard before the agent actually exists.
+# Placed into _running_agents *before* any await so a second message can't slip past the "already
+# running" guard before the agent exists.
 _AGENT_PENDING_SENTINEL = object()
 
 # Conversation-scoped per-session state registry (legacy contract). State lives in
-# ``SessionState.conversation`` and boundaries clear it via ``ConversationState.clear()``; this list
-# remains for plain-dict stores not yet folded in (``_pending_model_notes``, popped per-key by
-# _clear_conversation_scope) and the public test contract. NOT listed (different lifecycles):
-# turn-scoped _running_agents*/_active_session_leases/_busy_ack_ts/_turn_lease_tokens (owned by
-# _release_running_agent_state + dispatch finally); _session_run_generation (monotonic — clearing
-# breaks stale-run detection); _agent_cache (_evict_cached_agent); approval/slash-confirm state
-# (_clear_session_boundary_security_state).
+# ``SessionState.conversation`` (cleared via ``ConversationState.clear()``); this list remains for
+# plain-dict stores not yet folded in (``_pending_model_notes``, popped per-key by
+# _clear_conversation_scope) and the public test contract. NOT listed (different lifecycles): turn-scoped
+# _running_agents*/_active_session_leases/_busy_ack_ts/_turn_lease_tokens (_release_running_agent_state +
+# dispatch finally); _session_run_generation (monotonic; clearing breaks stale-run detection);
+# _agent_cache (_evict_cached_agent); approval/slash-confirm (_clear_session_boundary_security_state).
 _CONVERSATION_SCOPED_STATE: tuple = (
     "_session_model_overrides",
     "_pending_one_turn_model_restores",
