@@ -1078,13 +1078,11 @@ class GatewayAdapterLifecycleMixin:
                         and not getattr(adapter, "fatal_error_retryable", True)
                     ):
                         return
-                except asyncio.CancelledError:
+                except BaseException as exc:
                     if adapter is not None:
                         await self._safe_adapter_disconnect(adapter, platform)
-                    raise
-                except Exception:
-                    if adapter is not None:
-                        await self._safe_adapter_disconnect(adapter, platform)
+                    if not isinstance(exc, Exception):
+                        raise  # CancelledError (and other BaseExceptions) propagate after release
                     logger.debug(
                         "Secondary %s reconnect attempt failed (profile: %s)", platform.value,
                         profile_name, exc_info=True,
@@ -1138,7 +1136,7 @@ class GatewayAdapterLifecycleMixin:
                 )
 
         async def _await_running_then_schedule() -> None:
-            if self._running:
+            if self._running:  # fast path (also the only path for bare runners without _shutdown_event)
                 _handoff()
                 return
             # Poll (startup completion has no event); bounded so a wedged startup cannot spin.
