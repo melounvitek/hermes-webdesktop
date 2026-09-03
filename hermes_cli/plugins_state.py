@@ -22,16 +22,13 @@ _PLUGIN_STATE_LOCKS_GUARD = threading.Lock()
 
 
 def _plugin_relative_segments(key: str) -> tuple[str, ...]:
-    """Validate/split a plugin-relative settings key; global paths, traversal, and core roots are
-    rejected before any config read."""
+    """Validate/split a plugin-relative settings key; global paths, traversal, and core roots are rejected
+    before any config read."""
     if not isinstance(key, str):
         raise ValueError("Expected a plugin-relative config key string")
     segments = tuple(key.split("."))
-    if (
-        not key or "/" in key or "\\" in key
-        or not all(_PLUGIN_SETTING_SEGMENT_RE.fullmatch(segment) for segment in segments)
-        or segments[0].lower() in _PLUGIN_SETTING_RESERVED_ROOTS
-    ):
+    invalid = not key or "/" in key or "\\" in key or segments[0].lower() in _PLUGIN_SETTING_RESERVED_ROOTS
+    if invalid or not all(_PLUGIN_SETTING_SEGMENT_RE.fullmatch(segment) for segment in segments):
         raise ValueError(
             "Expected a plugin-relative config key such as 'endpoint' or "
             "'retry.policy'; global, cross-plugin, and traversal paths are forbidden"
@@ -64,27 +61,23 @@ def _plugin_settings_entry(config: object, plugin_id: str) -> Mapping[str, Any] 
 
 
 def _plugin_data_namespace(plugin_id: str, skill_namespace: str) -> str:
-    """Return one Windows-safe directory component for plugin-owned data."""
+    """Return one Windows-safe directory component for plugin-owned data. Portable Agent Plugins already
+    receive this exact PLUGIN_DATA path; otherwise the fixed prefix avoids Windows reserved device names and
+    the digest prevents fold collisions."""
     candidate = skill_namespace or plugin_id
-    if (
-        skill_namespace and candidate.startswith("agent-plugin-")
-        and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,191}", candidate)
-    ):
-        # Portable Agent Plugins already receive this exact PLUGIN_DATA path.
+    portable = skill_namespace and candidate.startswith("agent-plugin-")
+    if portable and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,191}", candidate):
         return candidate
-    # Fixed prefix avoids Windows reserved device names; digest prevents fold collisions.
     return _portable_skill_namespace(candidate)
 
 
 @contextmanager
 def _locked_plugin_state(path: Path):
-    """Serialize state read-modify-write across threads/processes (fcntl / msvcrt). The lock lives
-    in a sibling file because atomic replacement changes the target's inode."""
+    """Serialize state read-modify-write across threads/processes (fcntl / msvcrt). The lock lives in a
+    sibling file because atomic replacement changes the target's inode."""
     lock_path = path.with_name(f".{path.name}.lock")
     with _PLUGIN_STATE_LOCKS_GUARD:
-        thread_lock = _PLUGIN_STATE_LOCKS.setdefault(
-            str(lock_path.resolve(strict=False)), threading.RLock()
-        )
+        thread_lock = _PLUGIN_STATE_LOCKS.setdefault(str(lock_path.resolve(strict=False)), threading.RLock())
     with thread_lock:
         lock_path.parent.mkdir(parents=True, exist_ok=True)
         with open(lock_path, "a+b") as handle:
@@ -162,9 +155,7 @@ class PluginState:
             try:
                 encoded = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
             except (TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"Plugin state value for {key!r} is not JSON-serializable"
-                ) from exc
+                raise ValueError(f"Plugin state value for {key!r} is not JSON-serializable") from exc
             if len(encoded) > self.quota_bytes:
                 raise ValueError(
                     f"Plugin state quota exceeded: {len(encoded)} bytes is greater "
