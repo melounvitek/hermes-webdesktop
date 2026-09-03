@@ -1,7 +1,7 @@
 """Plugin hook / middleware / event-bus / system-prompt-section dispatch.
 
-Mixed into :class:`hermes_cli.plugins.PluginManager`. ``_resolve_hook_callback_timeout`` stays on the
-origin (tests patch it there) and is looked up lazily.
+Mixed into :class:`hermes_cli.plugins.PluginManager`. ``_resolve_hook_callback_timeout`` stays on
+the origin (tests patch it there) and is looked up lazily.
 """
 
 from __future__ import annotations
@@ -22,7 +22,6 @@ from hermes_cli.middleware import OBSERVER_SCHEMA_VERSION
 
 logger = logging.getLogger("hermes_cli.plugins")
 
-
 # Allowlist of agent-turn hot-path hooks bounded by plugins.hook_callback_timeout (fail-open:
 # abandon without join — joining reintroduced a shutdown hang). Unlisted hooks run synchronously.
 # Intentionally unbounded: on_session_finalize/reset (last-chance flush — abandon can lose state);
@@ -34,49 +33,23 @@ _HOOK_TIMEOUT_BOUNDED_HOOKS: Set[str] = {
     "pre_verify", "on_session_start", "on_session_end",
 }
 
-
 # Policy hooks: timeout / still-running must fail closed (block the tool).
 _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS: Set[str] = {"pre_tool_call"}
-
-
 # Documented parent-thread serialization contract — never run on a timeout worker (hooks.md).
 _HOOK_CALLER_THREAD_HOOKS: Set[str] = {"subagent_stop"}
-
-
 # After a timeout, suppress the same callback this long so a hung hook cannot pile up threads.
 _HOOK_TIMEOUT_SUPPRESSION_SECONDS = 60.0
-
-
-_PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE = (
-    "pre_tool_call plugin callback timed out or is still running"
-)
-
+_PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE = "pre_tool_call plugin callback timed out or is still running"
 
 # System-prompt sections are tightly bounded: they become high-trust prompt bytes charged every turn.
 SYSTEM_PROMPT_SECTION_POSITIONS = frozenset({"after_memory"})
-
-
 DEFAULT_SYSTEM_PROMPT_SECTION_MAX_CHARS = 4_000
-
-
 MAX_SYSTEM_PROMPT_SECTION_CHARS = 4_000
-
-
 MAX_SYSTEM_PROMPT_SECTIONS = 32
-
-
 MAX_SYSTEM_PROMPT_SECTIONS_TOTAL_CHARS = 8_000
-
-
 _SYSTEM_PROMPT_SECTION_ID_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
-
-
 _SYSTEM_PROMPT_SECTION_HEADING_PREFIX = "## Plugin Context: "
-
-
 PLUGIN_SECTIONS_START = "<!-- hermes-plugin-sections:start -->"
-
-
 PLUGIN_SECTIONS_END = "<!-- hermes-plugin-sections:end -->"
 
 
@@ -89,8 +62,7 @@ def format_system_prompt_section(section_id: str, content: str) -> str:
     """Render an auditable, length-framed block recoverable from the full prompt."""
     return (
         f"{_SYSTEM_PROMPT_SECTION_HEADING_PREFIX}{section_id}\n"
-        f"<!-- hermes-plugin-section-chars:{len(content)} -->\n\n" f"{content}"
-    )
+        f"<!-- hermes-plugin-section-chars:{len(content)} -->\n\n{content}")
 
 
 def format_system_prompt_sections(sections: list) -> str:
@@ -103,16 +75,10 @@ def format_system_prompt_sections(sections: list) -> str:
 
 # Reserved event namespace prefix — only core may publish ``hermes:<event>``.
 HERMES_EVENT_NAMESPACE = "hermes"
-
-
 # Event recursion depth cap (subscribers may emit); over-deep emits are dropped with a warning.
 _EVENT_EMIT_DEPTH_CAP = 8
-
-
 # Max queued + running events per manager generation; emit never waits — a full budget drops.
 _EVENT_PENDING_CAP = 64
-
-
 _EVENT_WORKER_STOP = object()
 
 
@@ -159,21 +125,15 @@ class _QueuedPluginEvent:
 # Hook callback timeout (non-blocking abandon). Default cap per Python hook callback; overridden by
 # ``plugins.hook_callback_timeout``. Shell hooks enforce their own subprocess timeout.
 _HOOK_CALLBACK_TIMEOUT_SECS = 30.0
-
-
-_HOOK_SKIPPED = object()  # returned by _run_hook_callback_bounded on skip/timeout
-
-
 _MAX_HOOK_CALLBACK_TIMEOUT_SECS = 600.0
+_HOOK_SKIPPED = object()  # returned by _run_hook_callback_bounded on skip/timeout
 
 
 def _hook_uses_callback_timeout(hook_name: str, timeout: float) -> bool:
     """Whether *hook_name* should run under the non-blocking timeout path."""
     if timeout <= 0 or hook_name in _HOOK_CALLER_THREAD_HOOKS:
         return False
-    return (
-        hook_name in _HOOK_TIMEOUT_BOUNDED_HOOKS or hook_name in _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS
-    )
+    return hook_name in _HOOK_TIMEOUT_BOUNDED_HOOKS or hook_name in _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS
 
 
 def _pre_tool_call_timeout_block() -> Dict[str, str]:
@@ -189,43 +149,33 @@ class PluginDispatchMixin:
             parameters = inspect.signature(callback).parameters
         except (TypeError, ValueError):
             return callback(**payload)  # no introspectable signature: historical behavior
-
-        if any(
-            parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
-        ):
+        if any(p.kind == inspect.Parameter.VAR_KEYWORD for p in parameters.values()):
             return callback(**payload)
-
-        accepted_payload = {
-            name: value for name, value in payload.items() if name in parameters
-            and parameters[name].kind
-            in {
-                inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY,
-            }
-        }
-        return callback(**accepted_payload)
+        keyword_kinds = {inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY}
+        return callback(**{
+            name: value for name, value in payload.items()
+            if name in parameters and parameters[name].kind in keyword_kinds
+        })
 
     def invoke_hook(self, hook_name: str, **kwargs: Any) -> List[Any]:
         """Call all callbacks for *hook_name*; return their non-``None`` results.
 
         Payloads evolve additively: ``**kwargs`` callbacks get everything, narrow signatures only
-        what they declare. Each callback is isolated. Hooks in ``_HOOK_TIMEOUT_BOUNDED_HOOKS`` and
-        ``pre_tool_call`` are bounded by ``plugins.hook_callback_timeout`` (worker abandoned, never
-        joined); ``pre_tool_call`` fails closed with a block directive, others skip.
-        ``_HOOK_CALLER_THREAD_HOOKS`` always run on the caller thread. ``pre_llm_call`` callbacks may
-        return ``{"context": "..."}`` (or a plain string) to inject into the turn.
+        what they declare. Each callback is isolated. Bounded hooks and ``pre_tool_call`` run under
+        ``plugins.hook_callback_timeout`` (worker abandoned, never joined); ``pre_tool_call`` fails
+        closed with a block directive, others skip. ``_HOOK_CALLER_THREAD_HOOKS`` always run on the
+        caller thread. ``pre_llm_call`` may return ``{"context": "..."}`` (or a str) to inject.
         """
         from hermes_cli.plugins import _resolve_hook_callback_timeout
         # Gateway platform events define event-local envelopes; a bus-wide version here would turn
         # unrelated adapter payloads into one monolithic compatibility contract.
         if hook_name != "gateway_platform_event":
             kwargs.setdefault("telemetry_schema_version", OBSERVER_SCHEMA_VERSION)
-        callbacks = self._hooks.get(hook_name, [])
         results: List[Any] = []
         timeout = _resolve_hook_callback_timeout()
         use_timeout = _hook_uses_callback_timeout(hook_name, timeout)
         fail_closed = hook_name in _HOOK_TIMEOUT_FAIL_CLOSED_HOOKS
-
-        for cb in callbacks:
+        for cb in self._hooks.get(hook_name, []):
             try:
                 if use_timeout:
                     ret = self._run_hook_callback_bounded(hook_name, cb, kwargs, timeout)
@@ -239,9 +189,7 @@ class PluginDispatchMixin:
                     results.append(ret)
             except Exception as exc:
                 logger.warning(
-                    "Hook '%s' callback %s raised: %s", hook_name,
-                    getattr(cb, "__name__", repr(cb)), exc,
-                )
+                    "Hook '%s' callback %s raised: %s", hook_name, getattr(cb, "__name__", repr(cb)), exc)
         return results
 
     def _run_hook_callback_bounded(
@@ -253,15 +201,13 @@ class PluginDispatchMixin:
         callback_name = getattr(cb, "__name__", repr(cb))
         callback_key = (hook_name, id(cb))
         token = object()
-        now = time.monotonic()
         with self._hook_timeout_lock:
             suppressed_until = self._hook_timeout_suppressed_until.get(callback_key)
             running = callback_key in self._hook_running_callbacks
-            if (suppressed_until is not None and suppressed_until > now) or running:
+            if (suppressed_until is not None and suppressed_until > time.monotonic()) or running:
                 logger.warning(
                     "Hook '%s' callback %s skipped after previous "
-                    "timeout or while still running", hook_name, callback_name,
-                )
+                    "timeout or while still running", hook_name, callback_name)
                 return _HOOK_SKIPPED
             if suppressed_until is not None:
                 self._hook_timeout_suppressed_until.pop(callback_key, None)
@@ -283,19 +229,14 @@ class PluginDispatchMixin:
                         self._hook_running_callbacks.pop(callback_key, None)
                 done.set()
 
-        thread = threading.Thread(
-            target=_runner, name=f"hermes-hook-{callback_name}"[:40], daemon=True,
-        )
+        thread = threading.Thread(target=_runner, name=f"hermes-hook-{callback_name}"[:40], daemon=True)
         thread.start()
         if not done.wait(timeout=timeout):  # do not join — that would reintroduce the hang
             with self._hook_timeout_lock:
                 self._hook_timeout_suppressed_until[callback_key] = (
-                    time.monotonic() + self._hook_timeout_suppression_seconds
-                )
+                    time.monotonic() + self._hook_timeout_suppression_seconds)
             logger.warning(
-                "Hook '%s' callback %s timed out after %gs — skipping", hook_name, callback_name,
-                timeout,
-            )
+                "Hook '%s' callback %s timed out after %gs — skipping", hook_name, callback_name, timeout)
             return _HOOK_SKIPPED
         if "exc" in failure:
             raise failure["exc"]
@@ -305,9 +246,8 @@ class PluginDispatchMixin:
         """Add an owner-tagged event subscription in registration order."""
         if not callable(callback):
             raise TypeError("Event subscriber callback must be callable")
-        entry = _EventSubscription(owner=owner, callback=callback)
         with self._event_lock:
-            self._subscriptions.setdefault(event, []).append(entry)
+            self._subscriptions.setdefault(event, []).append(_EventSubscription(owner, callback))
 
     def _remove_plugin_subscriptions(self, owner: str) -> int:
         """Remove every subscription owned by *owner*; return the count. Queued envelopes re-check
@@ -328,9 +268,8 @@ class PluginDispatchMixin:
         worker = self._event_worker
         if worker is not None and worker.is_alive():
             return
-        dispatch_queue = self._event_queue
         worker = threading.Thread(
-            target=self._event_worker_loop, args=(dispatch_queue,), name="hermes-plugin-events",
+            target=self._event_worker_loop, args=(self._event_queue,), name="hermes-plugin-events",
             daemon=True,
         )
         self._event_worker = worker
@@ -369,22 +308,16 @@ class PluginDispatchMixin:
                     if item.generation != self._event_generation:
                         break
                     # Owner unload may have removed this entry after the event was queued.
-                    if not any(
-                        current is subscription
-                        for current in self._subscriptions.get(item.event, [])
-                    ):
+                    if not any(cur is subscription for cur in self._subscriptions.get(item.event, [])):
                         continue
                 callback = subscription.callback
                 try:
                     # Fresh deep copy per subscriber: no callback can mutate what the next sees.
-                    owned_payload = copy.deepcopy(item.payload)
-                    result = callback(**owned_payload)
-                    resolve_plugin_command_result(result)
+                    resolve_plugin_command_result(callback(**copy.deepcopy(item.payload)))
                 except Exception as exc:
                     logger.warning(
                         "Event '%s' subscriber %s raised: %s", item.event,
-                        getattr(callback, "__name__", repr(callback)), exc,
-                    )
+                        getattr(callback, "__name__", repr(callback)), exc)
         finally:
             self._emit_depth.value = previous_depth
 
@@ -393,8 +326,7 @@ class PluginDispatchMixin:
         with self._event_idle:
             generation = self._event_generation
             return self._event_idle.wait_for(
-                lambda: self._event_pending_by_generation.get(generation, 0) == 0, timeout=timeout,
-            )
+                lambda: self._event_pending_by_generation.get(generation, 0) == 0, timeout=timeout)
 
     def _dispatch_event(self, event: str, payload: Dict[str, Any]) -> int:
         """Queue *event* without blocking; return the subscriber count scheduled. Pending work is
@@ -403,10 +335,9 @@ class PluginDispatchMixin:
         if depth >= _EVENT_EMIT_DEPTH_CAP:
             logger.warning(
                 "Event bus recursion cap (%d) exceeded while dispatching '%s' "
-                "— dropping this emit to prevent an infinite loop", _EVENT_EMIT_DEPTH_CAP, event,
-            )
+                "— dropping this emit to prevent an infinite loop", _EVENT_EMIT_DEPTH_CAP, event)
             return 0
-
+        budget_msg = "Event bus pending budget (%d) exhausted while dispatching '%s' — dropping this emit"
         with self._event_lock:
             subscriptions = tuple(self._subscriptions.get(event, []))
             if not subscriptions:
@@ -414,22 +345,15 @@ class PluginDispatchMixin:
             generation = self._event_generation
             pending = self._event_pending_by_generation.get(generation, 0)
             if pending >= _EVENT_PENDING_CAP:
-                logger.warning(
-                    "Event bus pending budget (%d) exhausted while dispatching "
-                    "'%s' — dropping this emit", _EVENT_PENDING_CAP, event,
-                )
+                logger.warning(budget_msg, _EVENT_PENDING_CAP, event)
                 return 0
             item = _QueuedPluginEvent(
                 event=event, payload=dict(payload), subscriptions=subscriptions, depth=depth + 1,
-                generation=generation,
-            )
+                generation=generation)
             try:
                 self._event_queue.put_nowait(item)
             except queue.Full:
-                logger.warning(
-                    "Event bus pending budget (%d) exhausted while dispatching "
-                    "'%s' — dropping this emit", _EVENT_PENDING_CAP, event,
-                )
+                logger.warning(budget_msg, _EVENT_PENDING_CAP, event)
                 return 0
             self._event_pending_by_generation[generation] = pending + 1
             self._ensure_event_worker_locked()
@@ -450,13 +374,11 @@ class PluginDispatchMixin:
         frozen_info = types.MappingProxyType(dict(session_info))
         rendered: List[RenderedPluginSystemPromptSection] = []
         total_chars = len(PLUGIN_SECTIONS_START) + len(PLUGIN_SECTIONS_END) + 2
-        for section_id in sorted(self._system_prompt_sections):
-            section = self._system_prompt_sections[section_id]
+        for _section_id, section in sorted(self._system_prompt_sections.items()):
             if len(rendered) >= MAX_SYSTEM_PROMPT_SECTIONS:
                 logger.warning(
                     "Plugin system prompt section %s exceeded the section-count "
-                    "budget (%d) and was skipped", section.id, MAX_SYSTEM_PROMPT_SECTIONS,
-                )
+                    "budget (%d) and was skipped", section.id, MAX_SYSTEM_PROMPT_SECTIONS)
                 continue
             text = self._render_prompt_section_text(section, frozen_info)
             if text is None:
@@ -468,19 +390,15 @@ class PluginDispatchMixin:
                 logger.warning(
                     "Plugin system prompt section %s (%s) exceeded the aggregate "
                     "session budget (%d chars) and was skipped", section.id, section.plugin,
-                    MAX_SYSTEM_PROMPT_SECTIONS_TOTAL_CHARS,
-                )
+                    MAX_SYSTEM_PROMPT_SECTIONS_TOTAL_CHARS)
                 continue
             rendered.append(
                 RenderedPluginSystemPromptSection(
-                    id=section.id, content=text, position=section.position, plugin=section.plugin,
-                )
-            )
+                    id=section.id, content=text, position=section.position, plugin=section.plugin))
             total_chars += rendered_chars
             logger.info(
                 "Session plugin prompt section: id=%s plugin=%s position=%s chars=%d", section.id,
-                section.plugin, section.position, len(text),
-            )
+                section.plugin, section.position, len(text))
         return rendered
 
     @staticmethod
@@ -490,8 +408,7 @@ class PluginDispatchMixin:
         """Evaluate one section; return its stripped text or None (with a warning) when skipped."""
         def _skip(detail: str, *args: Any) -> None:
             logger.warning(
-                "Plugin system prompt section %s (%s) " + detail, section.id, section.plugin, *args,
-            )
+                "Plugin system prompt section %s (%s) " + detail, section.id, section.plugin, *args)
 
         try:
             value = section.content(frozen_info) if callable(section.content) else section.content
@@ -518,16 +435,13 @@ class PluginDispatchMixin:
 
     def invoke_middleware(self, kind: str, **kwargs: Any) -> List[Any]:
         """Call middleware callbacks for *kind* (each isolated); return non-``None`` results."""
-        callbacks = self._middleware.get(kind, [])
         results: List[Any] = []
-        for cb in callbacks:
+        for cb in self._middleware.get(kind, []):
             try:
                 ret = cb(**kwargs)
                 if ret is not None:
                     results.append(ret)
             except Exception as exc:
                 logger.warning(
-                    "Middleware '%s' callback %s raised: %s", kind,
-                    getattr(cb, "__name__", repr(cb)), exc,
-                )
+                    "Middleware '%s' callback %s raised: %s", kind, getattr(cb, "__name__", repr(cb)), exc)
         return results

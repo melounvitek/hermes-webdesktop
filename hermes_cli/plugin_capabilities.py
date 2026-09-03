@@ -1,8 +1,7 @@
-"""Plugin capability declarations + consent state (#64228).
+"""Plugin capability declarations + consent state.
 
-Canonical registry ------------------ Every capability id maps 1:1 to a trust gate that **already
-exists** on the enforcing surface. We deliberately do not mint capability ids without an enforcing
-gate:
+Every capability id maps 1:1 to a trust gate that already exists on the enforcing surface; ids
+without an enforcing gate are deliberately never minted.
 """
 
 from __future__ import annotations
@@ -21,15 +20,11 @@ class CapabilitySpec:
     """One declarable capability and the legacy gate it maps to."""
 
     id: str
-    # Path of the deprecated boolean under ``plugins.entries.<plugin_id>``,
-    # e.g. ("allow_tool_override",) or ("llm", "allow_model_override").
-    legacy_path: Tuple[str, ...]
-    # One-line risk description shown on the consent screen.
-    description: str
+    legacy_path: Tuple[str, ...]  # deprecated boolean under plugins.entries.<id>, e.g. ("llm", "allow_model_override")
+    description: str  # one-line risk description shown on the consent screen
 
 
-# Canonical registry — ONLY capabilities with an existing enforcing surface.
-# (id, legacy_path, description)
+# (id, legacy_path, description) — ONLY capabilities with an existing enforcing surface.
 _CAPABILITY_ROWS = (
     ("tools.override", ("allow_tool_override",),
      "Replace built-in tools (e.g. shell_exec, write_file) — an "
@@ -49,12 +44,10 @@ _CAPABILITY_ROWS = (
      "task lanes"),
     ("gateway.platform_actions", ("allow_platform_actions",),
      "Act on connected chat platforms as the gateway bot "
-     "(add reactions, rename threads) via ctx.platform_actions"),
-)
+     "(add reactions, rename threads) via ctx.platform_actions"))
 CAPABILITY_REGISTRY: Dict[str, CapabilitySpec] = {
-    cid: CapabilitySpec(id=cid, legacy_path=path, description=desc) for cid, path, desc in _CAPABILITY_ROWS
+    cid: CapabilitySpec(cid, path, desc) for cid, path, desc in _CAPABILITY_ROWS
 }
-
 VALID_CAPABILITY_IDS = frozenset(CAPABILITY_REGISTRY)
 
 # Config keys under ``plugins.entries.<plugin_id>``.
@@ -62,24 +55,18 @@ GRANTED_KEY = "granted_capabilities"
 CONSENT_KEY = "capabilities_consent"
 
 
-# ---------------------------------------------------------------------------
-# Declaration parsing
-# ---------------------------------------------------------------------------
-
 def parse_declared_capabilities(raw: Any, plugin_name: str = "?") -> List[str]:
     """Normalize a manifest ``capabilities:`` value into known capability ids.
 
-    Unknown ids are dropped with a warning (forward compat: a plugin built for a newer Hermes may
-    declare ids this build doesn't know; they can never be granted here, so hiding them from the
-    consent screen is the fail-closed choice — the plugin must degrade gracefully).
+    Unknown ids are dropped with a warning: they can never be granted by this build, so hiding
+    them from the consent screen is the fail-closed choice (the plugin must degrade gracefully).
     """
     if not raw:
         return []
     if not isinstance(raw, (list, tuple)):
         logger.warning(
             "Plugin %s: manifest 'capabilities' must be a list, got %s — ignoring",
-            plugin_name, type(raw).__name__,
-        )
+            plugin_name, type(raw).__name__)
         return []
     out: List[str] = []
     for item in raw:
@@ -90,8 +77,7 @@ def parse_declared_capabilities(raw: Any, plugin_name: str = "?") -> List[str]:
         if cap not in VALID_CAPABILITY_IDS:
             logger.warning(
                 "Plugin %s: unknown capability %r (known: %s) — ignoring",
-                plugin_name, cap, ", ".join(sorted(VALID_CAPABILITY_IDS)),
-            )
+                plugin_name, cap, ", ".join(sorted(VALID_CAPABILITY_IDS)))
         elif cap not in out:
             out.append(cap)
     return out
@@ -108,29 +94,27 @@ def capability_set_hash(capabilities: Iterable[str]) -> str:
     return hashlib.sha256(canon.encode("utf-8")).hexdigest()
 
 
-# ---------------------------------------------------------------------------
-# Consent state (read side — fail closed on ANY error)
-# ---------------------------------------------------------------------------
+# ── Consent state (read side — fail closed on ANY error) ────────────────────────────────────
 
 def _plugin_entry(plugin_id: str, config: Optional[Mapping[str, Any]] = None) -> dict:
-    """Return ``plugins.entries.<plugin_id>`` or ``{}`` — never raises."""
+    """``plugins.entries.<plugin_id>`` or ``{}`` — never raises (unreadable state = not granted)."""
     try:
         cfg: Any = config
         if cfg is None:
             from hermes_cli.config import load_config
             cfg = load_config() or {}
-        entries = (cfg.get("plugins") or {}).get("entries") or {}
-        entry = entries.get(plugin_id) or {}
+        entry = ((cfg.get("plugins") or {}).get("entries") or {}).get(plugin_id) or {}
         return entry if isinstance(entry, dict) else {}
     except Exception:
-        # Ground rule: failure to read consent state = not granted.
         return {}
 
 
 def granted_capabilities(plugin_id: str, config: Optional[Mapping[str, Any]] = None) -> frozenset:
-    """Return the set of capabilities the user has granted this plugin."""
+    """The set of capabilities the user has granted this plugin."""
     raw = _plugin_entry(plugin_id, config).get(GRANTED_KEY)
-    return frozenset(_known(c.strip() for c in raw if isinstance(c, str))) if isinstance(raw, list) else frozenset()
+    if not isinstance(raw, list):
+        return frozenset()
+    return frozenset(_known(c.strip() for c in raw if isinstance(c, str)))
 
 
 def _legacy_gate_set(entry: Mapping[str, Any], spec: CapabilitySpec) -> bool:
@@ -144,12 +128,8 @@ def _legacy_gate_set(entry: Mapping[str, Any], spec: CapabilitySpec) -> bool:
 
 
 def plugin_capability_granted(plugin_id: str, capability: str, config: Optional[Mapping[str, Any]] = None) -> bool:
-    """Canonical check: is *capability* live for *plugin_id*?
-
-    True when the capability is in ``granted_capabilities`` (consent flow) OR the legacy
-    ``allow_*`` key is set (deprecated, still honored so existing configs keep working). Unknown
-    ids and any failure to read state return ``False`` (fail closed).
-    """
+    """Canonical check: is *capability* live for *plugin_id*? True via ``granted_capabilities`` OR
+    the deprecated-but-honored legacy ``allow_*`` key. Unknown ids / unreadable state -> False."""
     spec = CAPABILITY_REGISTRY.get(capability)
     if spec is None:
         logger.debug("capability check for unknown id %r (plugin %s) — denied", capability, plugin_id)
@@ -161,17 +141,13 @@ def plugin_capability_granted(plugin_id: str, capability: str, config: Optional[
         allowed, evidence = True, f"legacy key plugins.entries.{plugin_id}.{'.'.join(spec.legacy_path)} (deprecated)"
     else:
         allowed, evidence = False, "not granted"
-    # Audit line for capability gate decisions (the ``checked_by`` trail).
-    logger.info(
+    logger.info(  # audit trail for capability gate decisions
         "capability_check plugin=%s capability=%s decision=%s checked_by=plugin_capability_granted evidence=%s",
-        plugin_id, capability, "allow" if allowed else "deny", evidence,
-    )
+        plugin_id, capability, "allow" if allowed else "deny", evidence)
     return allowed
 
 
-# ---------------------------------------------------------------------------
-# Consent state (write side)
-# ---------------------------------------------------------------------------
+# ── Consent state (write side) ──────────────────────────────────────────────────────────────
 
 def _child_dict(parent: dict, key: str) -> dict:
     """``parent[key]`` as a dict, replacing any non-dict value in place."""
@@ -183,17 +159,12 @@ def _child_dict(parent: dict, key: str) -> dict:
 
 
 def record_consent(plugin_id: str, granted: Iterable[str], declared: Iterable[str]) -> None:
-    """Persist a consent decision for *plugin_id*.
-
-    Writes ``granted_capabilities`` (union with prior grants), the consent record (hash of the
-    declared set the user saw + UTC timestamp), and the legacy ``allow_*`` keys for each new grant
-    so every existing enforcement site keeps working unchanged.
-    """
+    """Persist a consent decision: ``granted_capabilities`` (union with prior grants), the consent
+    record (hash of the declared set the user saw + UTC timestamp), and the legacy ``allow_*`` key
+    for each grant so existing enforcement sites keep working unchanged."""
     from hermes_cli.config import load_config, save_config
-
     config = load_config()
     entry = _child_dict(_child_dict(_child_dict(config, "plugins"), "entries"), plugin_id)
-
     previous = entry.get(GRANTED_KEY)
     merged = (list(previous) if isinstance(previous, list) else []) + _known(granted)
     entry[GRANTED_KEY] = sorted(_known(c for c in merged if isinstance(c, str)))
@@ -201,9 +172,7 @@ def record_consent(plugin_id: str, granted: Iterable[str], declared: Iterable[st
         "hash": capability_set_hash(_known(declared)),
         "granted_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
     }
-
-    # Bridge: mirror each granted capability into its legacy gate so the
-    # existing enforcement sites (which still read allow_*) honor the grant.
+    # Bridge: mirror each grant into its legacy gate (enforcement sites still read allow_*).
     for cap in entry[GRANTED_KEY]:
         *parents, leaf = CAPABILITY_REGISTRY[cap].legacy_path
         node = entry
@@ -213,10 +182,8 @@ def record_consent(plugin_id: str, granted: Iterable[str], declared: Iterable[st
 
     save_config(config)
     logger.info(
-        "capability_consent plugin=%s granted=%s declared_hash=%s",
-        plugin_id, ",".join(entry[GRANTED_KEY]) or "(none)",
-        entry[CONSENT_KEY]["hash"][:12],
-    )
+        "capability_consent plugin=%s granted=%s declared_hash=%s", plugin_id,
+        ",".join(entry[GRANTED_KEY]) or "(none)", entry[CONSENT_KEY]["hash"][:12])
 
 
 def consent_hash(plugin_id: str, config: Optional[Mapping[str, Any]] = None) -> Optional[str]:
@@ -229,13 +196,8 @@ def consent_hash(plugin_id: str, config: Optional[Mapping[str, Any]] = None) -> 
 def pending_capabilities(
     plugin_id: str, declared: Iterable[str], config: Optional[Mapping[str, Any]] = None
 ) -> List[str]:
-    """Capabilities declared by the plugin but not yet granted.
-
-    Used both at first consent (everything is pending) and on update re-consent: when a new version
-    declares capabilities the granted set lacks, those additions are returned and must be re-
-    consented before they go live. The stored consent hash tells whether the *declared* set changed
-    since the user last saw it.
-    """
+    """Declared-but-ungranted capabilities: everything at first consent, only the additions on an
+    update re-consent (they must be re-consented before going live)."""
     granted = granted_capabilities(plugin_id, config)
     return [c for c in _known(declared) if c not in granted]
 
@@ -243,9 +205,6 @@ def pending_capabilities(
 def declared_set_changed(
     plugin_id: str, declared: Iterable[str], config: Optional[Mapping[str, Any]] = None
 ) -> bool:
-    """True when the declared set differs from what the user consented to.
-
-    No stored consent at all counts as changed (never consented).
-    """
+    """True when the declared set differs from what the user consented to (or never consented)."""
     stored = consent_hash(plugin_id, config)
     return stored is None or stored != capability_set_hash(_known(declared))
