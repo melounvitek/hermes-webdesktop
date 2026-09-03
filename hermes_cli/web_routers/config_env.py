@@ -105,7 +105,6 @@ async def get_schema(profile: Optional[str] = None):
 async def get_egress_status():
     """Dashboard/Desktop-readable egress proxy status and remediation text."""
     from hermes_cli.proxy_cli import format_status_text
-
     return {"text": format_status_text()}
 
 

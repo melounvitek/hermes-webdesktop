@@ -155,7 +155,6 @@ async def get_client_voice_config(profile: Optional[str] = None):
     Gate: ``voice.client_direct`` in config.yaml (default true).
     """
     from tools.voice_client_config import resolve_client_voice_config
-
     try:
         result = await _run_config_scoped(profile, resolve_client_voice_config)
     except Exception:
@@ -323,7 +322,6 @@ async def tts_lease(payload: TTSLeaseRequest, profile: Optional[str] = None):
 
     def _apply():
         from tools.tts_tool import acquire_tts_lease, release_tts_lease
-
         if payload.active:
             with _config_profile_scope(profile):
                 return acquire_tts_lease(lease)
@@ -376,7 +374,6 @@ async def speak_stream_ws(ws: "WebSocket") -> None:
     def _resolve():
         from tools.tts_streaming import resolve_streaming_provider
         from tools.tts_tool import _get_provider, _load_tts_config, _resolve_max_text_length
-
         with _config_profile_scope(profile):
             cfg = _load_tts_config()
             streamer = resolve_streaming_provider(cfg)

@@ -124,7 +124,6 @@ def _read_flat_json(provider: ProviderConfigSchema) -> Dict[str, Any]:
 def _honcho_resolvers():
     """Lazily import the Honcho plugin's resolvers (optional plugin)."""
     from plugins.memory.honcho.client import _host_block, resolve_active_host, resolve_config_path
-
     return resolve_active_host, resolve_config_path, _host_block
 
 

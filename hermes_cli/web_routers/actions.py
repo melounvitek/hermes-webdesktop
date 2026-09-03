@@ -39,13 +39,11 @@ _ACTION_RESULTS = LateState("_ACTION_RESULTS")
 def _action_log_dir() -> Path:
     """Live ``web_server._ACTION_LOG_DIR`` (a Path value, so not proxied by LateState)."""
     from hermes_cli.web_server import _ACTION_LOG_DIR
-
     return _ACTION_LOG_DIR
 
 
 def _project_root() -> Path:
     from hermes_cli.web_server import PROJECT_ROOT
-
     return PROJECT_ROOT
 
 
