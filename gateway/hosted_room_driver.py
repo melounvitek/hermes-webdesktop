@@ -88,8 +88,7 @@ _COMPLETE_STOP_SQL = _task_update(
 _INDETERMINATE_STALE = "indeterminate task generation changed"
 _GENERATION_TRANSITIONS = {
     "resolve": (
-        "indeterminate", _SETTLE_SET, _INDETERMINATE_STALE, "indeterminate task changed during reconciliation",
-    ),
+        "indeterminate", _SETTLE_SET, _INDETERMINATE_STALE, "indeterminate task changed during reconciliation"),
     "resolve_cancel": (
         "indeterminate", _CANCEL_SET, "indeterminate cancellation proof is stale",
         "indeterminate cancellation proof lost its fence"),
@@ -181,8 +180,7 @@ def _task_payload(value: Any) -> tuple[dict[str, Any], str, str]:
     if missing:
         raise DriverValidationError(f"missing payload fields: {', '.join(sorted(missing))}")
     target_profile = _identifier(value["target_profile"], label="target_profile")
-    prompt = text(
-        value["prompt"], error=DriverValidationError, label="prompt", max_bytes=MAX_PROMPT_BYTES, strip=False)
+    prompt = text(value["prompt"], error=DriverValidationError, label="prompt", max_bytes=MAX_PROMPT_BYTES, strip=False)
     source_event_seq = _bounded_int(
         value["source_event_seq"], message="source_event_seq must be a positive integer", low=1)
     normalized = {"target_profile": target_profile, "prompt": prompt, "source_event_seq": source_event_seq}
@@ -283,8 +281,7 @@ def _schema_objects_exist(conn: sqlite3.Connection) -> bool:
     if {row[0] for row in rows} != {"hosted_room_driver_leases", "hosted_room_driver_tasks"}:
         return False
     index = conn.execute(
-        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_hosted_room_driver_tasks_status'"
-    ).fetchone()
+        "SELECT 1 FROM sqlite_master WHERE type='index' AND name='idx_hosted_room_driver_tasks_status'").fetchone()
     return index is not None
 
 
@@ -301,8 +298,7 @@ def _migrate_task_status_constraint(conn: sqlite3.Connection) -> None:
     _create_task_table(conn, "hosted_room_driver_tasks_next")
     columns = ", ".join(_TASK_COLUMN_ORDER)
     conn.execute(
-        f"INSERT INTO hosted_room_driver_tasks_next ({columns}) SELECT {columns} FROM hosted_room_driver_tasks"
-    )
+        f"INSERT INTO hosted_room_driver_tasks_next ({columns}) SELECT {columns} FROM hosted_room_driver_tasks")
     conn.execute("DROP TABLE hosted_room_driver_tasks")
     conn.execute("ALTER TABLE hosted_room_driver_tasks_next RENAME TO hosted_room_driver_tasks")
     conn.execute(_TASK_INDEX_SQL.format(if_not_exists=""))
@@ -476,8 +472,7 @@ def _settlement_replay(settlement_id: str, status: str, result_json: str) -> Cal
 def _cancel_replay(cancel_id: str, status: str = "cancelled") -> Callable[[sqlite3.Row], Any]:
     """Replay predicate: same cancel_id already committed in ``status``."""
     return lambda row: (
-        _task_from_row(row, idempotent=True) if row["status"] == status and row["cancel_id"] == cancel_id else None
-    )
+        _task_from_row(row, idempotent=True) if row["status"] == status and row["cancel_id"] == cancel_id else None)
 
 
 def _generations_match(row: sqlite3.Row, status: str, execution_generation: int, cancel_generation: int) -> bool:
@@ -569,8 +564,7 @@ def acquire_lease(
     """Acquire an empty or expired room lease with a monotonic generation."""
     room_id = _identifier(room_id, label="room_id")
     gateway_id = _identifier(gateway_id, label="gateway_id")
-    authority_epoch = _bounded_int(
-        authority_epoch, message="authority_epoch must be a positive integer", low=1)
+    authority_epoch = _bounded_int(authority_epoch, message="authority_epoch must be a positive integer", low=1)
     process_generation = _identifier(process_generation, label="process_generation")
     ttl_seconds = _ttl(ttl_seconds)
     now = _timestamp(clock)
@@ -625,8 +619,7 @@ def renew_lease(db_path: Path | str, lease: DriverLease, *, ttl_seconds: Any, cl
             """UPDATE hosted_room_driver_leases SET expires_at=?, updated_at=?
                WHERE room_id=? AND gateway_id=? AND process_generation=?
                  AND lease_generation=? AND released_at IS NULL AND expires_at > ?""",
-            (expires_at, now, lease.room_id, lease.gateway_id, lease.process_generation, lease.lease_generation, now),
-        )
+            (expires_at, now, lease.room_id, lease.gateway_id, lease.process_generation, lease.lease_generation, now))
         if updated.rowcount != 1:
             raise StaleLeaseError("driver lease changed during renewal")
         return dataclasses.replace(lease, expires_at=expires_at, reclaimed=False)
@@ -782,8 +775,7 @@ def resolve_indeterminate_cancellation(
     now = _timestamp(clock)
     return _generation_transition(
         db_path, identity, lease, "resolve_cancel", expected_execution_generation, expected_cancel_generation,
-        now=now, replay=_cancel_replay(cancel_id), set_params=(expected_cancel_generation + 1, cancel_id, now, now),
-    )
+        now=now, replay=_cancel_replay(cancel_id), set_params=(expected_cancel_generation + 1, cancel_id, now, now))
 
 
 def requeue_indeterminate_task(
@@ -945,8 +937,7 @@ def list_tasks(db_path: Path | str, *, room_id: Any, status: TaskStatus | None =
 
 def prune_published_terminal_tasks(
     db_path: Path | str, *, room_id: Any, clock: Clock,
-    retention_seconds: float = TERMINAL_TASK_RETENTION_SECONDS, retain: int = MAX_RETAINED_TERMINAL_TASKS,
-) -> int:
+    retention_seconds: float = TERMINAL_TASK_RETENTION_SECONDS, retain: int = MAX_RETAINED_TERMINAL_TASKS) -> int:
     """Bound execution rows after outcomes are durable in the room log."""
     room_id = _identifier(room_id, label="room_id")
     now = _timestamp(clock)
@@ -956,8 +947,7 @@ def prune_published_terminal_tasks(
 
     with _transaction(db_path) as conn:
         publications = conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hosted_room_policy_publications'"
-        ).fetchone()
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='hosted_room_policy_publications'").fetchone()
         if publications is None:
             return 0
         rows = conn.execute(

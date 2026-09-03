@@ -85,8 +85,7 @@ def compact_json(value: Any, *, ensure_ascii: bool = True) -> str:
     return json.dumps(value, ensure_ascii=ensure_ascii, sort_keys=True, separators=(",", ":"))
 
 
-def canonical_json(
-    value: Any, *, error: type[Exception], label: str, max_bytes: int, ensure_ascii: bool) -> str:
+def canonical_json(value: Any, *, error: type[Exception], label: str, max_bytes: int, ensure_ascii: bool) -> str:
     """``compact_json`` bounded by ``max_bytes`` of UTF-8; unserializable input raises ``error``."""
     try:
         encoded = compact_json(value, ensure_ascii=ensure_ascii)

@@ -170,8 +170,7 @@ class _ValidatedEvent:
     payload: Mapping[str, Any]
 
 
-_identifier = partial(
-    common.identifier, error=DiscussionValidationError, max_chars=driver.MAX_IDENTIFIER_CHARS)
+_identifier = partial(common.identifier, error=DiscussionValidationError, max_chars=driver.MAX_IDENTIFIER_CHARS)
 _exact_fields = partial(common.exact_fields, error=DiscussionValidationError)
 _bounded_int = partial(common.bounded_int, error=DiscussionValidationError)
 
@@ -199,8 +198,7 @@ def validate_user_payload(value: Any) -> dict[str, Any]:
     return {"text": text, "thread_id": _identifier(payload["thread_id"], label="thread_id")}
 
 
-def _validate_member_target(
-    value: Any, *, profile: str, known_profiles: set[str], index: int) -> dict[str, Any]:
+def _validate_member_target(value: Any, *, profile: str, known_profiles: set[str], index: int) -> dict[str, Any]:
     if value is None:
         if profile not in known_profiles:
             raise DiscussionValidationError(
@@ -381,8 +379,7 @@ def _validate_turn_coordinates(payload: Mapping[str, Any], room: DiscussionRoom)
 
 
 def _validate_user_event(
-    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom
-) -> Mapping[str, Any]:
+    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom) -> Mapping[str, Any]:
     payload = validate_user_payload(payload)
     if actor.get("kind") != "user":
         raise DiscussionValidationError("message.user requires a user actor")
@@ -390,8 +387,7 @@ def _validate_user_event(
 
 
 def _validate_member_message(
-    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom
-) -> Mapping[str, Any]:
+    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom) -> Mapping[str, Any]:
     _exact_fields(payload, label="message.member payload", required=_MEMBER_MESSAGE_FIELDS)
     _validate_turn_coordinates(payload, room)
     text = payload.get("text")
@@ -410,8 +406,7 @@ def _validate_member_message(
 
 
 def _validate_terminal_event(
-    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom
-) -> Mapping[str, Any]:
+    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom) -> Mapping[str, Any]:
     _exact_fields(
         payload, label=f"{kind} payload",
         required=_TERMINAL_COMMON_FIELDS | _TERMINAL_EXTRA_FIELDS[kind],
@@ -444,8 +439,7 @@ def _validate_terminal_event(
 
 
 def _validate_gateway_event(
-    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom
-) -> Mapping[str, Any]:
+    kind: str, payload: Mapping[str, Any], actor: Mapping[str, Any], room: DiscussionRoom) -> Mapping[str, Any]:
     fields, identifier_fields = _GATEWAY_EVENT_FIELDS[kind]
     _exact_fields(payload, label=f"{kind} payload", required=fields)
     if kind == "room.activity" and payload.get("status") not in {"settled", "bounded"}:
@@ -487,8 +481,7 @@ def _validate_event(raw: Any, *, room: DiscussionRoom, previous_seq: int) -> _Va
     return _ValidatedEvent(raw=raw, seq=seq, event_id=event_id, kind=kind, actor=actor, payload=payload)
 
 
-def _validated_events(
-    events: Sequence[Mapping[str, Any]], *, room: DiscussionRoom) -> tuple[_ValidatedEvent, ...]:
+def _validated_events(events: Sequence[Mapping[str, Any]], *, room: DiscussionRoom) -> tuple[_ValidatedEvent, ...]:
     validated: list[_ValidatedEvent] = []
     previous_seq = 0
     event_ids: set[str] = set()
@@ -581,8 +574,7 @@ def _truncate_utf8_text(value: Any, *, max_bytes: int, suffix: str = "") -> str:
 def _build_prompt(
     *, room: DiscussionRoom, member: DiscussionMember, messages: Sequence[_ValidatedEvent],
     watermark: int, seen_through_seq: int) -> str:
-    delta = [event for event in messages if watermark < event.seq <= seen_through_seq][
-        -MAX_DISCUSSION_DELTA_LINES:]
+    delta = [event for event in messages if watermark < event.seq <= seen_through_seq][- MAX_DISCUSSION_DELTA_LINES:]
     peers = ", ".join(
         f"@{candidate.handle}" for candidate in room.members if candidate.member_id != member.member_id)
     opening = [
@@ -653,8 +645,7 @@ def _make_task_plan(
 
 def _pending_discussion(validated: Sequence[_ValidatedEvent]) -> _ValidatedEvent | None:
     """Oldest latest-per-thread user message not stopped and not yet completed."""
-    stopped_through_seq = max(
-        (event.seq for event in validated if event.kind == "room.stop_requested"), default=0)
+    stopped_through_seq = max((event.seq for event in validated if event.kind == "room.stop_requested"), default=0)
     completed_discussion_ids = {
         str(event.payload["discussion_event_id"])
         for event in validated
@@ -876,8 +867,7 @@ def _failed_effects(result: Any, **_: Any) -> tuple[dict[str, Any], list[EventPl
     return {"error": error_text, "reason_code": reason_code}, []
 
 
-def _cancelled_effects(
-    result: Any, *, newer_same_thread: bool, **_: Any) -> tuple[dict[str, Any], list[EventPlan]]:
+def _cancelled_effects(result: Any, *, newer_same_thread: bool, ** _: Any) -> tuple[dict[str, Any], list[EventPlan]]:
     reason = (
         "superseded_by_newer_user_event" if newer_same_thread
         else _terminal_text(result, field="reason", fallback="member turn cancelled"))
@@ -901,8 +891,7 @@ _TERMINAL_EFFECTS = {
 
 def plan_publication(
     room_value: Any, events: Sequence[Mapping[str, Any]], task: DiscussionTaskPlan, *, status: TerminalKind,
-    result: Any = None, execution_generation: int | None = None, local_profiles: Iterable[str],
-) -> PublicationPlan:
+    result: Any = None, execution_generation: int | None = None, local_profiles: Iterable[str]) -> PublicationPlan:
     """Plan idempotent room effects for one terminal driver task.
 
     A newer user event in the same thread supersedes a late result: the task

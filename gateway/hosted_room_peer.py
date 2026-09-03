@@ -258,8 +258,7 @@ class GatewayRoomCatalog:
     def endpoint_mapping(self) -> dict[str, Any]:
         """Return the normalized self-advertised endpoint capability."""
         if self.endpoint_url is not None:
-            return {
-                "available": True, "url": self.endpoint_url, "transport_security": self.transport_security}
+            return {"available": True, "url": self.endpoint_url, "transport_security": self.transport_security}
         return {"available": False, "reason": self.endpoint_reason or "not_configured"}
 
 
@@ -272,8 +271,7 @@ def catalog_mapping(
     # A Desktop-managed gateway exits with the app: the caller's flag is only an
     # upper bound, so call sites that still pass ``True`` stay honest.
     persistent_process = bool(persistent_process and os.getenv("HERMES_DESKTOP") != "1")
-    profile = (
-        str(target_profile or "").strip() or (os.getenv("HERMES_PROFILE") or "default").strip() or "default")
+    profile = (str(target_profile or "").strip() or (os.getenv("HERMES_PROFILE") or "default").strip() or "default")
     checked_policy = RoomExecutionPolicy.from_mapping(
         execution_policy or execution_policy_mapping(target_profile=profile))
     # A RoomLink run is initiated by another installation. Process-wide YOLO
@@ -458,8 +456,7 @@ def issue_room_grant(
     authority_epoch: int, member_id: str, target_install_id: str, target_profile: str,
     execution_policy_digest: str | None = None,
     permissions: Iterable[str] = ("approve", "dispatch", "status", "stop"), issued_at: float | None = None,
-    ttl_seconds: float = 3600, status_ttl_seconds: float | None = None, status_expires_at: float | None = None,
-) -> str:
+    ttl_seconds: float = 3600, status_ttl_seconds: float | None = None, status_expires_at: float | None = None) -> str:
     """Issue a target-verifiable bearer grant scoped to one room member."""
     if len(secret) < 32:
         raise HostedRoomGrantError("room grant secret must be at least 32 bytes")
@@ -547,8 +544,7 @@ def decode_room_grant(secret: bytes, token: str, *, permission: str, now: float 
     return payload
 
 
-def room_grant_needs_dispatch_refresh(
-    token: str, *, now: float | None = None, leeway_seconds: float = 5 * 60) -> bool:
+def room_grant_needs_dispatch_refresh(token: str, *, now: float | None = None, leeway_seconds: float = 5 * 60) -> bool:
     """Read only grant timing to schedule target-validated refresh.
 
     This deliberately does not establish trust; the target validates the

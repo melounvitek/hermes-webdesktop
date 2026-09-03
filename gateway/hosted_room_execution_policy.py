@@ -14,8 +14,7 @@ POLICY_VERSION = 1
 MAX_POLICY_TOOLSETS = 128
 MAX_POLICY_ITERATIONS = (1 << 53) - 1
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
-_POLICY_FIELDS = {
-    "version", "target_profile", "enabled_toolsets", "approval_mode", "max_iterations", "policy_digest"}
+_POLICY_FIELDS = {"version", "target_profile", "enabled_toolsets", "approval_mode", "max_iterations", "policy_digest"}
 
 
 class RoomExecutionPolicyError(ValueError):

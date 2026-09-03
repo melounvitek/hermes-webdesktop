@@ -50,8 +50,7 @@ CONTROL_EVENT_BYTE_RESERVE = 1024 * 1024
 _JOURNAL_MODE_LOCK_RETRIES = 8
 
 _EVENT_KIND_RE = re.compile(r"^[a-z][a-z0-9_.-]*$")
-_CONTROL_EVENT_KINDS = frozenset({
-    "authority.claimed", "authority.lost", "room.disbanded", "room.stop_requested"})
+_CONTROL_EVENT_KINDS = frozenset({"authority.claimed", "authority.lost", "room.disbanded", "room.stop_requested"})
 _EVENT_KINDS_BY_ACTOR = {
     "user": frozenset({"message.user"}),
     "member": frozenset({"message.member"}),
@@ -258,10 +257,8 @@ def _system_actor_json(actor_id: str) -> str:
 
 
 def _claim_payload_json(previous_gateway_id: str, new_gateway_id: str, epoch: int) -> str:
-    return _payload_json({
-        "previous_gateway_id": previous_gateway_id,
-        "authority_gateway_id": new_gateway_id,
-        "authority_epoch": epoch})
+    return _payload_json(
+        {"previous_gateway_id": previous_gateway_id, "authority_gateway_id": new_gateway_id, "authority_epoch": epoch})
 
 
 def user_event_id(client_event_id: Any) -> str:
@@ -446,8 +443,7 @@ def _initialize_schema(conn: sqlite3.Connection) -> None:
     # permanent: a stale coordinate must never name a different Group Chat.
     conn.execute(_RETIRE_FROM_ROOMS.format(where="disbanded_at IS NOT NULL"))
     _migrate_remote_run_schema(conn)
-    conn.execute(
-        "CREATE INDEX IF NOT EXISTS idx_hosted_room_events_cursor ON hosted_room_events(room_id, seq)")
+    conn.execute("CREATE INDEX IF NOT EXISTS idx_hosted_room_events_cursor ON hosted_room_events(room_id, seq)")
     if not _schema_is_current(conn):
         raise HostedRoomError("hosted room schema migration did not complete")
 
@@ -580,8 +576,7 @@ def _insert_event(
     conn: sqlite3.Connection, room: sqlite3.Row, room_id: str, seq: int, event_id: str, kind: str,
     actor_json: str, epoch: int, payload_json: str, now: float, *, allow_control: bool = False) -> int:
     """Capacity-check then INSERT one event at ``seq``; returns its accounted bytes."""
-    event_bytes = _prepare_event(
-        conn, room, event_id, kind, actor_json, payload_json, allow_control=allow_control)
+    event_bytes = _prepare_event(conn, room, event_id, kind, actor_json, payload_json, allow_control=allow_control)
     conn.execute(_INSERT_EVENT, (room_id, seq, event_id, kind, actor_json, epoch, payload_json, now))
     return event_bytes
 
@@ -595,19 +590,16 @@ def _prepare_event(
     byte_reserve = CONTROL_EVENT_BYTE_RESERVE if allow_control else 0
     gateway_byte_limit = MAX_GATEWAY_EVENT_BYTES + byte_reserve
     if int(room["next_seq"]) - 1 >= MAX_EVENTS_PER_ROOM + count_reserve:
-        raise HostedRoomError(
-            "This Group Chat reached its history limit. Start a new Group Chat to continue.")
+        raise HostedRoomError("This Group Chat reached its history limit. Start a new Group Chat to continue.")
     if int(room["event_bytes"]) + additional_bytes > MAX_ROOM_EVENT_BYTES + byte_reserve:
-        raise HostedRoomError(
-            "This Group Chat reached its storage limit. Start a new Group Chat to continue.")
+        raise HostedRoomError("This Group Chat reached its storage limit. Start a new Group Chat to continue.")
     gateway_bytes = _gateway_event_bytes(conn)
     if gateway_bytes + additional_bytes > gateway_byte_limit:
         _prune_disbanded_rooms_locked(
             conn, now=None, max_gateway_event_bytes=max(0, gateway_byte_limit - additional_bytes))
         gateway_bytes = _gateway_event_bytes(conn)
     if gateway_bytes + additional_bytes > gateway_byte_limit:
-        raise HostedRoomError(
-            "Group Chat storage is full on this host. Delete an old Group Chat and try again.")
+        raise HostedRoomError("Group Chat storage is full on this host. Delete an old Group Chat and try again.")
     return additional_bytes
 
 
@@ -842,16 +834,14 @@ def _read_one(db_path: Path | str, sql: str, params: tuple[Any, ...]) -> sqlite3
         return conn.execute(sql, params).fetchone()
 
 
-def peer_room_is_reserved(
-    db_path: Path | str, *, room_id: str, target_profile: str, now: float | None = None) -> bool:
+def peer_room_is_reserved(db_path: Path | str, *, room_id: str, target_profile: str, now: float | None = None) -> bool:
     """Return whether a live target-side RoomLink reservation fences Desktop."""
     timestamp = _now(now)
     params = (_room_id(room_id), _actor_id(target_profile, "target_profile"), timestamp)
     return _read_one(db_path, _SELECT_LIVE_RESERVATION, params) is not None
 
 
-def peer_room_grant_is_current(
-    db_path: Path | str, *, claims: Mapping[str, Any], now: float | None = None) -> bool:
+def peer_room_grant_is_current(db_path: Path | str, *, claims: Mapping[str, Any], now: float | None = None) -> bool:
     """Require a grant to match the target's current live reservation."""
     timestamp = _now(now)
     values = _reservation_claims(claims)
@@ -881,8 +871,7 @@ def _remote_run_identity(record: Mapping[str, Any]) -> tuple[Any, ...]:
     return tuple(record[column] for column in _REMOTE_RUN_IDENTITY_COLUMNS)
 
 
-def upsert_remote_run_receipt(
-    db_path: Path | str, *, record: Mapping[str, Any], now: float | None = None) -> None:
+def upsert_remote_run_receipt(db_path: Path | str, *, record: Mapping[str, Any], now: float | None = None) -> None:
     """Durably bind one logical peer task attempt to its remote run handle."""
     timestamp = _now(now)
     identity = _remote_run_identity(record)
@@ -988,8 +977,7 @@ def create_room(
         if existing is not None:
             if existing["disbanded_at"] is not None:
                 raise RoomConflictError("room_id belongs to a disbanded room")
-            legacy_adoption = (
-                existing["authority_gateway_id"] == "legacy" and authority_gateway_id != "legacy")
+            legacy_adoption = (existing["authority_gateway_id"] == "legacy" and authority_gateway_id != "legacy")
             members_match = existing["members_json"] == members_json or (
                 legacy_adoption
                 and _legacy_members_match(existing["members_json"], normalized_members))
@@ -1003,8 +991,7 @@ def create_room(
                 raise RoomConflictError("room_id already belongs to a different authority")
             return _room_from_row(existing, idempotent=True)
 
-        active_rooms = int(
-            conn.execute("SELECT COUNT(*) FROM hosted_rooms WHERE disbanded_at IS NULL").fetchone()[0])
+        active_rooms = int(conn.execute("SELECT COUNT(*) FROM hosted_rooms WHERE disbanded_at IS NULL").fetchone()[0])
         if active_rooms >= MAX_ACTIVE_ROOMS:
             raise HostedRoomError("This host has too many active Group Chats. Delete one and try again.")
         conn.execute(
@@ -1040,8 +1027,7 @@ def list_rooms(
 
 
 def rename_room(
-    db_path: Path | str, *, room_id: Any, event_id: Any, name: Any, now: float | None = None
-) -> dict[str, Any]:
+    db_path: Path | str, *, room_id: Any, event_id: Any, name: Any, now: float | None = None) -> dict[str, Any]:
     """Rename a live room and append its replay event atomically."""
     room_id = _room_id(room_id)
     event_id = _event_id(event_id)
@@ -1071,8 +1057,7 @@ def rename_room(
                 SET name=?, next_seq=?, event_bytes=event_bytes+?, revision=revision+1, updated_at=?
                 WHERE room_id=?""",
             (name, seq + 1, event_bytes, now, room_id))
-        conn.execute(
-            _INSERT_EVENT, (room_id, seq, event_id, "room.renamed", actor_json, epoch, payload_json, now))
+        conn.execute(_INSERT_EVENT, (room_id, seq, event_id, "room.renamed", actor_json, epoch, payload_json, now))
         updated = conn.execute(_SELECT_ROOM, (room_id,)).fetchone()
         event = _load_event(conn, room_id, event_id)
     result = _room_from_row(updated)
@@ -1082,8 +1067,7 @@ def rename_room(
 
 def append_event(
     db_path: Path | str, *, room_id: Any, event_id: Any, kind: Any, actor: Any, payload: Any,
-    authority_gateway_id: Any = None, authority_epoch: Any = None, now: float | None = None,
-) -> dict[str, Any]:
+    authority_gateway_id: Any = None, authority_epoch: Any = None, now: float | None = None) -> dict[str, Any]:
     """Append one immutable event and allocate its per-room sequence atomically.
 
     Repeating the same ``event_id`` and immutable content returns the original
@@ -1288,12 +1272,10 @@ def claim_authority(
     return state
 
 
-def _disband_replay(
-    conn: sqlite3.Connection, room_id: str, room: sqlite3.Row | None) -> dict[str, Any] | None:
+def _disband_replay(conn: sqlite3.Connection, room_id: str, room: sqlite3.Row | None) -> dict[str, Any] | None:
     """Idempotent replay for a retired or already-disbanded room; None when the room is live."""
     if room is None:
-        retired = conn.execute(
-            "SELECT retired_at FROM hosted_room_retired_ids WHERE room_id=?", (room_id,)).fetchone()
+        retired = conn.execute("SELECT retired_at FROM hosted_room_retired_ids WHERE room_id=?", (room_id,)).fetchone()
         if retired is None:
             raise RoomNotFoundError("hosted room not found")
         return {
