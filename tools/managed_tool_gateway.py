@@ -153,8 +153,7 @@ def resolve_managed_tool_gateway(
 def is_managed_tool_gateway_ready(
     vendor: str,
     gateway_builder: Optional[Callable[[str], str]] = None,
-    token_reader: Optional[Callable[[], Optional[str]]] = None,
-) -> bool:
+    token_reader: Optional[Callable[[], Optional[str]]] = None) -> bool:
     """True when a gateway URL and a likely-usable Nous token are present. Defaults to
     :func:`peek_nous_access_token` (no OAuth refresh); callers about to make a real request
     use :func:`resolve_managed_tool_gateway` instead."""
