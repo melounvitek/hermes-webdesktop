@@ -1458,11 +1458,7 @@ def get_gateway_runtime_snapshot(system: bool = False) -> GatewayRuntimeSnapshot
 
 
 def _format_gateway_pids(pids: tuple[int, ...] | list[int], *, limit: int | None = 3) -> str:
-    rendered = (
-        [str(pid) for pid in pids[:limit] if pid > 0]
-        if limit is not None
-        else [str(pid) for pid in pids if pid > 0]
-    )
+    rendered = [str(pid) for pid in (pids if limit is None else pids[:limit]) if pid > 0]
     if limit is not None and len(pids) > limit:
         rendered.append("...")
     return ", ".join(rendered)
@@ -1521,9 +1517,7 @@ def _gateway_list() -> None:
     print("Gateways:")
     for prof in profiles:
         marker = "✓" if prof.gateway_running else "✗"
-        label = prof.name
-        if prof.name == current:
-            label += " (current)"
+        label = prof.name + (" (current)" if prof.name == current else "")
         parts = [f"  {marker} {label:<24s}"]
         if prof.gateway_running:
             pid = None
@@ -1542,15 +1536,11 @@ def _gateway_list() -> None:
         print(" — ".join(parts))
 
 
-def kill_gateway_processes(
-    force: bool = False, exclude_pids: set | None = None, all_profiles: bool = False
-) -> int:
+def kill_gateway_processes(force: bool = False, exclude_pids: set | None = None, all_profiles: bool = False) -> int:
     """Kill running gateway processes (force-kill if ``force``); ``exclude_pids`` skips e.g. just-
     restarted service PIDs. Returns count killed."""
-    pids = find_gateway_pids(exclude_pids=exclude_pids, all_profiles=all_profiles)
     killed = 0
-
-    for pid in pids:
+    for pid in find_gateway_pids(exclude_pids=exclude_pids, all_profiles=all_profiles):
         try:
             expected_start_time = None
             if force:
@@ -1593,12 +1583,9 @@ def _reaper_candidate_is_supervisor_owned(pid: int) -> bool:
         for _ in range(_REAPER_SUPERVISOR_WALK_LIMIT):
             if parent is None:
                 break
-            try:
-                name = (parent.name() or "").lower()
-            except Exception:
-                name = ""
-            if name == "services.exe":
-                return True
+            with contextlib.suppress(Exception):
+                if (parent.name() or "").lower() == "services.exe":
+                    return True
             parent = parent.parent()
     except Exception:
         pass
@@ -1634,15 +1621,13 @@ def _reap_unsupervised_gateway_orphans(extra_exclude: set | None = None) -> bool
         if _windows_scheduled_task_supervises(_task_name):
             return False
 
-    from gateway.status import _pid_exists, write_planned_stop_marker
+    from gateway.status import _pid_exists, get_process_start_time, write_planned_stop_marker
 
     own = _reaper_exclusion_pids(extra_exclude)
     try:
         # On Windows also drop Task Scheduler-owned candidates (the pidfile-less gap).
         orphans = [
-            p
-            for p in find_gateway_pids(exclude_pids=own)
-            if p and p > 0 and not _reaper_candidate_is_supervisor_owned(p)
+            p for p in find_gateway_pids(exclude_pids=own) if p and p > 0 and not _reaper_candidate_is_supervisor_owned(p)
         ]
     except Exception:
         return False
@@ -1651,8 +1636,6 @@ def _reap_unsupervised_gateway_orphans(extra_exclude: set | None = None) -> bool
 
     # Pin each orphan's identity now: the delayed SIGKILL fires seconds later and a recycled PID
     # must never be force-killed. SIGTERM proceeds regardless; SIGKILL requires a matching fingerprint.
-    from gateway.status import get_process_start_time
-
     orphan_identity: dict[int, int] = {}
     for pid in orphans:
         start = get_process_start_time(pid)
@@ -1673,16 +1656,11 @@ def _reap_unsupervised_gateway_orphans(extra_exclude: set | None = None) -> bool
         reaped = True
 
     # Wait, then force-kill survivors so the replacement can bind the port cleanly.
-    survivors = _await_gateway_exit(orphans, pid_exists=_pid_exists)
     # Fail-closed: SIGKILL only a PID that still names the process fingerprinted at scan time.
-    verified_survivors = []
-    for pid in survivors:
-        recorded = orphan_identity.get(pid)
-        if recorded is None or get_process_start_time(pid) != recorded:
-            continue
-        verified_survivors.append(pid)
-    _force_kill_survivors(verified_survivors)
-
+    _force_kill_survivors([
+        pid for pid in _await_gateway_exit(orphans, pid_exists=_pid_exists)
+        if pid in orphan_identity and get_process_start_time(pid) == orphan_identity[pid]
+    ])
     return reaped
 
 
@@ -1691,26 +1669,19 @@ def _reaper_exclusion_pids(extra_exclude: set | None) -> set[int]:
     own = {os.getpid()}
     if extra_exclude:
         own |= extra_exclude
-    # Service-managed gateways are never orphans: on macOS supports_systemd_services() is False,
-    # so without this a launchd gateway would be SIGTERM'd (and left down under
-    # KeepAlive.SuccessfulExit=false). all_profiles=True because the scan sees every profile's
-    # gateway; a sibling profile's launchd gateway must not be reaped.
+    # Service-managed gateways are never orphans: on macOS supports_systemd_services() is False, so
+    # a launchd gateway would otherwise be SIGTERM'd (and left down under KeepAlive.SuccessfulExit=
+    # false). all_profiles=True: the scan sees every profile; a sibling's launchd gateway must survive.
     with contextlib.suppress(Exception):
         own |= _get_service_pids(all_profiles=True)
-    # Exempt the recorded gateway PID and its parent chain (on Windows the Scheduled-Task
-    # bootstrap's ``gateway run`` argv matches the scan; killing it takes the gateway down).
-    # Evidence comes from the RAW pidfile + lock records, not the validated probe: get_running_pid
-    # returns None on any validation hiccup — exactly when a healthy standalone gateway would be
-    # hard-killed (Windows SIGTERM is TerminateProcess, no drain). For a KILL exclusion list a
-    # stale PID at worst spares one process; a false-negative kills a live gateway. The validated
-    # probe still supplies the runtime-status fallback PID when no pidfile exists.
+    # Exempt the recorded gateway PID and its parent chain (on Windows the Scheduled-Task bootstrap's
+    # ``gateway run`` argv matches the scan; killing it takes the gateway down). Use the RAW pidfile +
+    # lock records, not only the validated probe: get_running_pid returns None on any validation
+    # hiccup — exactly when a healthy standalone gateway would be hard-killed (Windows SIGTERM is
+    # TerminateProcess, no drain). For a KILL exclusion list a stale PID at worst spares one process;
+    # a false negative kills a live gateway. The probe still supplies the runtime-status fallback PID.
     try:
-        from gateway.status import (
-            _pid_from_record,
-            _read_gateway_lock_record,
-            _read_pid_record,
-            get_running_pid,
-        )
+        from gateway.status import _pid_from_record, _read_gateway_lock_record, _read_pid_record, get_running_pid
 
         recorded_pids = set()
         for _record in (_read_pid_record(), _read_gateway_lock_record()):
@@ -1744,17 +1715,12 @@ _ORPHAN_EXIT_POLL_SECONDS = 0.2
 
 
 def _await_gateway_exit(
-    pids,
-    *,
-    pid_exists,
-    sleep=None,
-    grace_s: float = _ORPHAN_EXIT_GRACE_SECONDS,
-    poll_s: float = _ORPHAN_EXIT_POLL_SECONDS,
+    pids, *, pid_exists, sleep=None, grace_s: float = _ORPHAN_EXIT_GRACE_SECONDS, poll_s: float = _ORPHAN_EXIT_POLL_SECONDS
 ):
     """Poll up to *grace_s* for *pids* to exit; return survivors. ``pid_exists``/``sleep`` injectable for tests."""
     if sleep is None:
         sleep = time.sleep
-    survivors = [p for p in pids]
+    survivors = list(pids)
     for _ in range(max(1, int(grace_s / poll_s))):
         survivors = [p for p in survivors if pid_exists(p)]
         if not survivors:
@@ -1778,8 +1744,7 @@ def _force_kill_survivors(survivors, *, kill=None) -> None:
             "Gateway PID %s did not exit within %.0fs of SIGTERM — sending "
             "SIGKILL. A kill during a WAL checkpoint can corrupt state.db; "
             "the next start will run an integrity check.",
-            pid,
-            _ORPHAN_EXIT_GRACE_SECONDS,
+            pid, _ORPHAN_EXIT_GRACE_SECONDS,
         )
         with contextlib.suppress((ProcessLookupError, PermissionError, OSError)):
             kill(pid, getattr(signal, "SIGKILL", signal.SIGTERM))
@@ -1917,16 +1882,11 @@ def _windows_scheduled_task_state(task_name: str) -> str | None:
         )
         result = subprocess.run(
             [powershell, "-NoProfile", "-Command", ps_cmd],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="ignore",
-            timeout=10,
+            capture_output=True, text=True, encoding="utf-8", errors="ignore", timeout=10,
         )
         if result.returncode != 0:
             return None
-        state = (result.stdout or "").strip()
-        return state or None
+        return (result.stdout or "").strip() or None
     except (OSError, subprocess.TimeoutExpired):
         return None
 
@@ -1936,8 +1896,7 @@ def _windows_scheduled_task_supervises(task_name: str) -> bool:
 
     Best-effort: any failure returns False so the caller falls back to pidfile / parent-chain exclusions.
     """
-    state = _windows_scheduled_task_state(task_name)
-    return state in _WINDOWS_TASK_SUPERVISOR_STATES
+    return _windows_scheduled_task_state(task_name) in _WINDOWS_TASK_SUPERVISOR_STATES
 
 
 def _gateway_detached_env() -> bool:
