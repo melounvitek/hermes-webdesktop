@@ -2158,22 +2158,15 @@ def _strip_stale_todo_snapshot(content: Any) -> Any:
     if isinstance(content, list):
         cleaned = []
         for part in content:
-            if not isinstance(part, dict):
+            idx = str(part.get("text") or "").find(TODO_INJECTION_HEADER) if (
+                isinstance(part, dict) and part.get("type") == "text"
+            ) else -1
+            if idx == -1:
                 cleaned.append(part)
                 continue
-            if part.get("type") == "text":
-                text = str(part.get("text") or "")
-                idx = text.find(TODO_INJECTION_HEADER)
-                if idx != -1:
-                    stripped = text[:idx].rstrip()
-                    if stripped:
-                        p = dict(part)
-                        p["text"] = stripped
-                        cleaned.append(p)
-                else:
-                    cleaned.append(part)
-            else:
-                cleaned.append(part)
+            stripped = str(part.get("text") or "")[:idx].rstrip()
+            if stripped:
+                cleaned.append({**part, "text": stripped})
         return cleaned
     return content
 
