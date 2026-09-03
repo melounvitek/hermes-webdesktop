@@ -18,7 +18,6 @@ def _honcho_is_configured_for_doctor() -> bool:
     """Return True when Honcho is configured, even if this process has no active session."""
     try:
         from plugins.memory.honcho.client import HonchoClientConfig
-
         cfg = HonchoClientConfig.from_global_config()
         return bool(cfg.enabled and (cfg.api_key or cfg.base_url))
     except Exception:
@@ -30,14 +29,12 @@ def _doctor_memory_config(hermes_home: Path | None = None) -> dict:
     from hermes_cli.doctor import HERMES_HOME
     try:
         from hermes_cli.config import _expand_env_vars, read_user_config_raw
-
         config_path = (hermes_home if hermes_home is not None else HERMES_HOME) / "config.yaml"
         if not config_path.exists():
             return {}
         config = _expand_env_vars(read_user_config_raw(config_path))
         try:
             from hermes_cli import managed_scope
-
             config = managed_scope.apply_managed_overlay(config)
         except Exception:
             pass
@@ -52,6 +49,11 @@ def _doctor_memory_config(hermes_home: Path | None = None) -> dict:
 STATE_DB_SIZE_WARN_BYTES = 1 * 1024 * 1024 * 1024   # 1 GiB logical size
 
 
+def _bits(*pairs) -> list:
+    """``[fmt() for value, fmt in pairs if value is not None]`` — present-only stat fragments."""
+    return [fmt() for value, fmt in pairs if value is not None]
+
+
 def _render_state_db_stats(stats: dict, holders=None) -> list:
     """Turn a collect_state_db_stats() dict into ``(kind, text, detail)`` rows, kind 'info' / 'warn'.
 
@@ -64,27 +66,20 @@ def _render_state_db_stats(stats: dict, holders=None) -> list:
     wal = stats.get("wal_size_bytes")
     freelist = stats.get("freelist_count")
 
-    size_bits = []
-    if logical is not None:
-        size_bits.append(f"logical size {_human_bytes(logical)}")
-    if stats.get("page_count") is not None:
-        size_bits.append(f"{stats['page_count']:,} pages")
-    if freelist is not None:
-        size_bits.append(f"{freelist:,} free")
-    if wal is not None:
-        size_bits.append(f"WAL {_human_bytes(wal)}")
+    size_bits = _bits(
+        (logical, lambda: f"logical size {_human_bytes(logical)}"),
+        (stats.get("page_count"), lambda: f"{stats['page_count']:,} pages"),
+        (freelist, lambda: f"{freelist:,} free"),
+        (wal, lambda: f"WAL {_human_bytes(wal)}"),
+    )
     if size_bits:
         lines.append(("info", "state.db " + ", ".join(size_bits), ""))
-
-    row_bits = []
-    if stats.get("messages") is not None:
-        row_bits.append(f"{stats['messages']:,} messages")
-    if stats.get("sessions") is not None:
-        row_bits.append(f"{stats['sessions']:,} sessions")
-    if stats.get("journal_mode"):
-        row_bits.append(f"journal_mode={stats['journal_mode']}")
-    if holders is not None:
-        row_bits.append(f"{holders} process(es) holding the DB open")
+    row_bits = _bits(
+        (stats.get("messages"), lambda: f"{stats['messages']:,} messages"),
+        (stats.get("sessions"), lambda: f"{stats['sessions']:,} sessions"),
+        (stats.get("journal_mode") or None, lambda: f"journal_mode={stats['journal_mode']}"),
+        (holders, lambda: f"{holders} process(es) holding the DB open"),
+    )
     if row_bits:
         lines.append(("info", ", ".join(row_bits), ""))
 
@@ -120,7 +115,6 @@ def _render_state_db_stats(stats: dict, holders=None) -> list:
 
 def _memory_store_flags(hermes_home: Path) -> tuple:
     from tools.memory_tool import get_builtin_memory_store_flags
-
     return get_builtin_memory_store_flags({"memory": _doctor_memory_config(hermes_home)})
 
 
@@ -226,7 +220,6 @@ def _state_db_health(f: Finding, should_fix: bool, state_db_path: Path, _DHH: st
         # `SELECT COUNT(*)` succeeds even when the FTS index is corrupt and every message write
         # fails through the triggers; _db_opens_cleanly drives a rolled-back write to surface that.
         from hermes_state import _db_opens_cleanly
-
         _write_reason = _db_opens_cleanly(state_db_path)
         if _write_reason is not None:
             check_warn(f"{_DHH}/state.db fails a write-health probe (FTS index may be corrupt)", f"({_write_reason})")
@@ -241,7 +234,6 @@ def _state_db_health(f: Finding, should_fix: bool, state_db_path: Path, _DHH: st
             )
     except Exception as e:
         from hermes_state import is_malformed_db_error
-
         if not is_malformed_db_error(e):
             check_warn(f"{_DHH}/state.db exists but has issues: {e}")
             return
@@ -264,7 +256,6 @@ def _state_db_stats(issues: list, state_db_path: Path) -> None:
     the gateway; any failure degrades to one info line rather than failing doctor."""
     try:
         from hermes_state import collect_state_db_stats, count_db_holders
-
         rows = _render_state_db_stats(collect_state_db_stats(state_db_path), holders=count_db_holders(state_db_path))
         for _kind, _text, _detail in rows:
             if _kind != "warn":
@@ -351,7 +342,6 @@ def _check_skills_hub(should_fix: bool) -> Finding:
             check_warn(f"{q_count} skill(s) in quarantine", "(pending review)")
 
     from hermes_cli.config import get_env_value
-
     if get_env_value("GITHUB_TOKEN") or get_env_value("GH_TOKEN"):
         check_ok("GitHub token configured (authenticated API access)")
     else:
@@ -440,7 +430,6 @@ def _check_memory_provider(should_fix: bool) -> Finding:
 def _check_profiles(should_fix: bool, f: Finding) -> None:
     from hermes_cli.profiles import list_profiles, _get_wrapper_dir, profile_exists
     import re as _re
-
     named_profiles = [p for p in list_profiles() if not p.is_default]
     if not named_profiles:
         return

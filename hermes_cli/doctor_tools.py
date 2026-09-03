@@ -11,7 +11,7 @@ import shutil
 import subprocess
 import sys
 from hermes_cli.doctor_platform import _system_package_install_cmd
-from hermes_cli.doctor_report import CHECK_ROW, Finding, _fail_and_issue, check_bool, check_info, check_ok, check_warn, doctor_check
+from hermes_cli.doctor_report import Finding, _fail_and_issue, check_bool, check_info, check_ok, check_warn, doctor_check
 from hermes_cli.vercel_auth import describe_vercel_auth
 from hermes_constants import agent_browser_runnable, is_termux as _is_termux
 
@@ -71,12 +71,10 @@ def _doctor_web_capability_rows() -> list[tuple[str, str, str]]:
     try:
         from agent.web_search_registry import get_active_extract_provider, get_active_search_provider
         from tools.web_tools import _ensure_web_plugins_loaded, _provider_is_ready
-
         # Fresh process: bundled web providers only register during plugin discovery (idempotent, cheap).
         _ensure_web_plugins_loaded()
     except Exception:
         return rows
-
     for capability, getter in (("web search", get_active_search_provider), ("web extract", get_active_extract_provider)):
         try:
             provider = getter()
@@ -94,8 +92,7 @@ def _doctor_web_capability_rows() -> list[tuple[str, str, str]]:
 def _apply_doctor_tool_availability_overrides(available: list[str], unavailable: list[dict]) -> tuple[list[str], list[dict]]:
     """Adjust runtime-gated tool availability for doctor diagnostics."""
     from hermes_cli.doctor import _honcho_is_configured_for_doctor
-    updated_available = list(available)
-    updated_unavailable = []
+    updated_available, updated_unavailable = list(available), []
     for item in unavailable:
         if _is_kanban_worker_env_gate(item):
             gated = "kanban"
@@ -220,10 +217,8 @@ def _check_vercel_backend(issues: list[str]) -> None:
 def _check_plugin_backend(terminal_env: str, issues: list[str]) -> None:
     try:
         from hermes_cli.plugins import discover_plugins
-
         discover_plugins()
         from agent.terminal_env_registry import get_provider
-
         provider = get_provider(terminal_env)
     except Exception:
         provider = None
@@ -247,7 +242,6 @@ def _check_terminal_backend(should_fix: bool) -> Finding:
         running_in_container = _is_container()
     except Exception:
         running_in_container = False
-
     # Inside our container docker-in-docker isn't set up, so the local backend is the intended one: skip the
     # noisy "docker not found" warning. An explicit TERMINAL_ENV=docker (mounted docker.sock) still gets checked.
     if running_in_container and terminal_env != "docker":
@@ -460,7 +454,7 @@ def _check_tool_availability(should_fix: bool, f: Finding) -> None:
     for tid in available:
         check_ok(TOOLSET_REQUIREMENTS.get(tid, {}).get("name", tid), _doctor_tool_availability_detail(tid))
     for status, label, detail in web_rows:
-        CHECK_ROW[status](label, detail)
+        (check_ok if status == "ok" else check_warn)(label, detail)
     for item in unavailable:
         env_vars = item.get("missing_vars") or item.get("env_vars") or []
         check_warn(item["name"], f"(missing {', '.join(env_vars)})" if env_vars else "(system dependency not met)")

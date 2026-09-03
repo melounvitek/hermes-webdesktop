@@ -32,14 +32,11 @@ def _sqlite_upgrade_hint(install_method: str | None = None) -> str:
     """Return an actionable SQLite upgrade hint for this install layout."""
     from hermes_cli.doctor import PROJECT_ROOT, detect_install_method
     method = install_method or detect_install_method(PROJECT_ROOT)
-    if method == "docker":
-        action = f"run `{recommended_update_command_for_method(method)}`, then recreate all Hermes containers"
-    elif is_nix_install_method(method):
-        action = recommended_update_command_for_method(method)  # prose guidance, not a shell command
-    elif method == "apt":
-        action = f"run `{recommended_update_command_for_method(method)}`"
+    cmd = recommended_update_command_for_method(method)
+    if is_nix_install_method(method):
+        action = cmd  # prose guidance, not a shell command
     else:
-        action = "run `hermes update`"
+        action = {"docker": f"run `{cmd}`, then recreate all Hermes containers", "apt": f"run `{cmd}`"}.get(method, "run `hermes update`")
     return f"({action}; fixed versions: 3.51.3+ / 3.50.7 / 3.44.6 — see https://sqlite.org/wal.html#walresetbug)"
 
 
@@ -116,19 +113,17 @@ def _report_database_journal_modes(hermes_home: Path | None = None, version_info
             continue
         mode, error = _read_journal_mode(path)
         size = _format_db_size(path)
-        if error is not None:
-            if vulnerable:
-                check_warn(f"{name}: journal mode could not be read", f"({error}; cannot rule out WAL exposure)")
-            else:
-                check_info(f"{name}: journal mode could not be read ({error})")
+        if error is not None and vulnerable:
+            check_warn(f"{name}: journal mode could not be read", f"({error}; cannot rule out WAL exposure)")
+        elif error is not None:
+            check_info(f"{name}: journal mode could not be read ({error})")
+        elif mode == "wal" and vulnerable:
+            exposed.append(name)
+            check_warn(f"{name} is in WAL mode ({size})", "(exposed to the WAL-reset bug until SQLite is upgraded)")
         elif mode == "wal":
-            if vulnerable:
-                exposed.append(name)
-                check_warn(f"{name} is in WAL mode ({size})", "(exposed to the WAL-reset bug until SQLite is upgraded)")
-            else:
-                check_info(f"{name}: WAL journal mode ({size})")
+            check_info(f"{name}: WAL journal mode ({size})")
         else:
-            check_info(f"{name}: rollback journal mode ({size}, not exposed)" if vulnerable else f"{name}: rollback journal mode ({size})")
+            check_info(f"{name}: rollback journal mode ({size}{', not exposed' if vulnerable else ''})")
     if exposed:
         check_info(f"To clear the exposure: {_wal_reset_repair_hint()}")
 
@@ -188,8 +183,7 @@ def _check_s6_supervision(issues: list[str]) -> None:
 
     profiles = mgr.list_profile_gateways()
     if not profiles:
-        check_info("No per-profile gateways registered yet — create one with `hermes profile create <name>`")
-        return
+        return check_info("No per-profile gateways registered yet — create one with `hermes profile create <name>`")
     up_count = sum(1 for p in profiles if mgr.is_running(f"gateway-{p}"))
     check_ok(f"Per-profile gateways: {up_count}/{len(profiles)} supervised up"
              + (f" ({', '.join(sorted(profiles))})" if len(profiles) <= 8 else ""))
@@ -207,11 +201,8 @@ def check_certificates(should_fix: bool = False, issues: "list | None" = None) -
     except Exception as e:
         check_warn("SSL certificate check skipped", str(e))
         return
-
-    def add_issue(msg: str) -> None:
-        if issues is not None:
-            issues.append(msg)
-
+    if issues is None:
+        issues = []
     try:
         verify_ca_bundle_with_fallback()
         check_ok("SSL CA certificate bundle is valid")
@@ -225,20 +216,19 @@ def check_certificates(should_fix: bool = False, issues: "list | None" = None) -
     check_fail("SSL CA certificate bundle is broken", first_error)
     pip_cmd = f"{sys.executable} -m pip install --force-reinstall certifi"
     if not should_fix:
-        add_issue(f"Repair the CA bundle: run `hermes doctor --fix`, or `{pip_cmd}`")
+        issues.append(f"Repair the CA bundle: run `hermes doctor --fix`, or `{pip_cmd}`")
         return
 
     print("    → Repairing: force-reinstalling certifi...")
     try:
         result = subprocess.run([sys.executable, "-m", "pip", "install", "--force-reinstall", "certifi"],
                                 capture_output=True, text=True, timeout=300)
+        failure = ("certifi reinstall failed", (result.stderr or result.stdout or "")[-500:]) if result.returncode != 0 else None
     except Exception as exc:
-        check_fail("certifi repair could not run pip", str(exc))
-        add_issue(f"Reinstall certifi manually: {pip_cmd}")
-        return
-    if result.returncode != 0:
-        check_fail("certifi reinstall failed", (result.stderr or result.stdout or "")[-500:])
-        add_issue(f"Reinstall certifi manually: {pip_cmd}")
+        failure = ("certifi repair could not run pip", str(exc))
+    if failure:
+        check_fail(*failure)
+        issues.append(f"Reinstall certifi manually: {pip_cmd}")
         return
 
     # Drop cached certifi modules so where() resolves the fresh install without a restart.
@@ -252,11 +242,8 @@ def check_certificates(should_fix: bool = False, issues: "list | None" = None) -
         check_ok("SSL CA certificate bundle repaired (certifi reinstalled)")
     except SSLConfigurationError as e:
         check_fail("SSL CA certificate bundle still broken after reinstall", str(e))
-        add_issue(
-            "certifi reinstall did not restore the CA bundle — check for a "
-            "custom CA env var (SSL_CERT_FILE/REQUESTS_CA_BUNDLE) pointing "
-            "at a missing file, or recreate the venv."
-        )
+        issues.append("certifi reinstall did not restore the CA bundle — check for a custom CA env var "
+                      "(SSL_CERT_FILE/REQUESTS_CA_BUNDLE) pointing at a missing file, or recreate the venv.")
 
 
 def _check_gateway_service_linger(issues: list[str]) -> None:
@@ -291,9 +278,7 @@ def check_macos_tcc_grants() -> None:
     Disk Access, so the DR string is the only readable signal (a proxy for the signing class, not DR wording).
     """
     from hermes_cli.doctor import _desktop_app_bundle, _macos_desktop_dr
-    if sys.platform != "darwin":
-        return
-    app = _desktop_app_bundle()
+    app = _desktop_app_bundle() if sys.platform == "darwin" else None
     if app is None:
         return
     dr = _macos_desktop_dr(app)
@@ -335,13 +320,11 @@ def _desktop_app_bundle() -> Path | None:
 def _macos_desktop_dr(app: Path) -> str | None:
     """Return the bundle's designated requirement string, or None on failure (a hanging codesign must never abort doctor)."""
     codesign = shutil.which("codesign")
-    if not codesign:
-        return None
     try:
-        proc = subprocess.run([codesign, "-d", "--requirements", "-", str(app)], capture_output=True, text=True, timeout=15)
+        proc = subprocess.run([codesign, "-d", "--requirements", "-", str(app)], capture_output=True, text=True, timeout=15) if codesign else None
     except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
-    return None if proc.returncode != 0 else (proc.stdout or "") + (proc.stderr or "")
+    return None if proc is None or proc.returncode != 0 else (proc.stdout or "") + (proc.stderr or "")
 
 
 def check_macos_tcc_anchor(should_fix: bool = False) -> None:
@@ -354,13 +337,10 @@ def check_macos_tcc_anchor(should_fix: bool = False) -> None:
         if status == "skip":
             return
         if status == "active":
-            check_ok("macOS TCC anchor active", f"({detail})")
-            return
-        if should_fix:
-            anchored = tcc.ensure_tcc_anchor()
-            if anchored is not None:
-                check_ok("macOS TCC anchor installed", f"({anchored})")
-                return
+            return check_ok("macOS TCC anchor active", f"({detail})")
+        anchored = tcc.ensure_tcc_anchor() if should_fix else None
+        if anchored is not None:
+            return check_ok("macOS TCC anchor installed", f"({anchored})")
         check_warn("macOS TCC anchor missing" if status == "missing" else "macOS TCC anchor stale", f"({detail})")
     except Exception as e:
         check_warn("macOS TCC anchor check failed", f"({e})")
@@ -377,7 +357,9 @@ def check_macos_full_disk_access() -> None:
     tcc_dir = Path.home() / "Library" / "Application Support" / "com.apple.TCC"
     try:
         os.listdir(tcc_dir)
-    except PermissionError:
+    except OSError as e:
+        if not isinstance(e, PermissionError):
+            return
         check_info(
             "One switch silences all macOS folder prompts: grant your terminal "
             "app Full Disk Access and Hermes will never trip per-folder dialogs "
@@ -389,8 +371,6 @@ def check_macos_full_disk_access() -> None:
             "and restart them once. With Hermes' stable signing identities the "
             "grant survives every update."
         )
-    except OSError:
-        return
     else:
         check_ok("macOS Full Disk Access granted", "(no per-folder permission prompts will occur)")
 

@@ -76,7 +76,6 @@ def _gateway_status() -> str:
     """Return a short gateway status string."""
     try:
         from hermes_cli.gateway import get_gateway_runtime_snapshot
-
         snapshot = get_gateway_runtime_snapshot()
         if snapshot.running:
             mode = "manual" if snapshot.has_process_service_mismatch else snapshot.manager
@@ -142,7 +141,6 @@ _INTERESTING_PATHS = (
 def _config_overrides(config: dict) -> dict[str, str]:
     """Find non-default config values worth reporting."""
     from hermes_cli.config import DEFAULT_CONFIG
-
     overrides = {}
     for section, key in _INTERESTING_PATHS:
         default_section = DEFAULT_CONFIG.get(section, {})
@@ -214,7 +212,6 @@ def _api_key_lines(show_keys: bool) -> list[str]:
         if not val and label == "openrouter":
             try:
                 from agent.credential_pool import load_pool as _load_pool
-
                 if _load_pool("openrouter").has_credentials():
                     display = "set (auth pool)"
             except Exception:

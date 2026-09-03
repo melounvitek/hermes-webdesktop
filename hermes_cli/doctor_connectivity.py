@@ -189,26 +189,7 @@ def _probe_apikey_provider(pname, env_vars, default_url, base_env, supports_heal
         return _row(pname, "ok", "(key configured)", label=label)
     try:
         import httpx
-        base = os.getenv(base_env, "") if base_env else ""
-        # Kimi Code keys (sk-kimi-) → api.kimi.com/coding/v1 (OpenAI-compat surface exposing /models).
-        if not base and key.startswith("sk-kimi-"):
-            base = "https://api.kimi.com/coding/v1"
-        # Anthropic-compat endpoints (/anthropic, api.kimi.com/coding with no /v1) don't support
-        # /models — rewrite to the OpenAI-compat /v1 surface for health checks.
-        if base and base.rstrip("/").endswith("/anthropic"):
-            from agent.auxiliary_client import _to_openai_base_url
-            base = _to_openai_base_url(base)
-        if base_url_host_matches(base, "api.kimi.com") and base.rstrip("/").endswith("/coding"):
-            base = base.rstrip("/") + "/v1"
-        url = (base.rstrip("/") + "/models") if base else default_url
-        headers = {"Authorization": f"Bearer {key}", "User-Agent": _HERMES_USER_AGENT}
-        if base_url_host_matches(base, "api.kimi.com"):
-            headers["User-Agent"] = "claude-code/0.1.0"
-        # Google's Generative Language API rejects ``Authorization: Bearer <api-key>`` with 401
-        # ACCESS_TOKEN_TYPE_UNSUPPORTED (reserved for OAuth 2 tokens); plain keys use ``x-goog-api-key``.
-        if url and base_url_host_matches(url, "generativelanguage.googleapis.com"):
-            headers.pop("Authorization", None)
-            headers["x-goog-api-key"] = key
+        base, url, headers = _apikey_request(key, base_env, default_url)
         r = httpx.get(url, headers=headers, timeout=10)
         if pname == "Alibaba/DashScope" and not base and r.status_code == 401:
             r = httpx.get("https://dashscope.aliyuncs.com/compatible-mode/v1/models", headers=headers, timeout=10)
@@ -219,6 +200,31 @@ def _probe_apikey_provider(pname, env_vars, default_url, base_env, supports_heal
     if r.status_code == 401:
         return _row(pname, "fail", "(invalid API key)", [f"Check {env_vars[0]} in .env"], label=label)
     return _row(pname, "warn", f"(HTTP {r.status_code})", label=label)
+
+
+def _apikey_request(key: str, base_env, default_url) -> tuple:
+    """(effective base, models URL, headers) for a generic Bearer-auth probe, with the per-vendor rewrites."""
+    base = os.getenv(base_env, "") if base_env else ""
+    # Kimi Code keys (sk-kimi-) → api.kimi.com/coding/v1 (OpenAI-compat surface exposing /models).
+    if not base and key.startswith("sk-kimi-"):
+        base = "https://api.kimi.com/coding/v1"
+    # Anthropic-compat endpoints (/anthropic, api.kimi.com/coding with no /v1) don't support
+    # /models — rewrite to the OpenAI-compat /v1 surface for health checks.
+    if base and base.rstrip("/").endswith("/anthropic"):
+        from agent.auxiliary_client import _to_openai_base_url
+        base = _to_openai_base_url(base)
+    if base_url_host_matches(base, "api.kimi.com") and base.rstrip("/").endswith("/coding"):
+        base = base.rstrip("/") + "/v1"
+    url = (base.rstrip("/") + "/models") if base else default_url
+    headers = {"Authorization": f"Bearer {key}", "User-Agent": _HERMES_USER_AGENT}
+    if base_url_host_matches(base, "api.kimi.com"):
+        headers["User-Agent"] = "claude-code/0.1.0"
+    # Google's Generative Language API rejects ``Authorization: Bearer <api-key>`` with 401
+    # ACCESS_TOKEN_TYPE_UNSUPPORTED (reserved for OAuth 2 tokens); plain keys use ``x-goog-api-key``.
+    if url and base_url_host_matches(url, "generativelanguage.googleapis.com"):
+        headers.pop("Authorization", None)
+        headers["x-goog-api-key"] = key
+    return base, url, headers
 
 
 def _probe_bedrock() -> ProbeResult:
@@ -263,8 +269,7 @@ def _probe_azure_entra() -> ProbeResult:
         model_cfg = cfg.get("model") if isinstance(cfg, dict) else {}
         if not isinstance(model_cfg, dict):
             return _skip(name)
-        cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
-        auth_mode = str(model_cfg.get("auth_mode") or "").strip().lower()
+        cfg_provider, auth_mode = (str(model_cfg.get(k) or "").strip().lower() for k in ("provider", "auth_mode"))
         if cfg_provider != "azure-foundry" or auth_mode != "entra_id":
             return _skip(name)
     except Exception:
@@ -278,9 +283,7 @@ def _probe_azure_entra() -> ProbeResult:
         return _row(name, "warn", f"(adapter import failed: {exc})", [f"Azure Foundry adapter import failed: {exc}"], label=label)
 
     if not has_azure_identity_installed():
-        return _row(name, "warn", "(azure-identity not installed)",
-                    [f"Install azure-identity: {sys.executable} -m pip install azure-identity"], label=label)
-
+        return _row(name, "warn", "(azure-identity not installed)", [f"Install azure-identity: {sys.executable} -m pip install azure-identity"], label=label)
     entra_cfg = model_cfg.get("entra") or {}
     scope = (str(entra_cfg.get("scope") or "").strip() if isinstance(entra_cfg, dict) else "") or SCOPE_AI_AZURE_DEFAULT
     info = describe_active_credential(config=EntraIdentityConfig(scope=scope), timeout_seconds=10.0)

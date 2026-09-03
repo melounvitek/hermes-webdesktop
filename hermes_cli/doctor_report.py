@@ -15,7 +15,6 @@ def _mark(glyph: str, col: str):
 
 
 check_ok, check_warn, check_fail = _mark("✓", Colors.GREEN), _mark("⚠", Colors.YELLOW), _mark("✗", Colors.RED)
-CHECK_ROW = {"ok": check_ok, "warn": check_warn, "fail": check_fail}
 
 
 def check_info(text: str):
@@ -24,13 +23,9 @@ def check_info(text: str):
 
 def check_bool(cond, ok, bad, *, fail: bool = False):
     """``check_ok(*ok)`` when *cond* else ``check_warn(*bad)`` (``check_fail`` with fail=True); returns bool(cond).
-
-    *ok* / *bad* are a text string or a ``(text, detail)`` tuple.
-    """
+    *ok* / *bad* are a text string or a ``(text, detail)`` tuple."""
     args = ok if cond else bad
-    if isinstance(args, str):
-        args = (args,)
-    (check_ok if cond else (check_fail if fail else check_warn))(*args)
+    (check_ok if cond else (check_fail if fail else check_warn))(*((args,) if isinstance(args, str) else args))
     return bool(cond)
 
 
@@ -62,11 +57,8 @@ class Finding:
 
 def doctor_check(on_error: str | None = None, detail: str = ""):
     """Turn ``fn(should_fix, f: Finding)`` into a ``(should_fix) -> Finding`` doctor check.
-
-    Creates the Finding, and if *fn* raises prints ``check_warn(on_error.format(e=e), detail.format(e=e))``
-    (nothing when *on_error* is None) — the partial Finding is still returned, so issues recorded
-    before the crash survive.
-    """
+    If *fn* raises, prints ``check_warn(on_error.format(e=e), detail.format(e=e))`` (nothing when *on_error*
+    is None); the partial Finding is still returned, so issues recorded before the crash survive."""
     def deco(fn):
         @functools.wraps(fn)
         def check(should_fix: bool) -> Finding:

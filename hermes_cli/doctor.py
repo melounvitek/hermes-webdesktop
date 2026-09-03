@@ -81,7 +81,6 @@ def _check_auth_providers(should_fix: bool) -> Finding:
     f = Finding()
     try:
         from hermes_cli.auth import get_nous_auth_status_local, get_codex_auth_status, get_minimax_oauth_auth_status
-
         # Read-only display: refresh-free snapshot — doctor must never trigger an OAuth refresh.
         _login_row("Nous Portal auth", get_nous_auth_status_local())
         codex_status = get_codex_auth_status()

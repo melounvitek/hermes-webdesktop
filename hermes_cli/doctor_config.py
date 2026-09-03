@@ -68,12 +68,8 @@ def collect_deprecated_env_vars(env_map: dict | None) -> list[tuple[str, str]]:
 def collect_relay_plugin_cutover_findings(raw_config: dict | None, env_map: dict | None) -> list[tuple[str, str]]:
     """Return actionable findings for the removed Hermes Relay plugin."""
     from hermes_cli.relay_plugin_cutover import (
-        LEGACY_RELAY_EXPORT_ENV_VARS,
-        RELAY_PLUGINS_CONFIG_ENV,
-        configured_legacy_relay_env_vars,
-        legacy_relay_plugin_keys,
+        LEGACY_RELAY_EXPORT_ENV_VARS, RELAY_PLUGINS_CONFIG_ENV, configured_legacy_relay_env_vars, legacy_relay_plugin_keys,
     )
-
     findings: list[tuple[str, str]] = []
     plugins = raw_config.get("plugins") if isinstance(raw_config, dict) else None
     if isinstance(plugins, dict):
@@ -135,7 +131,6 @@ def _check_mcp_security(should_fix: bool, f: Finding) -> None:
     """Flag mcp_servers entries with suspicious stdio commands."""
     from hermes_cli.config import load_config
     from hermes_cli.mcp_security import validate_mcp_server_entry
-
     servers = load_config().get("mcp_servers") or {}
     suspicious = 0
     if isinstance(servers, dict):
@@ -219,11 +214,10 @@ def _known_provider_ids(cfg: dict) -> tuple[set, list, object, object, object]:
         from hermes_cli.config import is_provider_enabled
         known.update(str(name).strip().lower() for name, prov_cfg in user_providers.items()
                      if str(name).strip() and is_provider_enabled(prov_cfg))
-    if aliases is not None:
-        for entry in custom_providers:
-            name = str(entry.get("name") or "").strip() if isinstance(entry, dict) else ""
-            if name:
-                known.update(aliases(name, str(entry.get("provider_key") or "").strip()))
+    for entry in custom_providers if aliases is not None else ():
+        name = str(entry.get("name") or "").strip() if isinstance(entry, dict) else ""
+        if name:
+            known.update(aliases(name, str(entry.get("provider_key") or "").strip()))
     return known, custom_providers, resolve_auth, normalize, resolve_full
 
 
@@ -240,11 +234,8 @@ def _provider_has_credentials(runtime_provider: str) -> bool:
     checks elsewhere, and get_auth_status() returns a bare {logged_in: False} for anything it doesn't dispatch."""
     if runtime_provider == "openrouter":
         from hermes_cli.config import get_env_value
-
-        return bool(str(get_env_value("OPENROUTER_API_KEY") or "").strip()
-                    or str(get_env_value("OPENAI_API_KEY") or "").strip())
+        return any(str(get_env_value(k) or "").strip() for k in ("OPENROUTER_API_KEY", "OPENAI_API_KEY"))
     from hermes_cli.auth import PROVIDER_REGISTRY, get_auth_status
-
     pconfig = PROVIDER_REGISTRY.get(runtime_provider)
     if pconfig and getattr(pconfig, "auth_type", "") == "api_key":
         status = get_auth_status(runtime_provider) or {}
@@ -264,12 +255,11 @@ def _validate_model_config(config_path, issues: list) -> None:
     known_providers, custom_providers, resolve_auth, normalize, resolve_full = _known_provider_ids(cfg)
     valid_provider_ids = set(known_providers)
     accept = {provider} if provider else set()
-    if normalize is not None:
-        for known_provider in known_providers:
-            try:
-                valid_provider_ids.add(normalize(known_provider))
-            except Exception:
-                continue
+    for known_provider in known_providers if normalize is not None else ():
+        try:
+            valid_provider_ids.add(normalize(known_provider))
+        except Exception:
+            continue
 
     runtime_provider = catalog_provider = provider
     if provider and provider not in {"auto", "custom"}:
@@ -340,11 +330,10 @@ def _check_config_file(should_fix: bool) -> Finding:
         example_config = PROJECT_ROOT / 'cli-config.yaml.example'
         if example_config.exists():
             shutil.copy2(str(example_config), str(config_path))
-            check_ok(f"Created {_DHH}/config.yaml from cli-config.yaml.example")
         else:
             from hermes_cli.config import DEFAULT_CONFIG, save_config
             save_config(DEFAULT_CONFIG)
-            check_ok(f"Created {_DHH}/config.yaml from defaults")
+        check_ok(f"Created {_DHH}/config.yaml from {'cli-config.yaml.example' if example_config.exists() else 'defaults'}")
         f.fixed += 1
     else:
         check_warn("config.yaml not found", "(using defaults)")
@@ -481,7 +470,6 @@ def _check_config_drift(should_fix: bool) -> Finding:
 def _check_xai_retirement(should_fix: bool, f: Finding) -> None:
     from hermes_cli.config import load_config
     from hermes_cli.xai_retirement import MIGRATION_GUIDE_URL, find_retired_xai_refs, format_issue
-
     retired_refs = find_retired_xai_refs(load_config())
     if not retired_refs:
         check_ok("No retired xAI models in config")

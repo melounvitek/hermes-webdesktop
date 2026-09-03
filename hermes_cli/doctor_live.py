@@ -42,7 +42,6 @@ class ProbeResult:
 def _load_config() -> dict:
     try:
         from hermes_cli.config import load_config
-
         return load_config() or {}
     except Exception:
         return {}
@@ -51,19 +50,16 @@ def _load_config() -> dict:
 def _http_get(url: str, headers: Optional[dict] = None, timeout: Optional[float] = None):
     """Single HTTP GET seam for all metadata probes."""
     import httpx
-
     return httpx.get(url, headers=headers or {}, timeout=timeout)
 
 
 def _browser_available() -> bool:
     """Is the local browser automation backend (agent-browser) installed?"""
     import shutil
-
     if shutil.which("agent-browser"):
         return True
     try:
         from hermes_cli.doctor import HERMES_HOME, PROJECT_ROOT
-
         if (PROJECT_ROOT / "node_modules" / "agent-browser").exists():
             return True
         for candidate in (HERMES_HOME / "node" / "bin", HERMES_HOME / "node", HERMES_HOME / "node_modules" / ".bin"):
@@ -75,11 +71,7 @@ def _browser_available() -> bool:
     # probes above. Mirror the rung hermes_cli.doctor uses so this probe can't diverge from it, including
     # the Termux carve-out (bare npx is too fragile to advertise as ready there).
     try:
-        from tools.browser_tool import (
-            _find_agent_browser,
-            _is_npx_agent_browser_sentinel,
-            _requires_real_termux_browser_install,
-        )
+        from tools.browser_tool import _find_agent_browser, _is_npx_agent_browser_sentinel, _requires_real_termux_browser_install
         browser_cmd = _find_agent_browser(validate=False)
     except Exception:
         return False
@@ -93,7 +85,6 @@ def _launch_browser_probe(timeout: float) -> tuple:
         from playwright.sync_api import sync_playwright
     except ImportError:
         return (False, "playwright not installed")
-
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, timeout=timeout * 1000)
         try:
@@ -106,7 +97,6 @@ def _launch_browser_probe(timeout: float) -> tuple:
 def _probe_mcp_server(name: str, config: dict, timeout: float):
     """initialize + tools/list against one configured MCP server."""
     from hermes_cli.mcp_config import _probe_single_server
-
     return _probe_single_server(name, config, connect_timeout=timeout)
 
 
