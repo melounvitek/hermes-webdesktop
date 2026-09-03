@@ -940,10 +940,14 @@ class SessionSessionsMixin:
             where_clauses.append("s.hidden = 0")
         where_sql = _where_sql(where_clauses)
         base_where_params = list(params)  # pinned back-fill reuses the WHERE before LIMIT/OFFSET
-        prompt_select, prompt_join = (
-            "", "",
-        ) if compact_rows else(", COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved", "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash",)
-        _sel = self._compact_session_cols() if compact_rows else "s.*"
+        # Shared projection head of the three list queries (whitespace is part of the SQL text).
+        select_head = (
+            f"SELECT {self._compact_session_cols() if compact_rows else 's.*'}"
+            + ("" if compact_rows else ", COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved")
+            + f",\n                    {_PREVIEW_COL_SQL},\n                    "
+        )
+        prompt_join = "" if compact_rows else "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash"
+        from_sessions = f"FROM sessions s\n                {prompt_join}"
         if order_by_last_active:
             # The CTE walks compression-continuation edges forward from the admitted
             # rows; MAX over the chain gives effective_last_active in SQL. Do NOT
@@ -972,9 +976,7 @@ class SessionSessionsMixin:
                     FROM chain
                     GROUP BY root_id
                 )
-                SELECT {_sel}{prompt_select},
-                    {_PREVIEW_COL_SQL},
-                    {_sql_session_last_active("s")} AS last_active,
+                {select_head}{_sql_session_last_active("s")} AS last_active,
                     COALESCE(cm.effective_last_active, s.started_at) AS _effective_last_active
                 FROM sessions s
                 LEFT JOIN chain_max cm ON cm.root_id = s.id
@@ -986,11 +988,8 @@ class SessionSessionsMixin:
             params = params + params + id_params + [limit, offset]  # WHERE binds twice (seed + outer)
         else:
             query = f"""
-                SELECT {_sel}{prompt_select},
-                    {_PREVIEW_COL_SQL},
-                    {_sql_session_last_active("s")} AS last_active
-                FROM sessions s
-                {prompt_join}
+                {select_head}{_sql_session_last_active("s")} AS last_active
+                {from_sessions}
                 {where_sql}
                 ORDER BY s.started_at DESC
                 LIMIT ? OFFSET ?
@@ -1003,14 +1002,11 @@ class SessionSessionsMixin:
             seen_ids = {s["id"] for s in sessions}
             pinned_where = f"{where_sql} AND s.pinned = 1" if where_sql else "WHERE s.pinned = 1"
             pinned_query = f"""
-                SELECT {_sel}{prompt_select},
-                    {_PREVIEW_COL_SQL},
-                    COALESCE(
+                {select_head}COALESCE(
                         (SELECT MAX(m2.timestamp) FROM messages m2 WHERE m2.session_id = s.id),
                         s.started_at
                     ) AS last_active
-                FROM sessions s
-                {prompt_join}
+                {from_sessions}
                 {pinned_where}
                 ORDER BY s.started_at DESC
             """
