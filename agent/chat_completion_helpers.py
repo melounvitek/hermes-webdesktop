@@ -137,13 +137,11 @@ def _status_code_from_payload(payload: Any) -> Optional[int]:
 
 def _json_object_from_text(text: str) -> Optional[dict]:
     stripped = (text or "").strip()
-    if not stripped.startswith("{"):
-        return None
-    try:
-        decoded = json.loads(stripped)
-    except (json.JSONDecodeError, TypeError):
-        return None
-    return decoded if isinstance(decoded, dict) else None
+    with contextlib.suppress(json.JSONDecodeError, TypeError):
+        if stripped.startswith("{"):
+            decoded = json.loads(stripped)
+            return decoded if isinstance(decoded, dict) else None
+    return None
 
 
 def _parse_provider_sse_events(text: str) -> list[dict]:
@@ -553,22 +551,23 @@ def _scale_stale_timeout_for_context(base: float, est_tokens: int) -> float:
     return base
 
 
+def _cloud_stale_timeout(base: float, api_kwargs: dict) -> float:
+    """Cloud stale-stream patience: ``base`` scaled for context size, then floored for
+    known reasoning models. ``model`` (OpenAI/Anthropic) wins over ``modelId`` (Bedrock);
+    Bedrock's dotted, region-prefixed profile id can't match the floor's slug regex
+    directly, so it is normalized as a fallback."""
+    from agent.reasoning_timeouts import get_reasoning_stale_timeout_floor
+    timeout = _scale_stale_timeout_for_context(base, estimate_request_context_tokens(api_kwargs))
+    floor = get_reasoning_stale_timeout_floor(api_kwargs.get("model") or api_kwargs.get("modelId") or "")
+    if floor is None and api_kwargs.get("modelId"):
+        floor = _bedrock_reasoning_stale_floor(api_kwargs["modelId"])
+    return timeout if floor is None else max(timeout, floor)
+
+
 def _derive_stream_stale_timeout(agent, api_kwargs: dict) -> float:
     """Stale-stream patience for a provider that is never a local endpoint (Bedrock):
-    provider config → env base → context-size scaling → reasoning-model floor;
-    the same budget as the OpenAI/Anthropic stale detector minus its local branch."""
-    _timeout = _scale_stale_timeout_for_context(
-        _configured_stale_base(agent), estimate_request_context_tokens(api_kwargs))
-    from agent.reasoning_timeouts import get_reasoning_stale_timeout_floor
-    # ``model`` (OpenAI/Anthropic) wins over ``modelId`` (Bedrock). Bedrock's dotted,
-    # region-prefixed profile id can't match the floor's slug regex: normalize it first.
-    _model_id = api_kwargs.get("model") or api_kwargs.get("modelId") or ""
-    _reasoning_floor = get_reasoning_stale_timeout_floor(_model_id)
-    if _reasoning_floor is None and api_kwargs.get("modelId"):
-        _reasoning_floor = _bedrock_reasoning_stale_floor(api_kwargs["modelId"])
-    if _reasoning_floor is not None:
-        _timeout = max(_timeout, _reasoning_floor)
-    return _timeout
+    the OpenAI/Anthropic stale detector's budget minus its local branch."""
+    return _cloud_stale_timeout(_configured_stale_base(agent), api_kwargs)
 
 
 def _bedrock_reasoning_stale_floor(model_id: object) -> "float | None":
@@ -1117,8 +1116,7 @@ class _NonStreamRequest:
         self.thread = None
 
     def _install_codex_request_token(self) -> None:
-        # Already retired before the worker got going — do not re-publish.
-        if self.codex_token is not None and not self.codex_retired:
+        if self.codex_token is not None and not self.codex_retired:  # retired before start: don't re-publish
             self.agent._active_codex_stream_request_token = self.codex_token
 
     def _retire_codex_request_token(self) -> None:
@@ -1385,16 +1383,13 @@ def _build_anthropic_kwargs(agent, api_messages, tools_for_api, reasoning_config
         base_url=getattr(agent, "_anthropic_base_url", None),
         fast_mode=request_overrides.get("speed") == "fast",
         drop_context_1m_beta=bool(getattr(agent, "_oauth_1m_beta_disabled", False)))
-    # Nous Portal reads ``tags`` / ``session_id`` as top-level body fields on
-    # its Messages route too, but the profile hook that produces them is only
-    # consulted by the OpenAI-wire transport — merge here so Messages traffic
-    # keeps product attribution and sticky routing.
+    # Portal reads ``tags`` / ``session_id`` on its Messages route too, but the profile hook
+    # is only consulted by the OpenAI-wire transport — merge here to keep sticky routing.
     return _merge_nous_portal_messages_extra_body(agent, anthropic_kwargs)
 
 
 def _build_bedrock_kwargs(agent, api_messages, tools_for_api):
-    # AWS Bedrock native Converse API — the adapter handles message/tool
-    # conversion and boto3 calls directly, bypassing the OpenAI client.
+    # Bedrock Converse — the adapter converts messages/tools and calls boto3 directly.
     return agent._get_transport().build_kwargs(model=agent.model, messages=api_messages, tools=tools_for_api,
         max_tokens=agent.max_tokens or 4096, region=getattr(agent, "_bedrock_region", None) or "us-east-1",
         guardrail_config=getattr(agent, "_bedrock_guardrail_config", None))
@@ -1457,23 +1452,20 @@ def _build_chat_completions_kwargs(agent, api_messages, tools_for_api, reasoning
 
     # _fixed_temperature_for_model may return the OMIT_TEMPERATURE sentinel
     # (temperature omitted entirely), a numeric override, or None.
-    try:
+    _omit_temp, _fixed_temp = False, None
+    with contextlib.suppress(Exception):
         from agent.auxiliary_client import _fixed_temperature_for_model, OMIT_TEMPERATURE
         _ft = _fixed_temperature_for_model(agent.model, agent.base_url)
         _omit_temp = _ft is OMIT_TEMPERATURE
-        _fixed_temp = _ft if not _omit_temp else None
-    except Exception:
-        _omit_temp = False
-        _fixed_temp = None
+        _fixed_temp = None if _omit_temp else _ft
 
     _prefs = _provider_preferences_for_agent(agent)
     _ant_max = _anthropic_max_output_for_model(agent)
     _qwen_meta = {"sessionId": agent.session_id or "hermes", "promptId": str(uuid.uuid4())} if _is_qwen else None
-    try:
+    _profile = None
+    with contextlib.suppress(Exception):
         from providers import get_provider_profile
         _profile = get_provider_profile(agent.provider)
-    except Exception:
-        _profile = None
 
     _ephemeral_out = _consume_ephemeral_max_output(agent)
     # Strip image parts for non-vision models on BOTH paths (registered
@@ -1544,6 +1536,10 @@ def _model_dump_safe(obj):
         return obj.model_dump()
 
 
+def _dump_if_model(value):
+    return _model_dump_safe(value) if hasattr(value, "model_dump") else value
+
+
 def _assistant_reasoning_text(agent, assistant_message) -> Optional[str]:
     """Structured reasoning, else inline ``<think>`` blocks embedded in content."""
     reasoning_text = agent._extract_reasoning(assistant_message)
@@ -1606,7 +1602,7 @@ def _assistant_tool_call_dict(agent, tool_call, index: int) -> dict:
     # models 400 on the next request.
     extra = getattr(tool_call, "extra_content", None)
     if extra is not None:
-        tc_dict["extra_content"] = _model_dump_safe(extra) if hasattr(extra, "model_dump") else extra
+        tc_dict["extra_content"] = _dump_if_model(extra)
     return tc_dict
 
 
@@ -1703,9 +1699,8 @@ def _fallback_entry_unavailable_without_network(agent, fb: dict) -> Optional[str
         state = get_provider_auth_state("nous") or {}
     except Exception as exc:
         return f"nous_auth_unreadable:{type(exc).__name__}"
-    if any(isinstance(t, str) and t.strip() for t in (state.get("access_token"), state.get("refresh_token"))):
-        return None
-    return "nous_token_missing"
+    has_token = any(isinstance(t, str) and t.strip() for t in (state.get("access_token"), state.get("refresh_token")))
+    return None if has_token else "nous_token_missing"
 
 
 _FALLBACK_REASON_LABELS = {
@@ -2176,26 +2171,27 @@ def _iteration_summary_chat_kwargs(agent, api_messages: list) -> dict:
     return summary_kwargs
 
 
+def _summary_text(agent, response, **normalize_kwargs) -> str:
+    return (agent._get_transport().normalize_response(response, **normalize_kwargs).content or "").strip()
+
+
 def _codex_summary_attempt(agent, api_messages: list, api_request_id: str):
     def _attempt(retry_count: int) -> str:
         codex_kwargs = agent._build_api_kwargs(api_messages)
         codex_kwargs.pop("tools", None)
-        response = agent._run_codex_stream(codex_kwargs)
-        return (agent._get_transport().normalize_response(response).content or "").strip()
+        return _summary_text(agent, agent._run_codex_stream(codex_kwargs))
     return _attempt
 
 
 def _anthropic_summary_attempt(agent, api_messages: list, api_request_id: str):
     def _attempt(retry_count: int) -> str:
-        transport = agent._get_transport()
-        ant_kw = transport.build_kwargs(
+        ant_kw = agent._get_transport().build_kwargs(
             model=agent.model, messages=api_messages, tools=None, max_tokens=agent.max_tokens,
             reasoning_config=agent.reasoning_config, is_oauth=agent._is_anthropic_oauth,
             preserve_dots=agent._anthropic_preserve_dots(), base_url=getattr(agent, "_anthropic_base_url", None))
         ant_kw = _merge_nous_portal_messages_extra_body(agent, ant_kw)
         response = _managed_summary_call(agent, api_request_id, ant_kw, agent._anthropic_messages_create, retry_count=retry_count)
-        result = transport.normalize_response(response, strip_tool_prefix=agent._is_anthropic_oauth)
-        return (result.content or "").strip()
+        return _summary_text(agent, response, strip_tool_prefix=agent._is_anthropic_oauth)
     return _attempt
 
 
@@ -2206,7 +2202,7 @@ def _chat_summary_attempt(agent, api_messages: list, api_request_id: str):
         summary_client = agent._ensure_primary_openai_client(reason="iteration_limit_summary_retry" if retry_count else "iteration_limit_summary")
         response = _managed_summary_call(
             agent, api_request_id, summary_kwargs, lambda request: summary_client.chat.completions.create(**request), retry_count=retry_count)
-        return (agent._get_transport().normalize_response(response).content or "").strip()
+        return _summary_text(agent, response)
     return _attempt
 
 
@@ -2416,17 +2412,12 @@ class _BedrockStream:
             with contextlib.suppress(Exception):
                 self.on_first_delta()
 
-    def _on_text(self, text):
-        self._fire_first()
-        self.agent._fire_stream_delta(text)
-
-    def _on_tool(self, name):
-        self._fire_first()
-        self.agent._fire_tool_gen_started(name)
-
-    def _on_reasoning(self, text):
-        self._fire_first()
-        self.agent._fire_reasoning_delta(text)
+    def _after_first(self, fire):
+        """Wrap a delta callback so the first delivered event also fires ``on_first_delta``."""
+        def _on(value):
+            self._fire_first()
+            fire(value)
+        return _on
 
     def _open_stream(self, next_api_kwargs: dict[str, Any]):
         return _bedrock_converse_call(dict(next_api_kwargs), stream=True, on_stream_denied=self._fall_back_to_converse)
@@ -2478,9 +2469,9 @@ class _BedrockStream:
                 metadata=_relay_stream_metadata(agent, "custom"), defer_logical_completion=True)
             wants_reasoning = agent.reasoning_callback or agent.stream_delta_callback or plugin_reasoning_observer
             streamed_response = stream_converse_with_callbacks({"stream": stream},
-                on_text_delta=self._on_text if agent._has_stream_consumers() else None,
-                on_tool_start=self._on_tool,
-                on_reasoning_delta=self._on_reasoning if wants_reasoning else None,
+                on_text_delta=self._after_first(agent._fire_stream_delta) if agent._has_stream_consumers() else None,
+                on_tool_start=self._after_first(agent._fire_tool_gen_started),
+                on_reasoning_delta=self._after_first(agent._fire_reasoning_delta) if wants_reasoning else None,
                 on_interrupt_check=lambda: agent._interrupt_requested, on_event=_stamp_event)
             self.result["response"] = stream.final_response or streamed_response
         except Exception as e:
@@ -2598,7 +2589,7 @@ class _ToolCallAccumulator:
         if extra is None and hasattr(tc_delta, "model_extra"):
             extra = (tc_delta.model_extra if isinstance(tc_delta.model_extra, dict) else {}).get("extra_content")
         if extra is not None:
-            entry["extra_content"] = _model_dump_safe(extra) if hasattr(extra, "model_dump") else extra
+            entry["extra_content"] = _dump_if_model(extra)
         name = entry["function"]["name"]
         if name and idx not in self._notified:
             self._notified.add(idx)
@@ -2664,7 +2655,7 @@ class _StreamingCall:
 
     def _cancel_current_stream_attempt(self, reason: str) -> None:
         with self.stream_attempt_lock:
-            current = int(self.stream_attempt_state.get("current") or 0)
+            current = int(self.stream_attempt_state["current"])
             if current:
                 self.stream_attempt_state["cancelled"].add(current)
         if current:
@@ -3395,10 +3386,7 @@ class _StreamingCall:
             logger.debug("Local provider detected (%s) — stale stream timeout set to %.0fs",
                 self.agent.base_url, self._stream_stale_timeout)
             return
-        base = _scale_stale_timeout_for_context(base, estimate_request_context_tokens(self.api_kwargs))
-        from agent.reasoning_timeouts import get_reasoning_stale_timeout_floor
-        _reasoning_floor = get_reasoning_stale_timeout_floor(self.api_kwargs.get("model"))
-        self._stream_stale_timeout = base if _reasoning_floor is None else max(base, _reasoning_floor)
+        self._stream_stale_timeout = _cloud_stale_timeout(base, self.api_kwargs)
 
     def _partial_stream_stub(self):
         """Tokens already reached the platform: a finish_reason="length" stub fires the
@@ -3427,17 +3415,14 @@ class _StreamingCall:
                 len(_partial_text or ""), error)
         # Classify content filtering (MiniMax 1027, Azure content_filter, Anthropic refusal)
         # before the error is swallowed into the stub: the loop reads the tag and falls back.
-        try:
+        _stub = _build_partial_stream_stub("assistant", _partial_text, None,
+            getattr(self.agent, "model", "unknown"), None, dropped_tool_names=_partial_names)
+        with contextlib.suppress(Exception):
             from agent.error_classifier import classify_api_error
             _cls = classify_api_error(
                 error, provider=str(getattr(self.agent, "provider", "") or ""), model=str(getattr(self.agent, "model", "") or ""))
-            _content_filter_terminated = _cls.reason == FailoverReason.content_policy_blocked
-        except Exception:
-            _content_filter_terminated = False
-        _stub = _build_partial_stream_stub("assistant", _partial_text, None,
-            getattr(self.agent, "model", "unknown"), None, dropped_tool_names=_partial_names)
-        if _content_filter_terminated:
-            _stub._content_filter_terminated = True
+            if _cls.reason == FailoverReason.content_policy_blocked:
+                _stub._content_filter_terminated = True
         _reset_stale_streak(self.agent)  # deltas fired => provider responsive: clear the breaker
         return _stub
 
@@ -3475,9 +3460,8 @@ class _StreamingCall:
         if self.result["response"] is not None:
             _reset_stale_streak(self.agent)  # provider proved responsive: clear the breaker
         # Propagate first-chunk timing for the ``post_api_request`` hook.
-        _diag_last = self.clients.diag
-        if isinstance(_diag_last, dict) and _diag_last.get("first_chunk_at"):
-            self.agent._last_api_first_chunk_at = float(_diag_last["first_chunk_at"])
+        if isinstance(self.clients.diag, dict) and self.clients.diag.get("first_chunk_at"):
+            self.agent._last_api_first_chunk_at = float(self.clients.diag["first_chunk_at"])
         return self.result["response"]
 
 
