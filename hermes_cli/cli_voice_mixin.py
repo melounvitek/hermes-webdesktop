@@ -454,11 +454,8 @@ class CLIVoiceMixin:
                         logger.debug("voice interjection interrupt failed: %s", e)
 
             wav_path = full_duplex_listen(
-                _should_stop,
-                is_playing=is_audio_output_active,
-                on_trigger=_on_trigger,
-                multiplier=_mult or None,
-                grace_ms=max(0, _grace_ms),
+                _should_stop, is_playing=is_audio_output_active, on_trigger=_on_trigger,
+                multiplier=_mult or None, grace_ms=max(0, _grace_ms),
             )
             if wav_path and self._voice_barge_capture.is_set():
                 self._voice_submit_barge_utterance(wav_path)
@@ -491,8 +488,7 @@ class CLIVoiceMixin:
                     from tools.voice_mode import is_tts_echo
                     if is_tts_echo(transcript, getattr(self, "_voice_last_tts_text", "")):
                         logger.debug(
-                            "Dropping playback-phase barge transcript as TTS echo: %r",
-                            transcript,
+                            "Dropping playback-phase barge transcript as TTS echo: %r", transcript
                         )
                         _cprint(f"\n{_DIM}Ignored likely TTS echo (not queued).{_RST}")
                         return
@@ -658,10 +654,7 @@ class CLIVoiceMixin:
         from cli import _ACCENT, _DIM, _RST, _cprint
         try:
             from tools.wake_word import (
-                check_wake_word_requirements,
-                load_wake_word_config,
-                owns_listener,
-                start_listening,
+                check_wake_word_requirements, load_wake_word_config, owns_listener, start_listening
             )
         except Exception as e:
             if announce:
@@ -831,10 +824,7 @@ class CLIVoiceMixin:
         """Show current wake-word listener status."""
         from cli import _ACCENT, _BOLD, _DIM, _RST, _cprint
         from tools.wake_word import (
-            audio_is_silent,
-            check_wake_word_requirements,
-            is_listening,
-            load_wake_word_config,
+            audio_is_silent, check_wake_word_requirements, is_listening, load_wake_word_config,
             owns_listener,
         )
 

@@ -25,12 +25,9 @@ _MAX_CLOSE_TAG_LEN = max(len(t) for t in _CLOSE_TAGS)
 
 # Ordered (prefix, status) rows for _slow_command_status — first match wins.
 _SLOW_COMMAND_STATUS = (
-    ("/skills search", "Searching skills..."),
-    ("/skills browse", "Loading skills..."),
-    ("/skills inspect", "Inspecting skill..."),
-    ("/skills install", "Installing skill..."),
-    ("/skills", "Processing skills command..."),
-    ("/browser", "Configuring browser..."),
+    ("/skills search", "Searching skills..."), ("/skills browse", "Loading skills..."),
+    ("/skills inspect", "Inspecting skill..."), ("/skills install", "Installing skill..."),
+    ("/skills", "Processing skills command..."), ("/browser", "Configuring browser..."),
 )
 _SLOW_COMMAND_STATUS_EXACT = {
     "/reload-mcp": "Reloading MCP servers...",
@@ -386,9 +383,7 @@ class CLIStreamMixin:
         realigner pads to the final visible cell width, not the marker-decorated width.
         """
         from cli import (
-            _strip_markdown_syntax,
-            _terminal_width_for_streaming,
-            realign_markdown_tables,
+            _strip_markdown_syntax, _terminal_width_for_streaming, realign_markdown_tables
         )
         buf = self._stream_table_buf
         self._stream_table_buf = []
@@ -405,15 +400,8 @@ class CLIStreamMixin:
     def _emit_stream_text(self, text: str) -> None:
         """Emit filtered text to the streaming display."""
         from cli import (
-            HermesCLI,
-            _ACCENT,
-            _RST,
-            _STREAM_PARTIAL_PREVIEW_LEN,
-            _cprint,
-            _strip_markdown_syntax,
-            datetime,
-            is_table_divider,
-            looks_like_table_row,
+            HermesCLI, _ACCENT, _RST, _STREAM_PARTIAL_PREVIEW_LEN, _cprint, _strip_markdown_syntax,
+            datetime, is_table_divider, looks_like_table_row,
         )
         if not text:
             return
@@ -493,12 +481,7 @@ class CLIStreamMixin:
     def _flush_stream(self) -> None:
         """Emit any remaining partial line from the stream buffer and close the box."""
         from cli import (
-            _ACCENT,
-            _RST,
-            _cprint,
-            _strip_markdown_syntax,
-            is_table_divider,
-            looks_like_table_row,
+            _ACCENT, _RST, _cprint, _strip_markdown_syntax, is_table_divider, looks_like_table_row
         )
         # Still inside a "reasoning block" at end-of-stream means a false positive — the
         # model mentioned a tag like <think> in prose and never closed it. Recover the
@@ -754,10 +737,7 @@ class CLIStreamMixin:
                         and duration >= 30.0
                     ):
                         from agent.onboarding import (
-                            TOOL_PROGRESS_FLAG,
-                            is_seen,
-                            mark_seen,
-                            tool_progress_hint_cli,
+                            TOOL_PROGRESS_FLAG, is_seen, mark_seen, tool_progress_hint_cli
                         )
                         if not is_seen(CLI_CONFIG, TOOL_PROGRESS_FLAG):
                             self._long_tool_hint_fired = True
@@ -817,10 +797,7 @@ class CLIStreamMixin:
         try:
             from agent.display import render_edit_diff_with_delta
             render_edit_diff_with_delta(
-                function_name,
-                function_result,
-                function_args=function_args,
-                snapshot=snapshot,
+                function_name, function_result, function_args=function_args, snapshot=snapshot,
                 print_fn=_cprint,
             )
         except Exception:

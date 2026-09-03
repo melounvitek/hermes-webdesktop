@@ -11,13 +11,7 @@ from rich.table import Table
 from hermes_cli.cli_output import line_input
 
 from agent.skill_bundles import (
-    _bundles_dir,
-    delete_bundle,
-    get_bundle,
-    list_bundles,
-    reload_bundles,
-    save_bundle,
-    scan_bundles,
+    _bundles_dir, delete_bundle, get_bundle, list_bundles, reload_bundles, save_bundle, scan_bundles
 )
 
 
@@ -97,10 +91,7 @@ def _cmd_create(args) -> None:
 
     try:
         path = save_bundle(
-            name,
-            skills,
-            description=args.description or "",
-            instruction=args.instruction or "",
+            name, skills, description=args.description or "", instruction=args.instruction or "",
             overwrite=bool(args.force),
         )
     except FileExistsError as exc:
@@ -177,8 +168,7 @@ def register_cli(subparser) -> None:
         help="Extra guidance prepended to the loaded skill content",
     )
     p_create.add_argument(
-        "--force", "-f", action="store_true",
-        help="Overwrite an existing bundle with the same name",
+        "--force", "-f", action="store_true", help="Overwrite an existing bundle with the same name"
     )
     p_create.set_defaults(_bundles_handler=_cmd_create)
 

@@ -95,11 +95,9 @@ def _print_switch_summary(cli, result, old_model, *, one_turn: bool, strict_cont
     agent = cli.agent
     try:
         ctx = resolve_display_context_length(
-            result.new_model,
-            result.target_provider,
+            result.new_model, result.target_provider,
             base_url=result.base_url or cli.base_url or "",
-            api_key=result.api_key or cli.api_key or "",
-            model_info=mi,
+            api_key=result.api_key or cli.api_key or "", model_info=mi,
             config_context_length=getattr(agent, "_config_context_length", None) if agent else None,
             custom_providers=getattr(agent, "_custom_providers", None) if agent else None,
         )
@@ -147,8 +145,7 @@ def _show_model_picker(cli, ctx, force_refresh: bool) -> None:
         if ctx is None:
             raise RuntimeError("inventory context unavailable")
         providers = build_models_payload(
-            ctx,
-            probe_custom_providers=force_refresh,
+            ctx, probe_custom_providers=force_refresh,
             probe_current_custom_provider=not force_refresh,
         )["providers"]
     except Exception:
@@ -164,9 +161,7 @@ def _show_model_picker(cli, ctx, force_refresh: bool) -> None:
         _cprint("  /model --refresh                     re-fetch live model lists")
         return
     cli._open_model_picker(
-        providers,
-        cli.model or "unknown",
-        get_label(cli.provider) if cli.provider else "unknown",
+        providers, cli.model or "unknown", get_label(cli.provider) if cli.provider else "unknown",
         user_provs=ctx.user_providers if ctx is not None else None,
         custom_provs=ctx.custom_providers if ctx is not None else None,
     )
@@ -201,8 +196,7 @@ class CLIModelSwitchMixin:
 
         try:
             from hermes_cli.model_normalize import (
-                _AGGREGATOR_PROVIDERS,
-                normalize_model_for_provider,
+                _AGGREGATOR_PROVIDERS, normalize_model_for_provider
             )
             if resolved_provider not in _AGGREGATOR_PROVIDERS:
                 _adopt(
@@ -368,11 +362,8 @@ class CLIModelSwitchMixin:
         if self.agent is not None:
             try:
                 self.agent.switch_model(
-                    new_model=self.model,
-                    new_provider=self.provider,
-                    api_key=self.api_key or "",
-                    base_url=self.base_url or "",
-                    api_mode=self.api_mode or "",
+                    new_model=self.model, new_provider=self.provider, api_key=self.api_key or "",
+                    base_url=self.base_url or "", api_mode=self.api_mode or "",
                 )
             except Exception:
                 logger.debug("In-place agent model swap on resume failed", exc_info=True)
@@ -406,11 +397,9 @@ class CLIModelSwitchMixin:
         try:
             from hermes_cli.model_selection_guards import combined_selection_warning
             warning = combined_selection_warning(
-                result.new_model,
-                provider=result.target_provider,
+                result.new_model, provider=result.target_provider,
                 base_url=result.base_url or self.base_url or "",
-                api_key=result.api_key or self.api_key or "",
-                model_info=result.model_info,
+                api_key=result.api_key or self.api_key or "", model_info=result.model_info,
             )
         except Exception:
             warning = None
@@ -479,10 +468,8 @@ class CLIModelSwitchMixin:
         if hasattr(agent, "switch_model"):
             try:
                 agent.switch_model(
-                    new_model=snapshot.get("model", ""),
-                    new_provider=snapshot.get("provider", ""),
-                    api_key=snapshot.get("api_key", ""),
-                    base_url=snapshot.get("base_url", ""),
+                    new_model=snapshot.get("model", ""), new_provider=snapshot.get("provider", ""),
+                    api_key=snapshot.get("api_key", ""), base_url=snapshot.get("base_url", ""),
                     api_mode=snapshot.get("api_mode", ""),
                     capabilities=snapshot.get("capabilities"),
                 )
@@ -510,13 +497,8 @@ class CLIModelSwitchMixin:
 
     @staticmethod
     def _compute_model_picker_viewport(
-        selected: int,
-        scroll_offset: int,
-        n: int,
-        term_rows: int,
-        reserved_below: int = 6,
-        panel_chrome: int = 6,
-        min_visible: int = 3,
+        selected: int, scroll_offset: int, n: int, term_rows: int, reserved_below: int = 6,
+        panel_chrome: int = 6, min_visible: int = 3,
     ) -> tuple[int, int]:
         """Resolve (scroll_offset, visible) for the /model picker viewport.
 
@@ -545,12 +527,9 @@ class CLIModelSwitchMixin:
             if not isinstance(model_cfg, dict) or "context_length" not in model_cfg:
                 return
             if should_clear_context_pin(
-                model_cfg.get("default") or model_cfg.get("model"),
-                result.new_model,
-                model_cfg.get("base_url"),
-                result.base_url,
-                model_cfg.get("provider"),
-                result.target_provider,
+                model_cfg.get("default") or model_cfg.get("model"), result.new_model,
+                model_cfg.get("base_url"), result.base_url,
+                model_cfg.get("provider"), result.target_provider,
             ):
                 save_config_value("model.context_length", None)
         except Exception:
@@ -584,11 +563,8 @@ class CLIModelSwitchMixin:
         if self.agent is not None:
             try:
                 self.agent.switch_model(
-                    new_model=result.new_model,
-                    new_provider=result.target_provider,
-                    api_key=result.api_key,
-                    base_url=result.base_url,
-                    api_mode=result.api_mode,
+                    new_model=result.new_model, new_provider=result.target_provider,
+                    api_key=result.api_key, base_url=result.base_url, api_mode=result.api_mode,
                     capabilities=getattr(result, "runtime_capabilities", None),
                 )
             except Exception as exc:
@@ -676,12 +652,9 @@ class CLIModelSwitchMixin:
             if 0 <= selected < back_idx:
                 from hermes_cli.model_switch import switch_model
                 result = switch_model(
-                    raw_input=visible_labels[selected],
-                    current_provider=self.provider or "",
-                    current_model=self.model or "",
-                    current_base_url=self.base_url or "",
-                    current_api_key=self.api_key or "",
-                    is_global=persist_global,
+                    raw_input=visible_labels[selected], current_provider=self.provider or "",
+                    current_model=self.model or "", current_base_url=self.base_url or "",
+                    current_api_key=self.api_key or "", is_global=persist_global,
                     explicit_provider=provider_data.get("slug"),
                     user_providers=state.get("user_provs"),
                     custom_providers=state.get("custom_provs"),
@@ -692,8 +665,7 @@ class CLIModelSwitchMixin:
                 if getattr(self, "_app", None):
                     threading.Thread(
                         target=self._confirm_and_apply_model_switch_result,
-                        args=(result, persist_global, _picker_custom_provs),
-                        daemon=True,
+                        args=(result, persist_global, _picker_custom_provs), daemon=True,
                     ).start()
                 else:
                     self._confirm_and_apply_model_switch_result(
@@ -719,9 +691,7 @@ class CLIModelSwitchMixin:
         """
         from cli import _cprint
         from hermes_cli.model_switch import (
-            switch_model,
-            parse_model_switch_args,
-            resolve_persist_behavior,
+            switch_model, parse_model_switch_args, resolve_persist_behavior
         )
 
         parts = cmd_original.split(None, 1)  # split off '/model'
@@ -753,8 +723,7 @@ class CLIModelSwitchMixin:
         from hermes_cli.inventory import load_picker_context
         try:
             ctx = load_picker_context().with_overrides(
-                current_provider=self.provider or "",
-                current_model=self.model or "",
+                current_provider=self.provider or "", current_model=self.model or "",
                 current_base_url=self.base_url or "",
             )
         except Exception:
@@ -767,14 +736,10 @@ class CLIModelSwitchMixin:
             return _show_model_picker(self, ctx, request.force_refresh)
 
         result = switch_model(
-            raw_input=request.target,
-            current_provider=self.provider or "",
-            current_model=self.model or "",
-            current_base_url=self.base_url or "",
-            current_api_key=self.api_key or "",
-            is_global=persist_global,
-            explicit_provider=request.explicit_provider,
-            user_providers=user_provs,
+            raw_input=request.target, current_provider=self.provider or "",
+            current_model=self.model or "", current_base_url=self.base_url or "",
+            current_api_key=self.api_key or "", is_global=persist_global,
+            explicit_provider=request.explicit_provider, user_providers=user_provs,
             custom_providers=custom_provs,
         )
         if not result.success:
@@ -789,8 +754,7 @@ class CLIModelSwitchMixin:
         if getattr(self, "_app", None):
             threading.Thread(
                 target=self._confirm_and_apply_cli_model_switch,
-                args=(result, persist_global, one_turn, custom_provs),
-                daemon=True,
+                args=(result, persist_global, one_turn, custom_provs), daemon=True,
             ).start()
             return
         self._confirm_and_apply_cli_model_switch(result, persist_global, one_turn, custom_provs)

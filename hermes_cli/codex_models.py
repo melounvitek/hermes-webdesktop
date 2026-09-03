@@ -193,7 +193,6 @@ def get_codex_model_ids(access_token: Optional[str] = None) -> List[str]:
             return _finalize_codex_models(api_models)
     default_model = _read_default_model(codex_home)
     return _finalize_codex_models(_dedupe([
-        *([default_model] if default_model else []),
-        *_read_cache_models(codex_home),
+        *([default_model] if default_model else []), *_read_cache_models(codex_home),
         *DEFAULT_CODEX_MODELS,
     ]))
