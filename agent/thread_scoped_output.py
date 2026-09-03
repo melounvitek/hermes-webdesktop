@@ -1,11 +1,10 @@
 """Thread-scoped stdout/stderr silencing for background worker threads.
 
-``contextlib.redirect_stdout`` reassigns the *process-global* stream, so a
-daemon worker silencing itself also silences every other thread (gateway
-event loop included) for the duration. This module installs a per-thread
-routing proxy as ``sys.stdout``/``sys.stderr``: silenced threads write to a
-sink, everyone else passes through to the original stream. Installed once,
-idempotently, and never uninstalled (that would race other threads mid-write).
+``contextlib.redirect_stdout`` reassigns the *process-global* stream, so a daemon worker
+silencing itself also silences every other thread (gateway event loop included). This
+module installs a per-thread routing proxy as ``sys.stdout``/``sys.stderr``: silenced
+threads write to a sink, everyone else passes through to the original stream. Installed
+once, idempotently, and never uninstalled (that would race other threads mid-write).
 """
 
 from __future__ import annotations
@@ -74,9 +73,8 @@ class _ThreadRoutingStream:
             return None
 
     def writelines(self, lines):  # type: ignore[no-untyped-def]
-        target = self._target()
         try:
-            return target.writelines(lines)
+            return self._target().writelines(lines)
         except Exception:
             return None
 
@@ -127,12 +125,14 @@ def _ensure_installed(attr: str, passthrough: TextIO) -> "_ThreadRoutingStream":
 def thread_scoped_silence() -> Iterator[None]:
     """Silence ``stdout``/``stderr`` for the *current thread only*."""
     ident = threading.get_ident()
-    out_proxy = _ensure_installed("stdout", sys.__stdout__ or sys.stdout)
-    err_proxy = _ensure_installed("stderr", sys.__stderr__ or sys.stderr)
-    out_proxy.silence(ident)
-    err_proxy.silence(ident)
+    proxies = (
+        _ensure_installed("stdout", sys.__stdout__ or sys.stdout),
+        _ensure_installed("stderr", sys.__stderr__ or sys.stderr),
+    )
+    for proxy in proxies:
+        proxy.silence(ident)
     try:
         yield
     finally:
-        out_proxy.unsilence(ident)
-        err_proxy.unsilence(ident)
+        for proxy in proxies:
+            proxy.unsilence(ident)

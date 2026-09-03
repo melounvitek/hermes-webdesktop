@@ -1,15 +1,12 @@
 """Cheap content-sanity checks for the truncated-response continuation path.
 
-A model in a degenerate repetition loop can spend its ENTIRE output budget
-echoing one fragment; the ``finish_reason=length`` continuation path would
-then stitch that fragment into the final response with a "continue" nudge
-(one incident: a 60k-char turn delivered as 31 Discord messages). These
-helpers detect repetition-dominated fragments BEFORE the nudge so the turn
-aborts with a clear error (like the ``_thinking_exhausted`` guard).
-
-Deliberately conservative: only LONG verbatim repeats (60+ chars) covering a
-majority of the fragment trip the guard, so ordinary truncations (a sentence
-cut mid-word, a repeated heading, similar code lines) are never blocked.
+A model in a degenerate repetition loop can spend its ENTIRE output budget echoing one
+fragment; the ``finish_reason=length`` continuation path would then stitch that fragment
+into the final response with a "continue" nudge (one incident: a 60k-char turn delivered
+as 31 Discord messages). These helpers detect repetition-dominated fragments BEFORE the
+nudge so the turn aborts with a clear error. Deliberately conservative: only LONG verbatim
+repeats (60+ chars) covering a majority of the fragment trip the guard, so ordinary
+truncations (a sentence cut mid-word, a repeated heading, similar code lines) never do.
 """
 
 from __future__ import annotations
@@ -19,39 +16,30 @@ import math
 # Below this length the check doesn't run: short truncations trivially
 # contain repeated tokens and are legitimately continued.
 MIN_FRAGMENT_LENGTH = 400
-
-# Exact-repeat window; a verbatim repeat this long is far beyond ordinary
-# phrasing reuse (citations, headings, similar code).
+# Exact-repeat window; far beyond ordinary phrasing reuse (citations, headings, similar code).
 _REPEAT_WINDOW = 60
-
 # A window repeating at least this often is a signal even for short fragments.
 _MIN_REPEAT_COUNT = 5
-
 # "Repetition-dominated" = repeated windows cover at least this fraction.
 _DOMINANCE_RATIO = 0.5
 
 
 def is_repetition_dominated(text: str) -> bool:
-    """True when a single 60+ char substring recurs often enough to cover at
-    least half of ``text`` — the signature of a repetition loop, where
-    continuing would only stitch in more repeats.
-
-    Fail-open: False for non-string / empty / short inputs.
-    """
+    """True when a single 60+ char substring recurs often enough to cover at least half
+    of ``text`` — the signature of a repetition loop. Fail-open for non-string/short input."""
     if not isinstance(text, str):
         return False
     n = len(text)
     if n < MIN_FRAGMENT_LENGTH:
         return False
 
-    # Fast path: one normalized line duplicated enough to cover half the
-    # fragment (the most common echo shape). Cheap, no big allocations.
+    # Fast path: one normalized line duplicated enough to cover half the fragment (the common echo shape).
     if _line_repetition_dominated(text, n):
         return True
 
-    # General path: fixed-size windows sliding one char at a time, catching
-    # loops that don't align to line boundaries. A window must appear
-    # ``needed`` times to cover >= _DOMINANCE_RATIO (and >= _MIN_REPEAT_COUNT).
+    # General path: fixed-size windows sliding one char at a time, catching loops that
+    # don't align to line boundaries. A window must appear ``needed`` times to cover
+    # >= _DOMINANCE_RATIO (and >= _MIN_REPEAT_COUNT).
     window = _REPEAT_WINDOW
     needed = max(_MIN_REPEAT_COUNT, math.ceil(n * _DOMINANCE_RATIO / window))
     counts: dict[str, int] = {}

@@ -17,16 +17,8 @@ logger = logging.getLogger(__name__)
 
 # Lowercased upstream headers captured per attempt for post-hoc analysis.
 STREAM_DIAG_HEADERS = (
-    "cf-ray",
-    "cf-cache-status",
-    "x-openrouter-provider",
-    "x-openrouter-model",
-    "x-openrouter-id",
-    "x-request-id",
-    "x-vercel-id",
-    "via",
-    "server",
-    "x-forwarded-for",
+    "cf-ray", "cf-cache-status", "x-openrouter-provider", "x-openrouter-model", "x-openrouter-id",
+    "x-request-id", "x-vercel-id", "via", "server", "x-forwarded-for",
 )
 
 
@@ -75,9 +67,7 @@ def flatten_exception_chain(error: BaseException) -> str:
     """
     seen: List[BaseException] = []
     link: Optional[BaseException] = error
-    while link is not None and len(seen) < 4:
-        if link in seen:
-            break
+    while link is not None and len(seen) < 4 and link not in seen:
         seen.append(link)
         nxt = getattr(link, "__cause__", None) or getattr(link, "__context__", None)
         if nxt is None or nxt is link:
@@ -104,10 +94,9 @@ def log_stream_retry(
 ) -> None:
     """Structured WARNING to ``agent.log`` for a transient stream drop + retry.
 
-    Always logged regardless of UI verbosity (subagent retries no longer spam the
-    parent's terminal but keep full detail here). With *diag*, also records upstream
-    headers, HTTP status, bytes/chunks streamed, elapsed and TTFB on the dying attempt —
-    enough to tell "one CF edge / downstream provider" from "random across runs".
+    Always logged regardless of UI verbosity. With *diag*, also records upstream headers,
+    HTTP status, bytes/chunks streamed, elapsed and TTFB on the dying attempt — enough to
+    tell "one CF edge / downstream provider" from "random across runs".
     """
     try:
         try:
@@ -122,12 +111,10 @@ def log_stream_retry(
             _chain = type(error).__name__
 
         _now = time.time()
-        _bytes = 0
-        _chunks = 0
+        _bytes = _chunks = 0
         _elapsed = 0.0
         _ttfb = None
-        _headers_repr = "-"
-        _http_status = "-"
+        _headers_repr = _http_status = "-"
         if isinstance(diag, dict):
             try:
                 _bytes = int(diag.get("bytes") or 0)
@@ -152,20 +139,13 @@ def log_stream_retry(
             "chain=%s "
             "http_status=%s bytes=%d chunks=%d elapsed=%.2fs ttfb=%s "
             "upstream=[%s]",
-            kind,
-            attempt,
-            max_attempts,
+            kind, attempt, max_attempts,
             getattr(agent, "_subagent_id", None) or "-",
             getattr(agent, "_delegate_depth", 0),
             agent.provider or "-",
             agent.base_url or "-",
-            type(error).__name__,
-            _summary,
-            _chain,
-            _http_status,
-            _bytes,
-            _chunks,
-            _elapsed,
+            type(error).__name__, _summary, _chain,
+            _http_status, _bytes, _chunks, _elapsed,
             f"{_ttfb:.2f}s" if _ttfb is not None else "-",
             _headers_repr,
             extra={"mid_tool_call": mid_tool_call},
