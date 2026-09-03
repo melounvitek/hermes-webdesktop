@@ -22,6 +22,7 @@ import requests
 from agent.secret_scope import get_secret
 from agent.image_gen_provider import DEFAULT_ASPECT_RATIO, resolve_aspect_ratio, save_url_image, success_response
 from plugins.image_gen._common import (
+    ErrorFn,
     StaticImageGenProvider,
     collect_source_images,
     error_factory,
@@ -375,6 +376,68 @@ def _build_payload(
     return payload
 
 
+def _submit_job(
+    base_url: str, auth_token: str, model_path: str, payload: Dict[str, Any],
+    managed: bool, model_id: str, fail: ErrorFn,
+) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """POST the generation request; ``(job_id, None)`` or ``(None, error)``."""
+    submit_body, failure = post_json(
+        f"{base_url}/generate/image/krea/krea-2/{model_path}",
+        headers=_headers(auth_token, managed=managed, json_body=True),
+        payload=payload, timeout=30, label="Krea", error_message=_submit_error_message,
+    )
+    if failure is not None:
+        if failure.kind == "http":
+            status, err_msg = failure.status, failure.message
+            logger.error("Krea submit failed (%d): %s", status, err_msg)
+            # Managed 4xx: the model may not be enabled/priced on the Nous
+            # Portal, or the gateway's shared key hit its concurrency cap (429).
+            if managed and 400 <= status < 500:
+                hint = (
+                    "Krea's shared-key concurrency cap was hit — retry shortly."
+                    if status == 429
+                    else (
+                        f"Model '{model_id}' may not be enabled/priced on the "
+                        "Nous Portal's Krea gateway. Set KREA_API_KEY to use "
+                        "Krea directly, or pick a different model via "
+                        "`hermes tools` → Image Generation."
+                    )
+                )
+                return None, fail(
+                    f"Nous Subscription Krea gateway rejected '{model_id}' "
+                    f"(HTTP {status}): {err_msg}. {hint}",
+                    "api_error",
+                )
+            return None, fail(failure.error, "api_error")
+        if failure.kind == "timeout":
+            return None, fail("Krea submit timed out (30s)", "timeout")
+        if failure.kind == "invalid_json":
+            return None, fail(f"Krea returned invalid JSON on submit: {failure.message}", "invalid_response")
+        return None, fail(failure.error, failure.error_type)
+    job_id = submit_body.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        return None, fail("Krea submit response missing job_id", "invalid_response")
+    return job_id, None
+
+
+def _terminal_result_url(
+    job: Dict[str, Any], job_id: str, fail: ErrorFn
+) -> Tuple[Optional[str], Optional[Dict[str, Any]]]:
+    """Result URL of a terminal job; ``(url, None)`` or ``(None, error)``."""
+    result = job.get("result")
+    if job.get("status") == "failed":
+        err = result.get("error") if isinstance(result, dict) else None
+        return None, fail(f"Krea job {job_id} failed: {err or 'unknown error'}", "api_error")
+    if job.get("status") == "cancelled":
+        return None, fail(f"Krea job {job_id} was cancelled", "cancelled")
+    if not isinstance(result, dict):
+        return None, fail("Krea job completed but result was missing", "empty_response")
+    result_image_url = _extract_result_url(job)
+    if result_image_url is None:
+        return None, fail("Krea result contained no image URL", "empty_response")
+    return result_image_url, None
+
+
 class KreaImageGenProvider(StaticImageGenProvider):
     """Krea ``Krea 2`` foundation image model backend (Medium + Large)."""
 
@@ -456,42 +519,9 @@ class KreaImageGenProvider(StaticImageGenProvider):
                     )
 
         # 1. Submit job.
-        submit_body, failure = post_json(
-            f"{base_url}/generate/image/krea/krea-2/{meta['path']}",
-            headers=_headers(auth_token, managed=managed is not None, json_body=True),
-            payload=payload, timeout=30, label="Krea", error_message=_submit_error_message,
-        )
-        if failure is not None:
-            if failure.kind == "http":
-                status, err_msg = failure.status, failure.message
-                logger.error("Krea submit failed (%d): %s", status, err_msg)
-                # Managed 4xx: the model may not be enabled/priced on the Nous
-                # Portal, or the gateway's shared key hit its concurrency cap (429).
-                if managed is not None and 400 <= status < 500:
-                    hint = (
-                        "Krea's shared-key concurrency cap was hit — retry shortly."
-                        if status == 429
-                        else (
-                            f"Model '{model_id}' may not be enabled/priced on the "
-                            "Nous Portal's Krea gateway. Set KREA_API_KEY to use "
-                            "Krea directly, or pick a different model via "
-                            "`hermes tools` → Image Generation."
-                        )
-                    )
-                    return fail(
-                        f"Nous Subscription Krea gateway rejected '{model_id}' "
-                        f"(HTTP {status}): {err_msg}. {hint}",
-                        "api_error",
-                    )
-                return fail(failure.error, "api_error")
-            if failure.kind == "timeout":
-                return fail("Krea submit timed out (30s)", "timeout")
-            if failure.kind == "invalid_json":
-                return fail(f"Krea returned invalid JSON on submit: {failure.message}", "invalid_response")
-            return fail(failure.error, failure.error_type)
-        job_id = submit_body.get("job_id")
-        if not isinstance(job_id, str) or not job_id:
-            return fail("Krea submit response missing job_id", "invalid_response")
+        job_id, err = _submit_job(base_url, auth_token, meta["path"], payload, managed is not None, model_id, fail)
+        if err is not None:
+            return err
 
         # 2. Poll. Polling is bound to the same principal at the gateway, so the
         # managed path polls the gateway's ``/jobs/{id}`` with the Nous token.
@@ -509,17 +539,9 @@ class KreaImageGenProvider(StaticImageGenProvider):
             return fail("Krea returned non-dict job body", "invalid_response")
 
         # 3. Terminal — extract result.
-        result = job.get("result")
-        if job.get("status") == "failed":
-            err = result.get("error") if isinstance(result, dict) else None
-            return fail(f"Krea job {job_id} failed: {err or 'unknown error'}", "api_error")
-        if job.get("status") == "cancelled":
-            return fail(f"Krea job {job_id} was cancelled", "cancelled")
-        if not isinstance(result, dict):
-            return fail("Krea job completed but result was missing", "empty_response")
-        result_image_url = _extract_result_url(job)
-        if result_image_url is None:
-            return fail("Krea result contained no image URL", "empty_response")
+        result_image_url, err = _terminal_result_url(job, job_id, fail)
+        if err is not None:
+            return err
 
         # Krea Enhance pass. Precedence: explicit kwarg > ``image_gen.krea.upscale``
         # config > per-model catalog default. Best-effort: failure falls back to
