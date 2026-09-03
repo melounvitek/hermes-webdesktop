@@ -47,36 +47,24 @@ def _apply_cache_marker(
     role = msg.get("role", "")
     content = msg.get("content")
 
-    if role == "tool" and native_anthropic:
-        # Top-level marker; the native adapter moves it inside tool_result.
-        msg["cache_control"] = cache_marker
-        return
-    if role == "tool" and not tool_part_markers:
+    if role == "tool" and not native_anthropic and not tool_part_markers:
         # LiteLLM-style envelope: a part marker → tool_result.content[0] → non-retryable 400.
         return
-
-    if content is None or content == "":
-        # Envelope layout: OpenRouter rejects top-level cache_control on role:tool (silent
-        # hang) and ignores it on empty assistant turns — no content part to carry it.
-        if role in ("tool", "assistant") and not native_anthropic:
-            return
-        msg["cache_control"] = cache_marker
-        return
-
-    if isinstance(content, str):
+    if (role == "tool" and native_anthropic) or content is None or content == "":
+        # Native role:tool: top-level marker, the adapter moves it inside tool_result. Empty
+        # content: no part can carry it, and OpenRouter rejects a top-level marker on role:tool
+        # (silent hang) and ignores it on empty assistant turns — skip those on the envelope.
+        if not (role in ("tool", "assistant") and not native_anthropic):
+            msg["cache_control"] = cache_marker
+    elif isinstance(content, str):
         stable_prefix = find_stable_prefix(content) if role == "user" else None
         if stable_prefix is not None and content[len(stable_prefix):].strip():
             # Builder-declared boundary: the scaffold carries the breakpoint and the volatile
             # tail rides unmarked. Request-local only — the stored message stays a string.
-            msg["content"] = [
-                _text_part(stable_prefix, cache_marker),
-                _text_part(content[len(stable_prefix):]),
-            ]
+            msg["content"] = [_text_part(stable_prefix, cache_marker), _text_part(content[len(stable_prefix):])]
         else:
             msg["content"] = [_text_part(content, cache_marker)]
-        return
-
-    if isinstance(content, list) and content and isinstance(content[-1], dict):
+    elif isinstance(content, list) and content and isinstance(content[-1], dict):
         content[-1]["cache_control"] = cache_marker
 
 
@@ -93,17 +81,12 @@ def _can_carry_marker(msg: dict, native_anthropic: bool, tool_part_markers: bool
     if msg.get("role") == "tool" and not tool_part_markers:
         return False
     content = msg.get("content")
-    if isinstance(content, list):
-        return bool(content) and isinstance(content[-1], dict)
-    return isinstance(content, str) and content != ""
+    return isinstance(content[-1], dict) if isinstance(content, list) and content else isinstance(content, str) and content != ""
 
 
 def _build_marker(ttl: str) -> Dict[str, str]:
     """Build a cache_control marker dict for the given TTL ('5m' or '1h')."""
-    marker: Dict[str, str] = {"type": "ephemeral"}
-    if ttl == "1h":
-        marker["ttl"] = "1h"
-    return marker
+    return {"type": "ephemeral", "ttl": "1h"} if ttl == "1h" else {"type": "ephemeral"}
 
 
 # Alibaba-family providers (Qwen routes): five-minute context cache, 1h tier rejected. Shared
@@ -160,12 +143,7 @@ def _apply_system_cache_markers(
     prompt IS the prefix the whole message is one block — never an empty text block (400).
     """
     content = message.get("content")
-    if (
-        isinstance(static_system_prefix, str)
-        and static_system_prefix
-        and isinstance(content, str)
-        and content.startswith(static_system_prefix)
-    ):
+    if isinstance(static_system_prefix, str) and static_system_prefix and isinstance(content, str) and content.startswith(static_system_prefix):
         suffix = content[len(static_system_prefix):]
         if suffix.strip():
             message["content"] = [

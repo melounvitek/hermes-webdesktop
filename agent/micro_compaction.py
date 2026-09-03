@@ -43,26 +43,27 @@ class MicroCompactionMixin:
         """
         if head_end < self._micro_compact_cursor < tail_start:
             return self._micro_compact_cursor
-        last_summary_idx = -1
-        for idx in range(head_end, tail_start):
-            if self._is_context_summary_message(messages[idx]):
-                last_summary_idx = idx
+        last_summary_idx = max(
+            (idx for idx in range(head_end, tail_start) if self._is_context_summary_message(messages[idx])),
+            default=-1,
+        )
         cursor = head_end
         if last_summary_idx >= head_end:
             cursor = last_summary_idx + 1
             # Resumed session: rehydrate the rolling summary from the surviving marker so the next
             # pass merges, not replaces.
-            if not self._micro_compact_rolling_summary.strip():
-                recovered = self._rolling_summary_from_marker(messages[last_summary_idx].get("content"))
-                if recovered:
-                    self._micro_compact_rolling_summary = recovered
-                    # Rehydration proves containment: this marker (batch or micro) becomes
-                    # supersede/defrag-eligible; unabsorbed markers never get the key.
-                    messages[last_summary_idx][_cc().MICRO_COMPACT_MARKER_KEY] = True
-                    logger.info(
-                        "Micro-compaction: recovered rolling summary from "
-                        "transcript (%d chars)", len(recovered),
-                    )
+            recovered = "" if self._micro_compact_rolling_summary.strip() else (
+                self._rolling_summary_from_marker(messages[last_summary_idx].get("content"))
+            )
+            if recovered:
+                self._micro_compact_rolling_summary = recovered
+                # Rehydration proves containment: this marker (batch or micro) becomes
+                # supersede/defrag-eligible; unabsorbed markers never get the key.
+                messages[last_summary_idx][_cc().MICRO_COMPACT_MARKER_KEY] = True
+                logger.info(
+                    "Micro-compaction: recovered rolling summary from "
+                    "transcript (%d chars)", len(recovered),
+                )
         self._micro_compact_cursor = cursor
         return cursor
 
@@ -94,16 +95,10 @@ class MicroCompactionMixin:
 
         # Boundary must close the turn: a mid-turn stop at tail_start would put the assistant marker
         # beside assistant/tool rows. Any other role is a safe splice (avoids wedging the cursor).
-        if idx >= len(messages):
-            return None
-        boundary = messages[idx]
+        boundary = messages[idx] if idx < len(messages) else None
         if not isinstance(boundary, dict) or boundary.get("role") in ("assistant", "tool"):
             return None
         return (exchange_start, idx)
-
-    def _serialize_one_exchange(self, messages: List[Dict[str, Any]], start: int, end: int) -> str:
-        """Serialize a single exchange for the micro-summarizer via ``_serialize_for_summary``."""
-        return self._serialize_for_summary(messages[start:end])
 
     def _build_micro_summary_prompt(self, existing_summary: str, exchange_text: str) -> List[Dict[str, str]]:
         """Build the prompt messages for a single-exchange micro-summary."""
@@ -167,9 +162,7 @@ class MicroCompactionMixin:
 
         message = response.choices[0].message
         content = message.get("content") if isinstance(message, dict) else getattr(message, "content", message)
-        if not isinstance(content, str):
-            content = str(content) if content else ""
-        content = content.strip()
+        content = (content if isinstance(content, str) else str(content) if content else "").strip()
         if not content:
             logger.info("micro-summarization returned empty content")
             return None
@@ -269,7 +262,7 @@ class MicroCompactionMixin:
         # Cumulative iff it subsumes an earlier marker; captured before summarizing.
         _cumulative = bool(self._micro_compact_rolling_summary.strip())
 
-        exchange_text = self._serialize_one_exchange(messages, exchange_start, exchange_end)
+        exchange_text = self._serialize_for_summary(messages[exchange_start:exchange_end])
         _exchange_tokens = estimate_tokens_rough(exchange_text)
         updated_summary = self._micro_summarize_one(exchange_text)
         if updated_summary is None:
@@ -402,8 +395,7 @@ class MicroCompactionMixin:
         Without this the old exchange rows stay ``active=1`` and a resume double-loads
         both the summary and the originals.
         """
-        session_db = getattr(self, "_session_db", None)
-        session_id = getattr(self, "_session_id", "")
+        session_db, session_id = getattr(self, "_session_db", None), getattr(self, "_session_id", "")
         if not session_db or not session_id:
             return
         try:
@@ -445,8 +437,7 @@ class MicroCompactionMixin:
         if supersede:
             marker_idxs = [i for i, m in enumerate(result) if _is_micro_marker(m)]
             if len(marker_idxs) > 1:
-                superseded = set(marker_idxs[:-1])
-                result = self._merge_adjacent_user_turns([m for i, m in enumerate(result) if i not in superseded])
+                result = self._merge_adjacent_user_turns([m for i, m in enumerate(result) if i not in marker_idxs[:-1]])
 
         # Deliberately no _strip_persistence_markers: micro archives in place under the same session
         # id, so stamps stay accurate and a failed archive keeps the append-only flush idempotent.
@@ -477,12 +468,8 @@ class MicroCompactionMixin:
         for msg in result:
             prev = merged[-1] if merged else None
             if _plain_user(msg) and _plain_user(prev):
-                prev_content, new_content = prev["content"], msg["content"]
-                prev["content"] = (
-                    (prev_content + "\n\n" + new_content) if prev_content and new_content else (prev_content or new_content)
-                )
-                # Merged content invalidates the api_content sidecar.
-                drop_stale_api_content(prev)
-                continue
-            merged.append(msg)
+                prev["content"] = "\n\n".join(c for c in (prev["content"], msg["content"]) if c)
+                drop_stale_api_content(prev)  # merged content invalidates the api_content sidecar
+            else:
+                merged.append(msg)
         return merged

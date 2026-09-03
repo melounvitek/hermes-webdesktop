@@ -159,35 +159,30 @@ def _extract_item_text(item: Any) -> Optional[str]:
     if isinstance(content, str):
         return content if content.strip() else None
 
-    if isinstance(content, list):
-        parts = []
-        for part in content:
-            if isinstance(part, str):
-                candidates = (part,)
-            elif isinstance(part, dict):
-                part_meta = part.get("metadata")
-                candidates = (
-                    part.get("text") or part.get("input_text") or part.get("output_text"),
-                    part_meta.get("text") if isinstance(part_meta, dict) else None,
-                )
-            else:
-                continue
-            parts.extend(c.strip() for c in candidates if isinstance(c, str) and c.strip())
-        text = " ".join(parts)
-        return text if text.strip() else None
-
-    return None
+    if not isinstance(content, list):
+        return None
+    parts = []
+    for part in content:
+        if isinstance(part, str):
+            candidates = (part,)
+        elif isinstance(part, dict):
+            part_meta = part.get("metadata")
+            candidates = (
+                part.get("text") or part.get("input_text") or part.get("output_text"),
+                part_meta.get("text") if isinstance(part_meta, dict) else None,
+            )
+        else:
+            continue
+        parts.extend(c.strip() for c in candidates if isinstance(c, str) and c.strip())
+    text = " ".join(parts)
+    return text if text.strip() else None
 
 
 def _has_retainable_image_content(item: Any) -> bool:
     """True for a converted Responses message with a valid ``input_image`` part (only the
     adapter-owned shape counts, so empty multipart placeholders never become durable history)."""
-    if not isinstance(item, dict):
-        return False
-    content = item.get("content")
-    if not isinstance(content, list):
-        return False
-    return any(
+    content = item.get("content") if isinstance(item, dict) else None
+    return isinstance(content, list) and any(
         isinstance(part, dict)
         and str(part.get("type") or "").strip().lower() == "input_image"
         and isinstance(part.get("image_url"), str)
@@ -234,22 +229,14 @@ def prune_pre_checkpoint_items(
     """
     if not isinstance(items, list) or not items:
         return items
-
-    last_cp = None
-    for i, item in enumerate(items):
-        if _is_compaction_item(item):
-            last_cp = i
+    last_cp = max((i for i, item in enumerate(items) if _is_compaction_item(item)), default=None)
     if last_cp is None:
         return items
-
     first_cp = last_cp
     while first_cp > 0 and _is_compaction_item(items[first_cp - 1]):
         first_cp -= 1
 
     pre = items[:first_cp]
-    checkpoint_run = items[first_cp : last_cp + 1]
-    post = items[last_cp + 1 :]
-
     has_sources = isinstance(item_sources, list) and len(item_sources) == len(items)
     pre_sources: List[Any] = item_sources[:first_cp] if has_sources else [None] * len(pre)
 
@@ -309,13 +296,12 @@ def prune_pre_checkpoint_items(
                 retained_reversed.append(item)
                 user_remaining -= cost
             elif isinstance(item.get("content"), str):
-                truncated = dict(item)
-                truncated["content"] = item["content"][: user_remaining * 4]
+                truncated = {**item, "content": item["content"][: user_remaining * 4]}
                 if truncated["content"].strip():
                     retained_reversed.append(truncated)
                 user_remaining = 0
 
-    result = checkpoint_run + list(reversed(retained_reversed)) + post
+    result = items[first_cp : last_cp + 1] + list(reversed(retained_reversed)) + items[last_cp + 1 :]
 
     logger.debug(
         "Pruned pre-checkpoint items: %d input -> %d retained (user_rem=%d, summary_rem=%d)",
@@ -342,12 +328,11 @@ def is_native_compaction_rejection(error: Any, status_code: Any = None) -> bool:
     text = str(error or "").lower()
     if "context_management" not in text and "compact_threshold" not in text:
         return False
-    if status_code is not None:
-        try:
-            if int(status_code) != 400:
-                return False
-        except (TypeError, ValueError):
-            pass
+    try:
+        if status_code is not None and int(status_code) != 400:
+            return False
+    except (TypeError, ValueError):
+        pass
     return any(marker in text for marker in _REJECTION_MARKERS)
 
 

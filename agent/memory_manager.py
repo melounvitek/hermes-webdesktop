@@ -56,11 +56,9 @@ def _accepts_require_checkpoint(fn: Callable[..., Any]) -> bool:
     params = _signature_params(fn)
     if params is None:
         return False
-    if _has_var_kwargs(params):
-        return True
     param = params.get("require_checkpoint")
-    return param is not None and param.kind in (
-        inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD,
+    return _has_var_kwargs(params) or (
+        param is not None and param.kind in (inspect.Parameter.KEYWORD_ONLY, inspect.Parameter.POSITIONAL_OR_KEYWORD)
     )
 
 
@@ -91,9 +89,7 @@ def normalize_tool_schema(schema: Any) -> Optional[Dict[str, Any]]:
 
 
 def memory_provider_tools_enabled(
-    enabled_toolsets: Optional[List[str]],
-    disabled_toolsets: Optional[List[str]] = None,
-    *,
+    enabled_toolsets: Optional[List[str]], disabled_toolsets: Optional[List[str]] = None, *,
     memory_tool_present: bool = False,
 ) -> bool:
     """Return whether external memory-provider tools should be exposed."""
@@ -139,7 +135,6 @@ def inject_memory_provider_tools(agent: Any) -> int:
     if not memory_manager or tools is None:
         return 0
 
-    existing_tool_names = {_tool_name(tool) for tool in tools if isinstance(tool, dict)}
     if not memory_provider_tools_exposed(agent):
         # Say so once: a silent 0 leaves the provider looking "half on" with no clue which
         # config key (platform_toolsets / disabled_toolsets) gated it.
@@ -158,10 +153,9 @@ def inject_memory_provider_tools(agent: Any) -> int:
     if not callable(get_schemas):
         return 0
 
-    valid_tool_names = getattr(agent, "valid_tool_names", None)
-    if valid_tool_names is None:
-        valid_tool_names = agent.valid_tool_names = set()
-
+    if getattr(agent, "valid_tool_names", None) is None:
+        agent.valid_tool_names = set()
+    existing_tool_names = {_tool_name(tool) for tool in tools if isinstance(tool, dict)}
     added = 0
     for raw_schema in get_schemas():
         schema = normalize_tool_schema(raw_schema)
@@ -170,24 +164,18 @@ def inject_memory_provider_tools(agent: Any) -> int:
                 "Memory provider returned a tool schema with no resolvable "
                 "name; skipping to avoid poisoning the request (%r)", raw_schema,
             )
-            continue
-        tool_name = schema["name"]
-        if tool_name in existing_tool_names:
-            continue
-        tools.append({"type": "function", "function": schema})
-        valid_tool_names.add(tool_name)
-        existing_tool_names.add(tool_name)
-        added += 1
+        elif schema["name"] not in existing_tool_names:
+            tools.append({"type": "function", "function": schema})
+            agent.valid_tool_names.add(schema["name"])
+            existing_tool_names.add(schema["name"])
+            added += 1
     return added
 
 
 # -- Context fencing helpers --------------------------------------------------
 
 _FENCE_TAG_RE = re.compile(r'</?\s*memory-context\s*>', re.IGNORECASE)
-_INTERNAL_CONTEXT_RE = re.compile(
-    r'<\s*memory-context\s*>[\s\S]*?</\s*memory-context\s*>',
-    re.IGNORECASE,
-)
+_INTERNAL_CONTEXT_RE = re.compile(r'<\s*memory-context\s*>[\s\S]*?</\s*memory-context\s*>', re.IGNORECASE)
 _INTERNAL_NOTE_RE = re.compile(
     r'\[System note:\s*The following is recalled memory context,\s*NOT new user input\.\s*Treat as (?:informational background data|authoritative reference data[^\]]*)\.\]\s*',
     re.IGNORECASE,
@@ -196,9 +184,9 @@ _INTERNAL_NOTE_RE = re.compile(
 
 def sanitize_context(text: str) -> str:
     """Strip fence tags, injected context blocks, and system notes from provider output."""
-    text = _INTERNAL_CONTEXT_RE.sub('', text)
-    text = _INTERNAL_NOTE_RE.sub('', text)
-    return _FENCE_TAG_RE.sub('', text)
+    for pattern in (_INTERNAL_CONTEXT_RE, _INTERNAL_NOTE_RE, _FENCE_TAG_RE):
+        text = pattern.sub('', text)
+    return text
 
 
 class StreamingContextScrubber:
@@ -228,27 +216,25 @@ class StreamingContextScrubber:
         buf = self._buf + text
         self._buf = ""
         out: list[str] = []
-
         while buf:
             if self._in_span:
                 idx = buf.lower().find(self._CLOSE_TAG)
-                if idx == -1:
-                    # Hold back a potential partial close tag; drop the rest.
-                    held = self._max_partial_suffix(buf, self._CLOSE_TAG)
-                    self._buf = buf[-held:] if held else ""
-                    break
-                buf = buf[idx + len(self._CLOSE_TAG):]
+                held = self._max_partial_suffix(buf, self._CLOSE_TAG)  # potential partial close tag
+                tag = self._CLOSE_TAG
             else:
                 idx = self._find_boundary_open_tag(buf)
-                if idx == -1:
-                    held = self._max_pending_open_suffix(buf) or self._max_partial_suffix(buf, self._OPEN_TAG)
+                held = self._max_pending_open_suffix(buf) or self._max_partial_suffix(buf, self._OPEN_TAG)
+                tag = self._OPEN_TAG
+            if idx == -1:
+                # Hold back the possible partial tag; inside a span the rest is dropped.
+                if not self._in_span:
                     self._append_visible(out, buf[:-held] if held else buf)
-                    self._buf = buf[-held:] if held else ""
-                    break
+                self._buf = buf[-held:] if held else ""
+                break
+            if not self._in_span:
                 self._append_visible(out, buf[:idx])
-                buf = buf[idx + len(self._OPEN_TAG):]
+            buf = buf[idx + len(tag):]
             self._in_span = not self._in_span
-
         return "".join(out)
 
     def flush(self) -> str:
@@ -356,8 +342,6 @@ class MemoryManager:
             "status": "not_started", "abandoned_writes": 0, "abandoned_prefetches": 0, "active_tasks": 0,
         }
 
-    # -- Fan-out helper ------------------------------------------------------
-
     def _each_provider(
         self, label: str, call: Callable[[MemoryProvider], Any], *,
         level: int = logging.DEBUG, providers: Optional[List[MemoryProvider]] = None, exc_info: bool = False,
@@ -374,8 +358,6 @@ class MemoryManager:
             except Exception as e:
                 logger.log(level, "Memory provider '%s' %s: %s", provider.name, label, e, exc_info=exc_info)
         return results
-
-    # -- Registration --------------------------------------------------------
 
     def add_provider(self, provider: MemoryProvider) -> None:
         """Register a provider; builtin always accepted, only ONE external allowed."""
@@ -425,16 +407,12 @@ class MemoryManager:
     def get_provider(self, name: str) -> Optional[MemoryProvider]:
         return next((p for p in self._providers if p.name == name), None)
 
-    # -- System prompt -------------------------------------------------------
-
     def build_system_prompt(self) -> str:
         """Join every provider's non-empty ``system_prompt_block()`` with blank lines."""
         blocks = self._each_provider(
             "system_prompt_block() failed", lambda p: _nonblank(p.system_prompt_block()), level=logging.WARNING,
         )
         return "\n\n".join(b for b in blocks if b)
-
-    # -- Prefetch / recall ---------------------------------------------------
 
     # A /skill or /bundle turn embeds the whole skill body in the model-facing message;
     # providers get just the user's instruction (None for a bare invocation).
@@ -528,8 +506,6 @@ class MemoryManager:
             kind="prefetch",
         )
 
-    # -- Sync ----------------------------------------------------------------
-
     @staticmethod
     def _provider_sync_accepts_messages(provider: MemoryProvider) -> bool:
         """Whether ``sync_turn`` accepts a ``messages`` keyword (uninspectable → assume yes)."""
@@ -561,8 +537,6 @@ class MemoryManager:
             lambda: self._each_provider("sync_turn failed", _sync, level=logging.WARNING, providers=providers)
         )
 
-    # -- Background dispatch -------------------------------------------------
-
     def _submit_background(self, fn, *, kind: str = "write") -> None:
         """Queue ``fn`` on the serialized worker and track its durability class.
 
@@ -588,11 +562,11 @@ class MemoryManager:
                 return
         if future is not None:
             future.add_done_callback(self._forget_background_future)
-            return
-        try:
-            fn()
-        except Exception as e:  # pragma: no cover - fn guards internally
-            logger.debug("Inline memory background task failed: %s", e)
+        else:
+            try:
+                fn()
+            except Exception as e:  # pragma: no cover - fn guards internally
+                logger.debug("Inline memory background task failed: %s", e)
 
     def _forget_background_future(self, future: Future) -> None:
         with self._sync_executor_lock:
@@ -605,9 +579,7 @@ class MemoryManager:
         if self._sync_executor is not None:
             return self._sync_executor
         with self._sync_executor_lock:
-            if self._shutting_down:
-                return None
-            if self._sync_executor is None:
+            if self._sync_executor is None and not self._shutting_down:
                 try:
                     # Daemon workers: a wedged provider must never block interpreter exit.
                     from tools.daemon_pool import DaemonThreadPoolExecutor
@@ -625,16 +597,12 @@ class MemoryManager:
         if executor is None:
             return True
         try:
-            fut = executor.submit(lambda: None)
+            executor.submit(lambda: None).result(timeout=timeout)
         except RuntimeError:
             return True  # executor already shut down — nothing pending
-        try:
-            fut.result(timeout=timeout)
         except Exception:
             return False
         return True
-
-    # -- Tools ---------------------------------------------------------------
 
     def get_all_tool_schemas(self) -> List[Dict[str, Any]]:
         """Collect deduplicated tool schemas from all providers.
@@ -654,11 +622,9 @@ class MemoryManager:
                         "Memory provider '%s' returned a tool schema with "
                         "no resolvable name; skipping (%r)", provider.name, raw_schema,
                     )
-                    continue
-                name = schema["name"]
-                if name not in _HERMES_CORE_TOOLS and name not in seen:
+                elif schema["name"] not in _HERMES_CORE_TOOLS and schema["name"] not in seen:
                     schemas.append(schema)
-                    seen.add(name)
+                    seen.add(schema["name"])
 
         self._each_provider("get_tool_schemas() failed", _collect, level=logging.WARNING)
         return schemas
@@ -680,14 +646,10 @@ class MemoryManager:
             logger.error("Memory provider '%s' handle_tool_call(%s) failed: %s", provider.name, tool_name, e)
             return tool_error(f"Memory tool '{tool_name}' failed: {e}")
 
-    # -- Lifecycle hooks -----------------------------------------------------
-
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
-        """Notify all providers of a new turn (kwargs: remaining_tokens, model, platform, tool_count)."""
         self._each_provider("on_turn_start failed", lambda p: p.on_turn_start(turn_number, message, **kwargs))
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
-        """Notify all providers of session end."""
         self._each_provider(
             "on_session_end failed", lambda p: p.on_session_end(messages), level=logging.WARNING, exc_info=True,
         )
@@ -839,9 +801,7 @@ class MemoryManager:
                 result = json.loads(result)
             except Exception:
                 return False
-        if not isinstance(result, dict):
-            return False
-        return result.get("success") is True and result.get("staged") is not True
+        return isinstance(result, dict) and result.get("success") is True and result.get("staged") is not True
 
     def notify_memory_tool_write(
         self, tool_result: Any, tool_args: Dict[str, Any], *,
@@ -855,16 +815,12 @@ class MemoryManager:
         """
         if not self._memory_tool_result_succeeded(tool_result):
             return
-
         target = str(tool_args.get("target") or "memory")
         operations = tool_args.get("operations")
         if not (isinstance(operations, list) and operations):
-            operations = [{k: tool_args.get(k) for k in ("action", "content", "old_text")}]
-
+            operations = [tool_args]
         for op in operations:
-            if not isinstance(op, dict):
-                continue
-            action = str(op.get("action") or "")
+            action = str(op.get("action") or "") if isinstance(op, dict) else ""
             if action not in self._MIRRORED_MEMORY_ACTIONS:
                 continue
             try:
@@ -877,7 +833,6 @@ class MemoryManager:
                 logger.debug("notify_memory_tool_write failed for op %s: %s", action, e)
 
     def on_delegation(self, task: str, result: str, *, child_session_id: str = "", **kwargs) -> None:
-        """Notify all providers that a subagent completed."""
         self._each_provider(
             "on_delegation failed",
             lambda p: p.on_delegation(task, result, child_session_id=child_session_id, **kwargs),

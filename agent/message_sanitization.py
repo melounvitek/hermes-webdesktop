@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import re
+from functools import partial
 from typing import Any, Callable
 
 logger = logging.getLogger(__name__)
@@ -49,22 +50,15 @@ def _fix_str_field(container: Any, key: Any, fix: Callable[[str], str]) -> bool:
 def _sanitize_structure(payload: Any, fix: Callable[[str], str]) -> bool:
     """Apply ``fix`` to every str inside nested dict/list ``payload`` in-place."""
     found = False
-
-    def _walk(node):
-        nonlocal found
-        if isinstance(node, dict):
-            items = list(node.items())
-        elif isinstance(node, list):
-            items = list(enumerate(node))
-        else:
-            return
-        for key, value in items:
+    stack = [payload]
+    while stack:
+        node = stack.pop()
+        items = node.items() if isinstance(node, dict) else enumerate(node) if isinstance(node, list) else ()
+        for key, value in list(items):
             if isinstance(value, str):
                 found |= _fix_str_field(node, key, fix)
             elif isinstance(value, (dict, list)):
-                _walk(value)
-
-    _walk(payload)
+                stack.append(value)
     return found
 
 
@@ -106,29 +100,13 @@ def _sanitize_messages(messages: list, fix: Callable[[str], str], *, deep: bool)
     return found
 
 
-def _sanitize_structure_surrogates(payload: Any) -> bool:
-    """Replace surrogates in nested dict/list payloads in-place; True if any replaced."""
-    return _sanitize_structure(payload, _sanitize_surrogates)
-
-
-def _sanitize_messages_surrogates(messages: list) -> bool:
-    """Replace surrogates in all string content of a messages list in-place; True if any found."""
-    return _sanitize_messages(messages, _sanitize_surrogates, deep=True)
-
-
-def _sanitize_structure_non_ascii(payload: Any) -> bool:
-    """Strip non-ASCII from nested dict/list payloads in-place; True if any stripped."""
-    return _sanitize_structure(payload, _strip_non_ascii)
-
-
-def _sanitize_messages_non_ascii(messages: list) -> bool:
-    """Strip non-ASCII from a messages list in-place (ASCII-only locales); True if any stripped."""
-    return _sanitize_messages(messages, _strip_non_ascii, deep=False)
-
-
-def _sanitize_tools_non_ascii(tools: list) -> bool:
-    """Strip non-ASCII characters from tool payloads in-place."""
-    return _sanitize_structure_non_ascii(tools)
+# In-place sanitizers; each returns True when anything changed. Surrogate repair is deep
+# (tool_call ids, nested reasoning_details); the ASCII-only-locale strip is shallow.
+_sanitize_structure_surrogates = partial(_sanitize_structure, fix=_sanitize_surrogates)
+_sanitize_messages_surrogates = partial(_sanitize_messages, fix=_sanitize_surrogates, deep=True)
+_sanitize_structure_non_ascii = partial(_sanitize_structure, fix=_strip_non_ascii)
+_sanitize_messages_non_ascii = partial(_sanitize_messages, fix=_strip_non_ascii, deep=False)
+_sanitize_tools_non_ascii = _sanitize_structure_non_ascii
 
 
 def _escape_invalid_chars_in_json_strings(raw: str) -> str:
@@ -347,6 +325,13 @@ def _tc_field(tc: Any, key: str) -> Any:
     return tc.get(key) if isinstance(tc, dict) else getattr(tc, key, None)
 
 
+def _tc_set(tc: Any, key: str, value: Any) -> None:
+    if isinstance(tc, dict):
+        tc[key] = value
+    else:
+        setattr(tc, key, value)
+
+
 def deterministic_call_id(fn_name: str, arguments: str, index: int = 0) -> str:
     """Deterministic call_id fallback when the API omits one (random ids would break caching)."""
     seed = f"{fn_name}:{arguments}:{index}"
@@ -419,19 +404,12 @@ def uniquify_tool_call_ids(tool_calls: list) -> list:
 
         def _renamed(value):
             # Keep a composite id's response-item half so the provider's fc_/item id survives.
-            if isinstance(value, str) and "|" in value:
-                return f"{new_id}|{value.split('|', 1)[1]}"
-            return new_id
+            return f"{new_id}|{value.split('|', 1)[1]}" if isinstance(value, str) and "|" in value else new_id
 
         try:
-            if isinstance(tc, dict):
-                tc["id"] = _renamed(tc["id"]) if tc.get("id") else new_id
-                if tc.get("call_id"):
-                    tc["call_id"] = new_id
-            else:
-                tc.id = _renamed(getattr(tc, "id", None))
-                if getattr(tc, "call_id", None):
-                    tc.call_id = new_id
+            _tc_set(tc, "id", _renamed(_tc_field(tc, "id")))
+            if _tc_field(tc, "call_id"):
+                _tc_set(tc, "call_id", new_id)
         except Exception:
             logger.warning("Could not uniquify duplicate tool call id %s", cid)
             continue
