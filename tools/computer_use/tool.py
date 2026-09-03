@@ -265,8 +265,7 @@ def handle_computer_use(args: Dict[str, Any], **kwargs) -> Any:
     session_id = str(kwargs.get("session_id") or "")  # approval-state / daemon-mode isolation key
     if (err := _reject_unsafe(action, args)) is not None:
         return err
-    spec = _ACTIONS.get(action)
-    scopes = [action] if spec is not None and spec.destructive else []
+    scopes = [action] if action in _ACTIONS and _ACTIONS[action].destructive else []
     if args.get("bring_to_front") or (action == "focus_app" and args.get("raise_window")):
         scopes.append("bring_to_front")
     for scope in scopes:
@@ -315,8 +314,7 @@ def _request_approval(action: str, args: Dict[str, Any], session_id: str = "") -
 
 def _summarize_action(action: str, args: Dict[str, Any]) -> str:
     fg = " [FOREGROUND — briefly raises the window / changes focus]" if args.get("delivery_mode") == "foreground" else ""
-    spec = _ACTIONS.get(action)
-    return spec.summarize(action, args, fg) if spec is not None else action + fg
+    return _ACTIONS.get(action, _ActionSpec(None)).summarize(action, args, fg)
 
 # --- handlers: (backend, action, args, **delivery) -> ActionResult (_dispatch applies the follow-up capture) or a
 #     final str/dict result. `delivery` = delivery_mode + bring_to_front; only input actions use it.
@@ -363,10 +361,7 @@ def _do_focus_app(backend, action, args, **_):
     return backend.focus_app(args["app"], raise_window=bool(args.get("raise_window")))
 
 def _listing(key: str, method: str):
-    def handler(backend, action, args, **_):
-        items = getattr(backend, method)()
-        return json.dumps({key: items, "count": len(items)})
-    return handler
+    return lambda backend, action, args, **_: json.dumps({key: (items := getattr(backend, method)()), "count": len(items)})
 
 def _summarize_click(action: str, args: Dict[str, Any], fg: str) -> str:
     where = (f" element #{args['element']}" if args.get("element") is not None
@@ -423,8 +418,7 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
                            + (f" — did you mean {hint!r}? See the action enum in the tool schema." if hint else "")})
     # app= guard: input goes to the sticky target from the last capture/focus_app and the backend drops app=
     # silently — refuse a clear mismatch rather than type into the wrong window while reporting ok:true.
-    requested_app = args.get("app")
-    if (spec.input and isinstance(requested_app, str) and requested_app.strip()
+    if (spec.input and isinstance(requested_app := args.get("app"), str) and requested_app.strip()
             and (mismatch := _input_target_mismatch(backend, requested_app)) is not None):
         return json.dumps({"ok": False, "action": action, "code": "input_target_mismatch", "error": (
             f"{action} would go to the current target {mismatch!r}, not {requested_app.strip()!r} "
