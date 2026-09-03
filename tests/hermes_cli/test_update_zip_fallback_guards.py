@@ -339,7 +339,10 @@ def test_swap_preserve_set_is_the_module_constant():
     truth for the preserved entries (no comment-synced duplicate)."""
     import inspect
 
-    src = inspect.getsource(update_cmd._update_via_zip)
+    from hermes_cli import update_cmd_zip
+
+    # The swap loop lives in the download/swap collaborator the ZIP path calls.
+    src = inspect.getsource(update_cmd_zip._download_and_swap_zip)
     assert "preserve = _ZIP_PRESERVED_TOP_LEVEL" in src
 
 
