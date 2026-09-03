@@ -11,42 +11,18 @@ from urllib.parse import urlparse
 from hermes_constants import get_hermes_home
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-# rich and prompt_toolkit are imported lazily (inside the functions that use
-# them) rather than at module level.  Importing this module is on the TUI
-# gateway's critical startup path purely to reach the lightweight update-check
-# helpers (``prefetch_update_check``); pulling rich.console + prompt_toolkit
-# eagerly added ~50ms of wasted imports before ``gateway.ready`` could fire.
-# Keep the type-only reference available to checkers without the runtime cost.
+# rich and prompt_toolkit are imported lazily: this module sits on the TUI gateway's critical
+# startup path purely for the lightweight update-check helpers, and eager rich/prompt_toolkit
+# imports cost ~50ms before ``gateway.ready`` could fire.
 if TYPE_CHECKING:
     from rich.console import Console
 
 logger = logging.getLogger(__name__)
 
-
-# =========================================================================
-# ANSI building blocks for conversation display
-# =========================================================================
-
-_GOLD = "\033[1;38;2;255;215;0m"  # True-color #FFD700 bold
-_BOLD = "\033[1m"
+# ANSI building blocks for conversation display (``_DIM``/``_RST`` are imported by callbacks.py).
 _DIM = "\033[2m"
 _RST = "\033[0m"
 
-
-def cprint(text: str):
-    """Print ANSI-colored text through prompt_toolkit's renderer."""
-    from prompt_toolkit import print_formatted_text as _pt_print
-    from prompt_toolkit.formatted_text import ANSI as _PT_ANSI
-    # prompt_toolkit needs a real console. On Windows, a redirected or absent stdout (pythonw.exe,
-    # CI, `hermes ... > file`) raises NoConsoleScreenBufferError from its Win32Output — display
-    # helpers must never crash the caller over that, so degrade to plain print.
-    if _quiet(lambda: _pt_print(_PT_ANSI(text)) or True) is None:
-        print(text)
-
-
-# =========================================================================
-# Skin-aware color helpers
-# =========================================================================
 
 def _quiet(fn, default=None):
     """``fn()``, or ``default`` on any exception — for best-effort display inputs."""
@@ -54,6 +30,16 @@ def _quiet(fn, default=None):
         return fn()
     except Exception:
         return default
+
+
+def cprint(text: str):
+    """Print ANSI-colored text through prompt_toolkit's renderer."""
+    from prompt_toolkit import print_formatted_text as _pt_print
+    from prompt_toolkit.formatted_text import ANSI as _PT_ANSI
+    # prompt_toolkit needs a real console: on Windows a redirected/absent stdout raises
+    # NoConsoleScreenBufferError, and display helpers must never crash the caller over that.
+    if _quiet(lambda: _pt_print(_PT_ANSI(text)) or True) is None:
+        print(text)
 
 
 def _active_skin():
@@ -65,6 +51,8 @@ def _active_skin():
 def _skin_color(key: str, fallback: str) -> str:
     """Get a color from the active skin, or return fallback."""
     return _quiet(lambda: _active_skin().get_color(key, fallback), fallback)
+
+
 # =========================================================================
 # ASCII Art & Branding
 # =========================================================================
@@ -94,7 +82,6 @@ HERMES_CADUCEUS = """[#CD7F32]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⡀⠀⣀⣀�
 [#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠳⠈⣡⠞⠁⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]
 [#B8860B]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠈⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀[/]"""
 
-
 # =========================================================================
 # Skills scanning
 # =========================================================================
@@ -104,7 +91,6 @@ HERMES_CADUCEUS = """[#CD7F32]⠀⠀⠀⠀⠀⠀⠀⠀⠀⠀⢀⣀⡀⠀⣀⣀�
 _available_skills_cache: Optional[tuple] = None
 _git_banner_state_cache: Optional[tuple] = None
 _latest_release_cache: Optional[tuple] = None
-
 
 _UNCACHED = object()  # compute() result that must not be memoized
 
@@ -123,9 +109,8 @@ def _memo(cache_name: str, compute):
 def get_available_skills() -> Dict[str, List[str]]:
     """Return skills grouped by category, filtered by platform and disabled state.
 
-    Cached per-process: this feeds only the startup banner, whose snapshot is taken once anyway, and
-    the underlying skills-tree walk costs ~100ms. ``prefetch_banner_data()`` uses the cache to pay
-    that walk off-thread. A failed scan yields ``{}`` and is not cached.
+    Cached per-process (the skills-tree walk costs ~100ms and feeds only the startup banner);
+    ``prefetch_banner_data()`` pays it off-thread. A failed scan yields ``{}`` and is not cached.
     """
     def _scan():
         from tools.skills_tool import _find_all_skills
@@ -148,11 +133,9 @@ def get_available_skills() -> Dict[str, List[str]]:
 # Update check
 # =========================================================================
 
-# Cache update check results for 6 hours to avoid repeated git fetches
-_UPDATE_CHECK_CACHE_SECONDS = 6 * 3600
+_UPDATE_CHECK_CACHE_SECONDS = 6 * 3600  # avoid repeated git fetches
 
-# Sentinel returned when we know an update exists but can't count commits
-# (e.g. nix-built hermes — no local git history to count against).
+# Returned when an update is known to exist but commits can't be counted (e.g. nix builds).
 UPDATE_AVAILABLE_NO_COUNT = -1
 
 _UPSTREAM_REPO_URL = "https://github.com/NousResearch/hermes-agent.git"
@@ -189,8 +172,8 @@ def _git_run(
 ):
     """Run ``git <args>`` with the shared subprocess boilerplate; None on any exception.
 
-    git output is UTF-8; on Windows ``text=True`` defaults to the ANSI code page and bytes like 0x90
-    (3rd byte of 🐛 in a commit subject) crash the stdlib reader thread (#52649), hence the explicit
+    git output is UTF-8; on Windows ``text=True`` defaults to the ANSI code page and a byte like the
+    3rd of 🐛 in a commit subject crashes the stdlib reader thread (#52649), hence the explicit
     encoding. ``network=True`` (ls-remote/fetch) detaches stdin and disables git/GCM prompts so a
     passive update check can never hang on a ``Username for 'https://github.com':`` prompt.
     """
@@ -201,13 +184,8 @@ def _git_run(
         kwargs = {"stdin": subprocess.DEVNULL, "env": noninteractive_git_env()}
     try:
         return subprocess.run(
-            ["git", *args],
-            capture_output=True,
-            timeout=timeout,
-            cwd=str(cwd) if cwd is not None else None,
-            **(_GIT_TEXT_KW if text else {}),
-            **kwargs,
-        )
+            ["git", *args], capture_output=True, timeout=timeout, cwd=str(cwd) if cwd is not None else None,
+            **(_GIT_TEXT_KW if text else {}), **kwargs)
     except Exception:
         return None
 
@@ -233,6 +211,10 @@ def _git_count(args: list[str], *, cwd: Path) -> Optional[int]:
     return None
 
 
+def _is_full_sha(value: Optional[str]) -> bool:
+    return isinstance(value, str) and len(value) == 40 and all(c in "0123456789abcdefABCDEF" for c in value)
+
+
 def _github_compare_behind(current_rev: str, target_rev: str) -> Optional[int]:
     """Exact behind-count via the GitHub compare API for uncountable graphs.
 
@@ -241,10 +223,8 @@ def _github_compare_behind(current_rev: str, target_rev: str) -> Optional[int]:
     """
     if not (_is_full_sha(current_rev) and _is_full_sha(target_rev)):
         return None
-    url = (
-        "https://api.github.com/repos/nousresearch/hermes-agent/"
-        f"compare/{current_rev}...{target_rev}"
-    )
+    url = f"https://api.github.com/repos/nousresearch/hermes-agent/compare/{current_rev}...{target_rev}"
+
     def _fetch():
         import urllib.request
 
@@ -262,21 +242,13 @@ def _github_compare_behind(current_rev: str, target_rev: str) -> Optional[int]:
     return None
 
 
-def _behind_count_or_sentinel(local_rev: str, upstream_rev: str) -> int:
-    """Exact behind-count via the compare API, else the honest no-count sentinel.
-
-    ``ahead_by == 0`` with differing tips means the remote tip is reachable from our HEAD — a
-    local-ahead checkout, i.e. NOT behind. A local-only HEAD 404s on the API, which safely degrades
-    to ``UPDATE_AVAILABLE_NO_COUNT`` — never a fabricated 1.
-    """
-    counted = _github_compare_behind(local_rev, upstream_rev)
-    return counted if counted is not None else UPDATE_AVAILABLE_NO_COUNT
-
-
 def _tips_behind(head_rev: Optional[str], target_rev: Optional[str], repo_dir: Optional[Path] = None) -> Optional[int]:
     """Behind-count from two tip SHAs: None if either is unknown, 0 when equal, else count/sentinel.
 
     With ``repo_dir``, a target that is already an ancestor of HEAD (local-ahead checkout) is 0 too.
+    ``ahead_by == 0`` with differing tips means the remote tip is reachable from our HEAD — NOT
+    behind. A local-only HEAD 404s on the API, which degrades to ``UPDATE_AVAILABLE_NO_COUNT`` —
+    never a fabricated 1.
     """
     if not head_rev or not target_rev:
         return None
@@ -286,11 +258,8 @@ def _tips_behind(head_rev: Optional[str], target_rev: Optional[str], repo_dir: O
         ancestor = _git_run(["merge-base", "--is-ancestor", target_rev, "HEAD"], cwd=repo_dir, text=False)
         if ancestor is not None and ancestor.returncode == 0:
             return 0
-    return _behind_count_or_sentinel(head_rev, target_rev)
-
-
-def _is_full_sha(value: Optional[str]) -> bool:
-    return isinstance(value, str) and len(value) == 40 and all(c in "0123456789abcdefABCDEF" for c in value)
+    counted = _github_compare_behind(head_rev, target_rev)
+    return counted if counted is not None else UPDATE_AVAILABLE_NO_COUNT
 
 
 def _upstream_main_sha() -> Optional[str]:
@@ -302,11 +271,7 @@ def _upstream_main_sha() -> Optional[str]:
 
 
 def _check_via_rev(local_rev: str) -> Optional[int]:
-    """Compare an embedded git revision to upstream main via ls-remote.
-
-    Returns 0 if up-to-date, the exact behind-count when the GitHub compare API can recover it,
-    ``UPDATE_AVAILABLE_NO_COUNT`` if behind by an unknown amount, or ``None`` on failure.
-    """
+    """Compare an embedded git revision to upstream main via ls-remote (see ``_tips_behind``)."""
     return _tips_behind(local_rev, _upstream_main_sha())
 
 
@@ -318,63 +283,50 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
         if not head_rev:
             return None
         # Passive probe via HTTPS ls-remote (never SSH — no hardware-key prompts). Tip SHAs alone
-        # can't distinguish "behind" from a local carried commit sitting AHEAD of origin/main, and
-        # misreporting an ahead checkout as behind nudges the user into `hermes update`, which can
-        # wipe their carried work — hence the ancestor check, against the FRESH upstream SHA (not
-        # the possibly stale origin/main tracking ref) so a stale ref can't fake an up-to-date report.
+        # can't distinguish "behind" from a local commit AHEAD of origin/main, and misreporting an
+        # ahead checkout nudges the user into `hermes update`, which can wipe carried work — hence
+        # the ancestor check, against the FRESH upstream SHA (a stale tracking ref can't fake an
+        # up-to-date report).
         return _tips_behind(head_rev, _upstream_main_sha(), repo_dir)
 
-    # Installer checkouts are shallow (`git clone --depth 1`). On a shallow
-    # clone the history stops at a single commit, so a plain `git fetch` would
-    # unshallow the repo (dragging in the whole history) and
-    # `rev-list --count HEAD..origin/main` would report a huge bogus "behind"
-    # number (e.g. "12492 commits behind"). Detect shallow up front: fetch with
-    # --depth 1 to preserve the boundary and compare tip SHAs instead of
-    # counting. Full clones (developers, Docker dev images) keep the exact
-    # count path unchanged. Mirrors the desktop fix in apps/desktop/electron/main.cjs.
+    # Installer checkouts are shallow (`git clone --depth 1`): a plain `git fetch` would unshallow
+    # the repo and `rev-list --count HEAD..origin/main` would report a bogus "12492 commits
+    # behind". Fetch with --depth 1 to preserve the boundary and compare tip SHAs instead. Full
+    # clones keep the exact count path. Mirrors apps/desktop/electron/main.cjs.
     is_shallow = _git_stdout(["rev-parse", "--is-shallow-repository"], cwd=repo_dir) == "true"
 
     def _fetch() -> bool:
-        # Self-heal abandoned git lock files before fetching. A stale .git/shallow.lock from a
-        # crashed fetch makes the fetch fail, the exception is swallowed, and stale refs get
-        # compared against HEAD — silently degrading the passive check until a human removes the
-        # lock (git never self-heals these). The passive check is also the main tmp_pack GENERATOR
-        # on flaky lines (several aborted fetches per day), so it must be the janitor too, or debris
-        # accumulates unbounded between manual updates (#93732).
+        # Self-heal abandoned git lock files first. A stale .git/shallow.lock from a crashed fetch
+        # makes every fetch fail silently and stale refs get compared against HEAD until a human
+        # removes the lock. This passive check is also the main tmp_pack GENERATOR on flaky lines,
+        # so it must be the janitor too (#93732).
         from hermes_cli.gitlock import clear_stale_git_locks, clear_stale_tmp_packs
 
         clear_stale_git_locks(repo_dir)
         clear_stale_tmp_packs(repo_dir)
 
-        # Scope the fetch to the one branch the behind-count compares against. An unscoped
-        # ``git fetch origin`` transfers every remote head (~1,400 on this repo — measured 3.0 s vs
-        # 0.55 s scoped) and can burn the full 10 s timeout on slow links. Modern git updates the
-        # ``origin/main`` tracking ref on a scoped fetch, so the ``HEAD..origin/main`` count below
-        # is unaffected; the shallow path compares against FETCH_HEAD, which a scoped fetch also
-        # updates. ``--depth 1`` preserves the shallow boundary.
+        # Scope the fetch to the one branch compared against: an unscoped ``git fetch origin``
+        # transfers ~1,400 remote heads (3.0 s vs 0.55 s measured) and can burn the full timeout.
+        # A scoped fetch still updates ``origin/main`` and FETCH_HEAD; ``--depth 1`` preserves
+        # the shallow boundary.
         fetch_args = ["fetch", "origin", "main", *(["--depth", "1"] if is_shallow else []), "--quiet"]
         fetch_proc = _git_run(fetch_args, cwd=repo_dir, timeout=10, text=False, network=True)
         return fetch_proc is not None and fetch_proc.returncode == 0
 
     fetch_ok = _quiet(_fetch, False)  # Offline or timeout — don't use stale refs
 
-    # When the fetch fails, the local origin/main tracking ref is stale. It
-    # cannot prove *currentness* (a 0 behind-count may just mean the stale ref
-    # hasn't caught up), but if it already shows HEAD behind, that is sound
-    # evidence an update exists — the ref was good at some point in the past.
-    # Return the positive stale count; return None (inconclusive) otherwise so
-    # the caller doesn't cache a false "up to date". (#82166, review #92578)
+    # When the fetch fails the local origin/main ref is stale: it cannot prove *currentness*, but
+    # if it already shows HEAD behind, that is sound evidence an update exists. Return the positive
+    # stale count; None (inconclusive) otherwise so the caller doesn't cache a false "up to date".
     if is_shallow:
         if not fetch_ok:
             return None
-        # No history to count across the shallow boundary. `origin/main` may not be a tracking ref
-        # in a `clone --depth 1`, so prefer FETCH_HEAD (just updated by the fetch above) and fall
-        # back to origin/main. Tips differ but the shallow boundary hides the history between them.
+        # No history across the shallow boundary. `origin/main` may not be a tracking ref in a
+        # `clone --depth 1`, so prefer FETCH_HEAD (just updated) and fall back to origin/main.
         head_rev = _git_stdout(["rev-parse", "HEAD"], cwd=repo_dir)
         target_rev = (
             _git_stdout(["rev-parse", "FETCH_HEAD"], cwd=repo_dir)
-            or _git_stdout(["rev-parse", "origin/main"], cwd=repo_dir)
-        )
+            or _git_stdout(["rev-parse", "origin/main"], cwd=repo_dir))
         return _tips_behind(head_rev, target_rev)
 
     behind = _git_count(["rev-list", "--count", "HEAD..origin/main"], cwd=repo_dir)
@@ -392,21 +344,16 @@ def _read_json(path: Path) -> Optional[dict]:
 def check_for_updates() -> Optional[int]:
     """Check whether a Hermes update is available.
 
-    Two paths: if ``HERMES_REVISION`` is set (nix builds embed it), compare it to upstream main via
-    ``git ls-remote``. Otherwise look for a local git checkout and count commits behind
-    ``origin/main``.
+    If ``HERMES_REVISION`` is set (nix builds embed it), compare it to upstream main via
+    ``git ls-remote``; otherwise count commits behind ``origin/main`` in the local checkout.
     """
     hermes_home = get_hermes_home()
     cache_file = hermes_home / ".update_check"
     embedded_rev = os.environ.get("HERMES_REVISION") or None
 
-    # Docker images have no working tree to count commits against — the
-    # published image excludes `.git` (see .dockerignore) and sets no
-    # HERMES_REVISION (that's nix-only). Returning None makes both the Rich
-    # banner (build_welcome_banner) and the Ink badge (branding.tsx, guarded
-    # on `typeof === 'number' && > 0`) show nothing. The dashboard's REST
-    # `/api/hermes/update/check` endpoint short-circuits docker the same way
-    # (web_server.py); mirror that here so the banner/TUI surfaces agree.
+    # Docker images have no working tree (the image excludes `.git`) and set no HERMES_REVISION.
+    # None makes both the Rich banner and the Ink badge show nothing, mirroring the dashboard's
+    # `/api/hermes/update/check` short-circuit so the surfaces agree.
     def _install_method():
         from hermes_cli.config import detect_install_method, get_project_root
         return detect_install_method(get_project_root())
@@ -414,60 +361,50 @@ def check_for_updates() -> Optional[int]:
     if _quiet(_install_method) in {"docker", "apt"}:
         return None
 
-    # Read cache — invalidate if the embedded rev OR installed version has
-    # changed since the last check.
+    # Cache is invalidated when the embedded rev OR installed version changed since the last check.
     now = time.time()
     cached = _read_json(cache_file)
     if (
         cached is not None
         and now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS
         and cached.get("rev") == embedded_rev
-        and cached.get("ver") == VERSION
-    ):
+        and cached.get("ver") == VERSION):
         return cached.get("behind")
 
     if embedded_rev:
         behind = _check_via_rev(embedded_rev)
     else:
-        # No git checkout and no embedded revision — can't determine update
-        # status (the Docker path, already short-circuited above, or an
-        # unsupported install without a source tree).
+        # No checkout and no embedded revision — status can't be determined.
         repo_dir = _resolve_repo_dir()
         behind = _check_via_local_git(repo_dir) if repo_dir is not None else None
 
-    # Don't cache inconclusive results (None). A None means the check could not run — typically a
-    # failed git fetch. Caching None would suppress retries for the full 6-hour cache window,
-    # leaving the user with a stale "up to date" or no information for hours after connectivity
-    # is restored (#82166).
+    # Don't cache inconclusive results: None means the check could not run (typically a failed
+    # fetch), and caching it would suppress retries for the full 6-hour window (#82166).
     if behind is not None:
         _quiet(lambda: cache_file.write_text(
-            json.dumps({"ts": now, "behind": behind, "rev": embedded_rev, "ver": VERSION}),
-            encoding="utf-8",
+            json.dumps({"ts": now, "behind": behind, "rev": embedded_rev, "ver": VERSION}), encoding="utf-8",
         ))
 
     return behind
 
 
 def _resolve_repo_dir() -> Optional[Path]:
-    """Return the active Hermes git checkout, or None if this isn't a git install.
+    """The active Hermes git checkout, or None if this isn't a git install.
 
-    Prefers the running code's location over the profile-scoped path because ``$HERMES_HOME/hermes-
-    agent/`` may be a stale copy carried over by ``--clone-all``.
+    Prefers the running code's location: ``$HERMES_HOME/hermes-agent/`` may be a stale copy
+    carried over by ``--clone-all``.
     """
     repo_dir = Path(__file__).parent.parent.resolve()
     if not (repo_dir / ".git").exists():
-        hermes_home = get_hermes_home()
-        repo_dir = hermes_home / "hermes-agent"
+        repo_dir = get_hermes_home() / "hermes-agent"
     return repo_dir if (repo_dir / ".git").exists() else None
 
 
 def get_git_banner_state(repo_dir: Optional[Path] = None) -> Optional[dict]:
     """Return upstream/local git hashes for the startup banner.
 
-    Cached per-process (default ``repo_dir`` only): the state costs 2-3 git subprocesses (~100ms)
-    and the checkout revision cannot change under a running CLI in a way the banner needs to observe
-    live. The cache also lets ``prefetch_banner_data()`` pay this cost off-thread before the banner
-    renders.
+    Cached per-process (default ``repo_dir`` only): 2-3 git subprocesses (~100ms) whose result
+    cannot change under a running CLI. The cache lets ``prefetch_banner_data()`` pay it off-thread.
     """
     if repo_dir is not None:
         return _compute_git_banner_state(repo_dir)
@@ -502,11 +439,9 @@ _RELEASE_URL_BASE = "https://github.com/NousResearch/hermes-agent/releases/tag"
 
 
 def get_latest_release_tag(repo_dir: Optional[Path] = None) -> Optional[tuple]:
-    """Return ``(tag, release_url)`` for the latest git tag, or None.
+    """Return ``(tag, release_url)`` for the latest local git tag, or None (a miss is cached too).
 
-    Local-only — runs ``git describe --tags --abbrev=0`` against the Hermes checkout. Cached per-
-    process (a miss is cached too). Release URL always points at the canonical
-    NousResearch/hermes-agent repo (forks don't get a link).
+    Release URL always points at the canonical NousResearch/hermes-agent repo (forks get no link).
     """
     def _compute():
         rd = repo_dir or _resolve_repo_dir()
@@ -558,10 +493,9 @@ _banner_data_prefetch_started = False
 def prefetch_banner_data():
     """Warm the banner's subprocess/I/O-heavy inputs in a daemon thread.
 
-    Git state (~130ms of subprocesses) and the skills index (~110ms rglob) are cached per-process
-    by their own modules, so warming them while the main thread pays the CPU-bound ``cli`` /
-    prompt_toolkit imports overlaps GIL-releasing I/O with import work. Idempotent; failures
-    don't matter because the banner recomputes anything missing.
+    Git state (~130ms) and the skills index (~110ms) are cached per-process by their own modules,
+    so warming them while the main thread pays the CPU-bound imports overlaps GIL-releasing I/O
+    with import work. Idempotent; failures don't matter because the banner recomputes anything missing.
     """
     global _banner_data_prefetch_started
     if _banner_data_prefetch_started:
@@ -587,11 +521,9 @@ def _format_update_notice(behind: int) -> str:
     if behind > 0:
         return (
             f"[bold yellow]⚠ {behind} {_plural(behind, 'commit')} behind[/]"
-            f"[dim yellow] — run [bold]{recommended_update_command()}[/bold] to update[/]"
-        )
-    # UPDATE_AVAILABLE_NO_COUNT: nix-built hermes; we know an update
-    # exists but not by how much, and we don't know how the user
-    # installed it (nix run, profile, system flake, home-manager).
+            f"[dim yellow] — run [bold]{recommended_update_command()}[/bold] to update[/]")
+    # UPDATE_AVAILABLE_NO_COUNT (nix): an update exists but we don't know by how much, nor how
+    # the user installed (nix run, profile, system flake, home-manager).
     managed_cmd = get_managed_update_command()
     suffix = f"[dim yellow] — run [bold]{managed_cmd}[/bold][/]" if managed_cmd else ""
     return f"[bold yellow]⚠ update available[/]{suffix}"
@@ -601,10 +533,10 @@ _deferred_update_notice_started = False
 
 
 def _defer_update_notice(console: "Console", max_wait: float = 30.0) -> None:
-    """Print the update warning once the prefetched check completes.
+    """Print the update warning once the prefetched check completes (at most once per process).
 
     Used when the banner rendered before the update prefetch finished so startup never blocks on
-    git/network. Prints at most once per process.
+    git/network.
     """
     global _deferred_update_notice_started
     if _deferred_update_notice_started:
@@ -651,16 +583,11 @@ def _short_label(name: str) -> str:
 # =========================================================================
 # Banner snapshot — warm-launch fast path
 # =========================================================================
-# The banner's tool panel needs the full tool registry (get_tool_definitions:
-# tools/*.py discovery + every check_fn), which costs ~0.5-0.9s cold and is
-# the single largest chunk of CLI time-to-banner. The tool list shown in the
-# banner is a pure function of (config.yaml, .env, code checkout, enabled
-# toolsets), so we snapshot the rendered inputs to disk after each launch
-# and replay them on the next one when the fingerprint matches. The agent's
-# REAL tool list is still computed fresh at first message (agent init) —
-# the snapshot only feeds the cosmetic startup panel, and a background
-# refresh re-verifies it right after the banner renders (see
-# cli.show_banner), so a stale panel self-heals within one launch.
+# The tool panel needs the full tool registry (~0.5-0.9s cold, the largest chunk of time-to-
+# banner). The list is a pure function of (config.yaml, .env, code checkout, enabled toolsets),
+# so the rendered inputs are snapshotted to disk and replayed when the fingerprint matches. The
+# agent's REAL tool list is still computed fresh at first message; the snapshot only feeds the
+# cosmetic panel, and a background refresh (cli.show_banner) re-verifies it right after render.
 
 _BANNER_SNAPSHOT_VERSION = 1
 
@@ -710,10 +637,7 @@ def load_banner_snapshot(enabled_toolsets: List[str] = None) -> Optional[Dict[st
 
 
 def save_banner_snapshot(
-    tools: List[dict],
-    enabled_toolsets: List[str],
-    availability: Dict[str, Any],
-    toolset_map: Dict[str, str],
+    tools: List[dict], enabled_toolsets: List[str], availability: Dict[str, Any], toolset_map: Dict[str, str]
 ) -> None:
     """Persist the banner tool panel inputs for next launch (best-effort)."""
     fp = banner_snapshot_fingerprint()
@@ -725,8 +649,7 @@ def save_banner_snapshot(
         "tools": [
             {"function": {"name": t["function"]["name"]}}
             for t in tools
-            if isinstance(t, dict) and t.get("function", {}).get("name")
-        ],
+            if isinstance(t, dict) and t.get("function", {}).get("name")],
         "toolset_map": toolset_map,
         "availability": {
             "unavailable_toolsets": availability.get("unavailable_toolsets", []),
@@ -734,6 +657,7 @@ def save_banner_snapshot(
         },
         "skills_by_category": get_available_skills(),
     }
+
     def _write():
         import tempfile
         path = _banner_snapshot_path()
@@ -747,29 +671,25 @@ def save_banner_snapshot(
 
 
 def compute_toolset_availability(enabled_toolsets: List[str] = None) -> Dict[str, Any]:
-    """Compute the banner's toolset-availability payload.
+    """Compute ``{"unavailable_toolsets", "lazy_tools", "disabled_tools"}`` for the banner.
 
-    Returns ``{"unavailable_toolsets", "lazy_tools", "disabled_tools"}``. Split out so the result
-    can be snapshotted and replayed on the next launch without importing ``model_tools``.
+    Split out so the result can be snapshotted and replayed without importing ``model_tools``.
     """
     from model_tools import check_tool_availability, TOOLSET_REQUIREMENTS
 
     enabled_toolsets = enabled_toolsets or []
     _, unavailable_toolsets = check_tool_availability(quiet=True)
-    # The availability check walks the GLOBAL toolset registry, so it includes
-    # toolsets that aren't part of this agent's platform set at all (e.g.
-    # `discord`, `feishu_doc` on a CLI session). Those must never surface in the
-    # banner's "Available Tools" — they aren't exposed to the agent. Restrict to
-    # toolsets actually enabled for this agent; a toolset that's enabled but
-    # currently has unmet deps legitimately shows as disabled/lazy below.
+    # The availability check walks the GLOBAL registry, so it includes toolsets outside this
+    # agent's platform set (e.g. `discord` on a CLI session) which must never surface in
+    # "Available Tools". Restrict to enabled toolsets; an enabled toolset with unmet deps
+    # legitimately shows as disabled/lazy below.
     _enabled_ts = {str(t) for t in enabled_toolsets}
     if _enabled_ts:
         unavailable_toolsets = [
-            item for item in unavailable_toolsets
-            if str(item.get("id", item.get("name", ""))) in _enabled_ts
+            item for item in unavailable_toolsets if str(item.get("id", item.get("name", ""))) in _enabled_ts
         ]
-    # Tools whose toolset has a check_fn are lazy-initialized (e.g. honcho, homeassistant) — they
-    # show as unavailable at banner time because the check hasn't run yet, but aren't misconfigured.
+    # Toolsets with a check_fn are lazy-initialized (e.g. honcho): unavailable at banner time
+    # because the check hasn't run yet, but not misconfigured.
     lazy_tools, disabled_tools = set(), set()
     for item in unavailable_toolsets:
         is_lazy = TOOLSET_REQUIREMENTS.get(item.get("name", ""), {}).get("check_fn")
@@ -874,6 +794,83 @@ def _active_profile_name() -> Optional[str]:
     return get_active_profile_name()
 
 
+def _banner_left_lines(model: str, cwd: str, session_id, context_length, provider, *, accent: str, dim: str) -> list:
+    """Model / cwd / session lines under the hero art."""
+    def _dim_sep(label: str) -> str:
+        return f" [dim {dim}]·[/] [dim {dim}]{label}[/]"
+
+    lines = []
+    ctx_str = _dim_sep(f"{_format_context_length(context_length)} context") if context_length else ""
+    nous_str = _dim_sep("Nous Research")
+    if (provider or "").strip().lower() == "moa":
+        # MoA virtual provider: ``model`` is a preset name; show it with its aggregator.
+        agg_label = _quiet(lambda: _moa_aggregator_label(model), "")
+        agg_str = _dim_sep(f"agg {agg_label}") if agg_label else ""
+        lines.append(f"[{accent}]MoA: {_short_label(model)}[/]{agg_str}{ctx_str}{nous_str}")
+    elif not (model or "").strip() or (model or "").strip().lower() == "unknown":
+        # Unconfigured install: the clearest place to say what is wrong and how to fix it.
+        lines.append(f"[bold red]no model configured[/] [dim {dim}]— run /model or hermes setup[/]")
+    else:
+        model_short = model.split("/")[-1].removesuffix(".gguf")
+        lines.append(f"[{accent}]{_short_label(model_short)}[/]{ctx_str}{nous_str}")
+
+    if os.getenv("HERMES_YOLO_MODE"):
+        lines.append(f"[bold red]⚠ YOLO mode[/] [dim {dim}]— all approval prompts bypassed[/]")
+    lines.append(f"[dim {dim}]{cwd}[/]")
+    if session_id:
+        lines.append(f"[dim {_skin_color('session_border', '#8B8682')}]Session: {session_id}[/]")
+    return lines
+
+
+def _banner_tool_lines(
+    tools: list, unavailable_toolsets: list, get_toolset_for_tool, *,
+    lazy_tools: set, disabled_tools: set, accent: str, dim: str, text: str) -> list:
+    """"Available Tools" section: up to 8 toolsets, each truncated to ~42 columns."""
+    lines = [f"[bold {accent}]Available Tools[/]"]
+    toolsets_dict: Dict[str, list] = {}
+    for tool in tools:
+        tool_name = tool["function"]["name"]
+        toolset = _display_toolset_name(get_toolset_for_tool(tool_name) or "other")
+        toolsets_dict.setdefault(toolset, []).append(tool_name)
+    for item in unavailable_toolsets:
+        names = toolsets_dict.setdefault(_display_toolset_name(item.get("id", item.get("name", "unknown"))), [])
+        for tool_name in item.get("tools", []):
+            if tool_name not in names:
+                names.append(tool_name)
+
+    def _color_tool(name: Optional[str]) -> str:
+        if name is None:  # truncation marker
+            return "[dim]...[/]"
+        if name in disabled_tools:
+            return f"[red]{name}[/]"
+        if name in lazy_tools:
+            return f"[yellow]{name}[/]"
+        return f"[{text}]{name}[/]"
+
+    sorted_toolsets = sorted(toolsets_dict.keys())
+    for toolset in sorted_toolsets[:8]:
+        tool_names = _truncate_tool_names(sorted(toolsets_dict[toolset]))
+        lines.append(f"[dim {dim}]{toolset}:[/] {', '.join(_color_tool(n) for n in tool_names)}")
+    if len(sorted_toolsets) > 8:
+        lines.append(f"[dim {dim}](and {len(sorted_toolsets) - 8} more toolsets...)[/]")
+    return lines
+
+
+def _banner_skill_lines(skills_by_category: Dict[str, List[str]], skills_enabled: bool, *, dim: str, text: str) -> list:
+    """"Available Skills" body, sized to ~60% of the terminal width (the right grid column)."""
+    if not skills_enabled:
+        return [f"[dim {dim}]Skills toolset disabled[/]"]
+    if not skills_by_category:
+        return [f"[dim {dim}]No skills installed[/]"]
+    right_col_width = max(int(shutil.get_terminal_size().columns * 0.6) - 10, 30)
+    lines = []
+    for category in sorted(skills_by_category.keys()):
+        # Account for the "category: " prefix.
+        skills_str = _pack_skill_names(sorted(skills_by_category[category]), max(right_col_width - len(category) - 2, 20))
+        lines.append(f"[dim {dim}]{category}:[/] [{text}]{skills_str}[/]")
+    return lines
+
+
 def build_welcome_banner(console: "Console", model: str, cwd: str,
                          tools: List[dict] = None,
                          enabled_toolsets: List[str] = None,
@@ -899,14 +896,7 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
 
     if availability is None:
         availability = compute_toolset_availability(enabled_toolsets)
-    unavailable_toolsets = availability.get("unavailable_toolsets", [])
-    lazy_tools = set(availability.get("lazy_tools", []))
-    disabled_tools = set(availability.get("disabled_tools", []))
     _enabled_ts = {str(t) for t in enabled_toolsets}
-
-    layout_table = Table.grid(padding=(0, 2))
-    layout_table.add_column("left", justify="center")
-    layout_table.add_column("right", justify="left")
 
     # Resolve skin colors once for the entire banner
     accent = _skin_color("banner_accent", "#FFBF00")
@@ -916,106 +906,30 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
     # Use skin's custom caduceus art if provided
     _bskin = _quiet(_active_skin)
     left_lines = ["", getattr(_bskin, "banner_hero", None) or HERMES_CADUCEUS, ""]
+    left_lines += _banner_left_lines(model, cwd, session_id, context_length, provider, accent=accent, dim=dim)
 
-    def _dim_sep(label: str) -> str:
-        return f" [dim {dim}]·[/] [dim {dim}]{label}[/]"
+    right_lines = _banner_tool_lines(
+        tools, availability.get("unavailable_toolsets", []), get_toolset_for_tool,
+        lazy_tools=set(availability.get("lazy_tools", [])), disabled_tools=set(availability.get("disabled_tools", [])),
+        accent=accent, dim=dim, text=text)
 
-    ctx_str = _dim_sep(f"{_format_context_length(context_length)} context") if context_length else ""
-    nous_str = _dim_sep("Nous Research")
-    if (provider or "").strip().lower() == "moa":
-        # MoA virtual provider: ``model`` is a preset name. Show the preset and
-        # its aggregator so the banner is meaningful instead of a bare slug.
-        agg_label = _quiet(lambda: _moa_aggregator_label(model), "")
-        agg_str = _dim_sep(f"agg {agg_label}") if agg_label else ""
-        left_lines.append(f"[{accent}]MoA: {_short_label(model)}[/]{agg_str}{ctx_str}{nous_str}")
-    elif not (model or "").strip() or (model or "").strip().lower() == "unknown":
-        # Unconfigured install: say so in red instead of a blank/"unknown"
-        # slug — this is the single clearest place to tell the user what
-        # is wrong and how to fix it.
-        left_lines.append(
-            f"[bold red]no model configured[/] "
-            f"[dim {dim}]— run /model or hermes setup[/]"
-        )
-    else:
-        model_short = model.split("/")[-1].removesuffix(".gguf")
-        left_lines.append(f"[{accent}]{_short_label(model_short)}[/]{ctx_str}{nous_str}")
-
-    if os.getenv("HERMES_YOLO_MODE"):
-        left_lines.append(f"[bold red]⚠ YOLO mode[/] [dim {dim}]— all approval prompts bypassed[/]")
-    left_lines.append(f"[dim {dim}]{cwd}[/]")
-    if session_id:
-        left_lines.append(f"[dim {_skin_color('session_border', '#8B8682')}]Session: {session_id}[/]")
-    left_content = "\n".join(left_lines)
-
-    right_lines = [f"[bold {accent}]Available Tools[/]"]
-    toolsets_dict: Dict[str, list] = {}
-
-    for tool in tools:
-        tool_name = tool["function"]["name"]
-        toolset = _display_toolset_name(get_toolset_for_tool(tool_name) or "other")
-        toolsets_dict.setdefault(toolset, []).append(tool_name)
-
-    for item in unavailable_toolsets:
-        names = toolsets_dict.setdefault(_display_toolset_name(item.get("id", item.get("name", "unknown"))), [])
-        for tool_name in item.get("tools", []):
-            if tool_name not in names:
-                names.append(tool_name)
-
-    sorted_toolsets = sorted(toolsets_dict.keys())
-
-    def _color_tool(name: Optional[str]) -> str:
-        if name is None:  # truncation marker
-            return "[dim]...[/]"
-        if name in disabled_tools:
-            return f"[red]{name}[/]"
-        if name in lazy_tools:
-            return f"[yellow]{name}[/]"
-        return f"[{text}]{name}[/]"
-
-    for toolset in sorted_toolsets[:8]:
-        tool_names = _truncate_tool_names(sorted(toolsets_dict[toolset]))
-        right_lines.append(f"[dim {dim}]{toolset}:[/] {', '.join(_color_tool(n) for n in tool_names)}")
-
-    if len(sorted_toolsets) > 8:
-        right_lines.append(f"[dim {dim}](and {len(sorted_toolsets) - 8} more toolsets...)[/]")
-
-    # MCP Servers section (only if configured). Probe cheaply first: the
-    # full get_mcp_status() path resolves portable plugin MCP servers,
-    # which JOINS the in-flight background plugin discovery (~100ms on the
-    # startup path). When neither config.yaml nor the persisted plugin
-    # key cache mentions any MCP server, skip the section outright.
+    # MCP Servers section (only if configured) — see ``_mcp_configured`` for why the cheap probe.
     mcp_status = _quiet(_probe_mcp_status, []) if _mcp_configured() else []
-
     if mcp_status:
         right_lines += ["", f"[bold {accent}]MCP Servers[/]"]
         right_lines.extend(_mcp_server_line(srv, dim=dim, text=text) for srv in mcp_status)
 
     right_lines += ["", f"[bold {accent}]Available Skills[/]"]
-    # The skills catalog is only reachable when the `skills` toolset is enabled
-    # (it exposes skill_view / skill_manage). When it's disabled — e.g. a Blank
-    # Slate install — the agent literally cannot load any skill, so advertising
-    # the on-disk catalog here is misleading. Reflect the real state instead.
+    # The skills catalog is only reachable when the `skills` toolset is enabled (skill_view /
+    # skill_manage). When disabled (Blank Slate) the agent cannot load any skill, so advertising
+    # the on-disk catalog would be misleading — reflect the real state.
     _skills_enabled = (not _enabled_ts) or ("skills" in _enabled_ts)
     if not _skills_enabled:
         skills_by_category = {}
     elif skills_by_category is None:
         skills_by_category = get_available_skills()
     total_skills = sum(len(s) for s in skills_by_category.values())
-
-    # Dynamically size skills display based on terminal width.
-    # Rich grid with 2 columns; right column gets roughly 60% of terminal.
-    _term_cols = shutil.get_terminal_size().columns
-    _right_col_width = max(int(_term_cols * 0.6) - 10, 30)
-
-    if not _skills_enabled:
-        right_lines.append(f"[dim {dim}]Skills toolset disabled[/]")
-    elif skills_by_category:
-        for category in sorted(skills_by_category.keys()):
-            # Account for the "category: " prefix.
-            skills_str = _pack_skill_names(sorted(skills_by_category[category]), max(_right_col_width - len(category) - 2, 20))
-            right_lines.append(f"[dim {dim}]{category}:[/] [{text}]{skills_str}[/]")
-    else:
-        right_lines.append(f"[dim {dim}]No skills installed[/]")
+    right_lines += _banner_skill_lines(skills_by_category, _skills_enabled, dim=dim, text=text)
 
     right_lines.append("")
     mcp_connected = sum(1 for s in mcp_status if s["connected"])
@@ -1023,14 +937,12 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
     if mcp_connected:
         summary_parts.append(f"{mcp_connected} MCP servers")
     summary_parts.append("/help for commands")
-    # Indicate when the codex_app_server runtime is active so users
-    # understand why tool counts may not match what's actually reachable
-    # (codex builds its own tool list inside the spawned subprocess).
+    # Flag the codex_app_server runtime so users understand why tool counts may not match what's
+    # reachable (codex builds its own tool list inside the spawned subprocess).
     if _quiet(_codex_runtime_active, False):
         right_lines.append(
             f"[bold {accent}]Runtime:[/] [{text}]codex app-server[/] "
-            f"[dim {dim}](terminal/file ops/MCP run inside codex)[/]"
-        )
+            f"[dim {dim}](terminal/file ops/MCP run inside codex)[/]")
     # Show active profile name when not 'default'. Never break the banner over a profiles.py bug.
     _profile_name = _quiet(_active_profile_name)
     if _profile_name and _profile_name != "default":
@@ -1038,13 +950,10 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
 
     right_lines.append(f"[dim {dim}]{' · '.join(summary_parts)}[/]")
 
-    # Update check — use prefetched result if available. NEVER block the
-    # banner on it: the prefetch does git/network work that rarely finishes
-    # before the banner renders, so a blocking wait here just adds its full
-    # timeout to every startup (500ms of the banner path pre-fix). If the
-    # result isn't ready yet, defer the warning line: a daemon thread waits
-    # for the prefetch and prints the same notice above the prompt when it
-    # lands (prompt_toolkit's patch_stdout renders late prints safely).
+    # Update check — NEVER block the banner on it: the prefetch does git/network work that rarely
+    # finishes before render, so a blocking wait adds its full timeout to every startup. If not
+    # ready, a daemon thread prints the same notice above the prompt when it lands
+    # (prompt_toolkit's patch_stdout renders late prints safely).
     def _update_line():
         behind = get_update_result(timeout=0.05)
         if behind is None and not _update_check_done.is_set():
@@ -1054,17 +963,18 @@ def build_welcome_banner(console: "Console", model: str, cwd: str,
 
     _quiet(_update_line)  # Never break the banner over an update check
 
-    layout_table.add_row(left_content, "\n".join(right_lines))
+    layout_table = Table.grid(padding=(0, 2))
+    layout_table.add_column("left", justify="center")
+    layout_table.add_column("right", justify="left")
+    layout_table.add_row("\n".join(left_lines), "\n".join(right_lines))
 
     version_label = format_banner_version_label()
     release_info = get_latest_release_tag()
     if release_info:
         version_label = f"[link={release_info[1]}]{version_label}[/link]"
     outer_panel = Panel(
-        layout_table,
-        title=f"[bold {_skin_color('banner_title', '#FFD700')}]{version_label}[/]",
-        border_style=_skin_color("banner_border", "#CD7F32"),
-        padding=(0, 2),
+        layout_table, title=f"[bold {_skin_color('banner_title', '#FFD700')}]{version_label}[/]",
+        border_style=_skin_color("banner_border", "#CD7F32"), padding=(0, 2),
     )
 
     console.print()
