@@ -7,6 +7,10 @@ from typing import Callable
 from hermes_cli.subcommands._shared import add_json_flag, add_yes_flag
 
 
+def _flag(parser, *names, help, **kw):
+    parser.add_argument(*names, action="store_true", help=help, **kw)
+
+
 # Registry sources, then provider filters (GitHub taps stored under source="github").
 _SOURCE_CHOICES = [
     "all", "official", "skills-sh", "well-known", "github", "clawhub", "lobehub", "browse-sh",
@@ -21,17 +25,14 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
     )
     skills_subparsers = skills_parser.add_subparsers(dest="skills_action")
 
-    skills_trust = skills_subparsers.add_parser(
-        "trust",
+    skills_trust = skills_subparsers.add_parser("trust",
         help="Trust a project so its repo-local skills (./.hermes/skills, ./.agents/skills) load")
-    skills_trust.add_argument(
-        "path", nargs="?", default=None,
+    skills_trust.add_argument("path", nargs="?", default=None,
         help="Project root to trust (default: enclosing git checkout of cwd)")
 
     skills_untrust = skills_subparsers.add_parser(
         "untrust", help="Revoke project-skill trust for a repo")
-    skills_untrust.add_argument(
-        "path", nargs="?", default=None,
+    skills_untrust.add_argument("path", nargs="?", default=None,
         help="Project root to untrust (default: enclosing git checkout of cwd)")
 
     skills_browse = skills_subparsers.add_parser(
@@ -39,31 +40,26 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
     skills_browse.add_argument("--page", type=int, default=1, help="Page number (default: 1)")
     skills_browse.add_argument(
         "--size", type=int, default=20, help="Results per page (default: 20)")
-    skills_browse.add_argument(
-        "--source", default="all", choices=_SOURCE_CHOICES,
+    skills_browse.add_argument("--source", default="all", choices=_SOURCE_CHOICES,
         help="Filter by source or provider (e.g. nvidia, openai) (default: all)")
 
     skills_search = skills_subparsers.add_parser("search", help="Search skill registries")
     skills_search.add_argument("query", help="Search query")
-    skills_search.add_argument(
-        "--source", default="all", choices=_SOURCE_CHOICES,
+    skills_search.add_argument("--source", default="all", choices=_SOURCE_CHOICES,
         help="Filter by source or provider (e.g. nvidia, openai)")
     skills_search.add_argument("--limit", type=int, default=25, help="Max results")
     add_json_flag(
         skills_search, "Output JSON instead of a table (full identifiers, scripting-friendly)")
 
     skills_install = skills_subparsers.add_parser("install", help="Install a skill")
-    skills_install.add_argument(
-        "identifier",
+    skills_install.add_argument("identifier",
         help="Skill identifier (e.g. openai/skills/skill-creator) or a direct HTTP(S) URL to a SKILL.md file",
     )
     skills_install.add_argument("--category", default="", help="Category folder to install into")
-    skills_install.add_argument(
-        "--name", default="",
+    skills_install.add_argument("--name", default="",
         help="Override the skill name (useful when installing from a URL whose SKILL.md has no `name:` frontmatter)",
     )
-    skills_install.add_argument(
-        "--force", action="store_true", help="Install despite blocked scan verdict")
+    _flag(skills_install, "--force", help="Install despite blocked scan verdict")
     add_yes_flag(skills_install, "Skip confirmation prompt (needed in TUI mode)")
 
     skills_inspect = skills_subparsers.add_parser(
@@ -72,8 +68,7 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
 
     skills_list = skills_subparsers.add_parser("list", help="List installed skills")
     skills_list.add_argument("--source", default="all", choices=["all", "hub", "builtin", "local"])
-    skills_list.add_argument(
-        "--enabled-only", action="store_true",
+    _flag(skills_list, "--enabled-only",
         help="Hide disabled skills. Use with -p <profile> to see exactly "
         "which skills will load for that profile.")
 
@@ -84,30 +79,25 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
     skills_update = skills_subparsers.add_parser("update", help="Update installed hub skills")
     skills_update.add_argument(
         "name", nargs="?", help="Specific skill to update (default: all outdated skills)")
-    skills_update.add_argument(
-        "--force", action="store_true",
+    _flag(skills_update, "--force",
         help="Overwrite skills you have edited locally (they are skipped by default)")
 
     skills_audit = skills_subparsers.add_parser("audit", help="Re-scan installed hub skills")
     skills_audit.add_argument("name", nargs="?", help="Specific skill to audit (default: all)")
-    skills_audit.add_argument(
-        "--deep", action="store_true",
-        help="Run AST-level analysis on Python files (opt-in diagnostic)")
+    _flag(skills_audit, "--deep", help="Run AST-level analysis on Python files (opt-in diagnostic)")
 
     skills_uninstall = skills_subparsers.add_parser(
         "uninstall", help="Remove a hub-installed skill")
     skills_uninstall.add_argument("name", help="Skill name to remove")
     add_yes_flag(skills_uninstall)
 
-    skills_reset = skills_subparsers.add_parser(
-        "reset",
+    skills_reset = skills_subparsers.add_parser("reset",
         help="Reset a bundled skill — clears 'user-modified' tracking so updates work again",
         description="Clear a bundled skill's entry from the sync manifest (~/.hermes/skills/.bundled_manifest) "
             "so future 'hermes update' runs stop marking it as user-modified. Pass --restore to also "
             "replace the current copy with the bundled version.")
     skills_reset.add_argument("name", help="Skill name to reset (e.g. google-workspace)")
-    skills_reset.add_argument(
-        "--restore", action="store_true",
+    _flag(skills_reset, "--restore",
         help="Also delete the current copy and re-copy the bundled version")
     add_yes_flag(skills_reset, "Skip confirmation prompt when using --restore")
 
@@ -133,17 +123,14 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
             "into the active profile. By default nothing already on disk is "
             "touched. Pass --remove to ALSO delete bundled skills that are "
             "unmodified (user-edited and hub/local skills are never removed).")
-    skills_opt_out.add_argument(
-        "--remove", action="store_true",
-        help="Also delete already-present unmodified bundled skills")
+    _flag(skills_opt_out, "--remove", help="Also delete already-present unmodified bundled skills")
     add_yes_flag(skills_opt_out, "Skip confirmation prompt when using --remove")
 
     skills_opt_in = skills_subparsers.add_parser(
         "opt-in", help="Re-enable bundled-skill seeding (undo opt-out)",
         description="Remove the .no-bundled-skills marker so bundled skills are seeded "
             "again on the next `hermes update`. Pass --sync to re-seed now.")
-    skills_opt_in.add_argument(
-        "--sync", action="store_true",
+    _flag(skills_opt_in, "--sync",
         help="Re-seed bundled skills immediately instead of waiting for update")
 
     skills_repair_official = skills_subparsers.add_parser(
@@ -154,8 +141,7 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
             "a restore backup first. Use name 'all' to repair every optional skill.")
     skills_repair_official.add_argument(
         "name", help="Official optional skill folder/frontmatter name, or 'all'")
-    skills_repair_official.add_argument(
-        "--restore", action="store_true",
+    _flag(skills_repair_official, "--restore",
         help="Restore from official optional source, backing up existing matching copies")
     add_yes_flag(skills_repair_official, "Skip confirmation prompt when using --restore")
 
@@ -174,8 +160,7 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
     snap_import = snapshot_subparsers.add_parser(
         "import", help="Import and install skills from a file")
     snap_import.add_argument("input", help="Input JSON file path")
-    snap_import.add_argument(
-        "--force", action="store_true", help="Force install despite caution verdict")
+    _flag(snap_import, "--force", help="Force install despite caution verdict")
 
     skills_tap = skills_subparsers.add_parser("tap", help="Manage skill sources")
     tap_subparsers = skills_tap.add_subparsers(dest="tap_action")
