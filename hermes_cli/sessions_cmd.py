@@ -59,16 +59,15 @@ def _print_dry_run_preview(candidates, filters) -> None:
         print(f"  ... {len(candidates) - 100} more")
 
 
-_TIME_FILTER_ARGS = ("older_than", "newer_than", "before", "after")
-_NON_TIME_FILTER_ARGS = (
-    "source", "title", "end_reason", "cwd", "min_messages", "max_messages", "model", "provider",
-    "user", "chat_id", "chat_type", "branch", "min_tokens", "max_tokens", "min_cost", "max_cost",
-    "min_tool_calls", "max_tool_calls",
+_FILTER_ARGS = (
+    "older_than", "newer_than", "before", "after", "source", "title", "end_reason", "cwd", "min_messages",
+    "max_messages", "model", "provider", "user", "chat_id", "chat_type", "branch", "min_tokens", "max_tokens",
+    "min_cost", "max_cost", "min_tool_calls", "max_tool_calls",
 )
 
 
-def _any_filter_args(args, names) -> bool:
-    return any(getattr(args, a, None) is not None for a in names)
+def _any_filter_args(args) -> bool:
+    return any(getattr(args, a, None) is not None for a in _FILTER_ARGS)
 
 
 def _export_dir(output) -> Path:
@@ -301,8 +300,7 @@ def _cmd_list(db, args):
                          lambda s: f"{_preview(s, 48):<50} {_ago(s):<13} {s['source']:<6} {s['id']}"),
     }
     header, rule, fmt = layouts[(has_ws, has_titles)]
-    print(header)
-    print("─" * rule)
+    print(header + "\n" + "─" * rule)
     for s in sessions:
         print(fmt(s))
 
@@ -312,7 +310,7 @@ def _cmd_list(db, args):
 def _cmd_export(db, args):
     from hermes_cli.session_filters import build_prune_filters
     filters = None
-    if _any_filter_args(args, _TIME_FILTER_ARGS + _NON_TIME_FILTER_ARGS):
+    if _any_filter_args(args):
         try:
             filters = build_prune_filters(args)
         except ValueError as e:
@@ -655,7 +653,7 @@ def _cmd_prune_or_archive(db, args, action):
     # Bare `prune` keeps the historical "older than 90 days" default. ANY filter — including --source —
     # suppresses the implicit cutoff (`prune --source cron` matches ALL cron sessions); the preview +
     # confirmation below is the safety net.
-    if action == "prune" and not _any_filter_args(args, _TIME_FILTER_ARGS + _NON_TIME_FILTER_ARGS):
+    if action == "prune" and not _any_filter_args(args):
         args.older_than = "90"
 
     try:
