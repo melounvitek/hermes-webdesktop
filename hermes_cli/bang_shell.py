@@ -93,10 +93,10 @@ def _bang_env() -> dict:
     script, so reuse the sanitizer ``quick_commands`` and the local terminal backend use.
     """
     try:
-        from tools.environments.local import _sanitize_subprocess_env
-        return _sanitize_subprocess_env(os.environ.copy())
+        from tools.environments.local import build_subprocess_env
+        return build_subprocess_env()  # == _sanitize_subprocess_env(os.environ.copy())
     except Exception:
-        return os.environ.copy()
+        return os.environ.copy()  # tools package unimportable: run the user's command anyway
 
 
 def run_bang_command(command: str, *, cwd: Optional[str] = None, timeout: int = DEFAULT_TIMEOUT, writer=None) -> int:
