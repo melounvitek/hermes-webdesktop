@@ -21,18 +21,15 @@ _VOICE_MOD_ALIASES = {"ctrl": "c-", "control": "c-", "alt": "a-", "option": "a-"
 
 # Named keys prompt_toolkit accepts as ``c-<name>`` / ``a-<name>``; aliases collapse to canonical.
 _VOICE_NAMED_KEYS = {
-    "space": "space", "spc": "space",
-    "enter": "enter", "return": "enter", "ret": "enter",
-    "tab": "tab", "escape": "escape", "esc": "escape",
-    "backspace": "backspace", "bs": "backspace", "delete": "delete", "del": "delete",
+    "space": "space", "spc": "space", "enter": "enter", "return": "enter", "ret": "enter", "tab": "tab",
+    "escape": "escape", "esc": "escape", "backspace": "backspace", "bs": "backspace", "delete": "delete", "del": "delete",
 }
 
 # ``useInputHandlers()`` intercepts ctrl+c/d/l (interrupt/quit/clear) before the voice check, so
 # such a binding would be advertised but never fire (same blocklist as the TUI parser). On macOS
 # the CLI's copy/exit/clear bindings also claim ``a-c``/``a-d``/``a-l`` (hermes-ink reports Alt as
-# ``key.meta``), mirroring the TUI's darwin-only reservation.
-_VOICE_RESERVED_CTRL_CHARS = frozenset({"c", "d", "l"})
-_VOICE_RESERVED_ALT_CHARS_MAC = frozenset({"c", "d", "l"})
+# ``key.meta``), mirroring the TUI's darwin-only reservation — alt is reserved on darwin only.
+_VOICE_RESERVED_CHARS = frozenset({"c", "d", "l"})
 
 _DEFAULT_PT_KEY = "c-b"
 
@@ -63,12 +60,8 @@ def normalize_voice_record_key_for_prompt_toolkit(raw: Any) -> str:
     if not normalized_mod:
         return _DEFAULT_PT_KEY
     if len(key_token) == 1:
-        reserved = (
-            _VOICE_RESERVED_CTRL_CHARS if normalized_mod == "c-"
-            else _VOICE_RESERVED_ALT_CHARS_MAC if sys.platform == "darwin"
-            else frozenset()
-        )
-        return _DEFAULT_PT_KEY if key_token in reserved else f"{normalized_mod}{key_token}"
+        reserved = (normalized_mod == "c-" or sys.platform == "darwin") and key_token in _VOICE_RESERVED_CHARS
+        return _DEFAULT_PT_KEY if reserved else f"{normalized_mod}{key_token}"
     # Multi-char token must be a known named key; ``ctrl+spcae`` must not pass through as
     # ``c-spcae`` (prompt_toolkit would reject it).
     named = _VOICE_NAMED_KEYS.get(key_token)
@@ -230,20 +223,14 @@ def _voice_activity_held() -> bool:
         return False
 
 
-_continuous_on_transcript: Optional[Callable[[str], None]] = None
-_continuous_on_status: Optional[Callable[[str], None]] = None
-_continuous_on_silent_limit: Optional[Callable[[], None]] = None
-# Explicit user-intent stop: fired when the user SAYS a bare stop phrase. Distinct from
-# on_silent_limit (a timeout) so consumers end the conversation like a manual stop instead of
-# reporting "no speech detected"; unset → on_silent_limit fires.
-_continuous_on_stop_phrase: Optional[Callable[[str], None]] = None
+# (on_transcript, on_status, on_silent_limit, on_stop_phrase) of the active loop; guarded by
+# ``_continuous_lock``. on_stop_phrase is the explicit user-intent stop (the user SAYS a bare stop
+# phrase), distinct from on_silent_limit (a timeout) so consumers end the conversation like a
+# manual stop instead of reporting "no speech detected"; unset → on_silent_limit fires.
+_NO_CALLBACKS: tuple = (None, None, None, None)
+_continuous_callbacks: tuple = _NO_CALLBACKS
 _continuous_no_speech_count = 0
 _CONTINUOUS_NO_SPEECH_LIMIT = 3
-
-
-def _callbacks() -> tuple:
-    """(on_transcript, on_status, on_silent_limit, on_stop_phrase) — caller holds the lock."""
-    return _continuous_on_transcript, _continuous_on_status, _continuous_on_silent_limit, _continuous_on_stop_phrase
 
 
 def _turn_transcript(
@@ -335,7 +322,7 @@ def start_continuous(
     first, so the consumer only reflects "voice off" — like the manual stop control.
     """
     global _continuous_active, _continuous_recorder, _continuous_auto_restart, _continuous_no_speech_count
-    global _continuous_on_transcript, _continuous_on_status, _continuous_on_silent_limit, _continuous_on_stop_phrase
+    global _continuous_callbacks
 
     with _continuous_lock:
         if _continuous_active:
@@ -346,10 +333,7 @@ def start_continuous(
             return False
         _continuous_active = True
         _continuous_auto_restart = auto_restart
-        _continuous_on_transcript = on_transcript
-        _continuous_on_status = on_status
-        _continuous_on_silent_limit = on_silent_limit
-        _continuous_on_stop_phrase = on_stop_phrase
+        _continuous_callbacks = (on_transcript, on_status, on_silent_limit, on_stop_phrase)
         if auto_restart:
             _continuous_no_speech_count = 0
 
@@ -385,18 +369,17 @@ def stop_continuous(force_transcribe: bool = False) -> None:
     the buffer is discarded.
     """
     global _continuous_active, _continuous_stopping, _continuous_recorder, _continuous_no_speech_count
-    global _continuous_on_transcript, _continuous_on_status, _continuous_on_silent_limit, _continuous_on_stop_phrase
+    global _continuous_callbacks
 
     with _continuous_lock:
         if not _continuous_active:
             return
         _continuous_active = False
         rec = _continuous_recorder
-        callbacks = _callbacks()
+        callbacks = _continuous_callbacks
         track_no_speech = force_transcribe and not _continuous_auto_restart
         _continuous_stopping = rec is not None
-        _continuous_on_transcript = _continuous_on_status = None
-        _continuous_on_silent_limit = _continuous_on_stop_phrase = None
+        _continuous_callbacks = _NO_CALLBACKS
         if not track_no_speech:
             _continuous_no_speech_count = 0
 
@@ -470,7 +453,7 @@ def _continuous_on_silence() -> None:
             _debug("_continuous_on_silence: loop inactive — abort")
             return
         rec = _continuous_recorder
-        on_transcript, on_status, on_silent_limit, on_stop_phrase = _callbacks()
+        on_transcript, on_status, on_silent_limit, on_stop_phrase = _continuous_callbacks
     if rec is None:
         _debug("_continuous_on_silence: no recorder — abort")
         return
