@@ -7,6 +7,7 @@ Split out of ``tools/terminal_tool.py``; every public/patched name is re-importe
 so ``tools.terminal_tool.<name>`` keeps resolving (and monkeypatching) as before.
 """
 
+import glob
 import logging
 import inspect
 import shutil
@@ -19,6 +20,7 @@ from tools.terminal_tool_backends import (
     _container_config_from_config,
     _ssh_config_from_config,
 )
+from tools.terminal_tool_config import _quiet
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("tools.terminal_tool")
@@ -31,35 +33,33 @@ _disk_usage_cache: dict = {"timestamp": 0.0, "result": False}
 _DISK_USAGE_CACHE_TTL = 300.0  # seconds
 
 
+def _scratch_paths():
+    return glob.glob(str(_get_scratch_dir() / "hermes-*"))
+
+
 def _check_disk_usage_warning():
     """True when hermes scratch dirs exceed the warning threshold (cached, advisory)."""
     from tools.terminal_tool import DISK_USAGE_WARNING_THRESHOLD_GB
-    import time as _time_mod
-    now = _time_mod.monotonic()
-    if now - _disk_usage_cache["timestamp"] < _DISK_USAGE_CACHE_TTL:
+    if time.monotonic() - _disk_usage_cache["timestamp"] < _DISK_USAGE_CACHE_TTL:
         return _disk_usage_cache["result"]
     try:
-        scratch_dir = _get_scratch_dir()
         total_bytes = 0
-        import glob
-        for path in glob.glob(str(scratch_dir / "hermes-*")):
+        for path in _scratch_paths():
             for f in Path(path).rglob('*'):
                 if f.is_file():
-                    try:
+                    with _quiet("Could not stat file %s", f, exc=OSError):
                         total_bytes += f.stat().st_size
-                    except OSError as e:
-                        logger.debug("Could not stat file %s: %s", f, e)
         total_gb = total_bytes / (1024 ** 3)
         exceeded = total_gb > DISK_USAGE_WARNING_THRESHOLD_GB
         if exceeded:
             logger.warning("Disk usage (%.1fGB) exceeds threshold (%.0fGB). Consider running cleanup_all_environments().",
                            total_gb, DISK_USAGE_WARNING_THRESHOLD_GB)
-        _disk_usage_cache["timestamp"] = _time_mod.monotonic()
+        _disk_usage_cache["timestamp"] = time.monotonic()
         _disk_usage_cache["result"] = exceeded
         return exceeded
-    except Exception as e:
-        logger.debug("Disk usage warning check failed: %s", e, exc_info=True)
+    except Exception:
         # Don't update cache on error so the next call retries.
+        logger.debug("Disk usage warning check failed", exc_info=True)
         return False
 
 
@@ -115,6 +115,23 @@ def _clear_file_ops_cache(task_id: str) -> None:
         pass
 
 
+def _unregister_env(task_id: str):
+    """Pop *task_id* from the env cache, activity map and creation locks; return
+    the env (or None). Callers run the (slow) teardown OUTSIDE the lock —
+    Modal/Docker teardown can block 10-15s and would stall every concurrent
+    terminal/file tool call."""
+    from tools.terminal_tool import (
+        _active_environments, _creation_locks, _creation_locks_lock, _env_lock,
+        _last_activity,
+    )
+    with _env_lock:
+        env = _active_environments.pop(task_id, None)
+        _last_activity.pop(task_id, None)
+    with _creation_locks_lock:
+        _creation_locks.pop(task_id, None)
+    return env
+
+
 def _cleanup_inactive_envs(lifetime_seconds: int = 300):
     """Clean up environments that have been inactive for longer than lifetime_seconds."""
     from tools.terminal_tool import (
@@ -132,27 +149,20 @@ def _cleanup_inactive_envs(lifetime_seconds: int = 300):
     except ImportError:
         pass
 
-    # Phase 1: unregister stale entries under the lock. Do NOT call
-    # env.cleanup() inside the lock — Modal/Docker teardown can block 10-15s
-    # and would stall every concurrent terminal/file tool call.
-    envs_to_stop = []  # list of (task_id, env) pairs
-
+    # Phase 1: unregister stale entries atomically under the lock; phase 2:
+    # stop them outside it (see _unregister_env for why).
     with _env_lock:
-        for task_id, last_time in list(_last_activity.items()):
-            if current_time - last_time > lifetime_seconds:
-                env = _active_environments.pop(task_id, None)
-                _last_activity.pop(task_id, None)
-                if env is not None:
-                    envs_to_stop.append((task_id, env))
-
+        stale = [t for t, last in list(_last_activity.items()) if current_time - last > lifetime_seconds]
+        envs_to_stop = [(t, _active_environments.pop(t, None)) for t in stale]
+        for t in stale:
+            _last_activity.pop(t, None)
         with _creation_locks_lock:
-            for task_id, _ in envs_to_stop:
-                _creation_locks.pop(task_id, None)
-
-    # Phase 2: stop the sandboxes outside the lock.
+            for t in stale:
+                _creation_locks.pop(t, None)
     for task_id, env in envs_to_stop:
-        _clear_file_ops_cache(task_id)
-        _teardown_env(env, task_id)
+        if env is not None:
+            _clear_file_ops_cache(task_id)
+            _teardown_env(env, task_id)
 
 
 def get_active_env(task_id: str):
@@ -190,8 +200,7 @@ def ensure_task_env(task_id: Optional[str] = None):
             _last_activity[effective_task_id] = time.time()
         return existing
 
-    overrides = resolve_task_overrides(task_id)
-    image = _select_image(env_type, overrides, config)
+    image = _select_image(env_type, resolve_task_overrides(task_id), config)
 
     _start_cleanup_thread()
 
@@ -238,34 +247,26 @@ def is_persistent_env(task_id: str) -> bool:
     env = get_active_env(task_id)
     if env is None:
         return False
-    if getattr(env, "_session_scoped", False):
-        return True
-    return bool(getattr(env, "_persistent", False))
+    return bool(getattr(env, "_session_scoped", False) or getattr(env, "_persistent", False))
 
 
 def cleanup_all_environments():
     """Clean up ALL active environments. Use with caution."""
     from tools.terminal_tool import _active_environments, cleanup_vm
-    task_ids = list(_active_environments.keys())
     cleaned = 0
-    
-    for task_id in task_ids:
+    for task_id in list(_active_environments.keys()):
         try:
             cleanup_vm(task_id)
             cleaned += 1
         except Exception as e:
             logger.error("Error cleaning %s: %s", task_id, e, exc_info=True)
-    
+
     # Also clean any orphaned directories
-    scratch_dir = _get_scratch_dir()
-    import glob
-    for path in glob.glob(str(scratch_dir / "hermes-*")):
-        try:
+    for path in _scratch_paths():
+        with _quiet("Failed to remove orphaned path %s", path, exc=OSError):
             shutil.rmtree(path, ignore_errors=True)
             logger.info("Removed orphaned: %s", path)
-        except OSError as e:
-            logger.debug("Failed to remove orphaned path %s: %s", path, e)
-    
+
     if cleaned > 0:
         logger.info("Cleaned %d environments", cleaned)
     return cleaned
@@ -284,20 +285,8 @@ def cleanup_vm(task_id: str, *, force_remove: bool = False):
     directly, so persist-mode idle envs are likewise no-op'd; only the orphan
     reaper at next startup reclaims them.
     """
-    from tools.terminal_tool import (
-        _active_environments, _creation_locks, _creation_locks_lock, _env_lock,
-        _last_activity,
-    )
-    # Unregister under the lock; run the (slow) cleanup outside it.
-    with _env_lock:
-        env = _active_environments.pop(task_id, None)
-        _last_activity.pop(task_id, None)
-
-    with _creation_locks_lock:
-        _creation_locks.pop(task_id, None)
-
+    env = _unregister_env(task_id)
     _clear_file_ops_cache(task_id)
-
     if env is None:
         return
     _teardown_env(
@@ -323,7 +312,5 @@ def _evict_environment_for_task(task_id: Optional[str]) -> None:
             if env is not None:
                 evicted.append(env)
     for env in evicted:
-        try:
+        with _quiet("cleanup of degraded environment failed"):
             env.cleanup()
-        except Exception:
-            logger.debug("cleanup of degraded environment failed", exc_info=True)
