@@ -641,10 +641,10 @@ def _resolve_explicit_runtime(*, provider: str, requested_provider: str, model_c
     if resolver is not None:
         return resolver(requested_provider, model_cfg, explicit_api_key, explicit_base_url, target_model)
     pconfig = PROVIDER_REGISTRY.get(provider)
-    if pconfig and pconfig.auth_type == "api_key":
-        return _explicit_api_key_provider(provider, pconfig, requested_provider, model_cfg, explicit_api_key,
-                                          explicit_base_url, target_model)
-    return None
+    if not (pconfig and pconfig.auth_type == "api_key"):
+        return None
+    return _explicit_api_key_provider(provider, pconfig, requested_provider, model_cfg, explicit_api_key, explicit_base_url,
+                                      target_model)
 
 
 # ── OAuth / auth-store providers ───────────────────────────────────────────────────────────
@@ -670,8 +670,7 @@ _OAUTH_RUNTIME_PROVIDERS: Dict[str, _OAuthRuntimeSpec] = {
     "openai-codex": _OAuthRuntimeSpec(lambda: resolve_codex_runtime_credentials(), "codex_responses", "hermes-auth-store",
                                       "last_refresh", "Auto-detected Codex provider but credentials failed"),
     "xai-oauth": _OAuthRuntimeSpec(lambda: resolve_xai_oauth_runtime_credentials(), "codex_responses", "hermes-auth-store",
-                                   "last_refresh", "Auto-detected xAI OAuth provider but credentials failed",
-                                   default_base_url=DEFAULT_XAI_OAUTH_BASE_URL),
+                                   "last_refresh", "Auto-detected xAI OAuth provider but credentials failed", DEFAULT_XAI_OAUTH_BASE_URL),
     "qwen-oauth": _OAuthRuntimeSpec(lambda: resolve_qwen_runtime_credentials(), "chat_completions", "qwen-cli",
                                     "expires_at_ms", "Qwen OAuth credentials failed"),
 }
@@ -870,25 +869,25 @@ def resolve_runtime_provider(*, requested: Optional[str] = None, explicit_api_ke
     OpenCode Zen/Go where different models route through different API surfaces)."""
     requested_provider = resolve_requested_provider(requested)
     _raise_if_provider_disabled(requested_provider)
-    runtime = _resolve_requested_shortcuts(requested_provider, explicit_api_key, explicit_base_url, target_model)
-    if runtime:
-        return runtime
+    return next(r for r in _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, target_model) if r)
+
+
+def _named_custom_rung(requested_provider, explicit_api_key, explicit_base_url, target_model):
     runtime = _resolve_named_custom_runtime(requested_provider=requested_provider, explicit_api_key=explicit_api_key,
                                             explicit_base_url=explicit_base_url, target_model=target_model)
     if runtime:
         runtime["requested_provider"] = requested_provider
-        return runtime
+    return runtime
+
+
+def _ladder_rungs(requested_provider, explicit_api_key, explicit_base_url, target_model):
+    """Ladder rungs 2-8, yielded lazily so each is evaluated only when the previous one returned
+    nothing; the last rung (OpenRouter / bare-custom fallback) always yields a runtime."""
+    yield _resolve_requested_shortcuts(requested_provider, explicit_api_key, explicit_base_url, target_model)
+    yield _named_custom_rung(requested_provider, explicit_api_key, explicit_base_url, target_model)
     if not explicit_base_url and not explicit_api_key:
-        runtime = _local_endpoint_bypass(requested_provider, explicit_api_key, explicit_base_url)
-        if runtime:
-            return runtime
+        yield _local_endpoint_bypass(requested_provider, explicit_api_key, explicit_base_url)
     provider = resolve_provider(requested_provider, explicit_api_key=explicit_api_key, explicit_base_url=explicit_base_url)
-    return next(r for r in _provider_rungs(provider, requested_provider, explicit_api_key, explicit_base_url, target_model) if r)
-
-
-def _provider_rungs(provider, requested_provider, explicit_api_key, explicit_base_url, target_model):
-    """Rungs 5-8 of the ladder, yielded lazily so each is evaluated only when the previous one
-    returned nothing; the last rung (OpenRouter / bare-custom fallback) always yields a runtime."""
     model_cfg = _get_model_config()
     yield _opencode_free_runtime(provider, requested_provider, model_cfg, target_model)
     yield _resolve_explicit_runtime(provider=provider, requested_provider=requested_provider, model_cfg=model_cfg,
