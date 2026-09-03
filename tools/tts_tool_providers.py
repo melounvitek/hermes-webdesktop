@@ -100,9 +100,7 @@ def _section(tts_config: Dict[str, Any], key: str) -> Dict[str, Any]:
     return section if isinstance(section, dict) else {}
 
 
-# ---------------------------------------------------------------------------
-# Bounded upstream response reading
-# ---------------------------------------------------------------------------
+# --- Bounded upstream response reading ---
 
 def _response_has_explicit_stream(response: Any) -> bool:
     """True for real ``requests`` responses (or doubles defining ``iter_content`` themselves)."""
@@ -182,9 +180,7 @@ def _post_json(url: str, payload: Dict[str, Any], headers: Dict[str, str], **ext
     return requests.post(url, headers=headers, json=payload, timeout=60, stream=True, **extra)
 
 
-# ---------------------------------------------------------------------------
-# Auxiliary-model speech-tag rewrites
-# ---------------------------------------------------------------------------
+# --- Auxiliary-model speech-tag rewrites ---
 
 def _extract_auxiliary_message_content(response: Any) -> str:
     try:
@@ -232,9 +228,7 @@ def _rewrite_with_auxiliary_model(
         return fallback
 
 
-# ---------------------------------------------------------------------------
-# Edge TTS (free default)
-# ---------------------------------------------------------------------------
+# --- Edge TTS (free default) ---
 
 async def _generate_edge_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
     _edge_tts = _origin()._import_edge_tts()
@@ -247,9 +241,7 @@ async def _generate_edge_tts(text: str, output_path: str, tts_config: Dict[str, 
     return output_path
 
 
-# ---------------------------------------------------------------------------
-# ElevenLabs
-# ---------------------------------------------------------------------------
+# --- ElevenLabs ---
 
 def _elevenlabs_environment_kwargs(el_config: Dict[str, Any]) -> Dict[str, Any]:
     """Client kwargs redirecting the SDK to ``tts.elevenlabs.base_url``/``wss_url``.
@@ -285,9 +277,7 @@ def _generate_elevenlabs(text: str, output_path: str, tts_config: Dict[str, Any]
     return output_path
 
 
-# ---------------------------------------------------------------------------
-# xAI TTS (dedicated /v1/tts endpoint, not the OpenAI audio shape)
-# ---------------------------------------------------------------------------
+# --- xAI TTS (dedicated /v1/tts endpoint, not the OpenAI audio shape) ---
 _XAI_INLINE_SPEECH_TAGS = (
     "pause", "long-pause", "hum-tune", "laugh", "chuckle", "giggle", "cry", "tsk",
     "tongue-click", "lip-smack", "breath", "inhale", "exhale", "sigh",
@@ -425,9 +415,7 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -
     return output_path
 
 
-# ---------------------------------------------------------------------------
-# MiniMax TTS
-# ---------------------------------------------------------------------------
+# --- MiniMax TTS ---
 
 @dataclass(frozen=True)
 class _MiniMaxTTSRuntime:
@@ -564,9 +552,7 @@ def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any
     raise RuntimeError("MiniMax TTS returned no audio data")
 
 
-# ---------------------------------------------------------------------------
-# Mistral (Voxtral TTS) — base64 audio, native Opus for voice bubbles
-# ---------------------------------------------------------------------------
+# --- Mistral (Voxtral TTS) — base64 audio, native Opus for voice bubbles ---
 
 def _generate_mistral_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
     origin = _origin()
@@ -596,9 +582,7 @@ def _generate_mistral_tts(text: str, output_path: str, tts_config: Dict[str, Any
     return _write_bytes(output_path, audio_bytes)
 
 
-# ---------------------------------------------------------------------------
-# Google Gemini TTS
-# ---------------------------------------------------------------------------
+# --- Google Gemini TTS ---
 
 def _read_gemini_persona_prompt(gemini_config: Dict[str, Any]) -> str:
     """Read ``tts.gemini.persona_prompt_file`` (relative -> under HERMES_HOME), failing soft."""

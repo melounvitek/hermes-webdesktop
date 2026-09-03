@@ -31,9 +31,7 @@ def _origin():
     return tts_tool
 
 
-# ---------------------------------------------------------------------------
-# Bounded model caches
-# ---------------------------------------------------------------------------
+# --- Bounded model caches ---
 # Each cached entry is a whole loaded model (tens of MB); an unbounded dict would pin one
 # per distinct voice for the process lifetime. Most sessions use one or two voices and a
 # cold reload is cheap.
@@ -74,9 +72,7 @@ def _run_helper(cmd: list, timeout: int) -> subprocess.CompletedProcess:
     )
 
 
-# ---------------------------------------------------------------------------
-# NeuTTS (subprocess via tools/neutts_synth.py so the ~500MB model exits after use)
-# ---------------------------------------------------------------------------
+# --- NeuTTS (subprocess via tools/neutts_synth.py so the ~500MB model exits after use) ---
 
 def _generate_neutts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
     neutts_config = tts_config.get("neutts") or {}
@@ -98,9 +94,7 @@ def _generate_neutts(text: str, output_path: str, tts_config: Dict[str, Any]) ->
     return _finalize_wav_output(wav_path, output_path)
 
 
-# ---------------------------------------------------------------------------
-# Piper (local neural VITS, 44 languages)
-# ---------------------------------------------------------------------------
+# --- Piper (local neural VITS, 44 languages) ---
 
 def _get_piper_voices_dir() -> Path:
     """``<HERMES_HOME>/cache/piper-voices/`` so voice downloads follow profile boundaries."""
@@ -211,9 +205,7 @@ def _generate_piper_tts(text: str, output_path: str, tts_config: Dict[str, Any])
     return _finalize_wav_output(wav_path, output_path)
 
 
-# ---------------------------------------------------------------------------
-# KittenTTS (local ONNX, 25-80MB models, CPU only)
-# ---------------------------------------------------------------------------
+# --- KittenTTS (local ONNX, 25-80MB models, CPU only) ---
 
 def _load_kittentts_model_for_config(tts_config: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
     """Load (or fetch from cache) the KittenTTS model; returns ``(model, kittentts_config)``."""

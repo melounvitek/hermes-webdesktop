@@ -118,9 +118,7 @@ _OPUS_VOICE_ARGS = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Text chunking and delivery profiles
-# ---------------------------------------------------------------------------
+# --- Text chunking and delivery profiles ---
 
 @dataclass(frozen=True)
 class AudioDeliveryProfile:
@@ -248,9 +246,7 @@ def _pack_audio_files_for_delivery(audio_paths: List[str], profile: AudioDeliver
     return groups
 
 
-# ---------------------------------------------------------------------------
-# ffmpeg encoding helpers
-# ---------------------------------------------------------------------------
+# --- ffmpeg encoding helpers ---
 
 def _ffmpeg_run(
     ffmpeg: str, args: List[str], *, timeout: int = 30, check: bool = False, capture: bool = True,
@@ -382,9 +378,7 @@ def _ffmpeg_transcode_to_opus(input_path: str, ogg_path: str) -> Optional[str]:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Container sniffing / repair
-# ---------------------------------------------------------------------------
+# --- Container sniffing / repair ---
 # Several backends silently ignore the requested opus format (Edge only emits MP3, Piper
 # writes WAV, xAI writes MP3, some OpenAI-compatible servers ignore response_format="opus"),
 # which breaks native voice bubbles. Sniff the magic bytes once after synthesis and repair
@@ -432,9 +426,7 @@ def _repair_ogg_container(file_str: str) -> str:
         return file_str
 
 
-# ---------------------------------------------------------------------------
-# Long-form audio combination and delivery packing
-# ---------------------------------------------------------------------------
+# --- Long-form audio combination and delivery packing ---
 
 def _concat_audio_files(audio_paths: List[str], output_path: str, *, voice_compatible: bool = False) -> Optional[str]:
     """Combine independently encoded chunks with ffmpeg.

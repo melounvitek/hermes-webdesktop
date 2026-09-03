@@ -46,111 +46,55 @@ def _resolve_provider_key(env_var: str, provider_id: str) -> str:
 
 from tools.managed_tool_gateway import resolve_managed_tool_gateway  # noqa: F401 — seam patched by tests
 from tools.tts_command_provider import (  # noqa: F401 — historical names re-exported
-    BUILTIN_TTS_PROVIDERS,
-    COMMAND_TTS_OUTPUT_FORMATS,
-    DEFAULT_COMMAND_TTS_MAX_TEXT_LENGTH,
-    DEFAULT_COMMAND_TTS_OUTPUT_FORMAT,
-    DEFAULT_COMMAND_TTS_TIMEOUT_SECONDS,
-    _configured_command_tts_output_path,
-    _generate_command_tts,
-    _get_command_tts_output_format,
-    _get_command_tts_timeout,
-    _get_named_provider_config,
-    _is_command_provider_config,
-    _is_command_tts_voice_compatible,
-    _iter_command_providers,
-    _resolve_command_provider_config,
+    BUILTIN_TTS_PROVIDERS, COMMAND_TTS_OUTPUT_FORMATS, DEFAULT_COMMAND_TTS_MAX_TEXT_LENGTH,
+    DEFAULT_COMMAND_TTS_OUTPUT_FORMAT, DEFAULT_COMMAND_TTS_TIMEOUT_SECONDS,
+    _configured_command_tts_output_path, _generate_command_tts, _get_command_tts_output_format,
+    _get_command_tts_timeout, _get_named_provider_config, _is_command_provider_config,
+    _is_command_tts_voice_compatible, _iter_command_providers, _resolve_command_provider_config,
     command_env_passthrough as _command_provider_env_passthrough,
     render_command_template as _render_command_tts_template,
-    run_command_provider as _run_command_tts,
-    shell_quote_context as _shell_quote_context,
+    run_command_provider as _run_command_tts, shell_quote_context as _shell_quote_context,
 )
 from tools.tool_backend_helpers import (  # noqa: F401 — seams patched by tests, resolved via tts_tool_openai._origin()
-    NOUS_MANAGED_PROVIDER,
-    managed_nous_tools_enabled,
-    read_selection,
-    resolve_openai_audio_api_key,
+    NOUS_MANAGED_PROVIDER, managed_nous_tools_enabled, read_selection, resolve_openai_audio_api_key,
 )
 from tools.tts_tool_delivery import (  # noqa: F401 — historical names re-exported
-    FALLBACK_MAX_TEXT_LENGTH,
-    PROVIDER_MAX_TEXT_LENGTH,
-    _resolve_max_text_length,
-    AudioDeliveryProfile,
-    _build_audio_delivery_files,
-    _concat_audio_files,
-    _convert_to_opus,
-    _pack_audio_files_for_delivery,
-    _repair_ogg_container,
-    _resolve_audio_delivery_profile,
-    _sniff_audio_container,
-    _split_oversized_sentence,
-    _split_text_for_tts,
-    _wrap_pcm_as_wav,
+    FALLBACK_MAX_TEXT_LENGTH, PROVIDER_MAX_TEXT_LENGTH, _resolve_max_text_length,
+    AudioDeliveryProfile, _build_audio_delivery_files, _concat_audio_files, _convert_to_opus,
+    _pack_audio_files_for_delivery, _repair_ogg_container, _resolve_audio_delivery_profile,
+    _sniff_audio_container, _split_oversized_sentence, _split_text_for_tts, _wrap_pcm_as_wav,
 )
 from tools.tts_tool_providers import (  # noqa: F401 — historical names re-exported
-    DEFAULT_ELEVENLABS_MODEL_ID,
-    DEFAULT_ELEVENLABS_VOICE_ID,
-    DEFAULT_GEMINI_TTS_MODEL,
-    DEFAULT_GEMINI_TTS_VOICE,
-    DEFAULT_MINIMAX_BASE_URL,
-    DEFAULT_MINIMAX_CN_BASE_URL,
-    TTS_RESPONSE_BODY_LIMIT_BYTES,
-    _XAI_FIRST_SENTENCE_RE,
-    _XAI_INLINE_SPEECH_TAGS,
-    _XAI_WRAPPING_SPEECH_TAGS,
-    _apply_xai_auto_speech_tags,
-    _elevenlabs_environment_kwargs,
-    _generate_edge_tts,
-    _generate_elevenlabs,
-    _generate_gemini_tts,
-    _generate_minimax_tts,
-    _generate_mistral_tts,
-    _generate_xai_tts,
-    _resolve_minimax_tts_runtime,
+    DEFAULT_ELEVENLABS_MODEL_ID, DEFAULT_ELEVENLABS_VOICE_ID, DEFAULT_GEMINI_TTS_MODEL,
+    DEFAULT_GEMINI_TTS_VOICE, DEFAULT_MINIMAX_BASE_URL, DEFAULT_MINIMAX_CN_BASE_URL,
+    TTS_RESPONSE_BODY_LIMIT_BYTES, _XAI_FIRST_SENTENCE_RE, _XAI_INLINE_SPEECH_TAGS,
+    _XAI_WRAPPING_SPEECH_TAGS, _apply_xai_auto_speech_tags, _elevenlabs_environment_kwargs,
+    _generate_edge_tts, _generate_elevenlabs, _generate_gemini_tts, _generate_minimax_tts,
+    _generate_mistral_tts, _generate_xai_tts, _resolve_minimax_tts_runtime,
 )
 from tools.tts_tool_local import (  # noqa: F401 — historical names re-exported
-    DEFAULT_PIPER_VOICE,
-    _LOCAL_TTS_MODEL_CACHES,
-    _TTS_MODEL_CACHE_MAX,
-    _generate_kittentts,
-    _generate_neutts,
-    _generate_piper_tts,
-    _kittentts_model_cache,
-    _piper_voice_cache,
-    _resolve_piper_voice_path,
-    _tts_cache_get_or_load,
+    DEFAULT_PIPER_VOICE, _LOCAL_TTS_MODEL_CACHES, _TTS_MODEL_CACHE_MAX, _generate_kittentts,
+    _generate_neutts, _generate_piper_tts, _kittentts_model_cache, _piper_voice_cache,
+    _resolve_piper_voice_path, _tts_cache_get_or_load,
 )
 from tools.tts_tool_speaker import stream_tts_to_speaker  # noqa: F401 — historical name re-exported
 from tools.tts_text_normalize import _strip_markdown_for_tts  # noqa: F401 — historical name re-exported
 from tools.tts_tool_plugins import (  # noqa: F401 — historical names re-exported
-    _dispatch_to_plugin_provider,
-    _plugin_provider_is_available,
+    _dispatch_to_plugin_provider, _plugin_provider_is_available,
     _plugin_provider_is_voice_compatible,
 )
 from tools.tts_tool_openai import (  # noqa: F401 — historical names re-exported
-    DEFAULT_OPENAI_BASE_URL,
-    DEFAULT_OPENAI_MODEL,
-    DEFAULT_OPENAI_VOICE,
-    MANAGED_OPENAI_TTS_MODELS,
-    _generate_deepinfra_tts,
-    _generate_openai_tts,
-    _has_openai_audio_backend,
+    DEFAULT_OPENAI_BASE_URL, DEFAULT_OPENAI_MODEL, DEFAULT_OPENAI_VOICE, MANAGED_OPENAI_TTS_MODELS,
+    _generate_deepinfra_tts, _generate_openai_tts, _has_openai_audio_backend,
     _resolve_openai_audio_client_config,
 )
 from tools.tts_tool_lifecycle import (  # noqa: F401 — historical names re-exported
-    _local_tts_warmers,
-    _reset_tts_leases_for_tests,
-    acquire_tts_lease,
-    release_tts_lease,
-    release_tts_provider,
-    tts_lease_holders,
-    warm_tts_provider,
+    _local_tts_warmers, _reset_tts_leases_for_tests, acquire_tts_lease, release_tts_lease,
+    release_tts_provider, tts_lease_holders, warm_tts_provider,
 )
 
 
-# ---------------------------------------------------------------------------
-# Lazy SDK importers -- providers import only when used (headless boxes lack PortAudio etc.)
-# ---------------------------------------------------------------------------
+# --- Lazy SDK importers -- providers import only when used (headless boxes lack PortAudio etc.) ---
 
 def _sdk_importer(module: str, attr: Optional[str] = None, feature: Optional[str] = None) -> Callable[[], Any]:
     """Lazy SDK importer: returns ``module`` (or ``module.attr``), raising ImportError when absent.
@@ -209,9 +153,7 @@ def _check_piper_available() -> bool:
     return _package_installed("piper")
 
 
-# ---------------------------------------------------------------------------
-# Defaults / config
-# ---------------------------------------------------------------------------
+# --- Defaults / config ---
 DEFAULT_PROVIDER = "edge"
 
 
@@ -278,9 +220,7 @@ def _has_any_command_tts_provider(tts_config: Optional[Dict[str, Any]] = None) -
     return any(True for _ in _iter_command_providers(tts_config))
 
 
-# ---------------------------------------------------------------------------
-# Built-in provider dispatch
-# ---------------------------------------------------------------------------
+# --- Built-in provider dispatch ---
 # provider -> (availability predicate or None, "package missing" error, log line, generator
 # name). Predicates and generator names resolve module globals at call time so tests that
 # monkeypatch ``tools.tts_tool._import_x`` / ``_check_x`` / ``_generate_x`` apply.
@@ -418,9 +358,7 @@ def _finalize_voice_delivery(
     return file_str, file_str.endswith(".ogg")
 
 
-# ---------------------------------------------------------------------------
-# Main tool function
-# ---------------------------------------------------------------------------
+# --- Main tool function ---
 
 def _apply_call_overrides(tts_config: Dict[str, Any], speed: Optional[float], provider: Optional[str]):
     """Apply per-call ``speed`` (clamped, on a shallow copy) and resolve the provider name."""
@@ -666,9 +604,7 @@ def text_to_speech_tool(
                     pass
 
 
-# ---------------------------------------------------------------------------
-# check_fn
-# ---------------------------------------------------------------------------
+# --- check_fn ---
 
 def _minimax_requirements() -> bool:
     try:
@@ -716,9 +652,7 @@ def check_tts_requirements() -> bool:
     return _plugin_provider_is_available(provider)
 
 
-# ---------------------------------------------------------------------------
-# Registry
-# ---------------------------------------------------------------------------
+# --- Registry ---
 from tools.registry import registry, tool_error
 
 TTS_SCHEMA = {
