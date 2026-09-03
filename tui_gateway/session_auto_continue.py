@@ -5,9 +5,7 @@ busy-submit handling. Bodies are rebound onto server.py's globals at install tim
 from __future__ import annotations
 
 
-from .method_ctx import HandlerRegistry, bind_module
-
-_registry = HandlerRegistry()
+from .method_ctx import bind_module
 
 # A concluded turn (success, handled error, interrupt) clears its durable marker (turn_marker.py) in
 # _run_prompt_submit's finally; only a process death leaves it behind, so a marker at session.resume
@@ -373,10 +371,8 @@ def _inflight_snapshot(session: dict) -> dict | None:
     turn = session.get("inflight_turn")
     if not isinstance(turn, dict):
         return None
-    user = str(turn.get("user") or "").strip()
-    assistant = str(turn.get("assistant") or "")
-    streaming = bool(turn.get("streaming"))
-    error = str(turn.get("error") or "").strip()
+    user, assistant = str(turn.get("user") or "").strip(), str(turn.get("assistant") or "")
+    streaming, error = bool(turn.get("streaming")), str(turn.get("error") or "").strip()
     if not user and not assistant and not streaming and not error:
         return None
     snapshot = {"assistant": assistant, "streaming": streaming, "user": user}
@@ -427,20 +423,16 @@ def _emit_terminal_turn_error(
         partial = str(turn.get("assistant") or "")
         cols = int(session.get("cols", 80))
     text = partial or f"Error: {message}"
-    payload = {
-        "text": text, "usage": _get_usage(agent) if agent is not None else {}, "status": "error",
-        "error": message, "recoverable": True,
-    }
-    if error_surface:
-        payload["error_surface"] = error_surface
-    if partial:
-        payload["partial"] = True
     try:
         rendered = render_message(text, cols)
     except Exception:
         rendered = ""
-    if rendered:
-        payload["rendered"] = rendered
+    payload = {
+        "text": text, "usage": _get_usage(agent) if agent is not None else {}, "status": "error",
+        "error": message, "recoverable": True,
+        **({"error_surface": error_surface} if error_surface else {}),
+        **({"partial": True} if partial else {}), **({"rendered": rendered} if rendered else {}),
+    }
     if retire_marker:
         _retire_turn_marker(session)
     _emit("message.complete", sid, payload)

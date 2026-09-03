@@ -14,6 +14,7 @@ rides in the prompt text as a JSON object; any other prompt falls back to env / 
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import threading
@@ -21,6 +22,21 @@ import time
 from typing import Any, Callable, Optional
 
 from tui_gateway._env import env_float as _env_float, env_int as _env_int
+
+
+# Per-turn intensity spec: (key, caster, default source). ``chunk`` is pure-Python ops per
+# interrupt-check chunk (small enough that an interrupt lands within ms, large enough to stay hot on
+# the GIL); ``delta_interval_s`` is the streamed-delta cadence (each delta is a loop wakeup
+# marshalling a frame); ``tokens_per_delta`` drives the 100K+-token heavy-turn proxy; ``sleep_s`` is
+# an optional per-chunk sleep for a mixed regime (0 = pure burn; --dry-run uses a short duration, NOT
+# a sleep, so it still exercises the real seam).
+_SPEC_FIELDS = (
+    ("duration_s", float, lambda: _env_float("HERMES_ISO_CERTIFY_DURATION_S", 8.0)),
+    ("chunk", int, lambda: _env_int("HERMES_ISO_CERTIFY_CHUNK", 20_000)),
+    ("delta_interval_s", float, lambda: _env_float("HERMES_ISO_CERTIFY_DELTA_S", 0.05)),
+    ("tokens_per_delta", int, lambda: _env_int("HERMES_ISO_CERTIFY_TPD", 512)),
+    ("sleep_s", float, lambda: 0.0),
+)
 
 
 def synth_turn_armed() -> bool:
@@ -74,26 +90,10 @@ class SyntheticHeavyAgent:
     def _parse_spec(message: Any) -> dict[str, Any]:
         spec: dict[str, Any] = {}
         if isinstance(message, str) and message.strip().startswith("{"):
-            try:
+            with contextlib.suppress(ValueError, TypeError):
                 parsed = json.loads(message.strip())
-            except (ValueError, TypeError):
-                parsed = None
-            if isinstance(parsed, dict):
-                spec = parsed
-        return {
-            # Wall-clock seconds of GIL-holding compute.
-            "duration_s": float(spec.get("duration_s", _env_float("HERMES_ISO_CERTIFY_DURATION_S", 8.0))),
-            # Pure-Python ops per interrupt-check chunk: small enough that an interrupt lands within
-            # ms, large enough to stay hot on the GIL.
-            "chunk": int(spec.get("chunk", _env_int("HERMES_ISO_CERTIFY_CHUNK", 20_000))),
-            # Streamed-delta cadence: each delta is a loop wakeup marshalling a frame.
-            "delta_interval_s": float(spec.get("delta_interval_s", _env_float("HERMES_ISO_CERTIFY_DELTA_S", 0.05))),
-            # Notional output tokens per delta (drives the 100K+-token heavy-turn proxy).
-            "tokens_per_delta": int(spec.get("tokens_per_delta", _env_int("HERMES_ISO_CERTIFY_TPD", 512))),
-            # Optional per-chunk sleep for a mixed regime (0 = pure burn). --dry-run uses a short
-            # duration, NOT a sleep, so it still exercises the real seam.
-            "sleep_s": float(spec.get("sleep_s", 0.0)),
-        }
+                spec = parsed if isinstance(parsed, dict) else {}
+        return {key: cast(spec.get(key, default())) for key, cast, default in _SPEC_FIELDS}
 
     def run_conversation(
         self,

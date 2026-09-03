@@ -7,9 +7,7 @@ from __future__ import annotations
 
 import contextlib
 
-from .method_ctx import HandlerRegistry, bind_module
-
-_registry = HandlerRegistry()
+from .method_ctx import bind_module
 
 
 def _notif_locked_sessions(fn, default):
@@ -530,11 +528,17 @@ def _async_delegation_display_metadata(evt: dict) -> dict:
     return metadata
 
 
-def _wire_agent_terminal_output() -> None:
-    """Idempotently route background-process output (`agent.terminal.output` chunks) and
-    `process_registry.request_close_terminal` (`terminal.close`, drops a tab without killing the process)
-    to the window owning the process (its gateway session), keyed by process id. `_emit` is
-    `_stdout_lock`-guarded, so the registry's reader threads may call it."""
+_desktop_ui_wired = False
+
+
+def _wire_desktop_sinks() -> None:
+    """Idempotently wire process-registry and desktop-tool sinks to renderer events. Background-process
+    output (`agent.terminal.output` chunks) and `process_registry.request_close_terminal`
+    (`terminal.close`, drops a tab without killing the process) route to the window owning the process
+    (its gateway session), keyed by process id; desktop-only tools (open_preview, close_preview,
+    focus_pane) hand back the turn's ``HERMES_UI_SESSION_ID`` as ``sid`` so the event routes to the
+    window that asked. `_emit` is `_stdout_lock`-guarded, so registry reader / tool threads may call it."""
+    global _desktop_ui_wired
     from tools.process_registry import process_registry
 
     def _owner_sid_for_process(session) -> str:
@@ -553,24 +557,13 @@ def _wire_agent_terminal_output() -> None:
         process_registry.on_close = lambda session, process_id: _emit(
             "terminal.close", _owner_sid_for_process(session) if session is not None else "", {"process_id": process_id}
         )
-
-
-_desktop_ui_wired = False
-
-
-def _wire_desktop_ui() -> None:
-    """Bridge desktop-only tools (open_preview, close_preview, focus_pane) to renderer events. Idempotent.
-    The tool hands back the turn's ``HERMES_UI_SESSION_ID`` as ``sid`` so the event routes to the window
-    that asked (``_emit`` is ``_stdout_lock``-guarded; tool thread may call it)."""
-    global _desktop_ui_wired
-    if _desktop_ui_wired:
-        return
-    try:
-        from tools import desktop_ui
-    except Exception:
-        return
-    desktop_ui.set_emitter(lambda sid, event, payload: _emit(event, sid, payload))
-    _desktop_ui_wired = True
+    if not _desktop_ui_wired:
+        try:
+            from tools import desktop_ui
+        except Exception:
+            return
+        desktop_ui.set_emitter(lambda sid, event, payload: _emit(event, sid, payload))
+        _desktop_ui_wired = True
 
 
 # (stop_event, thread) for every poller started in this process, pruned of dead threads on each spawn.
@@ -581,8 +574,7 @@ _notification_pollers: list = []
 
 def _start_notification_poller(sid: str, session: dict) -> threading.Event:
     """Start the background notification poller for a TUI session (thread name is greppable)."""
-    _wire_agent_terminal_output()
-    _wire_desktop_ui()
+    _wire_desktop_sinks()
     stop = threading.Event()
     t = threading.Thread(
         target=_notification_poller_loop, args=(stop, sid, session), daemon=True, name=f"tui-notif-poller-{sid}"

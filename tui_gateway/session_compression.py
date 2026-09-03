@@ -9,9 +9,7 @@ from __future__ import annotations
 
 import contextlib
 
-from .method_ctx import HandlerRegistry, bind_module
-
-_registry = HandlerRegistry()
+from .method_ctx import bind_module
 
 
 def _tui_compression_config_signature(cfg: dict | None) -> tuple:
