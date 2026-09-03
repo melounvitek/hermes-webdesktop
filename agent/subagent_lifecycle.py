@@ -247,8 +247,7 @@ class SubagentLifecycleService:
             if request.correlation_id and correlation_key in _REGISTRY.correlations:
                 raise SubagentLifecycleError("Duplicate correlation_id for this parent session.")
 
-        # Delegate construction stays internal so plugin code never imports
-        # private delegation helpers or touches the active-child registry.
+        # Delegate construction stays internal: plugins never import private delegation helpers.
         from tools.delegate_tool import _build_child_preserving_parent_tools, DEFAULT_MAX_ITERATIONS
 
         child = _build_child_preserving_parent_tools(
@@ -318,29 +317,24 @@ class SubagentLifecycleService:
             agent = record.agent
             record.state = SubagentState.CANCEL_REQUESTED
             record.updated_at = time.time()
-        unsupported = SubagentCancelResult(False, unsupported=True, state=SubagentState.CANCEL_REQUESTED)
-        if agent is None:
-            return unsupported
-        try:
-            accepted = request_hard_interrupt(
-                agent,
-                f"Lifecycle cancellation requested: {reason[:500]}",
-                tool_reason="subagent cancellation requested",
-            )
-        except Exception:
-            accepted = False
-        if not accepted:
-            return unsupported
-        return SubagentCancelResult(True, state=SubagentState.CANCEL_REQUESTED)
+        accepted = False
+        if agent is not None:
+            try:
+                accepted = request_hard_interrupt(
+                    agent,
+                    f"Lifecycle cancellation requested: {reason[:500]}",
+                    tool_reason="subagent cancellation requested",
+                )
+            except Exception:
+                accepted = False
+        return SubagentCancelResult(bool(accepted), unsupported=not accepted, state=SubagentState.CANCEL_REQUESTED)
 
     def result(self, handle: SubagentHandle) -> SubagentResult:
         record = self._record(handle)
         if record is None:
             return SubagentResult(handle, SubagentState.UNKNOWN, False, error_classification="UNKNOWN_HANDLE")
         with _REGISTRY.lock:
-            if record.result is not None:
-                return record.result
-            return SubagentResult(record.handle, record.state, False, error_classification="NOT_READY")
+            return record.result or SubagentResult(record.handle, record.state, False, error_classification="NOT_READY")
 
     def reconnect(self, handle: SubagentHandle) -> SubagentReconnectResult:
         record = self._record(handle)
@@ -384,8 +378,7 @@ class SubagentLifecycleService:
 
             raw = _run_child_lifecycle(0, goal, record.agent, parent)
             is_dict = isinstance(raw, dict)
-            if not is_dict:
-                raw = {}
+            raw = raw if is_dict else {}
             status = str(raw.get("status", "error"))
             if status == "interrupted":
                 cancelled = record.state == SubagentState.CANCEL_REQUESTED
@@ -425,16 +418,10 @@ class SubagentLifecycleService:
 
     @staticmethod
     def _validate_request(request: SubagentLaunchRequest, parent: Any) -> None:
-        if (
-            not isinstance(request, SubagentLaunchRequest)
-            or not isinstance(request.goal, str)
-            or not request.goal.strip()
-            or len(request.goal) > _MAX_GOAL_CHARS
-        ):
+        goal_ok = isinstance(request, SubagentLaunchRequest) and isinstance(request.goal, str)
+        if not goal_ok or not request.goal.strip() or len(request.goal) > _MAX_GOAL_CHARS:
             raise SubagentLifecycleError("goal must be a non-empty string of at most 16000 characters.")
-        if request.context is not None and (
-            not isinstance(request.context, str) or len(request.context) > _MAX_CONTEXT_CHARS
-        ):
+        if request.context is not None and (not isinstance(request.context, str) or len(request.context) > _MAX_CONTEXT_CHARS):
             raise SubagentLifecycleError("context must be a string of at most 32000 characters.")
         if request.role not in {"leaf", "orchestrator"}:
             raise SubagentLifecycleError("role must be 'leaf' or 'orchestrator'.")

@@ -72,8 +72,7 @@ def _part_to_block(part: Any, redact: bool) -> Dict[str, Any]:
     if ptype == "text":
         return _text_block(part.get("text", ""), redact)
     if ptype in ("image_url", "image"):
-        # The viewer renders text turns; don't inline base64 blobs.
-        return {"type": "text", "text": "[image omitted]"}
+        return {"type": "text", "text": "[image omitted]"}  # the viewer renders text turns; no base64
     return _text_block(json.dumps(part), redact)
 
 
@@ -88,6 +87,15 @@ def _content_to_blocks(content: Any, redact: bool) -> List[Dict[str, Any]]:
     return [_text_block(json.dumps(content), redact)]
 
 
+def _parse_tool_args(raw_args: Any) -> Dict[str, Any]:
+    if not isinstance(raw_args, str):
+        return raw_args if isinstance(raw_args, dict) else {}
+    try:
+        return json.loads(raw_args) if raw_args.strip() else {}
+    except (json.JSONDecodeError, ValueError):
+        return {"_raw": raw_args}
+
+
 def _tool_calls_to_blocks(tool_calls: Any, redact: bool) -> List[Dict[str, Any]]:
     """Convert OpenAI tool_calls into Anthropic ``tool_use`` content blocks."""
     blocks: List[Dict[str, Any]] = []
@@ -95,14 +103,7 @@ def _tool_calls_to_blocks(tool_calls: Any, redact: bool) -> List[Dict[str, Any]]
         if not isinstance(tc, dict):
             continue
         fn = tc.get("function") or {}
-        raw_args = fn.get("arguments")
-        if isinstance(raw_args, str):
-            try:
-                parsed = json.loads(raw_args) if raw_args.strip() else {}
-            except (json.JSONDecodeError, ValueError):
-                parsed = {"_raw": raw_args}
-        else:
-            parsed = raw_args if isinstance(raw_args, dict) else {}
+        parsed = _parse_tool_args(fn.get("arguments"))
         if redact:
             try:
                 parsed = json.loads(_redact(json.dumps(parsed), redact))
@@ -127,9 +128,9 @@ def _git_branch(cwd: str) -> str:
             ["git", "rev-parse", "--abbrev-ref", "HEAD"],
             capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=3, cwd=cwd,
         )
-        return r.stdout.strip() if r.returncode == 0 else ""
     except Exception:
         return ""
+    return r.stdout.strip() if r.returncode == 0 else ""
 
 
 def _assistant_message(msg: Dict[str, Any], model: str, redact: bool) -> Dict[str, Any]:
@@ -310,14 +311,10 @@ def upload_session_trace(
     except Exception as e:
         logger.warning("Failed to load session %s for trace upload: %s", session_id, e)
         return f"Could not load session {session_id}: {e}"
-
     if not messages:
         return "No transcript to upload for this session yet."
-
     try:
-        jsonl = build_trace_jsonl(
-            messages, session_id=session_id, model=model or meta.get("model") or "", cwd=cwd, redact=redact,
-        )
+        jsonl = build_trace_jsonl(messages, session_id=session_id, model=model or meta.get("model") or "", cwd=cwd, redact=redact)
     except TraceRedactionError:
         return _REDACTION_BLOCKED_MESSAGE
     if not jsonl.strip():
