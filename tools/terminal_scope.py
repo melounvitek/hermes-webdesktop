@@ -62,7 +62,8 @@ def enforce_no_refusal() -> None:
     """Raise when the active scope is a refusal scope (fail closed)."""
     scope = _terminal_scope_var.get()
     if isinstance(scope, TerminalPolicyRefusal):
-        raise TerminalPolicyUnavailable(f"terminal policy unavailable for this profile: {scope.reason}")
+        raise TerminalPolicyUnavailable(
+            f"terminal policy unavailable for this profile: {scope.reason}")
 
 
 def terminal_env(name: str, default: str = "") -> str:

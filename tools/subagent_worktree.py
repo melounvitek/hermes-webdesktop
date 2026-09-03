@@ -48,12 +48,10 @@ def local_backend_active() -> bool:
 
 def resolve_repo_root(path: Optional[str]) -> Optional[str]:
     """Return the git toplevel for *path*, or None when not in a work tree."""
-    if not path:
+    candidate = os.path.abspath(os.path.expanduser(str(path))) if path else ""
+    if not candidate or not os.path.isdir(candidate):
         return None
     try:
-        candidate = os.path.abspath(os.path.expanduser(str(path)))
-        if not os.path.isdir(candidate):
-            return None
         result = _run_git(["rev-parse", "--show-toplevel"], cwd=candidate)
     except Exception as exc:
         logger.debug("subagent worktree: rev-parse failed: %s", exc)
@@ -75,11 +73,10 @@ def _ensure_gitignore_entry(repo_root: str) -> None:
 
 
 def create_subagent_worktree(parent_cwd: Optional[str], subagent_id: Optional[str] = None) -> Optional[Dict[str, str]]:
-    """Create an isolated worktree for one child; None (silent downgrade) if not git / on failure."""
+    """Create an isolated worktree for one child; None (silent downgrade) outside git/on failure."""
     repo_root = resolve_repo_root(parent_cwd)
     if not repo_root:
         return None
-
     wt_name = f"subagent-{(subagent_id or uuid.uuid4().hex[:8]).replace('/', '-')}"
     branch = f"hermes-subagent/{wt_name}"
     wt_path = Path(repo_root) / ".worktrees" / wt_name
@@ -146,7 +143,6 @@ def finalize_subagent_worktree(info: Dict[str, str], *, prune: bool = True) -> D
     if not base_commit:
         return mark_worktree_payload_unproven(
             payload, "no base_commit recorded — commit count unmeasurable", unmeasured="commits")
-
     failed, unmeasured = [], []
     probes = (("commits", "rev-list", ["rev-list", "--count", f"{base_commit}..HEAD"],
                lambda s: int(s or 0)),
@@ -166,7 +162,6 @@ def finalize_subagent_worktree(info: Dict[str, str], *, prune: bool = True) -> D
     if failed:
         # Destructive cleanup requires affirmative proof; defaults prove nothing.
         return mark_worktree_payload_unproven(payload, "; ".join(failed), unmeasured="/".join(unmeasured))
-
     if prune and payload["commits"] == 0 and not payload["dirty"]:
         cwd = info.get("repo_root", "") or path
         try:

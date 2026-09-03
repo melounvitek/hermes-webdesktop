@@ -34,23 +34,20 @@ def propagate_context_to_thread(target: Callable) -> Callable:
     denied by ``prompt_dangerous_approval`` and the gateway approval queue blocks.
     """
     ctx = contextvars.copy_context()
-    parent_approval_cb = parent_sudo_cb = None
-    setters = None
+    # (setter, parent callback) pairs; None when the callback API could not be captured.
+    installs = None
     try:
         get_approval, get_sudo, set_approval, set_sudo = _callback_api()
-        parent_approval_cb = get_approval()
-        parent_sudo_cb = get_sudo()
-        setters = (set_approval, set_sudo)
+        installs = ((set_approval, get_approval()), (set_sudo, get_sudo()))
     except Exception:
         logger.debug("Could not capture parent approval/sudo callbacks", exc_info=True)
 
     def _runner(*args, **kwargs):
         def _inner():
-            if setters is None:
+            if installs is None:
                 return target(*args, **kwargs)
-            set_approval, set_sudo = setters
             try:
-                for setter, cb in ((set_approval, parent_approval_cb), (set_sudo, parent_sudo_cb)):
+                for setter, cb in installs:
                     if cb is not None:
                         setter(cb)
             except Exception:
@@ -60,8 +57,8 @@ def propagate_context_to_thread(target: Callable) -> Callable:
                 return target(*args, **kwargs)
             finally:
                 try:
-                    set_approval(None)
-                    set_sudo(None)
+                    for setter, _cb in installs:
+                        setter(None)
                 except Exception:
                     logger.debug("Failed to clear propagated approval/sudo callbacks",
                                  exc_info=True)

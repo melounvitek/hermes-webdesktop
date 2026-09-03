@@ -153,9 +153,8 @@ def annotate_failure(command: str, exit_code: int, output: str) -> Optional[str]
     window = (output or "")[:_SCAN_CHARS]
     for fn in _OUTPUT_HINTS if window else ():
         try:
-            hint = fn(command or "", window)
+            if hint := fn(command or "", window):
+                return hint
         except Exception:
             continue
-        if hint:
-            return hint
     return _EXIT_CODE_HINTS.get(exit_code)
