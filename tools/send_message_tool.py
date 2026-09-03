@@ -29,7 +29,6 @@ from tools.registry import tool_error
 def prepare_send_message_platforms() -> None:
     """Load enabled standalone plugins before tool schemas/cache keys are built."""
     from hermes_cli.plugins import discover_plugins
-
     discover_plugins()
 
 
@@ -209,7 +208,6 @@ def _resolve_platform_config(platform_name, config):
     purely via .env (synthesized pconfig so cron delivery works without gateway.yaml)."""
     from gateway.config import Platform
     from gateway.platform_registry import platform_registry
-
     entry = platform_registry.get(platform_name)
     if entry is None and platform_name not in {member.value for member in Platform}:
         return None, None, None, f"Unknown or unregistered plugin platform: {platform_name}"
@@ -357,7 +355,6 @@ async def _send_live_adapter_media(
             return {"error": f"Adapter send failed: {_bounded_send_error(last_result.error)}"}
 
     from gateway.platforms.base import BasePlatformAdapter
-
     total = len(media_files)
     for index, descriptor in enumerate(media_files):
         media_path = descriptor[0] if isinstance(descriptor, (list, tuple)) and descriptor else None
@@ -494,7 +491,6 @@ def _platform_max_length(platform):
     SignalAdapter's own chunking), the registry's ``max_message_length`` for plugins,
     else None (no chunking)."""
     from gateway.config import Platform
-
     if platform == Platform.SIGNAL:
         try:
             from gateway.platforms.signal import MAX_MESSAGE_LENGTH
@@ -595,7 +591,6 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     unrelated optional imports such as lark-oapi), Telegram (chunks itself), plugin
     standalone media routes, native chunked routes, then the generic text path."""
     from gateway.config import Platform
-
     platform_name = platform.value if hasattr(platform, "value") else str(platform)
     media_files = media_files or []
 
@@ -611,7 +606,6 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             disable_link_previews=disable_link_previews, force_document=force_document)
 
     from gateway.platforms.base import BasePlatformAdapter
-
     max_len = _platform_max_length(platform)
     chunks = BasePlatformAdapter.truncate_message(message, max_len) if max_len else [message]
 
@@ -644,14 +638,12 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         send_one = lambda chunk, is_last: text_sender(pconfig, chat_id, chunk, thread_id)  # noqa: E731
     else:
         from gateway.platform_registry import platform_registry
-
         entry = platform_registry.get(platform_name)
         handler = entry.send_message_handler if entry is not None else None
         if handler is not None:
             # Custom handler receives the full typed request once (not per chunk).
             try:
                 import inspect
-
                 result = handler(args or {}, chat_id, platform_name, pconfig)
                 if inspect.isawaitable(result):
                     result = await result

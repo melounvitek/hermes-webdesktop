@@ -15,7 +15,6 @@ def _open_session_db():
     """Open the SessionDB for the profile owning this turn, or ``None``."""
     try:
         from hermes_state import get_shared_session_db
-
         return get_shared_session_db()
     except Exception:
         return None

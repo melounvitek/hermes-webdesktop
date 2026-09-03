@@ -131,7 +131,6 @@ def _telegram_bot(token):
     """Bot honouring TELEGRAM_PROXY (``telegram.proxy_url``) — without it the standalone
     path times out where api.telegram.org is blocked. Falls back to a direct connection."""
     from telegram import Bot
-
     try:
         from gateway.platforms.base import resolve_proxy_url
         proxy = resolve_proxy_url("TELEGRAM_PROXY", target_hosts=["api.telegram.org"])
@@ -259,7 +258,6 @@ def _telegram_format(message):
     """``(formatted, parse_mode, has_html)``: text already containing HTML tags is sent as
     HTML; otherwise Markdown -> MarkdownV2 via the adapter's ``format_message``."""
     from telegram.constants import ParseMode
-
     has_html = bool(re.search(r'<[a-zA-Z/][^>]*>', message))
     if has_html:
         return message, ParseMode.HTML, True
@@ -372,7 +370,6 @@ def _plugin_standalone_sender(platform_name, *, label=None, discover=True):
     """``(standalone_sender_fn, None)`` for a registered plugin or ``(None, error_dict)``;
     ``discover`` runs the idempotent plugin scan first."""
     from gateway.platform_registry import platform_registry
-
     if discover:
         from hermes_cli.plugins import discover_plugins
         discover_plugins()
@@ -505,7 +502,6 @@ async def _send_signal(extra, chat_id, message, media_files=None):
 
     from gateway.platforms import signal_rate_limit as rl
     from gateway.platforms.signal_format import markdown_to_signal
-
     try:
         http_url = extra.get("http_url", "http://127.0.0.1:8080").rstrip("/")
         account = extra.get("account", "")
@@ -517,35 +513,24 @@ async def _send_signal(extra, chat_id, message, media_files=None):
         for media_path, _is_voice in valid_media:
             if not os.path.exists(media_path):
                 logger.warning("Signal media file not found, skipping: %s", media_path)
-
         # No attachments still means one (text-only) batch; with attachments
         # the text rides on batch #0 so it isn't repeated per batch.
         per_batch = rl.SIGNAL_MAX_ATTACHMENTS_PER_MSG
-        att_batches = [
-            attachment_paths[i:i + per_batch] for i in range(0, len(attachment_paths), per_batch)
-        ] or [[]]
+        att_batches = [attachment_paths[i:i + per_batch]
+                       for i in range(0, len(attachment_paths), per_batch)] or [[]]
         n_batches = len(att_batches)
-
         plain_text, text_styles = markdown_to_signal(message)
+        recipient = {"groupId": chat_id[6:]} if chat_id.startswith("group:") else {"recipient": [chat_id]}
 
         async def _rpc_send(text, *, id_prefix, timeout, attachments=None, styled=False):
-            params = {"account": account, "message": text}
-            if chat_id.startswith("group:"):
-                params["groupId"] = chat_id[6:]
-            else:
-                params["recipient"] = [chat_id]
+            params = {"account": account, "message": text, **recipient}
             if styled and text and text_styles:
-                if len(text_styles) == 1:
-                    params["textStyle"] = text_styles[0]
-                else:
-                    params["textStyles"] = text_styles
+                params["textStyle" if len(text_styles) == 1 else "textStyles"] = (
+                    text_styles[0] if len(text_styles) == 1 else text_styles)
             if attachments:
                 params["attachments"] = attachments
-            payload = {
-                "jsonrpc": "2.0",
-                "method": "send",
-                "params": params,
-                "id": f"{id_prefix}_{int(time.time() * 1000)}"}
+            payload = {"jsonrpc": "2.0", "method": "send", "params": params,
+                       "id": f"{id_prefix}_{int(time.time() * 1000)}"}
             async with httpx.AsyncClient(timeout=timeout) as client:
                 return await client.post(f"{http_url}/api/v1/rpc", json=payload)
 
@@ -563,18 +548,15 @@ async def _send_signal(extra, chat_id, message, media_files=None):
         failed_batches: list[int] = []
         for idx, att_batch in enumerate(att_batches):
             n = len(att_batch)
-            if n > 0:
-                estimated = scheduler.estimate_wait(n)
-                if estimated >= rl.SIGNAL_BATCH_PACING_NOTICE_THRESHOLD:
-                    # Best-effort one-shot RPC for a user-facing pacing notice.
-                    notice = (
-                        f"(More images coming — pausing ~{rl._format_wait(estimated)} "
-                        f"for Signal rate limit, batch {idx + 1}/{n_batches}.)")
-                    try:
-                        await _rpc_send(notice, id_prefix="notice", timeout=30.0)
-                    except Exception as _e:
-                        logger.warning("Signal: inline notice failed: %s", _e)
-
+            estimated = scheduler.estimate_wait(n) if n > 0 else 0.0
+            if n > 0 and estimated >= rl.SIGNAL_BATCH_PACING_NOTICE_THRESHOLD:
+                # Best-effort one-shot RPC for a user-facing pacing notice.
+                notice = (f"(More images coming — pausing ~{rl._format_wait(estimated)} "
+                          f"for Signal rate limit, batch {idx + 1}/{n_batches}.)")
+                try:
+                    await _rpc_send(notice, id_prefix="notice", timeout=30.0)
+                except Exception as _e:
+                    logger.warning("Signal: inline notice failed: %s", _e)
             outcome = await _signal_send_batch(
                 _post, scheduler, rl, idx, n_batches, att_batch, plain_text if idx == 0 else "")
             if outcome is False:
@@ -586,14 +568,10 @@ async def _send_signal(extra, chat_id, message, media_files=None):
         if len(attachment_paths) < len(valid_media):
             warnings.append("Some media files were skipped (not found on disk)")
         if failed_batches:
-            warnings.append(
-                f"Signal rate-limited {len(failed_batches)} batch(es) "
-                f"(#{', #'.join(str(b) for b in failed_batches)})")
-
+            warnings.append(f"Signal rate-limited {len(failed_batches)} batch(es) "
+                            f"(#{', #'.join(str(b) for b in failed_batches)})")
         if failed_batches and len(failed_batches) == n_batches:
-            return _error(
-                f"Signal: every batch ({n_batches}) hit rate limit; no attachments delivered")
-
+            return _error(f"Signal: every batch ({n_batches}) hit rate limit; no attachments delivered")
         return _success("signal", _display_chat_id("signal", chat_id), warnings)
     except Exception as e:
         return _error(f"Signal send failed: {e}")
@@ -720,7 +698,6 @@ async def _send_qqbot(pconfig, chat_id, message):
 
     # Profile-scoped lookup so a multiplex profile never borrows another's QQ credentials.
     from gateway.config import _getenv
-
     extra = pconfig.extra or {}
     appid = extra.get("app_id") or _getenv("QQ_APP_ID", "")
     secret = (pconfig.token or extra.get("client_secret")

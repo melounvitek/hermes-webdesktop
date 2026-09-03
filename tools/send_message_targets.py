@@ -66,7 +66,6 @@ def _parse_telegram(ref):
     if parsed:
         return parsed
     from plugins.platforms.telegram.telegram_ids import parse_telegram_username_target
-
     username = parse_telegram_username_target(ref)
     return (username, None) if username else None
 
@@ -179,7 +178,6 @@ def resolve_send_target(
     """
     from gateway.config import Platform
     from gateway.platform_registry import platform_registry
-
     entry = platform_registry.get(platform_name)
 
     def _validate(candidate: str) -> str | None:
@@ -225,7 +223,6 @@ def resolve_send_target(
     resolution_failed = False
     try:
         from gateway.channel_directory import resolve_channel_name
-
         resolved = resolve_channel_name(platform_name, target_ref)
     except Exception:
         resolved = None
