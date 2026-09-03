@@ -7695,6 +7695,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         if self._resumed and self._preload_resumed_session():
             self._display_resumed_history()
 
+        _welcome_skin = None  # None when the skin engine failed: residue banner falls back to its default color
         try:
             from hermes_cli.skin_engine import get_active_skin
             _welcome_skin = get_active_skin()
@@ -7705,6 +7706,26 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             _welcome_color = "#FFF8DC"
         self._console_print(f"[{_welcome_color}]{_welcome_text}[/]")
 
+        self._tui_startup_prewarm_and_warnings(_welcome_skin)
+        self._print_random_tip()
+
+        self._tui_startup_background_maintenance()
+        _skills_for_line = self.preloaded_skills or list(
+            getattr(self, "_preload_skills_requested", []) or []
+        )
+        if _skills_for_line and not self._startup_skills_line_shown:
+            # When the background --skills preload hasn't been folded in yet
+            # (it joins at agent init), show the REQUESTED names — identical
+            # to the loaded set except for typo'd names, which warn later.
+            skills_label = ", ".join(_skills_for_line)
+            self._console_print(
+                f"[bold {_accent_hex()}]Activated skills:[/] {skills_label}"
+            )
+            self._startup_skills_line_shown = True
+        self._console_print()
+
+    def _tui_startup_prewarm_and_warnings(self, _welcome_skin):
+        """Idle-window prewarms (picker cache, agent runtime imports) plus the redaction-off and OpenClaw-residue banners."""
         # Warm the /model picker's provider-models cache off-thread during this
         # idle window (banner shown, user about to type). The no-args picker
         # otherwise blocks ~1-2s on serial /v1/models fetches the first time
@@ -7779,8 +7800,9 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
                     pass  # best-effort — banner will fire again next session
         except Exception:
             pass  # banner is non-critical — never break startup
-        self._print_random_tip()
 
+    def _tui_startup_background_maintenance(self):
+        """Best-effort startup passes: curator skill maintenance, personal + org skill sync. Never blocks startup."""
         # Curator — kick off a background skill-maintenance pass on startup
         # if the schedule says we're due.  Runs in a daemon thread so it
         # never blocks the interactive loop.  Best-effort; any failure is
@@ -7815,19 +7837,104 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             maybe_pull_org_skills()
         except Exception:
             pass
-        _skills_for_line = self.preloaded_skills or list(
-            getattr(self, "_preload_skills_requested", []) or []
+
+    def _tui_build_application(self, layout, kb, style):
+        """Construct the prompt_toolkit Application for the REPL."""
+        # CPR-disabled output when _terminal_may_leak_cpr() says so (POSIX local +
+        # SSH; Windows keeps the PT default). None -> prompt_toolkit's default;
+        # _strip_leaked_terminal_responses still scrubs residual leaks from input.
+        _cpr_disabled_output = _select_classic_cli_pt_output(sys.stdout)
+
+        # Kitty placeholders encode the image id in exact foreground RGB, so
+        # placeholder-capable terminals (kitty/Ghostty) run the whole app in
+        # 24-bit color — quantizing only that pane is not supported. ColorDepth is
+        # imported lazily so tests that stub ``prompt_toolkit`` can still import cli.
+        color_depth_kw = {}
+        if pet_render.supports_kitty_placeholders():
+            from prompt_toolkit.output import ColorDepth
+
+            color_depth_kw = {"color_depth": ColorDepth.DEPTH_24_BIT}
+        return Application(
+            layout=layout,
+            key_bindings=kb,
+            style=style,
+            full_screen=False,
+            mouse_support=False,
+            **({"output": _cpr_disabled_output} if _cpr_disabled_output is not None else {}),
+            **color_depth_kw,
+            # display.cli_refresh_interval (default 0 = disabled): non-zero keeps
+            # wall-clock status-bar read-outs ticking during idle; 0 avoids fighting
+            # terminal auto-scroll in non-fullscreen mode (Xshell, iTerm2, Windows
+            # Terminal). See #48309.
+            refresh_interval=float(CLI_CONFIG.get("display", {}).get("cli_refresh_interval", 0)),
+            # Erase the live bottom chrome (status bar, input box, rules) on exit
+            # instead of freezing a final copy into scrollback, where it would sit
+            # between the transcript and the exit summary and stack with the next
+            # session's UI on resume (#38252). The transcript itself goes through
+            # patch_stdout into normal scrollback and is unaffected.
+            erase_when_done=True,
+            **({'cursor': _STEADY_CURSOR} if _STEADY_CURSOR is not None else {}),
         )
-        if _skills_for_line and not self._startup_skills_line_shown:
-            # When the background --skills preload hasn't been folded in yet
-            # (it joins at agent init), show the REQUESTED names — identical
-            # to the loaded set except for typo'd names, which warn later.
-            skills_label = ", ".join(_skills_for_line)
-            self._console_print(
-                f"[bold {_accent_hex()}]Activated skills:[/] {skills_label}"
+
+    def _tui_install_signal_handlers(self):
+        """SIGTERM/SIGHUP -> graceful shutdown; Windows absorbs SIGINT (see body)."""
+        try:
+            import signal as _signal
+            _signal.signal(_signal.SIGTERM, self._tui_signal_handler)
+            if hasattr(_signal, 'SIGHUP'):
+                _signal.signal(_signal.SIGHUP, self._tui_signal_handler)
+
+            # Windows: absorb SIGINT. Win32 delivers spurious CTRL_C_EVENT when
+            # child processes are spawned from background threads; Python's
+            # default handler would unwind app.run() and run _run_cleanup
+            # mid-turn ("Daemon process exited during startup"). Real Ctrl+C
+            # still works — prompt_toolkit binds c-c at the TUI layer and never
+            # reaches this path. POSIX keeps the default handler (prompt_toolkit
+            # installs its own). Do NOT call agent.interrupt() here: it would
+            # inject a fake user message on every spurious event.
+            if sys.platform == "win32":
+                def _sigint_absorb(signum, frame):
+                    return
+                _signal.signal(_signal.SIGINT, _sigint_absorb)
+        except Exception:
+            pass  # Signal handlers may fail in restricted environments
+
+    def _tui_stdin_usable(self) -> bool:
+        """Validate fd 0 before prompt_toolkit starts; on macOS swap in a select()-backed loop if kqueue can't watch it.
+
+        With uv-managed Python on macOS fd 0 can be invalid or unregisterable with
+        the asyncio selector ("KeyError: '0 is not registered'", OSError(EINVAL) from
+        kqueue.control() in loop.add_reader) — #6393.
+        """
+        try:
+            os.fstat(0)
+        except OSError:
+            print(
+                "Error: stdin (fd 0) is not available.\n"
+                "This can happen with certain Python installations (e.g. uv-managed cPython on macOS).\n"
+                "Try reinstalling Python via pyenv or Homebrew, then re-run: hermes setup"
             )
-            self._startup_skills_line_shown = True
-        self._console_print()
+            return False
+        if sys.platform == "darwin":
+            try:
+                import selectors as _selectors
+                if hasattr(_selectors, "KqueueSelector"):
+                    _kq = _selectors.KqueueSelector()
+                    try:
+                        _kq.register(0, _selectors.EVENT_READ)
+                        _kq.unregister(0)
+                    finally:
+                        _kq.close()
+            except (OSError, ValueError, KeyError):
+                import asyncio as _aio_probe
+                import selectors as _selectors
+
+                class _SelectEventLoopPolicy(_aio_probe.DefaultEventLoopPolicy):
+                    def new_event_loop(self):
+                        return _aio_probe.SelectorEventLoop(_selectors.SelectSelector())
+
+                _aio_probe.set_event_loop_policy(_SelectEventLoopPolicy())
+        return True
 
     def run(self):
         """Run the interactive CLI loop with persistent input at bottom."""
@@ -7839,51 +7946,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         kb = self._tui_build_key_bindings()
         layout, style = self._tui_build_layout(kb)
 
-        # Select CPR-disabled output when _terminal_may_leak_cpr() says so
-        # (POSIX local + SSH; Windows keeps PT default — see helper docs).
-        # None falls back to prompt_toolkit's default output; input scrubbing
-        # in _strip_leaked_terminal_responses still guards residual leaks.
-        _cpr_disabled_output = _select_classic_cli_pt_output(sys.stdout)
-
-        # Kitty placeholders encode their image id in exact foreground RGB, so
-        # placeholder-capable terminals (kitty/Ghostty) use 24-bit color for
-        # the whole prompt_toolkit application — quantizing only that pane
-        # is not supported. WezTerm is excluded: it is not placeholder-capable.
-        # ColorDepth is imported here (not at module load) so tests that stub
-        # ``prompt_toolkit`` as a MagicMock can still import cli.
-        color_depth_kw = {}
-        if pet_render.supports_kitty_placeholders():
-            from prompt_toolkit.output import ColorDepth
-
-            color_depth_kw = {"color_depth": ColorDepth.DEPTH_24_BIT}
-        app = Application(
-            layout=layout,
-            key_bindings=kb,
-            style=style,
-            full_screen=False,
-            mouse_support=False,
-            **({"output": _cpr_disabled_output} if _cpr_disabled_output is not None else {}),
-            **color_depth_kw,
-            # Read from display.cli_refresh_interval (default 0 = disabled).
-            # When non-zero, prompt_toolkit redraws the UI on this cadence
-            # during idle, keeping wall-clock status-bar read-outs ticking.
-            # Set to 0 to suppress background redraws entirely — avoids
-            # fighting terminal auto-scroll in non-fullscreen mode (Xshell,
-            # iTerm2, Windows Terminal). See #48309.
-            refresh_interval=float(CLI_CONFIG.get("display", {}).get("cli_refresh_interval", 0)),
-            # Erase the live bottom chrome (status bar, input box, separator
-            # rules) on exit instead of freezing a final copy into scrollback.
-            # Without this, prompt_toolkit's render_as_done teardown repaints
-            # the chrome one last time and leaves it stranded above the exit
-            # summary — so a dead status bar + empty prompt sit between the
-            # conversation transcript and the "Resume this session" block, and
-            # stack with the next session's UI on resume (#38252). The actual
-            # conversation transcript is printed through patch_stdout into
-            # normal scrollback and is unaffected; only the managed chrome is
-            # erased. Applies to every exit path (/exit, /quit, EOF, Ctrl+C).
-            erase_when_done=True,
-            **({'cursor': _STEADY_CURSOR} if _STEADY_CURSOR is not None else {}),
-        )
+        app = self._tui_build_application(layout, kb, style)
         _disable_prompt_toolkit_cpr_warning(app)
         app.after_render += self._pet_flush_kitty_frame
         self._app = app  # Store reference for clarify_callback
@@ -7933,81 +7996,12 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # Register atexit cleanup so resources are freed even on unexpected exit
         atexit.register(_run_cleanup)
         
-        # Register signal handlers for graceful shutdown on SSH disconnect / SIGTERM
-        
-        try:
-            import signal as _signal
-            _signal.signal(_signal.SIGTERM, self._tui_signal_handler)
-            if hasattr(_signal, 'SIGHUP'):
-                _signal.signal(_signal.SIGHUP, self._tui_signal_handler)
+        self._tui_install_signal_handlers()
 
-            # Windows: absorb SIGINT. Win32 delivers spurious CTRL_C_EVENT when
-            # child processes are spawned from background threads; Python's
-            # default handler would unwind app.run() and run _run_cleanup
-            # mid-turn ("Daemon process exited during startup"). Real Ctrl+C
-            # still works — prompt_toolkit binds c-c at the TUI layer and never
-            # reaches this path. POSIX keeps the default handler (prompt_toolkit
-            # installs its own).
-            if sys.platform == "win32":
-                def _sigint_absorb(signum, frame):
-                    # Absorb silently. Do NOT call agent.interrupt() here:
-                    # Windows fires spurious CTRL_C_EVENT whenever a
-                    # background thread spawns a .cmd subprocess, and
-                    # interrupt() would inject a fake user message each
-                    # time. Real user Ctrl+C routes through prompt_toolkit's
-                    # own c-c key binding at the TUI layer (same pattern as
-                    # Claude Code's Windows handling).
-                    return
-                _signal.signal(_signal.SIGINT, _sigint_absorb)
-        except Exception:
-            pass  # Signal handlers may fail in restricted environments
-        
-        # Install a custom asyncio exception handler that suppresses the
-        # "Event loop is closed" RuntimeError from httpx transport cleanup
-        # and the "0 is not registered" KeyError from broken stdin (#6393).
-        # The RuntimeError fix is defense-in-depth — the primary fix is
-        # neuter_async_httpx_del which disables __del__ entirely.  The
-        # KeyError fix handles macOS + uv-managed Python environments where
-        # fd 0 is not reliably available to the asyncio selector.
-
-        # Validate stdin before launching prompt_toolkit — on macOS with
-        # uv-managed Python, fd 0 can be invalid or unregisterable with the
-        # asyncio selector, causing "KeyError: '0 is not registered'" (#6393).
-        try:
-            os.fstat(0)
-        except OSError:
-            print(
-                "Error: stdin (fd 0) is not available.\n"
-                "This can happen with certain Python installations (e.g. uv-managed cPython on macOS).\n"
-                "Try reinstalling Python via pyenv or Homebrew, then re-run: hermes setup"
-            )
+        if not self._tui_stdin_usable():
             _run_cleanup()
             self._print_exit_summary()
             return
-
-        # On macOS with uv-managed Python, kqueue's selector cannot register
-        # fd 0, raising OSError(EINVAL) from kqueue.control() when prompt_toolkit
-        # calls loop.add_reader (#6393). Probe kqueue and, if it can't watch
-        # stdin, switch to a SelectSelector-backed event loop policy.
-        if sys.platform == "darwin":
-            try:
-                import selectors as _selectors
-                if hasattr(_selectors, "KqueueSelector"):
-                    _kq = _selectors.KqueueSelector()
-                    try:
-                        _kq.register(0, _selectors.EVENT_READ)
-                        _kq.unregister(0)
-                    finally:
-                        _kq.close()
-            except (OSError, ValueError, KeyError):
-                import asyncio as _aio_probe
-                import selectors as _selectors
-
-                class _SelectEventLoopPolicy(_aio_probe.DefaultEventLoopPolicy):
-                    def new_event_loop(self):
-                        return _aio_probe.SelectorEventLoop(_selectors.SelectSelector())
-
-                _aio_probe.set_event_loop_policy(_SelectEventLoopPolicy())
 
         # Run the application with patch_stdout for proper output handling
         try:
