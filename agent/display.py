@@ -1057,13 +1057,11 @@ def _cute_delegate(a: dict, _r) -> str:
     action_preview = _delegate_action_preview(a)
     tasks = a.get("tasks")
     if action_preview is not None:
-        detail = action_preview
-    elif tasks and isinstance(tasks, list):
+        return f"┊ 🔀 delegate  {_cute_trunc(action_preview)}"
+    if tasks and isinstance(tasks, list):
         goals = _delegate_task_goals(tasks, per_goal_len=30)
-        detail = f"{len(goals) or len(tasks)}x: " + (" | ".join(goals) if goals else "parallel")
-    else:
-        detail = a.get("goal", "")
-    return f"┊ 🔀 delegate  {_cute_trunc(detail)}"
+        return f"┊ 🔀 delegate  {len(goals) or len(tasks)}x: {_cute_trunc(' | '.join(goals) if goals else 'parallel')}"
+    return f"┊ 🔀 delegate  {_cute_trunc(a.get('goal', ''))}"
 
 
 def _cute_process_manage(a: dict, _r) -> str:
