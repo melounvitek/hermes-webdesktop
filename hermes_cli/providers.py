@@ -115,39 +115,25 @@ class ProviderDef:
 # -- Aliases: human-friendly / legacy names grouped by canonical (models.dev where possible) id;
 # ``ALIASES`` is the inverted lookup table. ---------------------------------------------------
 _ALIAS_GROUPS: Dict[str, Tuple[str, ...]] = {
-    "openrouter": ("openai",),
-    "zai": ("glm", "z-ai", "z.ai", "zhipu"),
-    "xai": ("x-ai", "x.ai", "grok"),
+    "openrouter": ("openai",), "zai": ("glm", "z-ai", "z.ai", "zhipu"), "xai": ("x-ai", "x.ai", "grok"),
     "xai-oauth": ("grok-oauth", "xai-oauth", "x-ai-oauth", "xai-grok-oauth"),
     "nvidia": ("nim", "nvidia-nim", "build-nvidia", "nemotron"),
     "kimi-for-coding": ("kimi", "kimi-coding", "kimi-coding-cn", "moonshot"),
-    "stepfun": ("step", "stepfun-coding-plan"),
-    "minimax-cn": ("minimax-china", "minimax_cn"),
-    "anthropic": ("claude", "claude-code"),
-    "github-copilot": ("copilot", "github"),
-    "copilot-acp": ("github-copilot-acp",),
-    "vercel": ("ai-gateway", "aigateway", "vercel-ai-gateway"),
-    "opencode": ("opencode-zen", "zen"),
-    "opencode-go": ("go", "opencode-go-sub"),
-    "opencode-free": ("free", "opencode_free"),
-    "kilo": ("kilocode", "kilo-code", "kilo-gateway"),
-    "deepseek": ("deep-seek",),
-    "alibaba": ("dashscope", "aliyun", "qwen", "alibaba-cloud"),
+    "stepfun": ("step", "stepfun-coding-plan"), "minimax-cn": ("minimax-china", "minimax_cn"),
+    "anthropic": ("claude", "claude-code"), "github-copilot": ("copilot", "github"),
+    "copilot-acp": ("github-copilot-acp",), "vercel": ("ai-gateway", "aigateway", "vercel-ai-gateway"),
+    "opencode": ("opencode-zen", "zen"), "opencode-go": ("go", "opencode-go-sub"),
+    "opencode-free": ("free", "opencode_free"), "kilo": ("kilocode", "kilo-code", "kilo-gateway"),
+    "deepseek": ("deep-seek",), "alibaba": ("dashscope", "aliyun", "qwen", "alibaba-cloud"),
     "alibaba-coding-plan": ("alibaba_coding", "alibaba-coding", "alibaba_coding_plan"),
-    "huggingface": ("hf", "hugging-face", "huggingface-hub"),
-    "novita": ("novita-ai", "novitaai"),
-    "xiaomi": ("mimo", "xiaomi-mimo"),
-    "tencent-tokenhub": ("tencent", "tokenhub", "tencent-cloud", "tencentmaas"),
+    "huggingface": ("hf", "hugging-face", "huggingface-hub"), "novita": ("novita-ai", "novitaai"),
+    "xiaomi": ("mimo", "xiaomi-mimo"), "tencent-tokenhub": ("tencent", "tokenhub", "tencent-cloud", "tencentmaas"),
     "tencent-tokenplan": ("tokenplan", "tencent-lkeap"),
-    "bedrock": ("aws", "aws-bedrock", "amazon-bedrock", "amazon"),
-    "arcee": ("arcee-ai", "arceeai"),
-    "gmi": ("gmi-cloud", "gmicloud"),
-    "fireworks": ("fireworks-ai", "fw"),
-    "upstage": ("solar",),
+    "bedrock": ("aws", "aws-bedrock", "amazon-bedrock", "amazon"), "arcee": ("arcee-ai", "arceeai"),
+    "gmi": ("gmi-cloud", "gmicloud"), "fireworks": ("fireworks-ai", "fw"), "upstage": ("solar",),
     "actual": ("actual-computer", "actualcomputer", "aci"),
     "nebius-token-factory": ("nebius", "nebius-tokenfactory", "nebius-tf", "token-factory", "tokenfactory"),
-    "lmstudio": ("lmstudio", "lm-studio", "lm_studio"),
-    "custom": ("ollama",),
+    "lmstudio": ("lmstudio", "lm-studio", "lm_studio"), "custom": ("ollama",),
     "local": ("vllm", "llamacpp", "llama.cpp", "llama-cpp"),
 }
 ALIASES: Dict[str, str] = {alias: canon for canon, aliases in _ALIAS_GROUPS.items() for alias in aliases}
@@ -156,35 +142,20 @@ ALIASES: Dict[str, str] = {alias: canon for canon, aliases in _ALIAS_GROUPS.item
 # -- Display labels for providers not in the models.dev catalog ---------------
 
 _LABEL_OVERRIDES: Dict[str, str] = {
-    "moa": "Mixture of Agents",
-    "nous": "Nous Portal",
-    "openai-codex": "ChatGPT or Codex Subscription",
-    "copilot-acp": "GitHub Copilot ACP",
-    "stepfun": "StepFun Step Plan",
-    "xiaomi": "Xiaomi MiMo",
-    "gmi": "GMI Cloud",
-    "upstage": "Upstage Solar",
-    "actual": "Actual Computer",
-    "tencent-tokenhub": "Tencent TokenHub",
-    "nebius-token-factory": "Nebius Token Factory",
-    "tencent-tokenplan": "Tencent TokenPlan",
-    "lmstudio": "LM Studio",
-    "local": "Local endpoint",
-    "bedrock": "AWS Bedrock",
-    "vertex": "Google Vertex AI",
-    "ollama-cloud": "Ollama Cloud",
-    "xai-oauth": "xAI Grok OAuth (SuperGrok / Premium+)",
-    "opencode-free": "OpenCode Free",
+    "moa": "Mixture of Agents", "nous": "Nous Portal", "openai-codex": "ChatGPT or Codex Subscription",
+    "copilot-acp": "GitHub Copilot ACP", "stepfun": "StepFun Step Plan", "xiaomi": "Xiaomi MiMo", "gmi": "GMI Cloud",
+    "upstage": "Upstage Solar", "actual": "Actual Computer", "tencent-tokenhub": "Tencent TokenHub",
+    "nebius-token-factory": "Nebius Token Factory", "tencent-tokenplan": "Tencent TokenPlan", "lmstudio": "LM Studio",
+    "local": "Local endpoint", "bedrock": "AWS Bedrock", "vertex": "Google Vertex AI", "ollama-cloud": "Ollama Cloud",
+    "xai-oauth": "xAI Grok OAuth (SuperGrok / Premium+)", "opencode-free": "OpenCode Free",
 }
 
 
 # -- Transport → API mode mapping ---------------------------------------------
 
 TRANSPORT_TO_API_MODE: Dict[str, str] = {
-    "openai_chat": "chat_completions",
-    "anthropic_messages": "anthropic_messages",
-    "codex_responses": "codex_responses",
-    "bedrock_converse": "bedrock_converse",
+    "openai_chat": "chat_completions", "anthropic_messages": "anthropic_messages",
+    "codex_responses": "codex_responses", "bedrock_converse": "bedrock_converse",
 }
 
 

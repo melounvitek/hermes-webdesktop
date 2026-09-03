@@ -594,14 +594,20 @@ def _explicit_anthropic(requested_provider, model_cfg, api_key, base_url, target
     return _runtime("anthropic", "anthropic_messages", base_url, api_key, source="explicit", requested_provider=requested_provider)
 
 
+def _creds_fallback(api_key, explicit_base_url, base_url, expiry, expiry_key, resolve):
+    """When no explicit key was given, take api_key / expiry / base_url from stored credentials
+    (an explicit --base-url still wins over the stored one)."""
+    if api_key:
+        return api_key, base_url, expiry
+    creds = resolve()
+    return creds.get("api_key", ""), explicit_base_url or creds.get("base_url", "").rstrip("/") or base_url, creds.get(expiry_key)
+
+
 def _explicit_codex(requested_provider, model_cfg, api_key, explicit_base_url, target_model):
-    base_url = explicit_base_url or DEFAULT_CODEX_BASE_URL
-    last_refresh = None
-    if not api_key:
-        creds = resolve_codex_runtime_credentials()
-        api_key = creds.get("api_key", "")
-        last_refresh = creds.get("last_refresh")
-        base_url = explicit_base_url or creds.get("base_url", "").rstrip("/") or base_url
+    api_key, base_url, last_refresh = _creds_fallback(
+        api_key, explicit_base_url, explicit_base_url or DEFAULT_CODEX_BASE_URL, None, "last_refresh",
+        resolve_codex_runtime_credentials,
+    )
     return _runtime(
         "openai-codex", "codex_responses", base_url, api_key,
         source="explicit", last_refresh=last_refresh, requested_provider=requested_provider,
@@ -620,12 +626,10 @@ def _explicit_nous(requested_provider, model_cfg, api_key, explicit_base_url, ta
     api_key = api_key or (
         str(state.get("agent_key") or "").strip() if _agent_key_is_usable(state, _nous_min_key_ttl()) else ""
     )
-    expires_at = state.get("agent_key_expires_at") or state.get("expires_at")
-    if not api_key:
-        creds = _resolve_nous_creds()
-        api_key = creds.get("api_key", "")
-        expires_at = creds.get("expires_at")
-        base_url = explicit_base_url or creds.get("base_url", "").rstrip("/") or base_url
+    api_key, base_url, expires_at = _creds_fallback(
+        api_key, explicit_base_url, base_url, state.get("agent_key_expires_at") or state.get("expires_at"), "expires_at",
+        _resolve_nous_creds,
+    )
     return _runtime(
         "nous", nous_api_mode(_effective_model(model_cfg, target_model)), base_url, api_key,
         source="explicit", expires_at=expires_at, requested_provider=requested_provider,
@@ -636,6 +640,13 @@ def _explicit_azure_foundry(requested_provider, model_cfg, api_key, base_url, ta
     return _resolve_azure_foundry_runtime(
         requested_provider=requested_provider, model_cfg=model_cfg, explicit_api_key=api_key, explicit_base_url=base_url
     )
+
+
+def _actual_local_key(provider: str, api_key: str, base_url: str) -> str:
+    """Actual Computer's loopback daemon speaks a no-auth local API — substitute the placeholder key."""
+    if provider == "actual" and not api_key and is_actual_local_base_url(base_url):
+        return ACTUAL_LOCAL_NOAUTH_PLACEHOLDER
+    return api_key
 
 
 def _explicit_api_key_provider(provider, pconfig, requested_provider, model_cfg, api_key, base_url, target_model):
@@ -657,8 +668,7 @@ def _explicit_api_key_provider(provider, pconfig, requested_provider, model_cfg,
     api_mode = _api_key_provider_api_mode(
         provider, model_cfg, api_key, base_url, target_model or model_cfg.get("default", ""), opencode_by_model=False
     )
-    if provider == "actual" and not api_key and is_actual_local_base_url(base_url):
-        api_key = ACTUAL_LOCAL_NOAUTH_PLACEHOLDER
+    api_key = _actual_local_key(provider, api_key, base_url)
     return _runtime(provider, api_mode, base_url.rstrip("/"), api_key, source="explicit", requested_provider=requested_provider)
 
 
@@ -816,9 +826,7 @@ def _api_key_provider_runtime(provider, pconfig, requested_provider, model_cfg, 
         provider, model_cfg, creds.get("api_key", ""), base_url, target_model or model_cfg.get("default", ""), opencode_by_model=True
     )
     base_url = _finalize_base_url(provider, api_mode, base_url)
-    api_key = creds.get("api_key", "")
-    if provider == "actual" and not api_key and is_actual_local_base_url(base_url):
-        api_key = ACTUAL_LOCAL_NOAUTH_PLACEHOLDER
+    api_key = _actual_local_key(provider, creds.get("api_key", ""), base_url)
     return _runtime(provider, api_mode, base_url, api_key, source=creds.get("source", "env"), requested_provider=requested_provider)
 
 
@@ -963,37 +971,33 @@ def resolve_runtime_provider(
         if runtime:
             return runtime
     provider = resolve_provider(requested_provider, explicit_api_key=explicit_api_key, explicit_base_url=explicit_base_url)
+    return next(r for r in _provider_rungs(provider, requested_provider, explicit_api_key, explicit_base_url, target_model) if r)
+
+
+def _provider_rungs(provider, requested_provider, explicit_api_key, explicit_base_url, target_model):
+    """Rungs 5-8 of the ladder, yielded lazily so each is evaluated only when the previous one
+    returned nothing; the last rung (OpenRouter / bare-custom fallback) always yields a runtime."""
     model_cfg = _get_model_config()
-    runtime = _opencode_free_runtime(provider, requested_provider, model_cfg, target_model)
-    if runtime is not None:
-        return runtime
-    runtime = _resolve_explicit_runtime(
+    yield _opencode_free_runtime(provider, requested_provider, model_cfg, target_model)
+    yield _resolve_explicit_runtime(
         provider=provider, requested_provider=requested_provider, model_cfg=model_cfg,
         explicit_api_key=explicit_api_key, explicit_base_url=explicit_base_url, target_model=target_model,
     )
-    if runtime:
-        return runtime
-    runtime = _resolve_from_pool(provider, requested_provider, model_cfg, explicit_api_key, explicit_base_url, target_model)
-    if runtime:
-        return runtime
+    yield _resolve_from_pool(provider, requested_provider, model_cfg, explicit_api_key, explicit_base_url, target_model)
     if provider in _OAUTH_RUNTIME_PROVIDERS:
-        runtime = _resolve_oauth_runtime(provider, requested_provider, model_cfg, target_model)
-        if runtime:
-            return runtime
+        yield _resolve_oauth_runtime(provider, requested_provider, model_cfg, target_model)
     if provider == "minimax-oauth":
-        runtime = _minimax_oauth_runtime(provider, requested_provider)
-        if runtime:
-            return runtime
+        yield _minimax_oauth_runtime(provider, requested_provider)
     if _is_external_process_provider(provider):
-        return _resolve_external_process_runtime(provider, requested_provider)
+        yield _resolve_external_process_runtime(provider, requested_provider)
     if provider == "anthropic":
-        return _anthropic_env_runtime(requested_provider, model_cfg)
+        yield _anthropic_env_runtime(requested_provider, model_cfg)
     if provider == "bedrock":
-        return _resolve_bedrock_runtime(requested_provider, model_cfg, target_model)
+        yield _resolve_bedrock_runtime(requested_provider, model_cfg, target_model)
     pconfig = PROVIDER_REGISTRY.get(provider)
     if pconfig and pconfig.auth_type == "api_key":
-        return _api_key_provider_runtime(provider, pconfig, requested_provider, model_cfg, target_model)
-    return _openrouter_fallback(requested_provider, explicit_api_key, explicit_base_url)
+        yield _api_key_provider_runtime(provider, pconfig, requested_provider, model_cfg, target_model)
+    yield _openrouter_fallback(requested_provider, explicit_api_key, explicit_base_url)
 
 
 def format_runtime_provider_error(error: Exception) -> str:
