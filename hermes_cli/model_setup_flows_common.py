@@ -42,7 +42,6 @@ def _ask(prompt: str, *, secret: bool = False, raw: bool = False, cancel_msg: st
 def _existing_api_key_for_model_flow(provider_id: str, pconfig) -> tuple[str, str]:
     """Resolve an existing wizard credential without changing its storage."""
     from hermes_cli.auth import _resolve_api_key_provider_secret
-
     return _resolve_api_key_provider_secret(provider_id, pconfig)
 
 
@@ -53,7 +52,6 @@ def _ensure_flow_api_key(provider_id: str, pconfig, *, missing_hint=()) -> tuple
     Returns ``(existing_key, resolved_key, abort)``.
     """
     from hermes_cli.main import _prompt_api_key
-
     existing_key, existing_source = _existing_api_key_for_model_flow(provider_id, pconfig)
     if not existing_key:
         for line in missing_hint:
@@ -65,7 +63,6 @@ def _ensure_flow_api_key(provider_id: str, pconfig, *, missing_hint=()) -> tuple
 def _load_config_model_section() -> tuple[dict, dict]:
     """Return ``(cfg, cfg["model"])`` with the model section coerced to a dict."""
     from hermes_cli.config import load_config
-
     cfg = load_config()
     model = cfg.get("model")
     if not isinstance(model, dict):
@@ -78,7 +75,6 @@ def _begin_model_config(selected: str, provider: str) -> tuple[dict, dict]:
     """Record *selected* as the model choice and open the config model section
     with ``provider`` set; callers set endpoint fields then ``_commit_model_config``."""
     from hermes_cli.auth import _save_model_choice
-
     _save_model_choice(selected)
     cfg, model = _load_config_model_section()
     model["provider"] = provider
@@ -89,7 +85,6 @@ def _commit_model_config(cfg: dict) -> None:
     """Persist *cfg* and deactivate any OAuth provider."""
     from hermes_cli.auth import deactivate_provider
     from hermes_cli.config import save_config
-
     save_config(cfg)
     deactivate_provider()
 
@@ -134,7 +129,6 @@ def _activate_provider_model(selected, provider_id: str, base_url: str, done: st
     """OAuth-provider persist: model choice + ``_update_config_for_provider`` (which owns
     the auth-state bookkeeping), then *done*; *no_change* (``None`` = silent) otherwise."""
     from hermes_cli.auth import _save_model_choice, _update_config_for_provider
-
     if not selected:
         if no_change is not None:
             print(no_change)
@@ -157,7 +151,6 @@ def _pick_model_or_prompt(model_list, prompt: str, **kwargs):
     """Radio picker when *model_list* is non-empty, else a free-text ``line_input``
     (None on Ctrl-C/EOF)."""
     from hermes_cli.auth import _prompt_model_selection
-
     if model_list:
         return _prompt_model_selection(model_list, **kwargs)
     return _ask(prompt, cancel_msg=None)
@@ -204,7 +197,6 @@ def _models_dev_merged(provider_id: str, curated) -> list:
     mdev_models: list = []
     try:
         from agent.models_dev import list_agentic_models
-
         mdev_models = list_agentic_models(provider_id)
     except Exception:
         pass
@@ -269,7 +261,6 @@ def _curses_choice(title: str, rows: list, default_idx: int):
     non-TTY) so the caller can fall back to a numbered prompt."""
     try:
         from hermes_cli.setup import _curses_prompt_choice
-
         return _curses_prompt_choice(title, rows, default_idx)
     except Exception:
         return None

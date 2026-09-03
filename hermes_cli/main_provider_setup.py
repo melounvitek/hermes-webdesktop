@@ -44,7 +44,6 @@ def _clear_stale_openai_base_url():
     clients (compression, vision, delegation) to the old custom endpoint.
     """
     from hermes_cli.config import get_env_value, save_env_value, load_config
-
     model_cfg = load_config().get("model", {})
     provider = (model_cfg.get("provider") or "").strip().lower() if isinstance(model_cfg, dict) else ""
     if provider == "custom" or not provider:
@@ -144,7 +143,6 @@ def _save_aux_choice(task: str, *, provider: str, model: str = "", base_url: str
     model config never modified). ``delegation`` writes the top-level section, with "auto"
     stored as an empty provider."""
     from hermes_cli.config import load_config, save_config
-
     cfg = load_config()
     if task == _DELEGATION_TASK_KEY:
         entry = _ensure_dict_section(cfg, "delegation")
@@ -161,7 +159,6 @@ def _save_aux_choice(task: str, *, provider: str, model: str = "", base_url: str
 def _reset_aux_to_auto() -> int:
     """Reset every known aux task (built-in + plugin) back to auto/empty. Returns number reset."""
     from hermes_cli.config import load_config, save_config
-
     cfg = load_config()
     aux = _ensure_dict_section(cfg, "auxiliary")
     count = 0
@@ -196,7 +193,6 @@ def _aux_config_menu() -> None:
     """Top-level auxiliary-model picker; loops until the user picks "Back"."""
     from hermes_cli.main import _aux_select_for_task, _prompt_provider_choice
     from hermes_cli.config import load_config
-
     while True:
         cfg = load_config()
         _say("", "  Auxiliary models — side-task routing", "",
@@ -240,7 +236,6 @@ def _aux_select_for_task(task: str) -> None:
     from hermes_cli.main import _prompt_provider_choice
     from hermes_cli.config import load_config
     from hermes_cli.inventory import build_aux_picker_rows, format_aux_picker_entries
-
     task_cfg = _aux_task_cfg(load_config(), task)
     current_provider = str(task_cfg.get("provider") or "auto").strip() or "auto"
     current_model = str(task_cfg.get("model") or "").strip()
@@ -285,7 +280,6 @@ def _aux_flow_provider_model(task: str, provider_slug: str, curated_models: list
     """Prompt for a model under an already-authenticated provider, save to aux."""
     from hermes_cli.auth import _prompt_model_selection
     from hermes_cli.models import get_pricing_for_provider
-
     display_name = _aux_task_display_name(task)
     try:
         pricing = get_pricing_for_provider(provider_slug) or {}
@@ -370,7 +364,6 @@ def _prompt_provider_choice(choices, *, default=0, title="Select provider:"):
     (piped stdin, non-TTY). Returns the selected index, or None if the user cancels."""
     try:
         from hermes_cli.setup import _curses_prompt_choice
-
         idx = _curses_prompt_choice(title, choices, default)
         if idx >= 0:
             print()
@@ -409,7 +402,6 @@ _CUSTOM_API_MODE_ANSWERS = {answer: value for value, _, _, answers in _CUSTOM_AP
 def _prompt_custom_api_mode_selection(base_url: str, current_api_mode: str = "") -> Optional[str]:
     """Prompt for a custom provider API mode: an explicit mode string, or None for auto-detect."""
     from hermes_cli.runtime_provider import _detect_api_mode_for_url
-
     detected_mode = _detect_api_mode_for_url(base_url)
     default_mode = str(current_api_mode or "").strip().lower() or detected_mode or ""
 
@@ -437,7 +429,6 @@ def _auto_provider_name(base_url: str) -> str:
     """Display name from a custom endpoint URL, e.g. "Local (localhost:11434)" or
     "RunPod (xyz.runpod.io)" — the default offered during custom endpoint setup."""
     import re
-
     name = re.sub(r"/v1/?$", "", _short_url(base_url)).split("/")[0]
     if "localhost" in name or "127.0.0.1" in name:
         return f"Local ({name})"
@@ -472,7 +463,6 @@ def _save_custom_provider(base_url, api_key="", model="", context_length=None, n
     of inlining the secret.
     """
     from hermes_cli.config import load_config, save_config
-
     cfg = load_config()
     providers = cfg.get("custom_providers") or []
     if not isinstance(providers, list):
@@ -530,7 +520,6 @@ def _save_custom_provider(base_url, api_key="", model="", context_length=None, n
 def _remove_custom_provider(config):
     """Let the user remove a saved custom provider from config.yaml."""
     from hermes_cli.config import load_config, save_config
-
     cfg = load_config()
     providers = cfg.get("custom_providers") or []
     if not isinstance(providers, list) or not providers:
@@ -546,7 +535,6 @@ def _remove_custom_provider(config):
 
     try:
         from hermes_cli.curses_ui import curses_radiolist
-
         idx = curses_radiolist("Select provider to remove:", list(choices), selected=0, cancel_returns=-1)
         print()
         if idx < 0:
@@ -598,7 +586,6 @@ def _prompt_reasoning_effort_selection(efforts, current_effort=""):
     n = len(ordered)
     try:
         from hermes_cli.curses_ui import curses_radiolist
-
         choices = [_label(effort) for effort in ordered] + [disable_label, skip_label]
         idx = curses_radiolist("Select reasoning effort:", choices, selected=default_idx, cancel_returns=-1)
         if idx < 0:
@@ -626,7 +613,6 @@ def _prompt_api_key(pconfig, existing_key: str, provider_id: str = "", existing_
     """
     from hermes_cli.auth import LMSTUDIO_NOAUTH_PLACEHOLDER
     from hermes_cli.config import save_env_value
-
     key_env = pconfig.api_key_env_vars[0] if pconfig.api_key_env_vars else ""
 
     def _prompt_new_key(*, allow_lmstudio_default: bool) -> str:
@@ -656,7 +642,6 @@ def _prompt_api_key(pconfig, existing_key: str, provider_id: str = "", existing_
 
     # Already configured — offer K / R / C
     from hermes_cli.env_loader import format_secret_source_suffix
-
     source_suffix = format_secret_source_suffix(key_env) if key_env else ""
     print(f"  {pconfig.name} API key: {existing_key[:8]}... ✓{source_suffix}")
     if not key_env:
@@ -691,7 +676,6 @@ def _infer_stepfun_region(base_url: str) -> str:
 
 def _stepfun_base_url_for_region(region: str) -> str:
     from hermes_cli.auth import STEPFUN_STEP_PLAN_CN_BASE_URL, STEPFUN_STEP_PLAN_INTL_BASE_URL
-
     return STEPFUN_STEP_PLAN_CN_BASE_URL if region == "china" else STEPFUN_STEP_PLAN_INTL_BASE_URL
 
 
@@ -709,7 +693,6 @@ def _run_anthropic_oauth_flow(save_env_value):
             use_anthropic_claude_code_credentials(save_fn=save_env_value)
             print("  ✓ Claude Code credentials linked.")
             from hermes_constants import display_hermes_home as _dhh_fn
-
             print(f"    Hermes will use Claude's credential store directly instead of copying a setup-token into {_dhh_fn()}/.env.")
             return True
         return False
@@ -848,7 +831,6 @@ def _build_provider_picker_rows(config: dict, active: str, provider_labels: dict
     gateway/TUI pickers.
     """
     from hermes_cli.models import CANONICAL_PROVIDERS, _PROVIDER_ALIASES, group_providers, provider_group_for_slug
-
     canonical_descs = {p.slug: p.tui_desc for p in CANONICAL_PROVIDERS}
     _cli_excluded = {
         str(p).strip().lower()

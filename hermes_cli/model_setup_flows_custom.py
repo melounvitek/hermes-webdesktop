@@ -34,7 +34,6 @@ def _probe_custom_endpoint(effective_key: str, effective_url: str) -> tuple[dict
     """Verify a custom endpoint via ``probe_api_models`` and report; returns
     ``(probe, effective_url)`` where the URL may be the working fallback base."""
     from hermes_cli.models import probe_api_models
-
     probe = probe_api_models(effective_key, effective_url)
     if probe.get("used_fallback") and probe.get("resolved_base_url"):
         print(f"Warning: endpoint verification worked at {probe['resolved_base_url']}/models, "
@@ -82,7 +81,6 @@ def _model_flow_custom(config):
     from hermes_cli.auth import _save_model_choice, deactivate_provider
     from hermes_cli.config import custom_endpoint_key_env, get_env_value, save_env_value
     from hermes_cli.secret_prompt import masked_secret_prompt
-
     current_url = get_env_value("OPENAI_BASE_URL") or ""
     current_key = get_env_value("OPENAI_API_KEY") or ""
 
@@ -256,7 +254,6 @@ def _discover_named_custom_models(provider_info: dict, api_key: str, configured_
     if live_models:
         try:
             from hermes_cli.model_switch import _save_discovered_models_to_config
-
             _save_discovered_models_to_config(base_url, live_models, api_mode=api_mode, headers=extra_headers or None)
         except Exception:
             pass
@@ -269,7 +266,6 @@ def _pick_named_custom_model(name: str, models: list, saved_model: str):
     print(f"Found {len(models)} model(s):\n")
     try:
         from hermes_cli.curses_ui import curses_radiolist
-
         menu_items = [f"{m} (current)" if m == saved_model else m for m in models] + ["Cancel"]
         idx = curses_radiolist(f"Select model from {name}:", menu_items, selected=default_idx, cancel_returns=-1, searchable=True)
         print()
@@ -303,7 +299,6 @@ def _model_flow_named_custom(config, provider_info):
     from hermes_cli.auth import _save_model_choice
     from hermes_cli.config import load_config, save_config
     from hermes_cli.model_switch import _entry_models_discovered, _models_config_is_allowlist
-
     name = provider_info["name"]
     base_url = provider_info["base_url"]
     api_mode = provider_info.get("api_mode", "")
