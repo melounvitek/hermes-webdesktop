@@ -20,7 +20,7 @@ __all__ = ["CatalogEntry", "CATALOG", "seed_catalog_suggestions", "classify_item
 
 def classify_items_script_path() -> str:
     """Absolute path to the urgency classifier script shipped with cron/."""
-    return str((Path(__file__).resolve().parent / "scripts" / "classify_items.py"))
+    return str(Path(__file__).resolve().parent / "scripts" / "classify_items.py")
 
 
 @dataclass(frozen=True)
@@ -136,11 +136,8 @@ def seed_catalog_suggestions(
         if wanted is not None and entry.key not in wanted:
             continue
         rec = add_fn(
-            title=entry.title,
-            description=entry.description,
-            source="catalog",
-            job_spec=dict(entry.job_spec),
-            dedup_key=entry.key,
+            title=entry.title, description=entry.description, source="catalog",
+            job_spec=dict(entry.job_spec), dedup_key=entry.key,
         )
         if rec is not None:
             created.append(rec)

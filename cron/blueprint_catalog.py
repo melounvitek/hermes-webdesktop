@@ -553,9 +553,17 @@ def get_blueprint(key: str) -> Optional[AutomationBlueprint]:
     return _CATALOG_BY_KEY.get(key)
 
 
-# ---------------------------------------------------------------------------
-# Renderers
-# ---------------------------------------------------------------------------
+def _slot(blueprint: AutomationBlueprint, *names: str, type: Optional[str] = None) -> Optional[BlueprintSlot]:
+    """First slot matching any of *names* (or *type*), else None."""
+    return next((s for s in blueprint.slots if s.name in names or (type and s.type == type)), None)
+
+
+def _slot_default(blueprint: AutomationBlueprint, *names: str) -> Any:
+    slot = _slot(blueprint, *names)
+    return slot.default if slot else None
+
+
+# --- Renderers --------------------------------------------------------------------------------
 
 def blueprint_form_schema(blueprint: AutomationBlueprint) -> Dict[str, Any]:
     """Emit the JSON a form renderer (dashboard / GUI) needs for this blueprint."""
@@ -582,11 +590,8 @@ def blueprint_form_schema(blueprint: AutomationBlueprint) -> Dict[str, Any]:
 
 
 def blueprint_slash_command(blueprint: AutomationBlueprint, values: Optional[Dict[str, Any]] = None) -> str:
-    """Build the flattened ``/blueprint <key> slot=val …`` command string.
-
-    Uses each slot's default when ``values`` is omitted, so the docs/dashboard
-    can show a ready-to-paste command. Free-text slots are quoted.
-    """
+    """Build the flattened ``/blueprint <key> slot=val …`` command string. Uses each slot's default
+    when ``values`` is omitted (ready-to-paste for docs/dashboard). Free-text slots are quoted."""
     values = values or {}
     parts = [f"/blueprint {blueprint.key}"]
     for s in blueprint.slots:
@@ -607,11 +612,11 @@ def blueprint_deeplink(blueprint: AutomationBlueprint, values: Optional[Dict[str
     from urllib.parse import quote, urlencode
 
     values = values or {}
-    query = {}
-    for s in blueprint.slots:
-        val = values.get(s.name, s.default)
-        if val not in (None, ""):
-            query[s.name] = str(val)
+    query = {
+        s.name: str(values.get(s.name, s.default))
+        for s in blueprint.slots
+        if values.get(s.name, s.default) not in (None, "")
+    }
     qs = ("?" + urlencode(query)) if query else ""
     return f"hermes://blueprint/{quote(blueprint.key)}{qs}"
 
@@ -620,34 +625,27 @@ def _humanize_schedule(blueprint: AutomationBlueprint) -> str:
     """A short human-readable description of when a blueprint runs (defaults)."""
     sched = blueprint.schedule_template
     if sched.startswith("*/"):
-        iv = next((s for s in blueprint.slots if s.name == "interval_min"), None)
-        every = (iv.default if iv else None) or sched.split("/")[1].split()[0]
+        every = _slot_default(blueprint, "interval_min") or sched.split("/")[1].split()[0]
         return f"every {every} minutes"
     if "{interval_hours}" in sched:
-        iv = next((s for s in blueprint.slots if s.name == "interval_hours"), None)
-        every = str((iv.default if iv else None) or "1")
+        every = str(_slot_default(blueprint, "interval_hours") or "1")
         scope = "weekdays, " if "* * 1-5" in sched else ""
         return f"{scope}every hour" if every == "1" else f"{scope}every {every} hours"
-    time_slot = next((s for s in blueprint.slots if s.type == "time"), None)
+    time_slot = _slot(blueprint, type="time")
     when = time_slot.default if time_slot else None
     if "* * 1-5" in sched:
         return f"weekdays at {when}" if when else "every weekday"
     if "{dow}" in sched:
-        day_slot = next((s for s in blueprint.slots if s.name in ("day", "recurrence")), None)
-        scope = (day_slot.default if day_slot else "") or ""
+        scope = _slot_default(blueprint, "day", "recurrence") or ""
         if scope and when:
             return f"{scope} at {when}"
         return f"at {when}" if when else "on a schedule"
-    if when:
-        return f"daily at {when}"
-    return "on a schedule"
+    return f"daily at {when}" if when else "on a schedule"
 
 
 def blueprint_catalog_entry(blueprint: AutomationBlueprint) -> Dict[str, Any]:
-    """Unified serializable shape for a blueprint — used by the docs generator
-    and the dashboard API. Combines the form schema, the ready-to-paste slash
-    command, the deep-link URL, and a human-readable schedule.
-    """
+    """Unified serializable shape (docs generator + dashboard API): form schema + ready-to-paste slash
+    command + deep-link URL + human-readable schedule."""
     return {
         **blueprint_form_schema(blueprint),
         "schedule": blueprint.schedule_template,
@@ -657,9 +655,7 @@ def blueprint_catalog_entry(blueprint: AutomationBlueprint) -> Dict[str, Any]:
     }
 
 
-# ---------------------------------------------------------------------------
-# Fill + validate + translate to a create_job spec
-# ---------------------------------------------------------------------------
+# --- Fill + validate + translate to a create_job spec -----------------------------------------
 
 _TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 _DAY_TO_DOW = {
@@ -673,14 +669,13 @@ def _resolve_schedule(blueprint: AutomationBlueprint, values: Dict[str, Any]) ->
     sched = blueprint.schedule_template
 
     # A free-text `schedule` slot passes through verbatim (full flexibility).
-    if "schedule" in values and values["schedule"]:
+    if values.get("schedule"):
         return str(values["schedule"])
 
     repl: Dict[str, str] = {}
 
-    # time -> minute/hour
-    time_val = values.get("time")
     if "{minute}" in sched or "{hour}" in sched:
+        time_val = values.get("time")
         if not time_val:
             raise BlueprintFillError("a time is required")
         m = _TIME_RE.match(str(time_val).strip())
@@ -689,7 +684,6 @@ def _resolve_schedule(blueprint: AutomationBlueprint, values: Dict[str, Any]) ->
         repl["hour"] = str(int(m.group(1)))
         repl["minute"] = str(int(m.group(2)))
 
-    # weekday set -> dow
     if "{dow}" in sched:
         if "recurrence" in values:
             preset = str(values.get("recurrence", "everyday")).lower()
@@ -706,16 +700,14 @@ def _resolve_schedule(blueprint: AutomationBlueprint, values: Dict[str, Any]) ->
         else:
             repl["dow"] = "*"
 
-    # interval (minutes) for */N schedules
     if "{interval_min}" in sched:
         iv = str(values.get("interval_min", "")).strip()
         if not iv.isdigit() or int(iv) <= 0:
             raise BlueprintFillError(f"invalid interval {iv!r} — minutes as a positive integer")
         repl["interval_min"] = iv
 
-    # Any remaining {slot} placeholders are filled verbatim from validated
-    # enum/text slot values (e.g. an hour-range window). Enum options have
-    # already been checked in fill_blueprint, so these are safe to interpolate.
+    # Remaining {slot} placeholders are filled verbatim from validated enum/text slot values (enum
+    # options were already checked in fill_blueprint, so they are safe to interpolate).
     for name in re.findall(r"\{(\w+)\}", sched):
         if name not in repl and name in values:
             repl[name] = str(values[name])
@@ -734,10 +726,9 @@ def fill_blueprint(
 ) -> Dict[str, Any]:
     """Validate ``values`` and return ``cron.jobs.create_job`` kwargs.
 
-    Missing required (non-optional) slots raise BlueprintFillError naming the slot, so a form can
-    show field errors and the agent knows what to ask. Unknown slot names are rejected (a typo'd
-    ``tiem=07:15`` must not silently create a job with the default time). Enum values are checked
-    against their options. The result is passed straight to ``create_job`` — no second schema.
+    Missing required slots raise BlueprintFillError naming the slot (forms show field errors, the
+    agent knows what to ask). Unknown slot names are rejected (a typo'd ``tiem=07:15`` must not
+    silently create a job with the default time). Strict enums are checked against their options.
     """
     known = {s.name for s in blueprint.slots}
     unknown = sorted(set(values) - known)
@@ -761,7 +752,6 @@ def fill_blueprint(
 
     schedule = _resolve_schedule(blueprint, resolved)
 
-    # Render the prompt with whatever slots it references.
     try:
         prompt = blueprint.prompt_template.format(**resolved)
     except KeyError as e:
