@@ -6,24 +6,18 @@ import os
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
-from hermes_cli.config import cfg_get, load_config, save_config, get_env_value
+from hermes_cli.cli_output import print_info as _print_info
 from hermes_cli.colors import Colors, color
+from hermes_cli.config import cfg_get, load_config, save_config, get_env_value
 from hermes_cli.nous_subscription import (
     NousSubscriptionFeatures, apply_nous_managed_defaults, get_nous_subscription_features,
 )
+from hermes_cli.platforms import PLATFORMS as _PLATFORMS_REGISTRY
 from hermes_cli.toolset_scope import (
     _TOOLSET_PLATFORM_RESTRICTIONS, toolset_allowed_for_platform as _toolset_allowed_for_platform,
 )
-
-logger = logging.getLogger(__name__)
-
-# Platforms already warned about an all-invalid platform_toolsets list (warn once, not per resolution).
-_warned_invalid_platform_toolsets: Set[str] = set()
-
-PROJECT_ROOT = Path(__file__).parent.parent.resolve()
-
-from hermes_cli.cli_output import print_info as _print_info  # noqa: E402 — late import block
-from hermes_cli.tools_config_cua import (  # noqa: F401 — re-exported for hermes_cli.tools_config.X callers and test patches
+# Re-exports: keep ``hermes_cli.tools_config.X`` callers and test patch targets resolving.
+from hermes_cli.tools_config_cua import (  # noqa: F401
     _post_setup_no_window_flags, _cua_driver_cmd, _cua_version_summary, _resolved_cua_driver_cmd,
     _cua_driver_env, _CUA_DRIVER_CONTRACT_CACHE, _cua_driver_contract_status, _cua_driver_install_ready,
     _pip_install, _cua_install_target_writable, _cua_driver_version, install_cua_driver,
@@ -34,7 +28,7 @@ from hermes_cli.tools_config_cua import (  # noqa: F401 — re-exported for herm
     _repair_cua_driver_autostart_windows, _remove_quietly, _print_cua_platform_notes,
     _run_cua_driver_installer,
 )
-from hermes_cli.tools_config_post_setup import (  # noqa: F401 — re-exported for hermes_cli.tools_config.X callers and test patches
+from hermes_cli.tools_config_post_setup import (  # noqa: F401
     _ensure_browser_use_cli, _post_setup_lightpanda, _post_setup_agent_browser, _post_setup_camofox,
     _KITTENTTS_WHEEL_URL, _PIP_POST_SETUP_HOOKS, _post_setup_pip, _post_setup_spotify, _post_setup_langfuse,
     _post_setup_xai_grok, _POST_SETUP_HOOKS, _run_post_setup, valid_post_setup_keys, run_post_setup_command,
@@ -43,7 +37,7 @@ from hermes_cli.tools_config_post_setup import (  # noqa: F401 — re-exported f
     restorable_python_tool_dependency, _agent_browser_installed, _camofox_installed, _lightpanda_installed,
     _cloud_agent_browser_installed, _POST_SETUP_READY,
 )
-from hermes_cli.tools_config_providers import (  # noqa: F401 — re-exported for hermes_cli.tools_config.X callers and test patches
+from hermes_cli.tools_config_providers import (  # noqa: F401
     _plugin_provider_rows, _plugin_image_gen_providers, _plugin_video_gen_providers,
     _plugin_web_search_providers, _plugin_browser_providers, _plugin_tts_providers, web_provider_capabilities,
     _PLUGIN_ROW_BUILDERS, _visible_providers, provider_readiness_status, _toolset_needs_configuration_prompt,
@@ -57,11 +51,21 @@ from hermes_cli.tools_config_providers import (  # noqa: F401 — re-exported fo
     _finish_provider_selection, _print_provider_selection, _configure_provider, _reconfigure_provider,
     _configure_vision_backend, _configure_vision_provider_model, _configure_simple_requirements,
 )
-from hermes_cli.tools_config_mcp import (  # noqa: F401 — re-exported for hermes_cli.tools_config.X callers and test patches
+from hermes_cli.tools_config_mcp import (  # noqa: F401
     _mcp_match_filter, _mcp_preselected, _apply_mcp_checklist, _configure_mcp_tools_interactive,
     _apply_toolset_change, _apply_mcp_change, _print_tools_list, _known_tool_platforms,
     tools_disable_enable_command,
 )
+
+logger = logging.getLogger(__name__)
+
+# Platforms already warned about an all-invalid platform_toolsets list (warn once, not per resolution).
+_warned_invalid_platform_toolsets: Set[str] = set()
+
+PROJECT_ROOT = Path(__file__).parent.parent.resolve()
+
+# Platform display config derived from the canonical registry (dict-of-dicts for ``PLATFORMS[key]["label"]``).
+PLATFORMS = {k: {"label": info.label, "default_toolset": info.default_toolset} for k, info in _PLATFORMS_REGISTRY.items()}
 
 # --- Toolset Registry ---
 # Toolsets shown in the configurator: (toolset key in toolsets.py TOOLSETS, label, description).
@@ -99,10 +103,8 @@ def gui_toolset_label(label: str) -> str:
     """Strip the leading ``<emoji>`` from a toolset title for GUI surfaces (plugins prefix ``🔌``).
     CLI/TUI keeps the raw label — only HTTP APIs call this."""
     text = (label or "").strip()
-    if not text:
-        return text
     parts = text.split(None, 1)
-    if len(parts) == 2 and parts[0] and not any(ch.isascii() and ch.isalnum() for ch in parts[0]):
+    if len(parts) == 2 and not any(ch.isascii() and ch.isalnum() for ch in parts[0]):
         return parts[1].strip()
     return text
 
@@ -136,7 +138,7 @@ def _xai_credentials_present() -> bool:
     try:
         from agent.secret_scope import get_secret
     except ImportError:  # pragma: no cover — secret_scope is in-repo
-        return bool(str(os.environ.get("XAI_API_KEY") or "").strip())
+        get_secret = os.environ.get
     return bool(str(get_secret("XAI_API_KEY") or "").strip())
 
 
@@ -153,9 +155,7 @@ def _toolset_configuration_platform(ts_key: str, default: str = "cli") -> str:
     """Platform a platform-less configuration UI should target: a toolset restricted away from ``default``
     must be configured on a supported platform, else the save helper drops it and the UI reports a no-op."""
     allowed = _TOOLSET_PLATFORM_RESTRICTIONS.get(ts_key)
-    if not allowed or default in allowed:
-        return default
-    return sorted(allowed)[0]
+    return default if not allowed or default in allowed else sorted(allowed)[0]
 
 
 def _get_effective_configurable_toolsets():
@@ -166,10 +166,9 @@ def _get_effective_configurable_toolsets():
         from hermes_cli.plugins import discover_plugins, get_plugin_toolsets
         discover_plugins()  # idempotent — ensures plugins are loaded
         for entry in get_plugin_toolsets():
-            if entry[0] in seen:
-                continue
-            seen.add(entry[0])
-            result.append(entry)
+            if entry[0] not in seen:
+                seen.add(entry[0])
+                result.append(entry)
     except Exception:
         pass
     return result
@@ -194,12 +193,6 @@ def _checklist_toolset_keys(platform: str) -> Set[str]:
         ts_key for ts_key, _, _ in _get_effective_configurable_toolsets()
         if _toolset_allowed_for_platform(ts_key, platform) and ts_key not in _CONFIG_ONLY_TOOLSETS
     }
-
-
-# Platform display config derived from the canonical registry (dict-of-dicts for ``PLATFORMS[key]["label"]``).
-from hermes_cli.platforms import PLATFORMS as _PLATFORMS_REGISTRY
-
-PLATFORMS = {k: {"label": info.label, "default_toolset": info.default_toolset} for k, info in _PLATFORMS_REGISTRY.items()}
 
 
 def _platform_default_toolset(platform: str) -> str:
@@ -440,12 +433,8 @@ def _platform_toolset_summary(config: dict, platforms: Optional[List[str]] = Non
 
 def _parse_enabled_flag(value, default: bool = True) -> bool:
     """Parse bool-like config values used by tool/platform settings."""
-    if value is None:
-        return default
-    if isinstance(value, bool):
-        return value
-    if isinstance(value, int):
-        return value != 0
+    if isinstance(value, (bool, int)):
+        return bool(value)
     if isinstance(value, str):
         lowered = value.strip().lower()
         if lowered in {"true", "1", "yes", "on"}:
@@ -614,9 +603,7 @@ def _enabled_plugin_toolsets(config: dict, platform: str, toolset_names: List[st
 
 def _context_engine_active(config: dict) -> bool:
     context_cfg = config.get("context") or {}
-    if not isinstance(context_cfg, dict):
-        context_cfg = {}
-    name = str(context_cfg.get("engine") or "compressor").strip().lower()
+    name = str(context_cfg.get("engine") or "compressor").strip().lower() if isinstance(context_cfg, dict) else "compressor"
     return bool(name) and name != "compressor"
 
 
@@ -749,11 +736,9 @@ def _save_platform_tools(config: dict, platform: str, enabled_toolset_keys: Set[
     # user's unchecked selections on the next read.
     platform_default_keys = _platform_default_keys()
     existing_toolsets = cfg_get(config, "platform_toolsets", platform, default=[])
-    if not isinstance(existing_toolsets, list):
-        existing_toolsets = []
     # Preserve only entries that are neither configurable nor platform defaults (MCP server names).
     preserved_entries = {
-        str(entry) for entry in existing_toolsets
+        str(entry) for entry in (existing_toolsets if isinstance(existing_toolsets, list) else [])
         if str(entry) not in configurable_keys and str(entry) not in platform_default_keys
     }
     # Saving from the picker is consent to clear the "no_mcp" sentinel: the picker has no checkbox for it,
@@ -796,8 +781,7 @@ def _toolset_has_keys(
     if ts_key == "vision":
         try:
             from agent.auxiliary_client import resolve_vision_provider_client
-            _provider, client, _model = resolve_vision_provider_client()
-            return client is not None
+            return resolve_vision_provider_client()[1] is not None
         except Exception:
             return False
     if ts_key in {"web", "image_gen", "video_gen", "tts", "stt", "browser"}:
@@ -850,11 +834,11 @@ def _estimate_tool_tokens() -> Dict[str, int]:
     except Exception:
         logger.debug("tiktoken unavailable; skipping tool token estimation")
         return _tool_token_cache.setdefault(cache_key, {})
-    counts: Dict[str, int] = {}
-    for name in registry.get_all_tool_names():
-        schema = registry.get_schema(name)
-        if schema:  # mirror the wire shape sent to the API
-            counts[name] = len(enc.encode(_json.dumps({"type": "function", "function": schema})))
+    # Mirror the wire shape sent to the API.
+    counts = {
+        name: len(enc.encode(_json.dumps({"type": "function", "function": schema})))
+        for name in registry.get_all_tool_names() if (schema := registry.get_schema(name))
+    }
     _tool_token_cache[cache_key] = counts
     return counts
 
@@ -870,12 +854,11 @@ def _prompt_toolset_checklist(platform_label: str, enabled: Set[str], platform: 
         (k, l, d) for (k, l, d) in _get_effective_configurable_toolsets()
         if _toolset_allowed_for_platform(k, platform) and k not in _CONFIG_ONLY_TOOLSETS
     ]
-    labels = []
-    for ts_key, ts_label, ts_desc in effective:
-        suffix = ""
-        if not _toolset_has_keys(ts_key, force_fresh=force_fresh) and _is_configurable(ts_key):
-            suffix = "  [no API key]"
-        labels.append(f"{ts_label}  ({ts_desc}){suffix}")
+    labels = [
+        f"{ts_label}  ({ts_desc})"
+        + ("  [no API key]" if not _toolset_has_keys(ts_key, force_fresh=force_fresh) and _is_configurable(ts_key) else "")
+        for ts_key, ts_label, ts_desc in effective
+    ]
     pre_selected = {i for i, (ts_key, _, _) in enumerate(effective) if ts_key in enabled}
 
     status_fn = None
@@ -888,9 +871,7 @@ def _prompt_toolset_checklist(platform_label: str, enabled: Set[str], platform: 
             for idx in chosen:
                 all_tools.update(resolve_toolset(ts_keys[idx]))
             total = sum(tool_tokens.get(name, 0) for name in all_tools)
-            if total >= 1000:
-                return f"Est. tool context: ~{total / 1000:.1f}k tokens"
-            return f"Est. tool context: ~{total} tokens"
+            return f"Est. tool context: ~{total / 1000:.1f}k tokens" if total >= 1000 else f"Est. tool context: ~{total} tokens"
 
     chosen = curses_checklist(
         f"Tools for {platform_label}", labels, pre_selected, cancel_returns=pre_selected, status_fn=status_fn,
@@ -936,11 +917,10 @@ def _toolset_enabled_for_reconfigure(ts_key: str, config: dict) -> bool:
         if not _toolset_allowed_for_platform(ts_key, platform):
             continue
         try:
-            enabled = _get_platform_tools(config, platform, include_default_mcp_servers=False)
+            if ts_key in _get_platform_tools(config, platform, include_default_mcp_servers=False):
+                return True
         except Exception:
             continue
-        if ts_key in enabled:
-            return True
     return False
 
 
@@ -948,8 +928,7 @@ def _toolset_enabled_for_reconfigure(ts_key: str, config: dict) -> bool:
 def _shared_metrics_state(config: dict) -> tuple[bool, bool]:
     """Return (collection_enabled, send_enabled) from a config dict."""
     telemetry = config.get("telemetry")
-    telemetry = telemetry if isinstance(telemetry, dict) else {}
-    shared = telemetry.get("shared_metrics")
+    shared = telemetry.get("shared_metrics") if isinstance(telemetry, dict) else None
     shared = shared if isinstance(shared, dict) else {}
     return shared.get("enabled") is True, shared.get("send") is True
 
@@ -957,12 +936,7 @@ def _shared_metrics_state(config: dict) -> tuple[bool, bool]:
 def _shared_metrics_menu_label(config: dict) -> str:
     """Menu row for shared metrics, showing both consent states."""
     enabled, send = _shared_metrics_state(config)
-    if not enabled:
-        state = "off"
-    elif send:
-        state = "collecting + sending to Nous"
-    else:
-        state = "collecting locally"
+    state = "off" if not enabled else ("collecting + sending to Nous" if send else "collecting locally")
     return f"Configure shared metrics  ({state})"
 
 
@@ -1140,20 +1114,19 @@ def tools_command(args=None, first_install: bool = False, config: dict = None):
     platform_keys = list(enabled_platforms)
     platform_choices = [_platform_menu_label(config, pkey) for pkey in platform_keys]
     has_global = len(platform_keys) > 1
+    has_mcp = bool(config.get("mcp_servers"))
+    global_idx = len(platform_keys) if has_global else -1
     if has_global:
         platform_choices.append("Configure all platforms (global)")
+    reconfig_idx = len(platform_choices)
     platform_choices.append("Reconfigure an existing tool's provider or API key")
+    metrics_idx = len(platform_choices)
     platform_choices.append(_shared_metrics_menu_label(config))
-    has_mcp = bool(config.get("mcp_servers"))
+    mcp_idx = len(platform_choices) if has_mcp else -1
     if has_mcp:
         platform_choices.append("Configure MCP server tools")
+    done_idx = len(platform_choices)
     platform_choices.append("Done")
-
-    global_idx = len(platform_keys) if has_global else -1
-    reconfig_idx = len(platform_keys) + (1 if has_global else 0)
-    metrics_idx = reconfig_idx + 1
-    mcp_idx = (metrics_idx + 1) if has_mcp else -1
-    done_idx = metrics_idx + (2 if has_mcp else 1)
 
     while True:
         idx = _prompt_choice("Select an option:", platform_choices, default=0)
