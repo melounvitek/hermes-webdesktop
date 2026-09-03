@@ -1,12 +1,11 @@
 """Speaker-side streaming pipeline for ``tools.tts_tool.stream_tts_to_speaker``.
 
-Turns a queue of LLM text deltas into audio the moment each sentence is complete.
-Two paths share the sentence cutter (``tools.tts_streaming``): :class:`_StreamerPlayback`
-for a registered chunked streamer (prefetch thread per sentence, one FIFO playback worker
-through a sounddevice OutputStream or temp WAV + system player) and
-:class:`_SyncSentencePipeline` for every other provider (per-sentence ``text_to_speech_tool``
-on a single-thread executor, overlapped with playback). Seams tests monkeypatch on the origin
-module are resolved through :func:`_origin` at call time.
+Turns a queue of LLM text deltas into audio the moment each sentence is complete. Two paths
+share the sentence cutter (``tools.tts_streaming``): :class:`_StreamerPlayback` for a registered
+chunked streamer (prefetch thread per sentence, one FIFO playback worker through a sounddevice
+OutputStream or temp WAV + system player) and :class:`_SyncSentencePipeline` for every other
+provider (per-sentence ``text_to_speech_tool`` on a single-thread executor, overlapped with
+playback). Origin seams are resolved through :func:`_origin` at call time.
 """
 
 from __future__ import annotations
@@ -42,8 +41,7 @@ def _align_int16_chunks(chunks: Iterable[bytes], stop_evt: threading.Event, *, p
 
 def _play_via_tempfile(audio_iter: Iterable[bytes], stop_evt: threading.Event, sample_rate: int = 24000) -> None:
     """Write PCM chunks to a temp WAV file and play it with the system player."""
-    tmp = None
-    tmp_path = None
+    tmp = tmp_path = None
     try:
         import wave
         tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
@@ -120,11 +118,7 @@ class _SyncSentencePipeline:
             return None
 
     def _drain(self) -> None:
-        while True:
-            item = self._queue.get()
-            if item is None:
-                return
-            _sentence, future = item
+        for _sentence, future in iter(self._queue.get, None):
             tmp_path = None
             try:
                 tmp_path = future.result()
@@ -141,10 +135,9 @@ class _StreamerPlayback:
     """Prefetch + FIFO playback for a chunked :class:`StreamingTTSProvider`.
 
     ``speak(text)`` starts ``streamer.stream()`` immediately on a prefetch thread (at most 3 in
-    flight) buffering into a bounded per-sentence queue; one playback worker drains those in
-    order, so sentence N+1 arrives while N plays. Output is a PortAudio stream when one opened,
-    else temp WAV files; a failing write is retried on a reinitialized stream up to
-    ``_MAX_REINIT`` times before falling back to temp files."""
+    flight) buffering into a bounded per-sentence queue; one playback worker drains those in order,
+    so sentence N+1 arrives while N plays. Output is a PortAudio stream when one opened, else temp
+    WAV files; a failing write is retried on a reinitialized stream up to ``_MAX_REINIT`` times."""
 
     _MAX_REINIT = 3
     _CHUNK_QUEUE_MAX = 64
@@ -159,8 +152,6 @@ class _StreamerPlayback:
         self._worker = threading.Thread(target=self._playback_worker, daemon=True)
         self._worker.start()
 
-    # -- PortAudio stream management ---------------------------------------
-
     def _create_output_stream(self):
         sd = _origin()._import_sounddevice()
         stream = sd.OutputStream(samplerate=self.streamer.sample_rate, channels=self.streamer.channels, dtype="int16")
@@ -168,9 +159,9 @@ class _StreamerPlayback:
         return stream
 
     def _open_output_stream(self):
-        # On macOS skip sounddevice entirely: PortAudio/CoreAudio init triggers a
-        # kTCCServiceMediaLibrary permission prompt even though output needs no
-        # media-library access. None routes every sentence through tempfile -> afplay.
+        # macOS skips sounddevice entirely: PortAudio/CoreAudio init triggers a
+        # kTCCServiceMediaLibrary prompt though output needs no media-library access.
+        # None routes every sentence through tempfile -> afplay.
         if platform.system() == "Darwin":
             return None
         try:
@@ -187,8 +178,6 @@ class _StreamerPlayback:
             with contextlib.suppress(Exception):
                 self.output_stream.stop()
                 self.output_stream.close()
-
-    # -- prefetch ----------------------------------------------------------
 
     def speak(self, text: str) -> None:
         """Start ``streamer.stream(text)`` and prefetch its chunks immediately."""
@@ -217,17 +206,12 @@ class _StreamerPlayback:
             chunk_queue.put(None)  # sentinel: no more chunks
             self._prefetch_sem.release()
 
-    # -- playback ----------------------------------------------------------
-
     def _play_sentence_via_tempfile(self, chunk_queue) -> None:
         _play_via_tempfile(iter(_drain_chunks(chunk_queue)), self.stop_event, self.streamer.sample_rate)
 
     def _for_each_sentence(self, play: Callable[[queue.Queue], None]) -> None:
         """Feed queued sentences to *play* in order until the end sentinel; stopped sentences are skipped."""
-        while True:
-            chunk_queue = self._audio_queue.get()
-            if chunk_queue is None:
-                return
+        for chunk_queue in iter(self._audio_queue.get, None):
             if not self.stop_event.is_set():
                 play(chunk_queue)
 
@@ -274,14 +258,11 @@ class _StreamerPlayback:
         if self.output_stream is None:
             self._for_each_sentence(self._play_sentence_via_tempfile)
             return
-
         import numpy as _np
-
         try:
             from tools.voice_mode import mark_audio_output_active
         except Exception:
             mark_audio_output_active = lambda _active: None  # noqa: E731
-
         self._np = _np
         self._reinit_count = 0
         self._current_stream = self.output_stream
@@ -313,25 +294,19 @@ def stream_tts_to_speaker(
     origin = _origin()
     sync_pipeline: Optional[_SyncSentencePipeline] = None
     playback: Optional[_StreamerPlayback] = None
-
     try:
         tts_config = origin._load_tts_config()
-
-        # Prefer a chunked streamer for low time-to-first-audio; otherwise per-sentence
-        # sync synthesis (universal — edge + every non-streamer).
+        # Prefer a chunked streamer for low time-to-first-audio; otherwise per-sentence sync
+        # synthesis (universal — edge + every non-streamer).
         from tools.tts_streaming import SentenceChunker, resolve_streaming_provider
         streamer = resolve_streaming_provider(tts_config, preferred=provider)
-
         stream_max_len = 0
         if streamer is None:
             sync_pipeline = _SyncSentencePipeline(stop_event)
         else:
-            try:
+            with contextlib.suppress(Exception):
                 stream_max_len = origin._resolve_max_text_length(provider or origin._get_provider(tts_config), tts_config)
-            except Exception:
-                stream_max_len = 0
             playback = _StreamerPlayback(streamer, stop_event)
-
         chunker = SentenceChunker()
         spoken_sentences: list[str] = []  # skip duplicate/near-duplicate sentences (LLM repetition)
 
@@ -374,14 +349,13 @@ def stream_tts_to_speaker(
     except Exception as exc:
         logger.warning("Streaming TTS pipeline error: %s", exc)
     finally:
-        # Flush the sync pipeline first: queued sentences finish playing (or are skipped
-        # when stop_event is set) BEFORE tts_done_event fires, so continuous voice mode
-        # never reopens the mic over its own voice.
+        # Flush the sync pipeline first: queued sentences finish playing (or are skipped when
+        # stop_event is set) BEFORE tts_done_event fires, so continuous voice mode never reopens
+        # the mic over its own voice. The end sentinel lives in finally: so an exception in the
+        # text pump still lets the playback worker exit.
         if sync_pipeline is not None:
             with contextlib.suppress(Exception):
                 sync_pipeline.close()
-        # The end sentinel lives in finally: so an exception in the text pump still lets
-        # the playback worker exit.
         if playback is not None:
             playback.finish()
         tts_done_event.set()

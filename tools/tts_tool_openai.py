@@ -44,9 +44,7 @@ def _resolve_openai_audio_client_config() -> tuple[str, str, bool]:
     then ``VOICE_TOOLS_OPENAI_KEY``/``OPENAI_API_KEY``); unset → config key → env key → managed."""
     origin = _origin()
     openai_cfg = _section(origin._load_tts_config(), "openai")
-    direct_base = openai_cfg.get("base_url") or DEFAULT_OPENAI_BASE_URL
     selected = origin.read_selection("tts")
-
     if selected == NOUS_MANAGED_PROVIDER:
         route = _managed_openai_audio_route()
         if route is None:
@@ -54,16 +52,14 @@ def _resolve_openai_audio_client_config() -> tuple[str, str, bool]:
                 "tts", NOUS_MANAGED_PROVIDER,
                 "the Nous Tool Gateway is not available (not entitled or unreachable)"))
         return route
-
     direct_api_key = openai_cfg.get("api_key") or origin.resolve_openai_audio_api_key()
     if direct_api_key:
-        return direct_api_key, direct_base, False
+        return direct_api_key, openai_cfg.get("base_url") or DEFAULT_OPENAI_BASE_URL, False
     if selected is not None:
         raise ValueError(selection_error(
             "tts", selected,
             "neither tts.openai.api_key in config nor VOICE_TOOLS_OPENAI_KEY/OPENAI_API_KEY is set",
         ))
-
     route = _managed_openai_audio_route()
     if route is None:
         message = "Neither tts.openai.api_key in config nor VOICE_TOOLS_OPENAI_KEY/OPENAI_API_KEY is set"
@@ -97,21 +93,17 @@ def _generate_openai_tts(
     explicit_base_url = base_url is not None
     if api_key is None:
         api_key, fallback_base, is_managed = _origin()._resolve_openai_audio_client_config()
-
     oai_config = _section(tts_config, "openai")
     if model is None:
         model = oai_config.get("model", DEFAULT_OPENAI_MODEL)
     if voice is None:
         voice = oai_config.get("voice", DEFAULT_OPENAI_VOICE)
     config_base_url = oai_config.get("base_url")
-    if base_url is None:
-        # Config override beats the auth-chain fallback; an explicit arg (DeepInfra) always wins.
+    if base_url is None:  # config override beats the auth-chain fallback; explicit arg wins
         base_url = config_base_url or fallback_base or DEFAULT_OPENAI_BASE_URL
     if speed is None:
         speed_default = tts_config.get("speed", 1.0) if isinstance(tts_config, dict) else 1.0
         speed = float(oai_config.get("speed", speed_default))
-    language = oai_config.get("language")
-
     # The managed gateway only proxies MANAGED_OPENAI_TTS_MODELS; coerce a direct-OpenAI
     # model (e.g. "tts-1-hd") unless the user redirected base_url to their own endpoint.
     if is_managed and not explicit_base_url and not config_base_url and model not in MANAGED_OPENAI_TTS_MODELS:
@@ -122,24 +114,19 @@ def _generate_openai_tts(
             model, DEFAULT_OPENAI_MODEL, model)
         model = DEFAULT_OPENAI_MODEL
 
-    OpenAIClient = _origin()._import_openai_client()
-    client = OpenAIClient(api_key=api_key, base_url=base_url)
+    create_kwargs: Dict[str, Any] = {
+        "model": model, "voice": voice, "input": text,
+        "response_format": _tts_response_format_from_path(output_path),
+        "extra_headers": {"x-idempotency-key": str(uuid.uuid4())}}
+    if speed != 1.0:
+        create_kwargs["speed"] = max(0.25, min(4.0, speed))
+    if instructions:
+        create_kwargs["instructions"] = instructions
+    if oai_config.get("language"):
+        create_kwargs["extra_body"] = {"lang_code": oai_config["language"]}
+    client = _origin()._import_openai_client()(api_key=api_key, base_url=base_url)
     try:
-        create_kwargs: Dict[str, Any] = {
-            "model": model,
-            "voice": voice,
-            "input": text,
-            "response_format": _tts_response_format_from_path(output_path),
-            "extra_headers": {"x-idempotency-key": str(uuid.uuid4())}}
-        if speed != 1.0:
-            create_kwargs["speed"] = max(0.25, min(4.0, speed))
-        if instructions:
-            create_kwargs["instructions"] = instructions
-        if language:
-            create_kwargs["extra_body"] = {"lang_code": language}
-        response = client.audio.speech.create(**create_kwargs)
-
-        response.stream_to_file(output_path)
+        client.audio.speech.create(**create_kwargs).stream_to_file(output_path)
         return output_path
     finally:
         close = getattr(client, "close", None)
@@ -153,10 +140,8 @@ def _generate_deepinfra_tts(text: str, output_path: str, tts_config: Dict[str, A
     api_key = _origin()._resolve_provider_key("DEEPINFRA_API_KEY", "deepinfra")
     if not api_key:
         raise ValueError("DEEPINFRA_API_KEY not set. Run `hermes setup` to configure, or set the env var directly.")
-
     di_config = _section(tts_config, "deepinfra")
     from hermes_cli.models import deepinfra_base_url, deepinfra_model_ids
-
     model = di_config.get("model")
     if not isinstance(model, str) or not model.strip():
         candidates = deepinfra_model_ids("tts")

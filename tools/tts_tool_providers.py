@@ -1,16 +1,16 @@
 """Cloud TTS backends for ``tools.tts_tool``: Edge, ElevenLabs, xAI, MiniMax, Mistral, Gemini.
 
-Each ``_generate_<provider>(text, output_path, tts_config) -> path`` writes one
-final-encoded file. Shared here: bounded upstream response reading (16 MiB cap so
-a hostile endpoint can't feed unbounded audio) and the auxiliary-model speech-tag
-rewrites. OpenAI/DeepInfra live in ``tts_tool_openai`` (managed-gateway routing).
-Seams tests monkeypatch on the origin (``get_env_value``, ``_resolve_provider_key``,
-``_import_*``) are resolved through :func:`_origin` at call time.
+Each ``_generate_<provider>(text, output_path, tts_config) -> path`` writes one final-encoded
+file. Shared here: bounded upstream response reading (16 MiB cap so a hostile endpoint can't
+feed unbounded audio) and the auxiliary-model speech-tag rewrites. OpenAI/DeepInfra live in
+``tts_tool_openai``. Origin seams (``get_env_value``, ``_resolve_provider_key``, ``_import_*``)
+are resolved through :func:`_origin` at call time.
 """
 
 from __future__ import annotations
 
 import base64
+import contextlib
 import json
 import logging
 import os
@@ -65,19 +65,14 @@ def _config_bool(value: Any, default: bool = False) -> bool:
     """Coerce common YAML/env bool spellings without treating random strings as true."""
     if isinstance(value, (bool, int, float)):
         return bool(value)
-    if isinstance(value, str):
-        normalized = value.strip().lower()
-        if normalized in _TRUE_WORDS or normalized in _FALSE_WORDS:
-            return normalized in _TRUE_WORDS
-    return default
+    normalized = value.strip().lower() if isinstance(value, str) else None
+    return normalized in _TRUE_WORDS if normalized in _TRUE_WORDS | _FALSE_WORDS else default
 
 
 def _tts_response_format_from_path(output_path: str) -> str:
     """Pick an OpenAI-style response format (opus/wav/flac/mp3) from the output extension."""
-    for ext, fmt in ((".ogg", "opus"), (".wav", "wav"), (".flac", "flac")):
-        if output_path.endswith(ext):
-            return fmt
-    return "mp3"
+    formats = ((".ogg", "opus"), (".wav", "wav"), (".flac", "flac"))
+    return next((fmt for ext, fmt in formats if output_path.endswith(ext)), "mp3")
 
 
 def _require_key(env_var: str, provider_id: str, hint: str) -> str:
@@ -101,10 +96,8 @@ def _response_has_explicit_stream(response: Any) -> bool:
 def _close_response(response: Any) -> None:
     close = getattr(response, "close", None)
     if callable(close):
-        try:
+        with contextlib.suppress(Exception):
             close()
-        except Exception:
-            pass
 
 
 def _read_tts_response_bytes(response: Any, *, label: str, limit: Optional[int] = None) -> bytes:
@@ -117,10 +110,7 @@ def _read_tts_response_bytes(response: Any, *, label: str, limit: Optional[int] 
             iterator = response.iter_content(chunk_size=TTS_RESPONSE_BODY_CHUNK_BYTES)
         else:
             content = vars(response).get("content", getattr(type(response), "content", b""))
-            if isinstance(content, str):
-                content = content.encode("utf-8", errors="replace")
-            iterator = (content,) if isinstance(content, (bytes, bytearray)) else ()
-
+            iterator = (content,) if isinstance(content, (str, bytes, bytearray)) else ()
         for chunk in iterator:
             if not chunk:
                 continue
@@ -169,19 +159,14 @@ def _post_json(url: str, payload: Dict[str, Any], headers: Dict[str, str], **ext
 
 # --- Auxiliary-model speech-tag rewrites ---
 
-def _extract_auxiliary_message_content(response: Any) -> str:
+def _auxiliary_reply_text(response: Any) -> str:
+    """The first choice's message content with any ```fence``` unwrapped ("" when unreadable)."""
     try:
         message = getattr(response.choices[0], "message", None)
-        if isinstance(message, dict):
-            return str(message.get("content") or "")
-        return str(getattr(message, "content", "") or "")
+        content = message.get("content") if isinstance(message, dict) else getattr(message, "content", "")
     except Exception:
         return ""
-
-
-def _strip_code_fence(content: str) -> str:
-    """Unwrap a ```fenced``` LLM reply; returns the stripped inner text."""
-    clean = (content or "").strip()
+    clean = str(content or "").strip()
     fence = re.fullmatch(r"```(?:[A-Za-z0-9_-]+)?\s*(.*?)\s*```", clean, flags=re.DOTALL)
     return fence.group(1).strip() if fence else clean
 
@@ -200,14 +185,11 @@ def _rewrite_with_auxiliary_model(
     """Ask the auxiliary model (task ``tts_audio_tags``) to rewrite a script; *fallback* on any failure/empty reply."""
     try:
         from agent.auxiliary_client import call_llm
-
         response = call_llm(
-            task=GEMINI_AUDIO_TAG_REWRITE_TASK,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_prompt}],
-            temperature=0.7)
-        return _strip_code_fence(_extract_auxiliary_message_content(response)) or fallback
+            task=GEMINI_AUDIO_TAG_REWRITE_TASK, temperature=0.7,
+            messages=[{"role": "system", "content": system_prompt},
+                      {"role": "user", "content": user_prompt}])
+        return _auxiliary_reply_text(response) or fallback
     except Exception as exc:
         logger.log(level, "%s audio tag rewrite failed; using %s: %s", label, fallback_label, exc)
         return fallback
@@ -229,8 +211,8 @@ async def _generate_edge_tts(text: str, output_path: str, tts_config: Dict[str, 
 # --- ElevenLabs ---
 
 def _elevenlabs_environment_kwargs(el_config: Dict[str, Any]) -> Dict[str, Any]:
-    """SDK client kwargs for ``tts.elevenlabs.base_url``/``wss_url``; empty (SDK default environment)
-    without a base_url. ``wss_url`` defaults to the base_url host with a ``ws(s)://`` scheme."""
+    """SDK client kwargs for ``tts.elevenlabs.base_url``/``wss_url``; empty (SDK default) without a
+    base_url. ``wss_url`` defaults to the base_url host with a ``ws(s)://`` scheme."""
     base_url = (el_config.get("base_url") or "").rstrip("/")
     if not base_url:
         return {}
@@ -273,17 +255,12 @@ def _apply_xai_auto_speech_tags(text: str) -> str:
     clean = text.strip()
     if not clean:
         return text
-
-    local = re.sub(r"\n\s*\n+", " [pause] ", clean)
-    local = re.sub(r"\s*\n\s*", " ", local)
+    local = re.sub(r"\s*\n\s*", " ", re.sub(r"\n\s*\n+", " [pause] ", clean))
     if not _XAI_SPEECH_TAG_RE.search(local):
         local = _XAI_FIRST_SENTENCE_RE.sub(r"\1 [pause] ", local, count=1)
     local = re.sub(r"\s{2,}", " ", local).strip()
-
-    # Explicit user/model tags are trusted as-is.
-    if _XAI_SPEECH_TAG_RE.search(clean):
+    if _XAI_SPEECH_TAG_RE.search(clean):  # explicit user/model tags are trusted as-is
         return local
-
     system_prompt = (
         "You rewrite transcripts for the xAI /v1/tts endpoint by inserting "
         "expressive speech tags.\n\n"
@@ -322,34 +299,29 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -
     api_key = str(creds.get("api_key") or "").strip()
     if not api_key:
         raise ValueError("No xAI credentials found. Configure xAI OAuth in `hermes model` or set XAI_API_KEY.")
-
     xai_config = tts_config.get("xai") or {}
     voice_id = str(xai_config.get("voice_id", DEFAULT_XAI_VOICE_ID)).strip() or DEFAULT_XAI_VOICE_ID
     language = str(xai_config.get("language", DEFAULT_XAI_LANGUAGE)).strip() or DEFAULT_XAI_LANGUAGE
     sample_rate = int(xai_config.get("sample_rate", DEFAULT_XAI_SAMPLE_RATE))
     bit_rate = int(xai_config.get("bit_rate", DEFAULT_XAI_BIT_RATE))
-    auto_speech_tags = _config_bool(
-        xai_config.get("auto_speech_tags", xai_config.get("speech_tags")), DEFAULT_XAI_AUTO_SPEECH_TAGS,
-    )
-    # ``tts.xai.speed`` overrides global ``tts.speed``; out-of-range values are
-    # clamped into the API's band rather than 400ing the request.
-    speed = _clamped_number(
-        xai_config.get("speed", tts_config.get("speed")), float, DEFAULT_XAI_SPEED_MIN, DEFAULT_XAI_SPEED_MAX,
-    )
-    optimize_streaming_latency = _clamped_number(
-        xai_config.get("optimize_streaming_latency", tts_config.get("optimize_streaming_latency")), int, 0, 2,
-    )
-    text_normalization = _config_bool(xai_config.get("text_normalization"), DEFAULT_XAI_TEXT_NORMALIZATION_DEFAULT)
-    if auto_speech_tags:
+    auto_speech_tags = xai_config.get("auto_speech_tags", xai_config.get("speech_tags"))
+    if _config_bool(auto_speech_tags, DEFAULT_XAI_AUTO_SPEECH_TAGS):
         text = _apply_xai_auto_speech_tags(text)
+    # ``tts.xai.<knob>`` overrides global ``tts.<knob>``; out-of-range values are clamped into the
+    # API's band rather than 400ing the request.
+    speed = _clamped_number(xai_config.get("speed", tts_config.get("speed")), float,
+                            DEFAULT_XAI_SPEED_MIN, DEFAULT_XAI_SPEED_MAX)
+    optimize_streaming_latency = _clamped_number(
+        xai_config.get("optimize_streaming_latency", tts_config.get("optimize_streaming_latency")),
+        int, 0, 2)
+    text_normalization = _config_bool(xai_config.get("text_normalization"), DEFAULT_XAI_TEXT_NORMALIZATION_DEFAULT)
     if creds.get("provider") == "xai-oauth":
         base_url = creds.get("base_url")
     else:
         base_url = xai_config.get("base_url") or creds.get("base_url") or _origin().get_env_value("XAI_BASE_URL")
     base_url = str(base_url or DEFAULT_XAI_BASE_URL).strip().rstrip("/")
 
-    # Documented minimal POST /v1/tts shape; optional fields only when they
-    # differ from the API defaults.
+    # Documented minimal POST /v1/tts shape; optional fields only when they differ from defaults.
     codec = "wav" if output_path.endswith(".wav") else "mp3"
     payload: Dict[str, Any] = {"text": text, "voice_id": voice_id, "language": language}
     if codec != "mp3" or sample_rate != DEFAULT_XAI_SAMPLE_RATE or bit_rate != DEFAULT_XAI_BIT_RATE:
@@ -367,8 +339,7 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -
         payload["text_normalization"] = True
 
     response = _post_json(f"{base_url}/tts", payload, {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}", "Content-Type": "application/json",
         "User-Agent": hermes_xai_user_agent()})
     response.raise_for_status()
     return _write_bytes(output_path, _read_tts_response_bytes(response, label="xAI TTS"))
@@ -398,20 +369,16 @@ def _resolve_minimax_tts_runtime(tts_config: Dict[str, Any]) -> _MiniMaxTTSRunti
     mm_config = _section(tts_config, "minimax")
     resolve_key = _origin()._resolve_provider_key
     credentials = {
-        "global": ("MINIMAX_API_KEY", str(resolve_key("MINIMAX_API_KEY", "minimax") or "").strip()),
-        "cn": ("MINIMAX_CN_API_KEY", str(resolve_key("MINIMAX_CN_API_KEY", "minimax") or "").strip()),
-    }
-
+        region: (env_var, str(resolve_key(env_var, "minimax") or "").strip())
+        for region, env_var in (("global", "MINIMAX_API_KEY"), ("cn", "MINIMAX_CN_API_KEY"))}
     region = str(mm_config.get("region") or "").strip().lower()
     if region and region not in _MINIMAX_ENDPOINTS:
         raise ValueError("tts.minimax.region must be 'global' or 'cn'")
     if not region:
         region = "cn" if credentials["cn"][1] and not credentials["global"][1] else "global"
-
     credential_source, api_key = credentials[region]
     if not api_key:
         raise ValueError(f"{credential_source} not set for MiniMax TTS region {region!r}")
-
     endpoint = str(mm_config.get("base_url") or _MINIMAX_ENDPOINTS[region]).strip()
     other_region = "cn" if region == "global" else "global"
     if (urlparse(endpoint).hostname or "").lower() in _MINIMAX_OFFICIAL_HOSTS[other_region]:
@@ -436,15 +403,12 @@ def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any
     model = mm_config.get("model", DEFAULT_MINIMAX_MODEL)
     voice_id = mm_config.get("voice_id", DEFAULT_MINIMAX_VOICE_ID)
     base_url = runtime.endpoint
-
-    # MiniMax scopes TTS requests by GroupId (``?GroupId=<id>`` on the t2a_v2
-    # URL): config or MINIMAX_GROUP_ID, attached only when absent from the URL.
-    group_id = (
-        str(mm_config.get("group_id") or "").strip()
-        or (_origin().get_env_value("MINIMAX_GROUP_ID") or "").strip())
+    # MiniMax scopes TTS requests by GroupId (``?GroupId=<id>`` on the t2a_v2 URL): config or
+    # MINIMAX_GROUP_ID, attached only when absent from the URL.
+    group_id = (str(mm_config.get("group_id") or "").strip()
+                or (_origin().get_env_value("MINIMAX_GROUP_ID") or "").strip())
     if group_id and "GroupId=" not in base_url:
         base_url = f"{base_url}{'&' if '?' in base_url else '?'}GroupId={group_id}"
-
     is_t2a_v2 = "t2a_v2" in base_url
     if is_t2a_v2:
         payload = {
@@ -460,10 +424,8 @@ def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any
         }
     else:
         payload = {"model": model, "text": text, "voice_id": voice_id}
-
     response = _post_json(base_url, payload, {
         "Content-Type": "application/json", "Authorization": f"Bearer {runtime.api_key}"})
-
     if is_t2a_v2:
         response.raise_for_status()
         result = _read_tts_response_json(response, label="MiniMax TTS")
@@ -476,7 +438,6 @@ def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any
     content_type = response.headers.get("Content-Type", "")
     if "audio/" in content_type:
         return _write_bytes(output_path, _read_tts_response_bytes(response, label="MiniMax TTS"))
-
     # Non-audio reply: surface the API error if the body is JSON.
     raw_body = b""
     try:
@@ -544,10 +505,8 @@ def _gemini_audio_tags_enabled(gemini_config: Dict[str, Any], model: str) -> boo
     normalized = (model or "").strip().lower().rsplit("/", 1)[-1]
     if "gemini-3.1" in normalized and "tts" in normalized:
         return True
-    logger.warning(
-        "Gemini TTS audio_tags enabled, but model %s is not known to support "
-        "Gemini audio tags; skipping hidden tag rewrite",
-        model)
+    logger.warning("Gemini TTS audio_tags enabled, but model %s is not known to support "
+                   "Gemini audio tags; skipping hidden tag rewrite", model)
     return False
 
 
@@ -569,11 +528,10 @@ def _rewrite_gemini_tts_audio_tags(text: str, persona_prompt: str = "") -> str:
         "- Use square brackets for every audio tag.\n"
         "- Do not use SSML or XML tags.\n"
         + _TAG_REWRITE_TAIL)
-    context = persona_prompt.strip() or "(none)"
-    user_prompt = f"PERSONA AND DIRECTOR CONTEXT:\n{context}\n\nTRANSCRIPT TO TAG:\n{transcript}"
-    return _rewrite_with_auxiliary_model(
-        system_prompt, user_prompt, text, label="Gemini TTS", fallback_label="untagged text", level=logging.WARNING,
-    )
+    user_prompt = (f"PERSONA AND DIRECTOR CONTEXT:\n{persona_prompt.strip() or '(none)'}\n\n"
+                   f"TRANSCRIPT TO TAG:\n{transcript}")
+    return _rewrite_with_auxiliary_model(system_prompt, user_prompt, text, label="Gemini TTS",
+                                         fallback_label="untagged text", level=logging.WARNING)
 
 
 def _compose_gemini_tts_prompt(text: str, gemini_config: Dict[str, Any], persona_prompt: Optional[str] = None) -> str:
@@ -584,7 +542,6 @@ def _compose_gemini_tts_prompt(text: str, gemini_config: Dict[str, Any], persona
         persona_prompt = _read_gemini_persona_prompt(gemini_config)
     if not persona_prompt:
         return transcript
-
     preamble = (
         "Synthesize speech from the TRANSCRIPT only. Treat AUDIO PROFILE, "
         "SCENE, DIRECTOR'S NOTES, and SAMPLE CONTEXT as performance direction; "
@@ -614,7 +571,6 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
         "GOOGLE_API_KEY", "gemini")
     if not api_key:
         raise ValueError("GEMINI_API_KEY not set. Get one at https://aistudio.google.com/app/apikey")
-
     gemini_config = _section(tts_config, "gemini")
     model = str(gemini_config.get("model", DEFAULT_GEMINI_TTS_MODEL)).strip() or DEFAULT_GEMINI_TTS_MODEL
     voice = str(gemini_config.get("voice", DEFAULT_GEMINI_TTS_VOICE)).strip() or DEFAULT_GEMINI_TTS_VOICE
@@ -633,7 +589,6 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
             f"({len(prompt_text)} > {max_len} chars). Reduce the persona/audio-tag "
             "prompt or lower tts.gemini.max_text_length so long-form text is "
             "split with enough prompt headroom.")
-
     payload: Dict[str, Any] = {
         "contents": [{"parts": [{"text": prompt_text}]}],
         "generationConfig": {
@@ -654,7 +609,6 @@ def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]
     response = _post_json(f"{base_url}/models/{model}:generateContent", payload, headers, params={"key": api_key})
     if response.status_code != 200:
         raise RuntimeError(f"Gemini TTS API error (HTTP {response.status_code}): {_gemini_error_detail(response)}")
-
     try:
         data = _read_tts_response_json(response, label="Gemini TTS")
         parts = data["candidates"][0]["content"]["parts"]
