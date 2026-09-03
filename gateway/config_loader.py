@@ -1,11 +1,12 @@
 """config.yaml / gateway.json → ``GatewayConfig.from_dict`` schema (the ``load_gateway_config`` phases).
 
-Precedence contract for top-level keys: key-presence at the TOP LEVEL of config.yaml wins; the
-nested ``gateway.<key>`` form (what ``hermes config set gateway.<key>`` produces) is consulted only
-when the top-level key is absent — not merely falsy/mistyped — so a present-but-empty top-level
-value is never silently replaced by the nested one. Both overwrite whatever legacy gateway.json set.
+Precedence for top-level keys: key-presence at the TOP LEVEL of config.yaml wins; the nested
+``gateway.<key>`` form (what ``hermes config set gateway.<key>`` produces) is consulted only when the
+top-level key is absent — not merely falsy/mistyped — so a present-but-empty top-level value is never
+silently replaced by the nested one. Both overwrite whatever legacy gateway.json set.
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -35,11 +36,10 @@ def load_legacy_gateway_json(home: Path) -> Any:
 
 # --- top-level key bridging ----------------------------------------------------
 #
-# Settings meant to be top-level keys are also accepted nested under ``gateway:`` (what
-# ``hermes config set gateway.<key> ...`` naturally produces). This loader builds gw_data FLAT
-# and never forwards the yaml ``gateway:`` section, so even keys GatewayConfig.from_dict can
-# fall back on itself (loop_watchdog*, multiplex_profiles, ...) must be bridged here or they
-# are silently ignored on the real gateway startup path.
+# Top-level settings are also accepted nested under ``gateway:`` (what ``hermes config set
+# gateway.<key>`` produces). This loader builds gw_data FLAT and never forwards the yaml ``gateway:``
+# section, so even keys GatewayConfig.from_dict can fall back on itself (loop_watchdog*,
+# multiplex_profiles, ...) must be bridged here or they are silently ignored on real startup.
 #
 # Fallback modes (how the nested ``gateway.<key>`` form is consulted):
 #   "presence": top-level key present → its value; else nested key present.
@@ -101,9 +101,7 @@ def _bridge_lookup(yaml_cfg: dict, gateway_section: Any, gw_data: dict, key: str
             return True, gateway_section[key]
         return False, None
     if mode == "nested":
-        if nested and key in gateway_section:
-            return True, gateway_section[key]
-        return False, None
+        return (True, gateway_section[key]) if nested and key in gateway_section else (False, None)
     value = yaml_cfg.get(key)
     if mode == "none":
         if value is None and nested:
@@ -129,9 +127,9 @@ def merge_platform_sections(yaml_cfg: dict, gateway_cfg: Any, gw_data: dict) -> 
     """Merge every place a platform block may live into ``gw_data["platforms"]`` and return it.
 
     Order (later wins on shared keys, ``extra`` deep-merged so gateway.json defaults survive):
-    ``gateway.platforms.*`` → top-level ``platforms.*`` → ``gateway.<platform>`` subsections
-    (nested first so top-level config keeps precedence, matching the gateway.streaming fallback).
-    An ``enabled`` key in any block sets the ``_enabled_explicit`` marker consumed by the env pass.
+    ``gateway.platforms.*`` → top-level ``platforms.*`` → ``gateway.<platform>`` subsections (nested
+    first so top-level config keeps precedence, matching the gateway.streaming fallback). An
+    ``enabled`` key in any block sets the ``_enabled_explicit`` marker consumed by the env pass.
     Finally api_server's port/key/host/cors_origins/model_name are bridged into ``extra`` so
     ``gateway.api_server.port: 8642`` reaches the adapter (mirrors the env path).
     """
@@ -144,8 +142,7 @@ def merge_platform_sections(yaml_cfg: dict, gateway_cfg: Any, gw_data: dict) -> 
             if not isinstance(plat_block, dict):
                 continue
             existing = platforms_data.get(plat_name, {})
-            if not isinstance(existing, dict):
-                existing = {}
+            existing = existing if isinstance(existing, dict) else {}
             merged_extra = {**existing.get("extra", {}), **plat_block.get("extra", {})}
             if "enabled" in plat_block:
                 merged_extra["_enabled_explicit"] = True
@@ -177,12 +174,9 @@ def _is_platform_name(key: Any) -> bool:
 
 
 def platform_section(yaml_cfg: dict, name: str, gateway_platforms: Any) -> tuple:
-    """Return ``(section, is_toplevel)`` for platform *name*.
-
-    A top-level ``<name>:`` block wins; otherwise fall back to the block under ``gateway.platforms``
-    / ``platforms`` so shared-key bridging and adapter hooks still run when the user configured the
-    platform only under those nested paths.
-    """
+    """``(section, is_toplevel)`` for platform *name*: a top-level ``<name>:`` block wins; otherwise
+    the block under ``gateway.platforms`` / ``platforms`` so shared-key bridging and adapter hooks
+    still run for nested-only configs."""
     section = yaml_cfg.get(name)
     toplevel = isinstance(section, dict)
     if not toplevel:
@@ -225,9 +219,8 @@ _SHARED_KEYS: tuple = (
     *_plain("gateway_restart_notification", "typing_indicator", "typing_status_text"),
 )
 
-# Top-level port/host/secret bridged into ``extra`` for adapters that read them from config.extra.
-# Without this ``platforms.webhook.port: 8649`` silently falls back to the hardcoded DEFAULT_PORT,
-# because PlatformConfig.from_dict only extracts ``extra`` from the ``extra:`` sub-key.
+# Top-level port/host/secret bridged into ``extra`` for adapters that read them from config.extra
+# (PlatformConfig.from_dict only reads the ``extra:`` sub-key, so ``platforms.webhook.port`` would be lost).
 _PORT_BRIDGE_KEYS: dict = {
     Platform.WEBHOOK: ("port", "host", "secret"),
     Platform.MSGRAPH_WEBHOOK: ("port", "host", "secret"),
@@ -253,13 +246,9 @@ def _bridged_keys(plat: Platform, platform_cfg: dict, gw_data: dict) -> dict:
 def shared_loop_targets(registry) -> list:
     """Built-in platforms plus registered plugin platforms (so plugin authors get shared-key bridging)."""
     targets: list = list(Platform)
-    if registry is not None:
-        for entry in registry.plugin_entries():
-            try:
-                plat = Platform(entry.name)
-            except (ValueError, KeyError):
-                continue
-            if plat not in targets:
+    for entry in registry.plugin_entries() if registry is not None else ():
+        with contextlib.suppress(ValueError, KeyError):
+            if (plat := Platform(entry.name)) not in targets:
                 targets.append(plat)
     return targets
 
@@ -269,11 +258,10 @@ def bridge_platform_shared_keys(
 ) -> None:
     """Copy shared keys (allow_from, require_mention, …) from each platform's YAML section into ``extra``.
 
-    ``enabled`` is only written from a TOP-LEVEL block: for nested-only configs
-    ``merge_platform_sections`` already merged it with the correct precedence, and re-applying it here
-    would overwrite that. An explicit top-level enable/disable sets ``_enabled_explicit`` so the env
-    pass honors ``enabled: false`` for migrated plugin platforms instead of re-enabling them on
-    token/SDK presence.
+    ``enabled`` is only written from a TOP-LEVEL block: for nested-only configs ``merge_platform_sections``
+    already merged it with the correct precedence. An explicit top-level enable/disable sets
+    ``_enabled_explicit`` so the env pass honors ``enabled: false`` for migrated plugin platforms
+    instead of re-enabling them on token/SDK presence.
     """
     for plat in targets:
         if plat == Platform.LOCAL:
@@ -303,11 +291,8 @@ def bridge_platform_shared_keys(
 
 
 def apply_plugin_yaml_hooks(yaml_cfg: dict, gateway_platforms: Any, platforms_data: dict, registry) -> None:
-    """Plugin-owned YAML→env config bridges (``PlatformEntry.apply_yaml_config_fn``).
-
-    Order: shared-key loop → this dispatch → core-only bridges (require_mention/signal) →
-    ``_apply_env_overrides()`` after ``GatewayConfig.from_dict``.
-    """
+    """Plugin-owned YAML→env config bridges (``PlatformEntry.apply_yaml_config_fn``). Order: shared-key
+    loop → this dispatch → core-only bridges (require_mention/signal) → ``_apply_env_overrides()``."""
     if registry is None:
         return
     for entry in registry.all_entries():
@@ -326,12 +311,11 @@ def apply_plugin_yaml_hooks(yaml_cfg: dict, gateway_platforms: Any, platforms_da
 
 
 def bridge_core_env_settings(yaml_cfg: dict, platforms_data: dict) -> None:
-    """The two YAML→env bridges that stay in core (the per-platform ones live in plugin hooks).
+    """The two YAML→env bridges that stay in core (per-platform ones live in plugin hooks).
 
     Top-level ``require_mention`` → Telegram when the ``telegram:`` section has none: users write it
-    alongside ``group_sessions_per_user`` expecting it to work. It keys off the TOP-LEVEL key, so
-    the telegram plugin's hook (which only runs when a telegram block exists) can't cover it.
-    Signal ``require_mention`` → ``SIGNAL_REQUIRE_MENTION`` (env wins when already set).
+    alongside ``group_sessions_per_user`` expecting it to work, and the telegram plugin's hook only
+    runs when a telegram block exists. Signal ``require_mention`` → ``SIGNAL_REQUIRE_MENTION`` (env wins).
     """
     tl_require_mention = yaml_cfg.get("require_mention")
     if tl_require_mention is not None and "require_mention" not in (yaml_cfg.get("telegram") or {}):
@@ -355,9 +339,8 @@ def load_yaml_layer(home: Path, gw_data: dict) -> None:
     with open(config_yaml_path, encoding="utf-8") as f:
         yaml_cfg = yaml.safe_load(f) or {}
 
-    # Managed scope: overlay administrator-pinned values so the gateway honors them too. This
-    # loader builds its own dict instead of going through hermes_cli.config.load_config, so
-    # without this a managed session_reset / quick_commands / stt would be ignored. Fail-open.
+    # Managed scope: overlay administrator-pinned values (this loader bypasses
+    # hermes_cli.config.load_config, so a managed session_reset / quick_commands / stt would otherwise be ignored).
     from hermes_cli import managed_scope
     yaml_cfg = managed_scope.apply_managed_overlay(yaml_cfg)
 

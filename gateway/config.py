@@ -26,17 +26,19 @@ _TRUTHY_STRINGS = frozenset({"1", "true", "yes", "on"})
 _FALSY_STRINGS = frozenset({"0", "false", "no", "off"})
 
 
+def _bool_token(value: Any) -> Optional[bool]:
+    """True/False for a recognized truthy/falsy token, else None."""
+    token = str(value).strip().lower()
+    return True if token in _TRUTHY_STRINGS else False if token in _FALSY_STRINGS else None
+
+
 def _coerce_bool(value: Any, default: bool = True) -> bool:
     """Coerce bool-ish config values, preserving a caller-provided default."""
     if value is None:
         return default
     if isinstance(value, str):
-        lowered = value.strip().lower()
-        if lowered in _TRUTHY_STRINGS:
-            return True
-        if lowered in _FALSY_STRINGS:
-            return False
-        return default
+        parsed = _bool_token(value)
+        return default if parsed is None else parsed
     return is_truthy_value(value, default=default)
 
 
@@ -80,19 +82,16 @@ def _env_multiplex_profiles_override() -> "bool | None":
     a config.yaml opt-in.
     """
     raw = os.getenv("GATEWAY_MULTIPLEX_PROFILES")
-    token = (raw or "").strip().lower()
-    if not token:
+    if not (raw or "").strip():
         return None
-    if token in _TRUTHY_STRINGS:
-        return True
-    if token in _FALSY_STRINGS:
-        return False
-    logger.warning(
-        "Ignoring unrecognized GATEWAY_MULTIPLEX_PROFILES=%r "
-        "(expected one of %s or %s); falling back to config.yaml.",
-        raw, sorted(_TRUTHY_STRINGS), sorted(_FALSY_STRINGS),
-    )
-    return None
+    parsed = _bool_token(raw)
+    if parsed is None:
+        logger.warning(
+            "Ignoring unrecognized GATEWAY_MULTIPLEX_PROFILES=%r "
+            "(expected one of %s or %s); falling back to config.yaml.",
+            raw, sorted(_TRUTHY_STRINGS), sorted(_FALSY_STRINGS),
+        )
+    return parsed
 
 
 def _normalize_transport_token(value: Any) -> str:
@@ -148,13 +147,9 @@ def coerce_systemd_watchdog_seconds(
     parsed: Optional[int] = None
     if isinstance(value, int) and not isinstance(value, bool):
         parsed = value
-    elif isinstance(value, str):
-        raw = value.strip()
-        if raw and raw.isascii() and raw.isdecimal():
-            try:
-                parsed = int(raw, 10)
-            except (TypeError, ValueError, OverflowError):
-                parsed = None
+    elif isinstance(value, str) and value.strip().isascii() and value.strip().isdecimal():
+        with contextlib.suppress(TypeError, ValueError, OverflowError):  # int() digit limit
+            parsed = int(value.strip(), 10)
     if parsed is None:
         logger.warning("Ignoring invalid %s (expected a positive integer)", key)
         return 0
@@ -200,8 +195,7 @@ def _getenv_str(name: str, default: str = "") -> str:
     return val if val is not None else default
 
 
-# Bundled platform plugin names, cached outside the enum so it never becomes a member.
-_Platform__bundled_plugin_names: Optional[set] = None
+_Platform__bundled_plugin_names: Optional[set] = None  # cached outside the enum: never a member
 
 
 class Platform(Enum):
@@ -279,19 +273,15 @@ class Platform(Enum):
 # Built-in values snapshotted before any dynamic _missing_ lookup.
 _BUILTIN_PLATFORM_VALUES = frozenset(m.value for m in Platform.__members__.values())
 
-
-# Platforms that bind a host TCP port. In a multiplexer only the default profile owns
-# the shared listener, so a SECONDARY profile enabling one is a misconfiguration.
-# Single source of truth for gateway/run.py and hermes_cli/web_server.py validation.
+# Platforms that bind a host TCP port. In a multiplexer only the default profile owns the
+# shared listener, so a SECONDARY profile enabling one is a misconfiguration (single source
+# of truth for gateway/run.py and hermes_cli/web_server.py validation).
 PORT_BINDING_PLATFORM_VALUES = frozenset({
     "webhook", "api_server", "msgraph_webhook", "feishu", "wecom_callback",
     "bluebubbles", "sms", "whatsapp_cloud", "line", "teams",
 })
-
 # Platforms that only bind in one connection mode (Feishu's default websocket mode is outbound).
-PORT_BINDING_CONDITIONAL_MODES: dict[str, str] = {
-    "feishu": "webhook",
-}
+PORT_BINDING_CONDITIONAL_MODES: dict[str, str] = {"feishu": "webhook"}
 
 
 def platform_binds_port(platform_value: str, extra: Optional[dict] = None) -> bool:
@@ -299,10 +289,7 @@ def platform_binds_port(platform_value: str, extra: Optional[dict] = None) -> bo
     if platform_value not in PORT_BINDING_PLATFORM_VALUES:
         return False
     expected_mode = PORT_BINDING_CONDITIONAL_MODES.get(platform_value)
-    if expected_mode is not None:
-        actual = str((extra or {}).get("connection_mode", "websocket")).strip().lower()
-        return actual == expected_mode
-    return True
+    return expected_mode is None or str((extra or {}).get("connection_mode", "websocket")).strip().lower() == expected_mode
 
 
 @dataclass
@@ -313,8 +300,7 @@ class HomeChannel:
     chat_id: str
     name: str
     thread_id: Optional[str] = None
-    # Authenticated logical-target provenance; relay egress re-attaches these but the
-    # connector remains the authorization boundary.
+    # Authenticated logical-target provenance (relay egress re-attaches; connector stays the authz boundary).
     user_id: Optional[str] = None
     scope_id: Optional[str] = None
 
@@ -350,8 +336,7 @@ class SessionResetPolicy:
     idle_minutes: int = 1440
     notify: bool = True  # Notify the user when auto-reset occurs
     notify_exclude_platforms: tuple = ("api_server", "webhook")
-    # A background process this old no longer blocks reset (a forgotten preview server
-    # must not pin a session forever); it is NOT killed, only ignored by the guard.
+    # A background process this old no longer blocks reset (not killed, only ignored by the guard).
     bg_process_max_age_hours: int = 24
 
     def to_dict(self) -> Dict[str, Any]:
@@ -385,9 +370,7 @@ class ChannelOverride:
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ChannelOverride":
-        if not data:
-            return cls()
-        return cls(model=data.get("model"), provider=data.get("provider"), system_prompt=data.get("system_prompt"))
+        return cls(**{f.name: data.get(f.name) for f in fields(cls)}) if data else cls()
 
 
 # Platforms whose primary credential is ``PlatformConfig.token`` → its env var (empty-token
@@ -410,15 +393,10 @@ class PlatformConfig:
     token: Optional[str] = None
     api_key: Optional[str] = None  # API key if different from token
     home_channel: Optional[HomeChannel] = None
-    # Reply threading: "off" never threads, "first" threads only the first chunk, "all" every chunk.
-    reply_to_mode: str = "first"
-    # "♻️ Gateway online/restarted" pings; False on end-user platforms where they are noise.
-    gateway_restart_notification: bool = True
-    # "typing…" indicator (drives _keep_typing in platforms/base.py); False where unwanted
-    # (Slack's setStatus disables the compose box).
-    typing_indicator: bool = True
-    # Working-state text for text-rendering indicators (Slack assistant status, Google
-    # Chat marker); None = platform default; textless indicators ignore it.
+    reply_to_mode: str = "first"  # "off" never threads, "first" only the first chunk, "all" every chunk
+    gateway_restart_notification: bool = True  # "♻️ Gateway online/restarted" pings; noise on end-user platforms
+    typing_indicator: bool = True  # drives _keep_typing; False where unwanted (Slack setStatus blocks compose)
+    # Working-state text for text-rendering indicators (Slack status, Google Chat marker); None = platform default.
     typing_status_text: Optional[str] = None
     channel_overrides: Dict[str, ChannelOverride] = field(default_factory=dict)
     extra: Dict[str, Any] = field(default_factory=dict)  # Platform-specific settings
@@ -428,10 +406,9 @@ class PlatformConfig:
             "enabled": self.enabled, "extra": self.extra, "reply_to_mode": self.reply_to_mode,
             "gateway_restart_notification": self.gateway_restart_notification,
             "typing_indicator": self.typing_indicator,
+            **({"typing_status_text": self.typing_status_text} if self.typing_status_text is not None else {}),
+            **{k: v for k in ("token", "api_key") if (v := getattr(self, k))},
         }
-        if self.typing_status_text is not None:
-            result["typing_status_text"] = self.typing_status_text
-        result.update({k: v for k in ("token", "api_key") if (v := getattr(self, k))})
         if self.home_channel:
             result["home_channel"] = self.home_channel.to_dict()
         if self.channel_overrides:
@@ -441,10 +418,7 @@ class PlatformConfig:
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PlatformConfig":
         data = _coerce_dict(data)
-        home_channel = None
-        if isinstance(data.get("home_channel"), dict):
-            home_channel = HomeChannel.from_dict(data["home_channel"])
-
+        home = data.get("home_channel")
         # The typing/restart-notification keys may be top-level or bridged into ``extra``; top-level wins.
         extra = _coerce_dict(data.get("extra", {}))
 
@@ -463,7 +437,7 @@ class PlatformConfig:
             enabled=_coerce_bool(data.get("enabled"), False),
             token=data.get("token"),
             api_key=data.get("api_key"),
-            home_channel=home_channel,
+            home_channel=HomeChannel.from_dict(home) if isinstance(home, dict) else None,
             reply_to_mode=data.get("reply_to_mode", "first"),
             gateway_restart_notification=_coerce_bool(toplevel_or_extra("gateway_restart_notification"), True),
             typing_indicator=_coerce_bool(toplevel_or_extra("typing_indicator"), True),
@@ -484,15 +458,13 @@ DEFAULT_STREAMING_CURSOR: str = " ▉"
 class StreamingConfig:
     """Real-time token streaming to messaging platforms."""
     enabled: bool = False
-    # "auto" prefers native drafts (Telegram sendMessageDraft) with edit fallback — safe
-    # globally since adapters without draft support use the edit path unchanged;
-    # "draft" / "edit" force one; "off" disables.
+    # "auto" prefers native drafts (Telegram sendMessageDraft) with edit fallback (adapters without
+    # draft support use the edit path unchanged); "draft" / "edit" force one; "off" disables.
     transport: str = "auto"
     edit_interval: float = DEFAULT_STREAMING_EDIT_INTERVAL
     buffer_threshold: int = DEFAULT_STREAMING_BUFFER_THRESHOLD
     cursor: str = DEFAULT_STREAMING_CURSOR
-    # >0: deliver the final edit as a fresh message when the preview has been visible
-    # this long, so the timestamp reflects completion. Telegram only; 0 disables.
+    # >0: final edit becomes a fresh message once the preview was visible this long (Telegram only; 0 = off).
     fresh_final_after_seconds: float = 0.0
 
     def to_dict(self) -> Dict[str, Any]:
@@ -508,18 +480,13 @@ class StreamingConfig:
         # ``streaming.enabled`` is the documented master switch.
         raw_transport = data.get("transport")
         raw_mode = data.get("mode")
-        transport = _normalize_transport_token(raw_transport if raw_transport is not None else raw_mode)
-
         if "enabled" in data:
             enabled = _coerce_bool(data.get("enabled"), False)
-        elif raw_mode is not None:
-            enabled = _normalize_transport_token(raw_mode) != "off"
         else:
-            enabled = False
-
+            enabled = raw_mode is not None and _normalize_transport_token(raw_mode) != "off"
         return cls(
             enabled=enabled,
-            transport=transport,
+            transport=_normalize_transport_token(raw_transport if raw_transport is not None else raw_mode),
             edit_interval=_coerce_float(data.get("edit_interval"), DEFAULT_STREAMING_EDIT_INTERVAL),
             buffer_threshold=_coerce_int(data.get("buffer_threshold"), DEFAULT_STREAMING_BUFFER_THRESHOLD),
             cursor=data.get("cursor", DEFAULT_STREAMING_CURSOR),
@@ -575,47 +542,41 @@ class GatewayConfig:
     reset_by_type: Dict[str, SessionResetPolicy] = field(default_factory=dict)
     reset_by_platform: Dict[Platform, SessionResetPolicy] = field(default_factory=dict)
     reset_triggers: List[str] = field(default_factory=lambda: ["/new", "/reset"])
-    # Slash commands that bypass the agent loop.
-    quick_commands: Dict[str, Any] = field(default_factory=dict)
+    quick_commands: Dict[str, Any] = field(default_factory=dict)  # slash commands that bypass the agent loop
     sessions_dir: Path = field(default_factory=lambda: get_hermes_home() / "sessions")
-    # Keep the legacy sessions.json mirror of the routing index (primary: state.db)
-    # for external tooling and downgrade safety.
+    # Legacy sessions.json mirror of the routing index (primary: state.db) for external tooling / downgrades.
     write_sessions_json: bool = True
     always_log_local: bool = True  # Always save cron outputs to local files
-    # Drop outbound "silence narration" (*(silent)*, 🔇, a bare ".") that ping-pongs in
-    # bot-to-bot channels; a substrate guard that survives prompt drift.
+    # Drop outbound "silence narration" (*(silent)*, 🔇, a bare ".") that ping-pongs in bot-to-bot
+    # channels; a substrate guard that survives prompt drift.
     filter_silence_narration: bool = True
     stt_enabled: bool = True  # Auto-transcribe inbound voice messages
     stt_echo_transcripts: bool = True  # Echo raw STT transcripts back to the user
     group_sessions_per_user: bool = True  # Isolate group sessions per participant when user IDs exist
     thread_sessions_per_user: bool = False  # False = threads shared across participants
     max_concurrent_sessions: Optional[int] = None  # Positive int caps simultaneous active sessions
-    # Opt-in: the default profile's gateway serves every profile on the host
-    # (profiles stamped into session keys, per-profile adapters/credentials).
+    # Opt-in: the default profile's gateway serves every profile on the host (profiles stamped into
+    # session keys, per-profile adapters/credentials). Allowlist None = serve all; [] = default only.
     multiplex_profiles: bool = False
-    # None = historical serve-all; [] = default profile only.
     multiplex_profile_allowlist: Optional[List[str]] = None
-    # Public HTTPS endpoint for scoped RoomLink calls; an API key alone must never
-    # advertise a route. HERMES_ROOM_LINK_URL overrides.
+    # Public HTTPS endpoint for scoped RoomLink calls (an API key alone must never advertise a
+    # route); HERMES_ROOM_LINK_URL overrides.
     room_link_url: Optional[str] = None
-    # Opt-in systemd event-loop watchdog; zero keeps Type=simple and disables sd_notify.
-    systemd_watchdog_seconds: int = 0
-    # In-process loop liveness watchdog: after consecutive missed probes it dumps
-    # all-thread stacks and hard-exits with the service-restart code. The knobs
-    # tolerate transient self-recovering stalls (adapter reconnect doing sync socket
-    # I/O) so a short block does not cause restart churn; a genuine wedge still escalates.
+    systemd_watchdog_seconds: int = 0  # opt-in; zero keeps Type=simple and disables sd_notify
+    # In-process loop liveness watchdog: after consecutive missed probes it dumps all-thread stacks
+    # and hard-exits with the service-restart code. The knobs tolerate transient self-recovering
+    # stalls (adapter reconnect doing sync socket I/O) so a short block does not cause restart churn.
+    # max_strikes ~= 90-120s sustained block; the heartbeat-fsync false positive is fixed at the root
+    # (off-loop write + two-witness probe), so raising it would only delay recovery.
     loop_watchdog: bool = True
     loop_watchdog_probe_interval_s: float = DEFAULT_LOOP_WATCHDOG_INTERVAL_S
     loop_watchdog_probe_timeout_s: float = DEFAULT_LOOP_WATCHDOG_TIMEOUT_S
-    # ~90-120s sustained block. The heartbeat-fsync false positive is fixed at the root
-    # (off-loop write + two-witness probe), so raising this would only delay recovery.
     loop_watchdog_max_strikes: int = DEFAULT_LOOP_WATCHDOG_MAX_STRIKES
     unauthorized_dm_behavior: str = "pair"  # "pair" or "ignore"
     streaming: StreamingConfig = field(default_factory=StreamingConfig)
     # Prune SessionEntry records older than this (a resumed chat gets a fresh session). 0 = off.
     session_store_max_age_days: int = 90
-    # Route guilds/channels/threads to profiles (gateway/profile_routing.py).
-    profile_routes: list = field(default_factory=list)
+    profile_routes: list = field(default_factory=list)  # gateway/profile_routing.py
 
     # Scalar fields serialized verbatim by ``to_dict`` (in output order).
     _SCALAR_DICT_FIELDS = (
@@ -634,11 +595,7 @@ class GatewayConfig:
     def get_connected_platforms(self) -> List[Platform]:
         """Enabled + configured platforms, sorted by value so the rendered "Connected
         Platforms" prompt block is byte-stable (a reorder busts the prompt cache)."""
-        connected = [
-            platform
-            for platform, config in self.platforms.items()
-            if config.enabled and self._is_platform_connected(platform, config)
-        ]
+        connected = [p for p, c in self.platforms.items() if c.enabled and self._is_platform_connected(p, c)]
         return sorted(connected, key=lambda p: str(p.value))
 
     def _is_platform_connected(self, platform: Platform, config: PlatformConfig) -> bool:
@@ -659,11 +616,8 @@ class GatewayConfig:
                 discover_plugins()
             entry = platform_registry.get(platform.value)
             if entry:
-                if entry.is_connected is not None:
-                    return entry.is_connected(config)
-                if entry.validate_config is not None:
-                    return entry.validate_config(config)
-                return True
+                check = entry.is_connected if entry.is_connected is not None else entry.validate_config
+                return True if check is None else check(config)
         except Exception:
             pass  # Registry not yet initialised during early import
         return False
@@ -681,7 +635,7 @@ class GatewayConfig:
         return self.default_reset_policy
 
     def to_dict(self) -> Dict[str, Any]:
-        result: Dict[str, Any] = {
+        return {
             "platforms": {p.value: c.to_dict() for p, c in self.platforms.items()},
             "default_reset_policy": self.default_reset_policy.to_dict(),
             "reset_by_type": {k: v.to_dict() for k, v in self.reset_by_type.items()},
@@ -689,16 +643,13 @@ class GatewayConfig:
             "reset_triggers": self.reset_triggers,
             "quick_commands": self.quick_commands,
             "sessions_dir": str(self.sessions_dir),
+            **{name: getattr(self, name) for name in self._SCALAR_DICT_FIELDS},
+            "streaming": self.streaming.to_dict(),
+            "session_store_max_age_days": self.session_store_max_age_days,
+            "profile_routes": [
+                asdict(r) if is_dataclass(r) and not isinstance(r, type) else r for r in self.profile_routes
+            ],
         }
-        for name in self._SCALAR_DICT_FIELDS:
-            result[name] = getattr(self, name)
-        result["streaming"] = self.streaming.to_dict()
-        result["session_store_max_age_days"] = self.session_store_max_age_days
-        result["profile_routes"] = [
-            asdict(r) if is_dataclass(r) and not isinstance(r, type) else r
-            for r in self.profile_routes
-        ]
-        return result
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "GatewayConfig":
@@ -742,17 +693,15 @@ class GatewayConfig:
         systemd_watchdog_seconds = coerce_systemd_watchdog_seconds(
             pick("systemd_watchdog_seconds"), key_label("systemd_watchdog_seconds")
         )
-
-        # env > config.yaml > False: a recognized GATEWAY_MULTIPLEX_PROFILES wins (hosted
-        # deployments stamp it on the container); blank/unrecognized falls through to the
-        # top-level VALUE when not None, else ``gateway.multiplex_profiles``.
+        # env > config.yaml > False: a recognized GATEWAY_MULTIPLEX_PROFILES wins (hosted deployments
+        # stamp it on the container); blank/unrecognized falls through to the top-level VALUE when
+        # not None, else ``gateway.multiplex_profiles``.
         multiplex_profiles = data.get("multiplex_profiles")
         if multiplex_profiles is None:
             multiplex_profiles = nested_gateway.get("multiplex_profiles")
         env_multiplex = _env_multiplex_profiles_override()
         if env_multiplex is not None:
             multiplex_profiles = env_multiplex
-
         max_concurrent_sessions = _coerce_optional_positive_int(
             pick("max_concurrent_sessions"), key_label("max_concurrent_sessions")
         )
@@ -789,39 +738,31 @@ class GatewayConfig:
             loop_watchdog_probe_timeout_s=bounded_float("loop_watchdog_probe_timeout_s", DEFAULT_LOOP_WATCHDOG_TIMEOUT_S, 1.0, 600.0),
             loop_watchdog_max_strikes=max_strikes,
             max_concurrent_sessions=max_concurrent_sessions,
-            unauthorized_dm_behavior=_normalize_choice(
-                data.get("unauthorized_dm_behavior"), {"pair", "ignore"}, "pair"
-            ),
+            unauthorized_dm_behavior=_normalize_choice(data.get("unauthorized_dm_behavior"), {"pair", "ignore"}, "pair"),
             streaming=StreamingConfig.from_dict(data.get("streaming", {})),
             session_store_max_age_days=session_store_max_age_days,
             profile_routes=parse_profile_routes(data.get("profile_routes") or []),
         )
 
+    def _extra_choice(self, platform: Optional[Platform], key: str, choices: set, default: str) -> Optional[str]:
+        """Normalized ``platforms[platform].extra[key]`` when the key is present, else None."""
+        platform_cfg = self.platforms.get(platform) if platform else None
+        if platform_cfg and key in platform_cfg.extra:
+            return _normalize_choice(platform_cfg.extra.get(key), choices, default)
+        return None
+
     def get_unauthorized_dm_behavior(self, platform: Optional[Platform] = None) -> str:
-        """Effective unauthorized-DM behavior. Email is inbox-shaped so it defaults to
-        ``"ignore"`` unless its own ``unauthorized_dm_behavior`` opts in (a global
-        default does not)."""
-        if platform:
-            platform_cfg = self.platforms.get(platform)
-            if platform_cfg and "unauthorized_dm_behavior" in platform_cfg.extra:
-                return _normalize_choice(
-                    platform_cfg.extra.get("unauthorized_dm_behavior"),
-                    {"pair", "ignore"},
-                    self.unauthorized_dm_behavior,
-                )
-            if platform == Platform.EMAIL:
-                return "ignore"
-        return self.unauthorized_dm_behavior
+        """Effective unauthorized-DM behavior. Email is inbox-shaped so it defaults to ``"ignore"``
+        unless its own ``unauthorized_dm_behavior`` opts in (a global default does not)."""
+        choice = self._extra_choice(platform, "unauthorized_dm_behavior", {"pair", "ignore"}, self.unauthorized_dm_behavior)
+        if choice is not None:
+            return choice
+        return "ignore" if platform == Platform.EMAIL else self.unauthorized_dm_behavior
 
     def get_notice_delivery(self, platform: Optional[Platform] = None) -> str:
         """Effective notice-delivery mode ("public"/"private") for a platform."""
-        if platform:
-            platform_cfg = self.platforms.get(platform)
-            if platform_cfg and "notice_delivery" in platform_cfg.extra:
-                return _normalize_choice(
-                    platform_cfg.extra.get("notice_delivery"), {"public", "private"}, "public"
-                )
-        return "public"
+        choice = self._extra_choice(platform, "notice_delivery", {"public", "private"}, "public")
+        return "public" if choice is None else choice
 
 
 def load_gateway_config() -> GatewayConfig:
@@ -866,14 +807,12 @@ def _validate_gateway_config(config: "GatewayConfig") -> None:
         (p, c, PLATFORM_TOKEN_ENV_NAMES[p]) for p, c in config.platforms.items()
         if c.enabled and p in PLATFORM_TOKEN_ENV_NAMES and c.token is not None
     ]
-    # An empty token won't connect; say so.
-    for platform, pconfig, env_name in token_platforms:
+    for platform, pconfig, env_name in token_platforms:  # an empty token won't connect; say so
         if not pconfig.token.strip():
             logger.warning("%s is enabled but %s is empty. The adapter will likely fail to connect.", platform.value, env_name)
     if has_usable_secret is None:
         return
-    # Reject placeholder tokens (copied .env.example) with a clear startup error.
-    for platform, pconfig, env_name in token_platforms:
+    for platform, pconfig, env_name in token_platforms:  # reject placeholder tokens (copied .env.example)
         token = pconfig.token
         if token.strip() and not has_usable_secret(token, min_length=4):
             logger.error(
@@ -888,5 +827,4 @@ def _validate_gateway_config(config: "GatewayConfig") -> None:
 def _apply_env_overrides(config: GatewayConfig) -> None:
     """Apply environment variable overrides to config (see ``gateway.config_env``)."""
     from gateway.config_env import _apply_env_overrides as _impl
-
     _impl(config)

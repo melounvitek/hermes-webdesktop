@@ -8,10 +8,9 @@ direct parent, so a channel route also matches any thread/post under it.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
-
-import logging
 
 logger = logging.getLogger(__name__)
 
@@ -22,18 +21,15 @@ _WHATSAPP_NON_USER_SUFFIXES = ("@g.us", "@broadcast", "@newsletter")
 
 def _is_whatsapp_non_user_chat(chat_id: Optional[str]) -> bool:
     """True for group / broadcast / newsletter JIDs — not a sender identity."""
-    if not chat_id:
-        return False
-    cid = str(chat_id).strip().lower()
-    return any(cid.endswith(suffix) for suffix in _WHATSAPP_NON_USER_SUFFIXES)
+    return bool(chat_id) and str(chat_id).strip().lower().endswith(_WHATSAPP_NON_USER_SUFFIXES)
 
 
 def _whatsapp_user_chat_ids_match(platform: str, left: Optional[str], right: Optional[str]) -> bool:
     """True when two WhatsApp *user* chat_ids refer to the same person.
 
-    Uses ``expand_whatsapp_aliases`` (same helper as session keys and adapter
-    allowlists) so a bare number, JID and LID collapse to one identity.
-    Group/broadcast JIDs are chats, not senders; non-WhatsApp platforms → False.
+    Uses ``expand_whatsapp_aliases`` (same helper as session keys and adapter allowlists) so a bare
+    number, JID and LID collapse to one identity. Group/broadcast JIDs are chats, not senders;
+    non-WhatsApp platforms → False.
     """
     if (
         (platform or "").strip().lower() not in _WHATSAPP_IDENTITY_PLATFORMS
@@ -69,18 +65,13 @@ class ProfileRoute:
         return 2 * bool(self.guild_id) + 4 * bool(self.chat_id) + 8 * bool(self.thread_id)
 
     def matches(
-        self,
-        platform: str,
-        guild_id: Optional[str] = None,
-        chat_id: Optional[str] = None,
-        thread_id: Optional[str] = None,
-        parent_chat_id: Optional[str] = None,
+        self, platform: str, guild_id: Optional[str] = None, chat_id: Optional[str] = None,
+        thread_id: Optional[str] = None, parent_chat_id: Optional[str] = None,
     ) -> bool:
         """True if every discriminator the route declares holds (AND).
 
-        ``chat_id`` matches the channel directly or as the parent of a thread/forum
-        post; WhatsApp ``chat_id`` also matches across number/JID/LID after the
-        exact check (groups/broadcasts stay exact-only).
+        ``chat_id`` matches the channel directly or as the parent of a thread/forum post; WhatsApp
+        ``chat_id`` also matches across number/JID/LID after the exact check (groups/broadcasts stay exact-only).
         """
         if not self.enabled or self.platform != platform:
             return False
@@ -99,9 +90,9 @@ class ProfileRoute:
 def _coerce_route_id(value: Any) -> Optional[str]:
     """Normalize a route discriminator to str for strict equality matching.
 
-    PyYAML loads unquoted numeric IDs as ``int`` while ``SessionSource`` fields are
-    ``str``. Only ``int`` (not ``bool``) is coerced; floats stringify to something
-    (``"123.0"``) that can never match, so they get a load-time warning instead.
+    PyYAML loads unquoted numeric IDs as ``int`` while ``SessionSource`` fields are ``str``. Only
+    ``int`` (not ``bool``) is coerced; floats stringify to something (``"123.0"``) that can never
+    match, so they get a load-time warning instead.
     """
     if value is None or isinstance(value, str):
         return value
@@ -138,32 +129,24 @@ def parse_profile_routes(raw: Optional[List[Dict[str, Any]]]) -> List[ProfileRou
         except (ValueError, ImportError):
             logger.warning("Skipping profile route %s: invalid profile name %r", name, profile)
             continue
-        routes.append(
-            ProfileRoute(
-                name=name,
-                platform=platform,
-                profile=profile,
-                guild_id=_coerce_route_id(entry.get("guild_id")),
-                chat_id=_coerce_route_id(entry.get("chat_id")),
-                thread_id=_coerce_route_id(entry.get("thread_id")),
-                enabled=entry.get("enabled", True),
-            )
-        )
+        routes.append(ProfileRoute(
+            name=name, platform=platform, profile=profile,
+            guild_id=_coerce_route_id(entry.get("guild_id")),
+            chat_id=_coerce_route_id(entry.get("chat_id")),
+            thread_id=_coerce_route_id(entry.get("thread_id")),
+            enabled=entry.get("enabled", True),
+        ))
     routes.sort(key=lambda r: r.specificity, reverse=True)
     logger.debug("Loaded %d profile routes (most-specific-first)", len(routes))
     return routes
 
 
 def match_profile_route(
-    routes: List[ProfileRoute],
-    platform: str,
-    guild_id: Optional[str] = None,
-    chat_id: Optional[str] = None,
-    thread_id: Optional[str] = None,
-    parent_chat_id: Optional[str] = None,
+    routes: List[ProfileRoute], platform: str, guild_id: Optional[str] = None, chat_id: Optional[str] = None,
+    thread_id: Optional[str] = None, parent_chat_id: Optional[str] = None,
 ) -> Optional[ProfileRoute]:
     """Return the first (most specific) matching route, or None."""
-    for route in routes:
-        if route.matches(platform, guild_id=guild_id, chat_id=chat_id, thread_id=thread_id, parent_chat_id=parent_chat_id):
-            return route
-    return None
+    return next(
+        (r for r in routes if r.matches(platform, guild_id=guild_id, chat_id=chat_id, thread_id=thread_id, parent_chat_id=parent_chat_id)),
+        None,
+    )

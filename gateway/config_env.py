@@ -1,10 +1,9 @@
 """Environment-variable overrides for the gateway config (``_apply_env_overrides``).
 
-Runs after ``GatewayConfig.from_dict`` so env always wins over config.yaml /
-gateway.json. Most platforms follow one shape — "credentials present in env
-⇒ enable the platform and copy the values into ``extra``" — declared as
-``_Cred`` rows in ``_ENV_STEPS`` (source order = application order).
-Platforms with unique gating are small functions in the same table.
+Runs after ``GatewayConfig.from_dict`` so env always wins over config.yaml / gateway.json.
+Most platforms follow one shape — "credentials present in env ⇒ enable the platform and
+copy the values into ``extra``" — declared as ``_Cred`` rows in ``_ENV_STEPS`` (source
+order = application order). Platforms with unique gating are small functions in the same table.
 """
 
 import contextlib
@@ -30,13 +29,11 @@ logger = logging.getLogger("gateway.config")
 
 getenv = _getenv_str
 
-# Platforms already warned about "explicitly disabled in config.yaml, but
-# credentials present in env". Config reloads every turn, so the notice is
-# one-time per platform per process.
+# Platforms already warned "explicitly disabled in config.yaml, but credentials present in
+# env": config reloads every turn, so the notice is one-time per platform per process.
 _EXPLICIT_DISABLE_WARNED: set = set()
 
-# Env var(s) whose presence drives each platform's env-enable branch, named in
-# the explicit-disable WARNING.
+# Env var(s) whose presence drives each platform's env-enable branch, named in the explicit-disable WARNING.
 _ENV_ENABLE_CREDENTIALS: dict = {
     Platform.TELEGRAM: ("TELEGRAM_BOT_TOKEN",),
     Platform.DISCORD: ("DISCORD_BOT_TOKEN",),
@@ -105,6 +102,14 @@ def _strip_lower(value: str) -> str:
 
 def _truthy_token(value: str) -> bool:
     return value.lower() in {"true", "1", "yes", "on"}
+
+
+def _csv_extras(extra: Dict[str, Any], spec) -> None:
+    """``extra[key] = _csv_list(raw)`` for each ``(key, raw)`` whose list is non-empty."""
+    for key, raw in spec:
+        items = _csv_list(raw)
+        if items:
+            extra[key] = items
 
 
 def _mention_patterns(value: str) -> Any:
@@ -181,9 +186,9 @@ def _enable_from_env(config: GatewayConfig, platform: Platform) -> PlatformConfi
 def _enable_port_bound_from_env(config: GatewayConfig, platform: Platform) -> PlatformConfig:
     """Enable a port-binding platform unless config.yaml explicitly disabled it.
 
-    A multiplex secondary profile pins ``enabled: false`` to share the default profile's
-    listener yet inherits the process env; without this guard env presence would
-    force-enable it and trip MultiplexConfigError. POPs the marker (terminal branch).
+    A multiplex secondary profile pins ``enabled: false`` to share the default profile's listener
+    yet inherits the process env; without this guard env presence would force-enable it and trip
+    MultiplexConfigError. POPs the marker (terminal branch).
     """
     platform_config = config.platforms.setdefault(platform, PlatformConfig())
     explicit = platform_config.extra.pop("_enabled_explicit", False)
@@ -196,12 +201,11 @@ def _enable_port_bound_from_env(config: GatewayConfig, platform: Platform) -> Pl
 class _Cred:
     """Credential-gated platform enable, applied as ``step(config)``.
 
-    ``creds``: env names that must ALL be truthy (inner tuple = ANY of). ``token``: env
-    stored as ``PlatformConfig.token`` even when yaml disables the adapter (sending skills
-    use it). ``fixed``: ``(extra_key, env[, default[, fn]])`` always written once enabled.
-    ``optional*``: ``_env_extras`` specs. ``warn_missing``: ``(env, msg)`` logged BEFORE
-    enabling when blank. ``then``: tail ``fn(config, platform_config)``. ``home``:
-    ``_env_home_channel`` env base applied only when the gate passed.
+    ``creds``: env names that must ALL be truthy (inner tuple = ANY of). ``token``: env stored as
+    ``PlatformConfig.token`` even when yaml disables the adapter (sending skills use it). ``fixed``:
+    ``(extra_key, env[, default[, fn]])`` always written once enabled. ``optional*``: ``_env_extras``
+    specs. ``warn_missing``: ``(env, msg)`` logged BEFORE enabling when blank. ``then``: tail
+    ``fn(config, platform_config)``. ``home``: ``_env_home_channel`` env base applied only when the gate passed.
     """
     platform: Platform
     creds: tuple
@@ -220,10 +224,8 @@ class _Cred:
         if self.warn_missing and not getenv(self.warn_missing[0]):
             logger.warning(self.warn_missing[1])
         platform_config = _enable_from_env(config, self.platform)
-        if self.token:
-            token = getenv(self.token)
-            if token:
-                platform_config.token = token
+        if self.token and (token := getenv(self.token)):
+            platform_config.token = token
         extra = platform_config.extra
         for key, env, *rest in self.fixed:
             default = rest[0] if rest else ""
@@ -258,18 +260,17 @@ def _whatsapp(config: GatewayConfig) -> None:
     raw = getenv("WHATSAPP_ENABLED")
     enabled = is_truthy_value(raw)
     wa_cfg = config.platforms.get(Platform.WHATSAPP)
-    if wa_cfg is not None:
-        if raw.lower() in {"false", "0", "no"}:
-            wa_cfg.enabled = False
-        elif enabled:
-            wa_cfg.enabled = True
+    if wa_cfg is None:
+        if enabled:
+            config.platforms[Platform.WHATSAPP] = PlatformConfig(enabled=True)
+    elif raw.lower() in {"false", "0", "no"}:
+        wa_cfg.enabled = False
     elif enabled:
-        config.platforms[Platform.WHATSAPP] = PlatformConfig(enabled=True)
+        wa_cfg.enabled = True
 
 
 def _slack_home(config: GatewayConfig) -> None:
-    """SLACK_HOME_CHANNEL creates a disabled Slack entry if needed and keeps
-    user_id/scope_id provenance when the chat_id is unchanged."""
+    """SLACK_HOME_CHANNEL creates a disabled Slack entry if needed; user_id/scope_id provenance survives an unchanged chat_id."""
     slack_home = getenv("SLACK_HOME_CHANNEL")
     if not slack_home:
         return
@@ -306,9 +307,7 @@ def _api_server(config: GatewayConfig) -> None:
         return
     extra = _enable_port_bound_from_env(config, Platform.API_SERVER).extra
     extra["key"] = key
-    origins = _csv_list(getenv("API_SERVER_CORS_ORIGINS"))
-    if origins:
-        extra["cors_origins"] = origins
+    _csv_extras(extra, (("cors_origins", getenv("API_SERVER_CORS_ORIGINS")),))
     _env_extras(extra, (("port", "API_SERVER_PORT", _INT), ("host", "API_SERVER_HOST"), ("model_name", "API_SERVER_MODEL_NAME")))
 
 
@@ -333,24 +332,19 @@ def _msgraph_webhook(config: GatewayConfig) -> None:
     _env_extras(msgraph_cfg.extra, (("port", "MSGRAPH_WEBHOOK_PORT", _INT),))
     if client_state:
         msgraph_cfg.extra["client_state"] = client_state
-    for key, raw in (("accepted_resources", resources), ("allowed_source_cidrs", allowed_cidrs)):
-        items = _csv_list(raw)
-        if items:
-            msgraph_cfg.extra[key] = items
+    _csv_extras(msgraph_cfg.extra, (("accepted_resources", resources), ("allowed_source_cidrs", allowed_cidrs)))
 
 
 def _qq_home(config: GatewayConfig, qq_config: PlatformConfig) -> None:
     qq_home = getenv("QQBOT_HOME_CHANNEL").strip()
     name_env = "QQBOT_HOME_CHANNEL_NAME"
-    if not qq_home:
-        # Back-compat: accept the pre-rename name and log a one-time warning.
-        qq_home = getenv("QQ_HOME_CHANNEL").strip()
-        if qq_home:
-            name_env = "QQ_HOME_CHANNEL_NAME"
-            logger.warning(
-                "QQ_HOME_CHANNEL is deprecated; rename to QQBOT_HOME_CHANNEL "
-                "in your .env for consistency with the platform key."
-            )
+    if not qq_home and (qq_home := getenv("QQ_HOME_CHANNEL").strip()):
+        # Back-compat: accept the pre-rename name and warn.
+        name_env = "QQ_HOME_CHANNEL_NAME"
+        logger.warning(
+            "QQ_HOME_CHANNEL is deprecated; rename to QQBOT_HOME_CHANNEL "
+            "in your .env for consistency with the platform key."
+        )
     if qq_home:
         qq_config.home_channel = HomeChannel(
             platform=Platform.QQBOT, chat_id=qq_home,
@@ -380,10 +374,8 @@ def _plugin_probe_seed(entry) -> Optional[dict]:
 
 
 def _plugin_is_configured(entry, existing_extra: dict, seed: Optional[dict]) -> bool:
-    """``entry.is_connected`` on a transient ``enabled=True`` view seeded with env extras."""
+    """``entry.is_connected`` on a transient ``enabled=True`` view seeded with env extras (never the real config)."""
     try:
-        # Seed extras so ``is_connected`` implementations reading ``config.extra`` see
-        # post-enable state; never mutate the real config for the probe.
         for k, v in (seed or {}).items():
             if k != "home_channel":
                 existing_extra.setdefault(k, v)
@@ -413,10 +405,10 @@ def _enable_plugin_platform(config: GatewayConfig, entry) -> None:
     if existing_cfg is not None and not already_enabled and existing_extra.get("_enabled_explicit", False):
         return
     seed = _plugin_probe_seed(entry)
-    # Only consult is_connected for platforms not already enabled by YAML/env.
+    # is_connected gates only platforms not already enabled by YAML/env.
     if not already_enabled and entry.is_connected is not None and not _plugin_is_configured(entry, existing_extra, seed):
         return
-    # Verify dependencies LAST — only for platforms already enabled or past the credential gate.
+    # Dependencies LAST — only for platforms already enabled or past the credential gate.
     try:
         deps_ok = bool(entry.check_fn())
     except Exception as e:
@@ -426,8 +418,7 @@ def _enable_plugin_platform(config: GatewayConfig, entry) -> None:
         return
     platform_config = config.platforms.setdefault(platform, PlatformConfig())
     platform_config.enabled = True
-    if seed:
-        # Commit the env-seeded extras (reuse the probe result; don't call env_enablement_fn twice).
+    if seed:  # commit the probe's env-seeded extras (env_enablement_fn is never called twice)
         seed = dict(seed)
         home = seed.pop("home_channel", None)
         platform_config.extra.update(seed)
@@ -441,10 +432,9 @@ def _enable_plugin_platform(config: GatewayConfig, entry) -> None:
 def _enable_plugin_platforms_from_env(config: GatewayConfig) -> None:
     """Registry-driven enable for plugin platforms (built-ins have rows in ``_ENV_STEPS``).
 
-    Enabled when credentials are configured (``is_connected`` MUST gate: ``check_fn``
-    alone would enable unconfigured platforms that retry-connect forever) and deps are
-    present (``check_fn``) or installable later by ``create_adapter()`` — never here:
-    installing in this sweep pip-installed SDKs on every load and boot-looped the app.
+    Enabled when credentials are configured (``is_connected`` MUST gate: ``check_fn`` alone would
+    enable unconfigured platforms that retry-connect forever) and deps are present (``check_fn``) or
+    installable later by ``create_adapter()`` — never here: installing in this sweep boot-looped the app.
     """
     try:
         from hermes_cli.plugins import discover_plugins
@@ -457,16 +447,15 @@ def _enable_plugin_platforms_from_env(config: GatewayConfig) -> None:
 
 
 def _relay(config: GatewayConfig) -> None:
-    """Relay (connector-fronted, EXPERIMENTAL): enabled by GATEWAY_RELAY_URL or
-    gateway.relay_url; the URL is mirrored into extra["relay_url"] for the connected-checker.
+    """Relay (connector-fronted, EXPERIMENTAL): enabled by GATEWAY_RELAY_URL or gateway.relay_url;
+    the URL is mirrored into extra["relay_url"] for the connected-checker.
 
-    Relay-exclusive: the GATEWAY_RELAY_URL env stamp means the connector owns every
-    platform connection; a directly-connected adapter would be a second unmanaged ingress
-    (duplicate deliveries, split sessions, a socket disarming scale-to-zero). So the env
-    stamp disables all other messaging platforms — even ones explicitly enabled — except
-    non-messaging surfaces (local, api_server, webhook; same set as the scale-to-zero arm
-    gate). relay_url from YAML only keeps the additive behavior. Opt out with
-    GATEWAY_RELAY_ALLOW_DIRECT_PLATFORMS=true.
+    Relay-exclusive: the GATEWAY_RELAY_URL env stamp means the connector owns every platform
+    connection; a directly-connected adapter would be a second unmanaged ingress (duplicate
+    deliveries, split sessions, a socket disarming scale-to-zero). So the env stamp disables all
+    other messaging platforms — even explicitly enabled ones — except non-messaging surfaces (local,
+    api_server, webhook; same set as the scale-to-zero arm gate). relay_url from YAML only keeps the
+    additive behavior. Opt out with GATEWAY_RELAY_ALLOW_DIRECT_PLATFORMS=true.
     """
     relay_url_env = getenv("GATEWAY_RELAY_URL").strip()
     existing_relay = config.platforms.get(Platform.RELAY)
@@ -477,9 +466,9 @@ def _relay(config: GatewayConfig) -> None:
 
     if not relay_url_env or is_truthy_value(getenv("GATEWAY_RELAY_ALLOW_DIRECT_PLATFORMS")):
         return
-    non_messaging = {Platform.LOCAL, Platform.API_SERVER, Platform.WEBHOOK}
+    skip = {Platform.RELAY, Platform.LOCAL, Platform.API_SERVER, Platform.WEBHOOK}
     for platform, platform_config in config.platforms.items():
-        if platform is Platform.RELAY or platform in non_messaging or not platform_config.enabled:
+        if platform in skip or not platform_config.enabled:
             continue
         if platform_config.extra.get("_enabled_explicit"):
             logger.warning(
@@ -505,9 +494,9 @@ def _scrub_explicit_markers(config: GatewayConfig) -> None:
         platform_config.extra.pop("_enabled_explicit", None)
 
 
-# Order is significant: a home channel only attaches to a platform that already exists
-# (Telegram's reply mode may create the entry first; Discord reads home first). Relay
-# disabling runs after the plugin pass; the marker scrub must be last.
+# Order is significant: a home channel only attaches to a platform that already exists (Telegram's
+# reply mode may create the entry first; Discord reads home first). Relay disabling runs after the
+# plugin pass; the marker scrub must be last.
 _ENV_STEPS: tuple = (
     _Cred(Platform.TELEGRAM, ("TELEGRAM_BOT_TOKEN",), token="TELEGRAM_BOT_TOKEN"),
     _ReplyMode(Platform.TELEGRAM, "TELEGRAM_REPLY_TO_MODE"),
@@ -518,8 +507,7 @@ _ENV_STEPS: tuple = (
     _ReplyMode(Platform.DISCORD, "DISCORD_REPLY_TO_MODE"),
     _whatsapp,
     _Home(Platform.WHATSAPP, "WHATSAPP_HOME_CHANNEL"),
-    # WhatsApp Cloud API (Meta Business Platform). Distinct from the Baileys bridge;
-    # both adapters can run in parallel against different phone numbers.
+    # WhatsApp Cloud API (Meta). Distinct from the Baileys bridge; both may run against different numbers.
     _Cred(
         Platform.WHATSAPP_CLOUD, ("WHATSAPP_CLOUD_PHONE_NUMBER_ID", "WHATSAPP_CLOUD_ACCESS_TOKEN"),
         fixed=(("phone_number_id", "WHATSAPP_CLOUD_PHONE_NUMBER_ID"), ("access_token", "WHATSAPP_CLOUD_ACCESS_TOKEN")),
@@ -592,8 +580,7 @@ _ENV_STEPS: tuple = (
             ("corp_id", "WECOM_CALLBACK_CORP_ID"), ("corp_secret", "WECOM_CALLBACK_CORP_SECRET"),
             ("agent_id", "WECOM_CALLBACK_AGENT_ID"), ("token", "WECOM_CALLBACK_TOKEN"),
             ("encoding_aes_key", "WECOM_CALLBACK_ENCODING_AES_KEY"),
-            # No host default: a falsy extra.host lets the adapter's dual-stack DEFAULT_HOST=None
-            # apply (binds IPv4 + IPv6; "0.0.0.0" was IPv4-only).
+            # No host default: falsy extra.host lets the adapter's dual-stack DEFAULT_HOST=None bind v4+v6.
             ("host", "WECOM_CALLBACK_HOST"), ("port", "WECOM_CALLBACK_PORT", "", _int_or(8645)),
         ),
     ),
