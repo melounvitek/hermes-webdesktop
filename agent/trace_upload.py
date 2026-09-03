@@ -36,6 +36,7 @@ _NO_TOKEN_MESSAGE = (
     "     HF_TOKEN=hf_xxxxxxxxxxxxxxxxxxxx\n"
     "3. Run /upload-trace again (or `hermes trace upload`)."
 )
+_TOKEN_ENV_VARS = ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN")
 
 
 class TraceRedactionError(RuntimeError):
@@ -80,11 +81,9 @@ def _content_to_blocks(content: Any, redact: bool) -> List[Dict[str, Any]]:
     """Normalize a message ``content`` field into Anthropic content blocks."""
     if content is None:
         return []
-    if isinstance(content, str):
-        return [_text_block(content, redact)]
     if isinstance(content, list):
         return [_part_to_block(part, redact) for part in content]
-    return [_text_block(json.dumps(content), redact)]
+    return [_text_block(content if isinstance(content, str) else json.dumps(content), redact)]
 
 
 def _parse_tool_args(raw_args: Any) -> Dict[str, Any]:
@@ -152,10 +151,7 @@ def _tool_result_message(msg: Dict[str, Any], model: str, redact: bool) -> Dict[
 
 def _user_message(msg: Dict[str, Any], model: str, redact: bool) -> Dict[str, Any]:
     content = msg.get("content")
-    return {
-        "role": "user",
-        "content": _redact(content, redact) if isinstance(content, str) else _content_to_blocks(content, redact),
-    }
+    return {"role": "user", "content": _redact(content, redact) if isinstance(content, str) else _content_to_blocks(content, redact)}
 
 
 # role -> (Claude Code line type, message builder). Unknown roles render as user.
@@ -165,14 +161,7 @@ _ROLE_RENDERERS: Dict[Any, Tuple[str, Any]] = {
 }
 
 
-def build_trace_jsonl(
-    messages: List[Dict[str, Any]],
-    *,
-    session_id: str,
-    model: str = "",
-    cwd: str = "",
-    redact: bool = True,
-) -> str:
+def build_trace_jsonl(messages: List[Dict[str, Any]], *, session_id: str, model: str = "", cwd: str = "", redact: bool = True) -> str:
     """Render messages as Claude Code JSONL: one line per non-system message (``user``/``tool`` ->
     type user, ``assistant`` -> type assistant with text + ``tool_use`` blocks; tool results ride
     on user turns as ``tool_result`` keyed by ``tool_call_id``; turns link via ``parentUuid``)."""
@@ -180,7 +169,6 @@ def build_trace_jsonl(
     parent: Optional[str] = None
     base_ts = _now_iso()
     git_branch = _git_branch(cwd)
-
     for msg in messages:
         role = msg.get("role")
         if role == "system":
@@ -202,7 +190,6 @@ def build_trace_jsonl(
         }
         lines.append(json.dumps(entry, ensure_ascii=False))
         parent = turn_uuid
-
     return "\n".join(lines) + ("\n" if lines else "")
 
 
@@ -210,21 +197,10 @@ def build_trace_jsonl(
 
 def _resolve_hf_token() -> Optional[str]:
     """Return the user's Hugging Face token from the usual env vars."""
-    for var in ("HF_TOKEN", "HUGGINGFACE_HUB_TOKEN", "HUGGING_FACE_HUB_TOKEN", "HUGGINGFACE_TOKEN"):
-        val = (os.getenv(var) or "").strip()
-        if val:
-            return val
-    return None
+    return next((val for var in _TOKEN_ENV_VARS if (val := (os.getenv(var) or "").strip())), None)
 
 
-def _do_upload(
-    jsonl: str,
-    *,
-    token: str,
-    session_id: str,
-    dataset_name: str = DEFAULT_DATASET_NAME,
-    private: bool = True,
-) -> str:
+def _do_upload(jsonl: str, *, token: str, session_id: str, dataset_name: str = DEFAULT_DATASET_NAME, private: bool = True) -> str:
     """Create (idempotently) the private dataset and push the trace file.
     Returns a user-facing status string. Never raises."""
     with suppress(Exception):  # lazy-install unavailable/declined — the import below surfaces the hint
@@ -234,38 +210,30 @@ def _do_upload(
         from huggingface_hub import HfApi
     except ImportError:
         return "Hugging Face upload needs the `huggingface_hub` package (`pip install huggingface_hub`)."
-
     api = HfApi(token=token)
     try:
         who = api.whoami()
         user = who.get("name") if isinstance(who, dict) else None
     except Exception as e:
         logger.warning("HF whoami failed: %s", e)
-        return ("Your Hugging Face token was rejected (whoami failed). "
-                "Make sure it has WRITE access and isn't expired.")
+        return "Your Hugging Face token was rejected (whoami failed). Make sure it has WRITE access and isn't expired."
     if not user:
         return "Could not resolve your Hugging Face username from the token."
-
     repo_id = f"{user}/{dataset_name}"
     try:
         api.create_repo(repo_id=repo_id, repo_type="dataset", private=private, exist_ok=True)
     except Exception as e:
         logger.warning("HF create_repo failed for %s: %s", repo_id, e)
         return f"Could not create/access dataset {repo_id}: {e}"
-
     path_in_repo = f"sessions/{session_id}.jsonl"
     try:
         api.upload_file(
-            path_or_fileobj=jsonl.encode("utf-8"),
-            path_in_repo=path_in_repo,
-            repo_id=repo_id,
-            repo_type="dataset",
+            path_or_fileobj=jsonl.encode("utf-8"), path_in_repo=path_in_repo, repo_id=repo_id, repo_type="dataset",
             commit_message=f"add session trace {session_id}",
         )
     except Exception as e:
         logger.warning("HF upload_file failed for %s: %s", repo_id, e)
         return f"Upload to Hugging Face failed: {e}"
-
     return (f"Uploaded -> https://huggingface.co/datasets/{repo_id}/blob/main/{path_in_repo}\n"
             f"View in the trace viewer: https://huggingface.co/datasets/{repo_id}")
 
@@ -301,11 +269,9 @@ def upload_session_trace(
     dataset. Returns a status string, never raises."""
     if not session_id:
         return "No active session to upload."
-
     token = token or _resolve_hf_token()
     if not token:
         return _NO_TOKEN_MESSAGE
-
     try:
         messages, meta = load_session_messages(session_id, db_path=db_path)
     except Exception as e:
@@ -319,5 +285,4 @@ def upload_session_trace(
         return _REDACTION_BLOCKED_MESSAGE
     if not jsonl.strip():
         return "No transcript content to upload for this session."
-
     return _do_upload(jsonl, token=token, session_id=session_id, dataset_name=dataset_name, private=private)
