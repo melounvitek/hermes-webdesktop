@@ -4654,6 +4654,50 @@ def specify_triage_task(
     return True
 
 
+def _validate_children_graph(children: list) -> None:
+    """Shape-check ``decompose_triage_task`` children and reject cycles.
+
+    Cheap, DB-free, so bad input aborts before the txn. The sibling parent
+    graph is checked whole (Kahn's sort) rather than edge-by-edge like
+    ``link_tasks``/``_would_cycle``: a cycle silently deadlocks every involved
+    child in ``todo`` because ``recompute_ready`` can never promote them.
+    """
+    for idx, child in enumerate(children):
+        if not isinstance(child, dict):
+            raise ValueError(f"child[{idx}] is not a dict")
+        title = child.get("title")
+        if not isinstance(title, str) or not title.strip():
+            raise ValueError(f"child[{idx}].title is required")
+        parents_idx = child.get("parents") or []
+        if not isinstance(parents_idx, list):
+            raise ValueError(f"child[{idx}].parents must be a list")
+        for p in parents_idx:
+            if not isinstance(p, int) or p < 0 or p >= len(children):
+                raise ValueError(
+                    f"child[{idx}].parents[{p}] is not a valid index into children"
+                )
+            if p == idx:
+                raise ValueError(f"child[{idx}] cannot list itself as a parent")
+
+    _in_deg = [0] * len(children)
+    _adj: list[list[int]] = [[] for _ in range(len(children))]
+    for _i, _c in enumerate(children):
+        for _p in (_c.get("parents") or []):
+            _adj[_p].append(_i)
+            _in_deg[_i] += 1
+    _queue = [_i for _i in range(len(children)) if _in_deg[_i] == 0]
+    _seen = 0
+    while _queue:
+        _node = _queue.pop()
+        _seen += 1
+        for _nb in _adj[_node]:
+            _in_deg[_nb] -= 1
+            if _in_deg[_nb] == 0:
+                _queue.append(_nb)
+    if _seen != len(children):
+        raise ValueError("cyclic dependency detected in decomposed children list")
+
+
 def decompose_triage_task(
     conn: sqlite3.Connection,
     task_id: str,
@@ -4682,47 +4726,7 @@ def decompose_triage_task(
     if root_assignee is not None:
         root_assignee = _canonical_assignee(root_assignee)
 
-    # Pre-validate the children list shape outside the txn. Cheap checks
-    # that don't need DB access. Bad input aborts before we touch the DB.
-    for idx, child in enumerate(children):
-        if not isinstance(child, dict):
-            raise ValueError(f"child[{idx}] is not a dict")
-        title = child.get("title")
-        if not isinstance(title, str) or not title.strip():
-            raise ValueError(f"child[{idx}].title is required")
-        parents_idx = child.get("parents") or []
-        if not isinstance(parents_idx, list):
-            raise ValueError(f"child[{idx}].parents must be a list")
-        for p in parents_idx:
-            if not isinstance(p, int) or p < 0 or p >= len(children):
-                raise ValueError(
-                    f"child[{idx}].parents[{p}] is not a valid index into children"
-                )
-            if p == idx:
-                raise ValueError(f"child[{idx}] cannot list itself as a parent")
-
-    # Detect cycles in the sibling parent graph (Kahn's topological sort).
-    # link_tasks() calls _would_cycle() for every new edge; here we check
-    # the entire sibling graph before touching the DB.  A cycle silently
-    # deadlocks every involved child in 'todo' because recompute_ready()
-    # can never promote them.
-    _in_deg = [0] * len(children)
-    _adj: list[list[int]] = [[] for _ in range(len(children))]
-    for _i, _c in enumerate(children):
-        for _p in (_c.get("parents") or []):
-            _adj[_p].append(_i)
-            _in_deg[_i] += 1
-    _queue = [_i for _i in range(len(children)) if _in_deg[_i] == 0]
-    _seen = 0
-    while _queue:
-        _node = _queue.pop()
-        _seen += 1
-        for _nb in _adj[_node]:
-            _in_deg[_nb] -= 1
-            if _in_deg[_nb] == 0:
-                _queue.append(_nb)
-    if _seen != len(children):
-        raise ValueError("cyclic dependency detected in decomposed children list")
+    _validate_children_graph(children)
 
     # We do the full decomposition in a SINGLE write_txn so it's
     # atomic: either every child is created AND the root flips to
