@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
-"""Memory Tool - persistent curated memory (MEMORY.md = agent notes, USER.md =
-user profile). Both enter the system prompt as a FROZEN snapshot at session
-start; mid-session writes hit disk immediately but never change the prompt
-(prefix cache stays intact). Single `memory` tool: add/replace/remove or a
-batch `operations` list. The store lives in ``tools.memory_tool_store``."""
+"""Memory Tool - persistent curated memory (MEMORY.md = agent notes, USER.md = user
+profile). Both enter the system prompt as a FROZEN snapshot at session start;
+mid-session writes hit disk but never change the prompt (prefix cache intact).
+Single `memory` tool: add/replace/remove or a batch `operations` list."""
 
 import copy
 import json
@@ -16,8 +15,8 @@ from typing import Dict, Any, List, Optional, Tuple
 from utils import is_truthy_value
 from tools.registry import no_cache_check_fn
 
-# fcntl is Unix-only; on Windows use msvcrt for file locking. MemoryStore reads
-# these lazily from this module (tests inspect ``memory_tool.fcntl``).
+# fcntl is Unix-only; Windows uses msvcrt. MemoryStore reads both lazily from
+# this module (tests patch ``memory_tool.fcntl``).
 msvcrt = None
 try:
     import fcntl
@@ -30,17 +29,15 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-# One tool-definition pass must use one config decision for both availability
-# and the dynamic target schema. ContextVar keeps concurrent profile/session
-# builds isolated while letting the check_fn result flow to the immediately
-# following dynamic_schema_overrides call in ToolRegistry.get_definitions().
+# One tool-definition pass must use ONE config decision for availability and the
+# dynamic target schema: the check_fn result flows to the immediately following
+# dynamic_schema_overrides call; ContextVar isolates concurrent profile builds.
 _memory_surface_flags: ContextVar[Optional[Tuple[bool, bool]]] = ContextVar(
     "memory_surface_flags", default=None)
 
 
 def get_memory_dir() -> Path:
-    """Return the profile-scoped memories directory (resolved per call so
-    HERMES_HOME/profile switches after import are respected)."""
+    """Profile-scoped memories dir, resolved per call (HERMES_HOME may switch after import)."""
     return get_hermes_home() / "memories"
 
 
@@ -50,20 +47,18 @@ from tools.memory_tool_store import (  # noqa: E402,F401  (re-exports)
 
 
 def load_on_disk_store() -> "MemoryStore":
-    """Fresh on-disk MemoryStore with configured limits/flags, for contexts with
-    no live agent (gateway, Desktop, bare CLI ``/memory``) so approvals enforce
-    the SAME caps as ``agent_init``. Defaults if config can't load; never raises."""
+    """Fresh on-disk MemoryStore with configured limits/flags for contexts with no
+    live agent (gateway, Desktop, ``/memory``) so approvals enforce the SAME caps
+    as ``agent_init``. Falls back to defaults if config can't load; never raises."""
     try:
         from hermes_cli.config import load_config
 
         config = load_config() or {}
         mem_cfg = get_builtin_memory_config(config)
         memory_enabled, user_profile_enabled = get_builtin_memory_store_flags(config)
-        kwargs = {
-            "memory_char_limit": int(mem_cfg.get("memory_char_limit", 2200)),
-            "user_char_limit": int(mem_cfg.get("user_char_limit", 1375)),
-            "memory_enabled": memory_enabled,
-            "user_profile_enabled": user_profile_enabled}
+        kwargs = {"memory_char_limit": int(mem_cfg.get("memory_char_limit", 2200)),
+                  "user_char_limit": int(mem_cfg.get("user_char_limit", 1375)),
+                  "memory_enabled": memory_enabled, "user_profile_enabled": user_profile_enabled}
     except Exception:
         kwargs: Dict[str, Any] = {}  # config optional — fall back to defaults rather than break /memory
     store = MemoryStore(**kwargs)
@@ -74,9 +69,8 @@ def load_on_disk_store() -> "MemoryStore":
 # -- Write-approval gate --
 
 def _gate_or_stage(summary: str, detail: str, payload: Dict[str, Any]) -> Optional[str]:
-    """Run the memory write gate. Returns a JSON tool-result string when the
-    write must NOT proceed (blocked, or staged for approval), None to proceed.
-    If the gate module can't load, fail open rather than block all writes."""
+    """JSON tool-result string when the write must NOT proceed (blocked or staged
+    for approval), None to proceed. Fails open if the gate module can't load."""
     try:
         from tools import write_approval as wa
     except Exception:
@@ -128,11 +122,10 @@ def _apply_batch_write_gate(target: str, operations: List[Dict[str, Any]]) -> Op
 # -- Tool entry point --
 
 def _validate_single_op(store, action, target, content, old_text) -> Optional[str]:
-    """Validate required params BEFORE the gate so an invalid write is rejected
-    now rather than staged and failing at approve time. A missing ``old_text``
-    is recoverable (it can't be schema-required — needs a combinator the Codex
-    backend rejects, see test_memory_tool_schema.py — and some clients omit it),
-    so return the current inventory plus a retry instruction, not a dead-end."""
+    """Validate BEFORE the gate so an invalid write is rejected now, not at approve
+    time. Missing ``old_text`` is recoverable (it can't be schema-required — needs a
+    combinator the Codex backend rejects — and some clients omit it): return the
+    current inventory plus a retry instruction instead of a dead-end."""
     if action == "add" and not content:
         return tool_error("Content is required for 'add' action.", success=False)
     if action in ("replace", "remove") and not old_text:
@@ -164,18 +157,16 @@ def memory_tool(
     new_text: str = None,
     operations: Optional[List[Dict[str, Any]]] = None,
     store: Optional[MemoryStore] = None) -> str:
-    """Tool entry point; returns a JSON string. Single op (action + content /
-    old_text) or batch (``operations`` applied atomically against the final
-    budget). ``new_text`` aliases ``content`` — callers mirror ``old_text``
-    with it (patch-tool shape), which used to leave ``content`` empty."""
+    """Tool entry point; returns a JSON string. Single op (action + content/old_text)
+    or batch (``operations``, atomic against the final budget). ``new_text``
+    aliases ``content`` — callers mirror ``old_text`` with it (patch-tool shape)."""
     if store is None:
         return tool_error("Memory is not available. It may be disabled in config or this environment.", success=False)
 
     if content is None and new_text is not None:
         content = new_text
     # Strict providers send JSON null for optional fields; treat as omitted.
-    if target is None:
-        target = "memory"
+    target = "memory" if target is None else target
     target_error = _memory_target_error(store, target)
     if target_error is not None:
         return json.dumps(target_error)
@@ -194,8 +185,7 @@ def memory_tool(
     invalid = _validate_single_op(store, action, target, content, old_text)
     if invalid is not None:
         return invalid
-    # Approval gate: when on, stages the write (background/gateway) or prompts
-    # inline (interactive CLI); when off (default) passes straight through.
+    # Approval gate: stages (background/gateway) or prompts inline (CLI); off by default.
     gate_result = _apply_write_gate(action, target, content, old_text)
     if gate_result is not None:
         return gate_result
@@ -203,9 +193,9 @@ def memory_tool(
 
 
 def get_builtin_memory_config(config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-    """Normalized ``memory`` config section ({} when missing/malformed → flags
-    default to enabled). ``agent_init`` consumes the same section so tool
-    availability and store construction cannot diverge."""
+    """Normalized ``memory`` config section ({} when missing/malformed → flags default
+    to enabled). ``agent_init`` reads the same section so availability and store
+    construction cannot diverge."""
     if config is None:
         try:
             from hermes_cli.config import load_config_readonly
@@ -221,9 +211,7 @@ def get_builtin_memory_config(config: Optional[Dict[str, Any]] = None) -> Dict[s
 def get_builtin_memory_store_flags(config: Optional[Dict[str, Any]] = None) -> Tuple[bool, bool]:
     """Return ``(memory_enabled, user_profile_enabled)`` from resolved config."""
     section = get_builtin_memory_config(config)
-    return (
-        is_truthy_value(section.get("memory_enabled"), default=True),
-        is_truthy_value(section.get("user_profile_enabled"), default=True))
+    return tuple(is_truthy_value(section.get(k), default=True) for k in ("memory_enabled", "user_profile_enabled"))
 
 
 @no_cache_check_fn
@@ -351,10 +339,8 @@ _SINGLE_TARGET_TEXT = {
 
 def _build_memory_schema_overrides() -> Dict[str, Any]:
     """Narrow the advertised target surface using the availability snapshot."""
-    flags = _memory_surface_flags.get()
+    flags = _memory_surface_flags.get() or get_builtin_memory_store_flags()
     _memory_surface_flags.set(None)
-    if flags is None:
-        flags = get_builtin_memory_store_flags()
     targets = [t for t, on in zip(("memory", "user"), flags) if on]
     parameters = copy.deepcopy(MEMORY_SCHEMA["parameters"])
     target_schema = parameters["properties"]["target"]
