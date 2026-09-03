@@ -126,11 +126,9 @@ def _neutralize_harmony_tokens(text: str) -> str:
     """Keep Harmony source readable without emitting reserved wire tokens."""
     if not text or "<" not in text or "|" not in text:
         return text
-
     replacement = rf"<{_FULLWIDTH_PIPE}\1{_FULLWIDTH_PIPE}>"
     if not any(unicodedata.category(char) == "Cf" for char in text):
         return _HARMONY_CONTROL_TOKEN_RE.sub(replacement, text)
-
     # The backend strips Unicode format controls (e.g. U+200B) before its
     # reserved-token check, so match on the visible text and rewrite the
     # original spans — any Cf-hidden variant is neutralized the same way.
@@ -324,7 +322,6 @@ def _derive_responses_function_call_id(call_id: str, response_item_id: Optional[
     """Build a valid Responses `function_call.id` (must start with `fc_`)."""
     if isinstance(response_item_id, str) and response_item_id.strip().startswith("fc_"):
         return response_item_id.strip()
-
     source = (call_id or "").strip()
     sanitized = re.sub(r"[^A-Za-z0-9_-]", "", source)
     for candidate in (source, sanitized):
@@ -494,7 +491,6 @@ def _tool_output_item(msg: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             call_id = raw_tool_call_id.strip()
     if not _nonblank(call_id):
         return None
-
     # ``output`` may be a string or an ``input_text``/``input_image`` array.
     tool_content = msg.get("content")
     output_value: Any = (
@@ -546,7 +542,6 @@ def _chat_messages_to_responses_input(
     def emit(new_items: List[Dict[str, Any]], msg: Dict[str, Any]) -> None:
         items.extend(new_items)
         item_sources.extend([msg] * len(new_items))
-
     for msg in messages:
         if not isinstance(msg, dict):
             continue
@@ -558,7 +553,6 @@ def _chat_messages_to_responses_input(
             continue
         if role not in {"user", "assistant"}:
             continue
-
         content = msg.get("content", "")
         content_parts = _chat_content_to_responses_parts(content, role=role)  # [] unless a list
         if isinstance(content, list):
@@ -566,11 +560,9 @@ def _chat_messages_to_responses_input(
             content_text = "".join(p["text"] for p in content_parts if p["type"] == text_type)
         else:
             content_text = _str_or_empty(content)
-
         if role == "user":
             emit([{"role": role, "content": content_parts or content_text}], msg)
             continue
-
         reasoning_items = [] if not replay_encrypted_reasoning else _replay_reasoning_items(
             msg, seen_item_ids=seen_item_ids, current_issuer_kind=current_issuer_kind,
             native_compaction_eligible=native_compaction_eligible,
@@ -578,7 +570,6 @@ def _chat_messages_to_responses_input(
         emit(reasoning_items, msg)
         message_items = _replay_message_items(msg, is_github_responses=is_github_responses)
         emit(message_items, msg)
-
         if not message_items:
             if content_parts:
                 emit([{"role": "assistant", "content": content_parts}], msg)
@@ -587,9 +578,7 @@ def _chat_messages_to_responses_input(
             elif reasoning_items:
                 # Every reasoning item needs a following item (else missing_following_item).
                 emit([{"role": "assistant", "content": ""}], msg)
-
         emit(_replay_tool_call_items(msg, start_index=len(items)), msg)
-
     # Native server-side compaction renders nothing placed before a compaction
     # item, so pre-checkpoint history is dead upload weight and the user's
     # plaintext asks / merged local summaries silently vanish. Keep the newest
@@ -597,9 +586,7 @@ def _chat_messages_to_responses_input(
     # messages within a token budget, leave the tail untouched.
     if not native_compaction_eligible:
         return items
-
     from agent.native_compaction import prune_pre_checkpoint_items
-
     return prune_pre_checkpoint_items(items, item_sources=item_sources)
 
 
@@ -622,7 +609,6 @@ def classify_responses_route(agent: Any) -> ResponsesRouteFlags:
     ``https://evil.com/models.github.ai`` must not classify as GitHub.
     """
     from utils import base_url_hostname
-
     provider = getattr(agent, "provider", None)
     base_url = str(getattr(agent, "base_url", "") or "")
     hostname = str(getattr(agent, "_base_url_hostname", "") or "").lower() or base_url_hostname(base_url)
@@ -630,7 +616,6 @@ def classify_responses_route(agent: Any) -> ResponsesRouteFlags:
 
     def _host_is(domain: str) -> bool:
         return hostname == domain or hostname.endswith("." + domain)
-
     return ResponsesRouteFlags(
         is_codex_backend=provider == "openai-codex" or (_host_is("chatgpt.com") and "/backend-api/codex" in lower),
         is_xai_responses=provider in {"xai", "xai-oauth"} or hostname == "api.x.ai",
@@ -654,17 +639,13 @@ def estimate_native_responses_preflight_tokens(
     """
     if getattr(agent, "api_mode", None) != "codex_responses" or not isinstance(messages, list):
         return None
-
     is_codex_backend, is_xai_responses, is_github_responses = classify_responses_route(agent)
-
     from agent.native_compaction import native_compaction_context_management
-
     if not native_compaction_context_management(
         agent, is_codex_backend=is_codex_backend, is_xai_responses=is_xai_responses,
         is_github_responses=is_github_responses,
     ):
         return None
-
     try:
         items = _chat_messages_to_responses_input(
             messages, is_xai_responses=is_xai_responses, is_github_responses=is_github_responses,
@@ -680,9 +661,7 @@ def estimate_native_responses_preflight_tokens(
         return None
     if not isinstance(items, list):
         return None
-
     from agent.model_metadata import estimate_request_tokens_rough
-
     return estimate_request_tokens_rough(items, system_prompt=system_prompt or "", tools=tools)
 
 
@@ -781,7 +760,6 @@ def _preflight_role_message(item: Dict[str, Any], idx: int, role: str, ctx: _Pre
     content = item.get("content", "")
     if not isinstance(content, list):
         return {"role": role, "content": ctx.sanitize_text(_str_or_empty(content))}
-
     # Parts are already Responses-shaped; validate and re-type text for the role.
     # Unlike history conversion, empty text / empty image urls are kept, not dropped.
     text_type = _text_type_for(role)
@@ -825,7 +803,6 @@ def _preflight_codex_input_items(
 ) -> List[Dict[str, Any]]:
     if not isinstance(raw_items, list):
         raise ValueError("Codex Responses input must be a list of input items.")
-
     ctx = _PreflightCtx(
         sanitize_text=_neutralize_harmony_tokens if sanitize_harmony_tokens else (lambda text: text),
         sanitize_harmony_tokens=sanitize_harmony_tokens,
@@ -906,19 +883,15 @@ def _preflight_codex_api_kwargs(
 ) -> Dict[str, Any]:
     if not isinstance(api_kwargs, dict):
         raise ValueError("Codex Responses request must be a dict.")
-
     missing = [key for key in ("model", "instructions", "input") if key not in api_kwargs]
     if missing:
         raise ValueError(f"Codex Responses request missing required field(s): {', '.join(sorted(missing))}.")
-
     model = api_kwargs.get("model")
     if not _nonblank(model):
         raise ValueError("Codex Responses request 'model' must be a non-empty string.")
-
     instructions = _str_or_empty(api_kwargs.get("instructions")).strip() or DEFAULT_AGENT_IDENTITY
     if sanitize_harmony_tokens:
         instructions = _neutralize_harmony_tokens(instructions)
-
     normalized: Dict[str, Any] = {
         "model": model.strip(),
         "instructions": instructions,
@@ -929,7 +902,6 @@ def _preflight_codex_api_kwargs(
         ),
         "store": False,
     }
-
     tools = api_kwargs.get("tools")
     if tools is not None:
         if not isinstance(tools, list):
@@ -938,15 +910,12 @@ def _preflight_codex_api_kwargs(
         if sanitize_harmony_tokens:
             normalized_tools = _neutralize_harmony_structure(normalized_tools)
         normalized["tools"] = normalized_tools
-
     if api_kwargs.get("store", False) is not False:
         raise ValueError("Codex Responses contract requires 'store' to be false.")
-
     for key, accept, coerce in _PREFLIGHT_OPTIONAL_FIELDS:
         value = api_kwargs.get(key)
         if accept(value):
             normalized[key] = coerce(value) if coerce else value
-
     extra_headers = api_kwargs.get("extra_headers")
     if extra_headers is not None:
         if not isinstance(extra_headers, dict):
@@ -956,7 +925,6 @@ def _preflight_codex_api_kwargs(
         normalized_headers = {key.strip(): str(value) for key, value in extra_headers.items() if value is not None}
         if normalized_headers:
             normalized["extra_headers"] = normalized_headers
-
     extra_body = api_kwargs.get("extra_body")
     if extra_body is not None:
         if not isinstance(extra_body, dict):
@@ -965,7 +933,6 @@ def _preflight_codex_api_kwargs(
         # the SDK serializes extra_body without per-field checks.
         if extra_body:
             normalized["extra_body"] = dict(extra_body)
-
     allowed_keys = set(_PREFLIGHT_ALLOWED_KEYS)
     if allow_stream:
         stream = api_kwargs.get("stream")
@@ -976,7 +943,6 @@ def _preflight_codex_api_kwargs(
         allowed_keys.add("stream")
     elif "stream" in api_kwargs:
         raise ValueError("Codex Responses stream flag is only allowed in fallback streaming requests.")
-
     # Defense-in-depth slash-enum strip for xAI (rejects ``Qwen/Qwen3.5`` style
     # enum values). Gated on the model name because native Codex accepts slashes.
     is_xai_model = str(api_kwargs.get("model") or "").lower().startswith(("grok-", "x-ai/grok-"))
@@ -986,7 +952,6 @@ def _preflight_codex_api_kwargs(
             normalized["tools"], _ = strip_slash_enum(normalized["tools"])
         except Exception:
             pass  # Best-effort — the caller-level sanitization should have handled it
-
     unexpected = sorted(key for key in api_kwargs if key not in allowed_keys)
     if unexpected:
         raise ValueError(f"Codex Responses request has unsupported field(s): {', '.join(unexpected)}.")
@@ -1025,7 +990,6 @@ def _format_responses_error(error_obj: Any, response_status: str) -> str:
     def field(name: str) -> str:
         value = _field(error_obj, name)
         return str(value).strip() if isinstance(value, str) or value else ""
-
     code_str, message_str = field("code"), field("message")
     if code_str and message_str:
         return f"{code_str}: {message_str}"
@@ -1113,7 +1077,6 @@ class _OutputScan:
             if item_status in _INCOMPLETE_STATUSES and item_type not in _SERVER_SIDE_TOOL_CALL_TYPES:
                 self.has_incomplete_items = True
                 self.saw_streaming_or_item_incomplete = True
-
             if item_type == "message":
                 self._message(item, item_status)
             elif item_type == "reasoning":
@@ -1170,7 +1133,6 @@ def _normalize_codex_response(response: Any, *, issuer_kind: Optional[str] = Non
     response_incomplete_content_filter = (
         response_status == "incomplete" and str(incomplete_reason or "").strip().lower() == "content_filter"
     )
-
     output = getattr(response, "output", None)
     if not isinstance(output, list) or not output:
         # Codex can deliver the whole answer via stream events and return an
@@ -1189,20 +1151,16 @@ def _normalize_codex_response(response: Any, *, issuer_kind: Optional[str] = Non
         else:
             raise RuntimeError("Responses API returned no output items")
         response.output = output
-
     if response_status in {"failed", "cancelled"}:
         raise RuntimeError(_format_responses_error(getattr(response, "error", None), response_status))
-
     scan = _OutputScan(response_status)
     scan.scan(output, issuer_kind)
     tool_calls, reasoning_parts = scan.tool_calls, scan.reasoning_parts
-
     final_text = "\n".join(scan.content_parts).strip()
     if not final_text and hasattr(response, "output_text") and (scan.saw_final_answer_phase or not scan.saw_commentary_phase):
         out_text = getattr(response, "output_text", "")
         if isinstance(out_text, str):
             final_text = out_text.strip()
-
     # Tool-call leak recovery: gpt-5.x sometimes emits the intended
     # ``function_call`` as plain Harmony text (``to=functions.foo {json}``) with
     # no structured item. Treat as incomplete so the continuation path
@@ -1216,7 +1174,6 @@ def _normalize_codex_response(response: Any, *, issuer_kind: Optional[str] = Non
             "Leaked snippet: %r", final_text[:300],
         )
         final_text = ""
-
     # Reasoning-channel answer salvage (xAI grok): grok-4.x sometimes puts the
     # final answer inside the reasoning item after its ``<response>`` delimiter.
     # Without salvage the reasoning-only rule marks the turn incomplete, and since
@@ -1235,7 +1192,6 @@ def _normalize_codex_response(response: Any, *, issuer_kind: Optional[str] = Non
                 final_text = salvaged
                 reasoning_prefix = joined_reasoning[:marker].strip()
                 reasoning_parts = [reasoning_prefix] if reasoning_prefix else []
-
     assistant_message = SimpleNamespace(
         content=final_text,
         tool_calls=tool_calls,
@@ -1245,7 +1201,6 @@ def _normalize_codex_response(response: Any, *, issuer_kind: Optional[str] = Non
         codex_reasoning_items=scan.reasoning_items_raw or None,
         codex_message_items=scan.message_items_raw or None,
     )
-
     if tool_calls:
         finish_reason = "tool_calls"
     elif response_incomplete_content_filter:

@@ -154,7 +154,6 @@ class BedrockOpenAISigV4Auth(httpx.Auth):
         import botocore.session
         from botocore.auth import SigV4Auth
         from botocore.awsrequest import AWSRequest
-
         credentials = botocore.session.get_session().get_credentials()
         if credentials is None:
             raise RuntimeError(
@@ -215,7 +214,6 @@ _STALE_LIB_MODULE_PREFIXES = ("urllib3.", "botocore.", "boto3.")
 def _stale_error_types() -> tuple:
     """botocore + urllib3 transport-failure exception classes (best-effort import)."""
     import importlib
-
     types: list = []
     for module, names in (
         ("botocore.exceptions", ("ConnectionError", "HTTPClientError")),
@@ -656,19 +654,16 @@ def _assistant_blocks(msg: Dict, content) -> List[Dict]:
         content_blocks = _replay_ordered_blocks(ordered_blocks)
         if content_blocks:
             return content_blocks
-
     content_blocks = []
     for detail in (msg.get("reasoning_details") or []):
         if isinstance(detail, dict) and detail.get("type") == "redacted_thinking":
             redacted = _decode_redacted(detail.get("data") or detail.get("redactedContentBase64"))
             if redacted is not None:
                 content_blocks.append({"reasoningContent": {"redactedContent": redacted}})
-
     if isinstance(content, str) and content.strip():
         content_blocks.append({"text": content})
     elif isinstance(content, list):
         content_blocks.extend(_convert_content_to_converse(content))
-
     for tc in (msg.get("tool_calls", []) or []):
         fn = tc.get("function", {})
         content_blocks.append(_tool_use_block(tc.get("id", ""), fn.get("name", ""), _parse_tool_args(fn.get("arguments", "{}"))))
@@ -691,7 +686,6 @@ def convert_messages_to_converse(messages: List[Dict]) -> Tuple[Optional[List[Di
             converse_msgs[-1]["content"].extend(blocks)
         else:
             converse_msgs.append({"role": role, "content": blocks})
-
     for msg in messages:
         role = msg.get("role", "")
         content = msg.get("content")
@@ -707,7 +701,6 @@ def convert_messages_to_converse(messages: List[Dict]) -> Tuple[Optional[List[Di
             append_turn("assistant", _assistant_blocks(msg, content) or [dict(_PLACEHOLDER_BLOCK)])
         elif role == "user":
             append_turn("user", _convert_content_to_converse(content))
-
     if converse_msgs and converse_msgs[0]["role"] != "user":
         converse_msgs.insert(0, {"role": "user", "content": [dict(_PLACEHOLDER_BLOCK)]})
     if converse_msgs and converse_msgs[-1]["role"] != "user":
@@ -881,7 +874,6 @@ def stream_converse_with_callbacks(
         if encoded:
             parts.add_redacted(encoded)
             current_block({"reasoningContent": {}}).setdefault("reasoningContent", {})["redactedContentBase64"] = encoded
-
     for event in event_stream.get("stream", []):
         if on_event is not None:
             try:
@@ -890,7 +882,6 @@ def stream_converse_with_callbacks(
                 pass
         if on_interrupt_check and on_interrupt_check():
             break
-
         if "contentBlockStart" in event:
             start_event = event["contentBlockStart"]
             current_block_index = start_event.get("contentBlockIndex", len(stream_blocks))
@@ -902,7 +893,6 @@ def stream_converse_with_callbacks(
                 stream_blocks[current_block_index] = _tool_use_block(current_tool["toolUseId"], current_tool["name"], {})
                 if on_tool_start:
                     on_tool_start(current_tool["name"])
-
         elif "contentBlockDelta" in event:
             delta = event["contentBlockDelta"].get("delta", {})
             if "text" in delta:
@@ -916,7 +906,6 @@ def stream_converse_with_callbacks(
                 current_tool["input_json"] += delta["toolUse"].get("input", "")
             elif "reasoningContent" in delta:
                 on_reasoning(delta["reasoningContent"])
-
         elif "contentBlockStop" in event:
             if current_tool is not None:
                 input_dict = _parse_tool_args(current_tool["input_json"]) if current_tool["input_json"] else {}
@@ -926,17 +915,14 @@ def stream_converse_with_callbacks(
                 current_tool = None
             else:
                 flush_text()
-
         elif "messageStop" in event:
             stop_reason = event["messageStop"].get("stopReason", "end_turn")
-
         elif "metadata" in event:
             meta_usage = event["metadata"].get("usage", {})
             usage_data = {
                 key: meta_usage.get(key, 0)
                 for key in ("inputTokens", "outputTokens", "cacheReadInputTokens", "cacheWriteInputTokens")
             }
-
     flush_text()
     return parts.build([stream_blocks[i] for i in sorted(stream_blocks)], usage_data, stop_reason, "")
 
@@ -966,17 +952,13 @@ def build_converse_kwargs(
 
     def cache_here(placement: str) -> bool:
         return cache_enabled and cache_point_allowed(model, placement)
-
     inference_config: Dict[str, Any] = {}
     if max_tokens is not None:
         inference_config["maxTokens"] = max_tokens
     kwargs: Dict[str, Any] = {"modelId": model, "messages": converse_messages, "inferenceConfig": inference_config}
-
     if system_prompt:
         kwargs["system"] = system_prompt + [dict(_CACHE_POINT)] if cache_here("system") else system_prompt
-
     from agent.anthropic_adapter import _forbids_sampling_params
-
     if not _forbids_sampling_params(model):
         if temperature is not None:
             inference_config["temperature"] = temperature
@@ -984,7 +966,6 @@ def build_converse_kwargs(
             inference_config["topP"] = top_p
     if stop_sequences:
         inference_config["stopSequences"] = stop_sequences
-
     converse_tools = convert_tools_to_converse(tools) if tools else []
     if converse_tools:
         # Non-tool-calling models (e.g. DeepSeek R1) reject toolConfig with a
@@ -998,12 +979,10 @@ def build_converse_kwargs(
                 "Model %s does not support tool calling — tools stripped. "
                 "The agent will operate in text-only mode.", model
             )
-
     if cache_here("messages") and len(converse_messages) >= 2:
         content = converse_messages[-2].get("content")
         if isinstance(content, list) and content:
             content.append(dict(_CACHE_POINT))
-
     if guardrail_config:
         kwargs["guardrailConfig"] = guardrail_config
     if not inference_config:
@@ -1100,7 +1079,6 @@ def _list_inference_profiles(client, filter_set: set, models: List[Dict[str, Any
         next_token = response.get("nextToken")
         if not next_token:
             break
-
     seen_ids = {m["id"].lower() for m in models}
     for profile in profiles:
         profile_id = (profile.get("inferenceProfileId") or "").strip()
@@ -1123,18 +1101,15 @@ def discover_bedrock_models(region: str, provider_filter: Optional[List[str]] = 
     Returns [] when the client cannot be built.
     """
     import time
-
     cache_key = f"{region}:{','.join(sorted(provider_filter or []))}"
     cached = _discovery_cache.get(cache_key)
     if cached and (time.time() - cached["timestamp"]) < _DISCOVERY_CACHE_TTL_SECONDS:
         return cached["models"]
-
     try:
         client = _get_bedrock_control_client(region)
     except Exception as e:
         logger.warning("Failed to create Bedrock client for model discovery: %s", e)
         return []
-
     models: List[Dict[str, Any]] = []
     filter_set = {f.lower() for f in (provider_filter or [])}
     try:
@@ -1145,7 +1120,6 @@ def discover_bedrock_models(region: str, provider_filter: Optional[List[str]] = 
         _list_inference_profiles(client, filter_set, models)
     except Exception as e:
         logger.debug("Skipping inference profile discovery: %s", e)
-
     models.sort(key=lambda m: (0 if m["id"].startswith("global.") else 1, m["name"].lower()))
     _discovery_cache[cache_key] = {"timestamp": time.time(), "models": models}
     return models
@@ -1220,7 +1194,6 @@ def probe_bedrock_context_length(model_id: str, region: str) -> Optional[int]:
     except Exception as exc:  # boto3 missing / credential resolution failure
         logger.debug("Bedrock context probe skipped for %s: %s", model_id, exc)
         return None
-
     last_error = ""
     for tier_tokens in _BEDROCK_PROBE_TIERS:
         oversized = "data " * int(tier_tokens / _WORDS_PER_TOKEN)
@@ -1242,7 +1215,6 @@ def probe_bedrock_context_length(model_id: str, region: str) -> Optional[int]:
                 logger.info("Probed Bedrock context window for %s: %s tokens", model_id, f"{limit:,}")
                 return limit
             # Opaque server error / auth / throttle at this tier — try the next.
-
     logger.debug("Bedrock context probe for %s returned no parseable limit: %s", model_id, last_error[:200])
     return None
 
