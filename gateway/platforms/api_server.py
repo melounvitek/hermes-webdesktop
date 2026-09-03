@@ -1,43 +1,11 @@
-"""
-OpenAI-compatible API server platform adapter.
+"""OpenAI-compatible API server platform adapter (aiohttp).
 
-Exposes an HTTP server with endpoints:
-- POST /v1/chat/completions        — OpenAI Chat Completions format (stateless; opt-in session continuity via X-Hermes-Session-Id header; opt-in long-term memory scoping via X-Hermes-Session-Key header)
-- POST /v1/responses               — OpenAI Responses API format (stateful via previous_response_id; X-Hermes-Session-Key supported)
-- GET  /v1/responses/{response_id} — Retrieve a stored response
-- DELETE /v1/responses/{response_id} — Delete a stored response
-- GET  /v1/models                  — lists hermes-agent and any configured model_routes aliases
-- GET  /v1/capabilities            — machine-readable API capabilities for external UIs
-- GET  /api/sessions               — list client-visible Hermes sessions
-- POST /api/sessions               — create an empty Hermes session
-- GET/PATCH/DELETE /api/sessions/{session_id} — read/update/delete a session
-- GET  /api/sessions/{session_id}/messages — read session message history
-- POST /api/sessions/{session_id}/fork — branch a session using SessionDB lineage
-- POST /api/sessions/{session_id}/chat[/stream] — chat with a persisted session
-- POST /v1/runs                    — start a run, returns run_id immediately (202)
-- GET  /v1/runs/{run_id}           — retrieve current run status
-- GET  /v1/runs/{run_id}/events    — SSE stream of structured lifecycle events
-- POST /v1/runs/{run_id}/approval — resolve a pending run approval
-- POST /v1/runs/{run_id}/steer      — inject guidance into a running agent
-- POST /v1/runs/{run_id}/stop       — interrupt a running agent
-- GET  /health                     — health check
-- GET  /health/detailed            — rich status for cross-container dashboard probing
-
-Any OpenAI-compatible frontend (Open WebUI, LobeChat, LibreChat,
-AnythingLLM, NextChat, ChatBox, etc.) can connect to hermes-agent
-through this adapter by pointing at http://localhost:8642/v1 and
-authenticating with API_SERVER_KEY.
-
-When ``gateway.multiplex_profiles`` is on, the default profile owns this
-listener and secondary profiles are reached via a URL prefix — same contract
-as the webhook adapter:
-
-    GET  /p/<profile>/v1/models
-    POST /p/<profile>/v1/chat/completions
-    ...
-
-Requires:
-- aiohttp (already available in the gateway)
+Serves /v1/chat/completions, /v1/responses, /v1/models, /v1/capabilities, the
+/api/sessions resource API, /v1/runs, /api/jobs and /health* (full table:
+``APIServerAdapter._http_route_table``). Any OpenAI-compatible frontend can
+connect at http://localhost:8642/v1 with API_SERVER_KEY. Under
+``gateway.multiplex_profiles`` secondary profiles are reached via
+``/p/<profile>/...`` (same contract as the webhook adapter).
 """
 
 import asyncio
@@ -70,11 +38,8 @@ _PROFILE_REJECTED = object()
 def _prefix_names_served_profile(profile: str) -> bool:
     """True when a /p/<profile>/ prefix names the profile this gateway serves.
 
-    Single-profile (non-multiplex) gateways historically ignored the prefix
-    and answered every /p/<x>/ request from their own profile's config —
-    which silently served the gateway owner's toolsets/capabilities under
-    another profile's URL (#91583 defect 2). Only a self-referential prefix
-    may fall through; anything else must be rejected. Fail closed.
+    Single-profile gateways must not answer /p/<x>/ from their own config (that
+    served the owner's toolsets under another profile's URL). Fail closed.
     """
     try:
         from hermes_cli.profiles import profile_matches_home
@@ -92,11 +57,8 @@ _api_request_browser_control_principal: ContextVar[str] = ContextVar(
 _api_request_browser_control_transport_family: ContextVar[str] = ContextVar(
     "api_server_browser_control_transport_family", default="")
 
-#: Minimal scope shape accepted by :func:`gateway.browser_control_artifacts
-#: .artifact_scope_key`: principal + session + transport family.  The API
-#: server authenticates the caller itself, so the facade carries only the
-#: server-derived principal and the loopback/remote family.
 class _ArtifactScopeFacade:
+    """Minimal scope for ``artifact_scope_key``: server-derived principal + session + transport family."""
     __slots__ = ("principal_id", "session_id", "transport_family")
 
     def __init__(self, principal_id: str, *, session_id: str = "", transport_family: str = ""):
@@ -108,9 +70,7 @@ class _ArtifactScopeFacade:
         return f"_ArtifactScopeFacade(principal={self.principal_id!r})"
 
 
-#: Browser-extension control protocol version advertised in capabilities and
-#: echoed in registration responses. Strict validation is centralized in the
-#: broker's ``browser_control_protocol_supported`` helper.
+# Advertised in capabilities and echoed in registration responses; validated by the broker.
 _BROWSER_CONTROL_PROTOCOL_VERSION = 1
 
 # /v1/capabilities static feature flags (order is part of the JSON shape).
@@ -153,11 +113,10 @@ _BROWSER_CONTROL_WS_PROTOCOL = "hermes-browser-control-v1"
 _BROWSER_CONTROL_TICKET_PROTOCOL_PREFIX = "hermes-browser-control-ticket."
 
 
-def _approval_event_choices(
-    *, smart_denied: bool, allow_session: bool, allow_permanent: bool) -> list[str]:
+def _approval_event_choices(*, smart_denied: bool, allow_session: bool, allow_permanent: bool) -> list[str]:
     if smart_denied or not allow_session:
         return ["once", "deny"]
-    return(["once", "session", "always", "deny"] if allow_permanent else["once", "session", "deny"])
+    return ["once", "session", "always", "deny"] if allow_permanent else ["once", "session", "deny"]
 
 
 try:
@@ -243,15 +202,8 @@ def _browser_controller_ws_sender(ws, loop, *, wait_timeout: float = 10.0):
 
 
 def _hermes_version() -> str:
-    """Return the canonical Hermes Agent version string.
-
-    ``hermes_cli.__version__`` is the runtime source of truth used by the CLI,
-    dashboard, portal tags, and release script. Prefer it over installed
-    distribution metadata because editable/source checkouts can retain stale
-    ``hermes_agent-*.dist-info`` after a source update until the environment is
-    reinstalled. Never raises — a version probe must not be able to break the
-    health endpoint.
-    """
+    """Canonical Hermes version: ``hermes_cli.__version__`` (dist-info can be stale on
+    source checkouts), then distribution metadata, then "dev". Never raises."""
     try:
         from hermes_cli import __version__
         return __version__
@@ -276,12 +228,8 @@ RESPONSES_AUTO_TRUNCATION_HISTORY_LIMIT = 100
 
 
 class ThreadSafeAsyncQueue(asyncio.Queue):
-    """An ``asyncio.Queue`` that a non-loop thread can push into safely.
-
-    ``run_conversation`` runs on an executor thread, so its stream callbacks
-    call ``put_threadsafe``; the SSE consumer does a plain ``await get()`` and
-    is woken by ``call_soon_threadsafe`` — no executor hop, no poll latency.
-    """
+    """``asyncio.Queue`` a non-loop thread (run_conversation's executor) can push into via
+    ``put_threadsafe``; the SSE consumer's ``await get()`` is woken by ``call_soon_threadsafe``."""
 
     def put_threadsafe(self, item, *, loop: asyncio.AbstractEventLoop = None) -> None:
         (loop or self._loop_ref).call_soon_threadsafe(self.put_nowait, item)
@@ -294,12 +242,8 @@ class ThreadSafeAsyncQueue(asyncio.Queue):
 
 
 def _sse_frame(data: Any, *, event: str = None, ensure_ascii: bool = True) -> bytes:
-    """Encode one SSE frame: optional ``event:`` line, then ``data: <json>\n\n``.
-
-    Single source of truth for every SSE writer (chat completions, Responses,
-    /v1/runs). ``ensure_ascii=True`` is byte-identical to bare ``json.dumps``;
-    writers that must keep raw non-ASCII on the wire pass ``ensure_ascii=False``.
-    """
+    """Encode one SSE frame (``event:`` line if given, then ``data: <json>\n\n``) for every
+    SSE writer. ``ensure_ascii=False`` keeps raw non-ASCII on the wire."""
     prefix = f"event: {event}\n" if event else ""
     return f"{prefix}data: {json.dumps(data, ensure_ascii=ensure_ascii)}\n\n".encode()
 
@@ -317,14 +261,8 @@ _FALSE_REQUEST_BOOL_STRINGS = frozenset({"0", "false", "no", "off"})
 
 
 def _coerce_request_bool(value: Any, default: bool = False) -> bool:
-    """Normalize boolean-like API payload values.
-
-    External clients should send real JSON booleans, but some OpenAI-compatible
-    frontends and middleware serialize flags like ``stream`` as strings.  Using
-    Python truthiness on those values misroutes requests because ``"false"`` is
-    still truthy.  Treat only explicit bool-ish scalars as booleans; everything
-    else falls back to the caller's default.
-    """
+    """Normalize boolean-like payload values; only explicit bool-ish scalars count (some
+    frontends send ``"false"`` for ``stream``, which is truthy), else ``default``."""
     if isinstance(value, bool):
         return value
     if value is None:
@@ -347,9 +285,7 @@ _REQUEST_OPTION_MISSING = object()
 _REASONING_EFFORTS = frozenset(
     {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"})
 _RUNTIME_AGENT_OVERRIDE_KEYS = (
-    "api_key", "base_url", "provider", "api_mode", "command", "args", "credential_pool",
-    "max_tokens",
-)
+    "api_key", "base_url", "provider", "api_mode", "command", "args", "credential_pool", "max_tokens")
 
 
 def _clean_request_string(value: Any) -> Optional[str]:
@@ -361,13 +297,8 @@ def _clean_request_string(value: Any) -> Optional[str]:
 
 
 def _request_reasoning_config(model_options: Any) -> Optional[Dict[str, Any]]:
-    """Translate browser/API model_options into AIAgent reasoning_config.
-
-    The browser extension sends both a structured ``reasoning`` object and a
-    compatibility ``reasoning_effort`` scalar.  Keep this parser permissive so
-    older clients can send either shape, but ignore unknown effort values rather
-    than raising on a chat request.
-    """
+    """Translate model_options (structured ``reasoning`` or legacy ``reasoning_effort``) into
+    AIAgent reasoning_config; unknown effort values are ignored, never raised."""
     if not isinstance(model_options, dict):
         return None
     reasoning = model_options.get("reasoning")
@@ -418,12 +349,8 @@ def _apply_runtime_agent_overrides(
 
 
 def _resolve_request_runtime_agent_kwargs(provider: str, target_model: Optional[str] = None) -> Dict[str, Any]:
-    """Resolve runtime kwargs for a one-request provider override.
-
-    This mirrors gateway.run._resolve_runtime_agent_kwargs(), but accepts an
-    explicit provider/model so an API caller can use the same authenticated
-    provider catalog as the TUI without mutating config.yaml.
-    """
+    """gateway.run._resolve_runtime_agent_kwargs() for an explicit provider/model, so an API
+    caller uses the same authenticated provider catalog without mutating config.yaml."""
     from hermes_cli.runtime_provider import resolve_runtime_provider, format_runtime_provider_error, _get_model_config
     try:
         runtime = resolve_runtime_provider(requested=provider, target_model=target_model)
@@ -461,20 +388,11 @@ def _request_agent_overrides(
 ) -> Dict[str, Any]:
     """Extract per-request model/provider/options for _run_agent.
 
-    ``/v1/models`` advertises a stable virtual model (usually ``hermes-agent``)
-    for OpenAI-compatible clients.  Treat that alias as "use the gateway
-    default"; real model picker selections from the browser extension send the
-    raw provider model id plus a provider slug and should override this turn.
-
-    ``allow_bare_model`` controls whether a ``model`` value WITHOUT an
-    accompanying ``provider`` is honored.  Generic OpenAI clients routinely
-    hardcode model names ("gpt-4o", ...), and existing deployments rely on
-    those falling back to the gateway default on the OpenAI-compatible
-    surfaces — so those handlers pass the opt-in
-    ``direct_model_requests`` config value here, while Hermes-native
-    endpoints (session chat, /v1/runs) always allow it.  A request that
-    sends an explicit ``provider`` is unambiguously Hermes-aware and is
-    always honored.
+    The advertised virtual model (``hermes-agent``) means "gateway default". A bare
+    ``model`` without ``provider`` is honored only when ``allow_bare_model`` (generic
+    OpenAI clients hardcode "gpt-4o" and rely on the default; OpenAI-compatible
+    handlers pass the ``direct_model_requests`` opt-in, Hermes-native endpoints
+    always allow it). An explicit ``provider`` is always honored.
     """
     if not isinstance(body, dict):
         return {}
@@ -492,12 +410,8 @@ def _request_agent_overrides(
 
 
 def _is_compressed_summary_message(message: Any) -> bool:
-    """Recognize every model-side compaction carrier shape.
-
-    SessionDB does not persist the in-process metadata marker, so client
-    projections must share the compressor's content classifier rather than a
-    prefix-only approximation that misses merge-into-tail carriers.
-    """
+    """Recognize every compaction carrier shape via the compressor's own classifier
+    (SessionDB drops the in-process marker; a prefix scan misses merge-into-tail carriers)."""
     if not isinstance(message, dict):
         return False
     from agent.context_compressor import is_compaction_summary_message
@@ -505,14 +419,8 @@ def _is_compressed_summary_message(message: Any) -> bool:
 
 
 def _project_client_message(message: Dict[str, Any]) -> Dict[str, Any]:
-    """Remove model-only compaction scaffolding from a client message.
-
-    Standalone handoffs have no transcript content and remain as hidden empty
-    rows so clients can reconcile stable message identities. Merged handoffs
-    preserve only the real prior-tail content that precedes the internal
-    summary delimiter. Tool calls are dropped from both shapes because a
-    carrier's inherited calls are historical context, not live client output.
-    """
+    """Strip compaction scaffolding: standalone handoffs become hidden empty rows (stable
+    ids), merged handoffs keep only the real prior-tail content; inherited tool calls dropped."""
     from agent.compaction_display import (
         _COMPACTION_INTERNAL_FIELDS, project_compaction_message_for_display)
     projected = project_compaction_message_for_display(message)
@@ -529,19 +437,11 @@ def _auto_truncate_response_history(
     conversation_history: List[Dict[str, Any]],
     *,
     limit: int = RESPONSES_AUTO_TRUNCATION_HISTORY_LIMIT) -> List[Dict[str, Any]]:
-    """Keep recent Responses history without dropping the compaction handoff.
-
-    Compaction summaries are preserved wherever they sit in the history —
-    the gateway /compress path can leave them after a retained system head
-    (see ``context_compressor`` force-user-leading handling), so a
-    leading-block-only scan would silently drop them.
-    """
+    """Keep the most recent ``limit`` messages, always preserving compaction summaries
+    wherever they sit (the /compress path can leave them after a retained system head)."""
     if limit <= 0 or len(conversation_history) <= limit:
         return conversation_history
-    summary_indices = [
-        index
-        for index, message in enumerate(conversation_history)
-        if _is_compressed_summary_message(message)]
+    summary_indices = [i for i, m in enumerate(conversation_history) if _is_compressed_summary_message(m)]
     if not summary_indices:
         return conversation_history[-limit:]
     kept_indices = set(summary_indices[:limit])
@@ -558,177 +458,138 @@ def _auto_truncate_response_history(
     return [conversation_history[index] for index in sorted(kept_indices)]
 
 
+def _cap_text(text: str) -> str:
+    return text[:MAX_NORMALIZED_TEXT_LENGTH] if len(text) > MAX_NORMALIZED_TEXT_LENGTH else text
+
+
+def _cap_list(items: list) -> list:
+    return items[:MAX_CONTENT_LIST_SIZE] if len(items) > MAX_CONTENT_LIST_SIZE else items
+
+
 def _normalize_chat_content(
     content: Any, *, _max_depth: int = 10, _depth: int = 0) -> str:
-    """Normalize OpenAI chat message content into a plain text string.
+    """Flatten OpenAI chat content (string or typed-part array) into one plain string.
 
-    Some clients (Open WebUI, LobeChat, etc.) send content as an array of
-    typed parts instead of a plain string::
-
-        [{"type": "text", "text": "hello"}, {"type": "input_text", "text": "..."}]
-
-    This function flattens those into a single string so the agent pipeline
-    (which expects strings) doesn't choke.
-
-    Defensive limits prevent abuse: recursion depth, list size, and output
-    length are all bounded.
+    Non-text parts (image_url, ...) are skipped. Recursion depth, list size and
+    output length are bounded.
     """
-    if _depth > _max_depth:
-        return ""
-    if content is None:
+    if _depth > _max_depth or content is None:
         return ""
     if isinstance(content, str):
-        return content[:MAX_NORMALIZED_TEXT_LENGTH] if len(content) > MAX_NORMALIZED_TEXT_LENGTH else content
+        return _cap_text(content)
     if isinstance(content, list):
         parts: List[str] = []
         total_len = 0
-        items = content[:MAX_CONTENT_LIST_SIZE] if len(content) > MAX_CONTENT_LIST_SIZE else content
-        for item in items:
+        for item in _cap_list(content):
+            part = ""
             if isinstance(item, str):
-                if item:
-                    part = item[:MAX_NORMALIZED_TEXT_LENGTH]
-                    parts.append(part)
-                    total_len += len(part)
+                part = item
             elif isinstance(item, dict):
-                item_type = str(item.get("type") or "").strip().lower()
-                if item_type in {"text", "input_text", "output_text"}:
+                if str(item.get("type") or "").strip().lower() in _TEXT_PART_TYPES:
                     text = item.get("text", "")
                     if text:
                         try:
-                            part = str(text)[:MAX_NORMALIZED_TEXT_LENGTH]
-                            parts.append(part)
-                            total_len += len(part)
+                            part = str(text)
                         except Exception:
                             pass
-                # Silently skip image_url / other non-text parts
             elif isinstance(item, list):
-                nested = _normalize_chat_content(item, _max_depth=_max_depth, _depth=_depth + 1)
-                if nested:
-                    parts.append(nested)
-                    total_len += len(nested)
-            # Check accumulated size
+                part = _normalize_chat_content(item, _max_depth=_max_depth, _depth=_depth + 1)
+            if part:
+                part = _cap_text(part)
+                parts.append(part)
+                total_len += len(part)
             if total_len >= MAX_NORMALIZED_TEXT_LENGTH:
                 break
-        result = "\n".join(parts)
-        return result[:MAX_NORMALIZED_TEXT_LENGTH] if len(result) > MAX_NORMALIZED_TEXT_LENGTH else result
-
-    # Fallback for unexpected types (int, float, bool, etc.)
+        return _cap_text("\n".join(parts))
     try:
-        result = str(content)
-        return result[:MAX_NORMALIZED_TEXT_LENGTH] if len(result) > MAX_NORMALIZED_TEXT_LENGTH else result
+        return _cap_text(str(content))
     except Exception:
         return ""
 
 
-# Content part type aliases used by the OpenAI Chat Completions and Responses
-# APIs.  We accept both spellings on input and emit a single canonical internal
-# shape (``{"type": "text", ...}`` / ``{"type": "image_url", ...}``) that the
-# rest of the agent pipeline already understands.
+# Chat Completions / Responses part-type spellings; emitted shape is always the canonical
+# ``{"type": "text", ...}`` / ``{"type": "image_url", ...}`` the agent pipeline understands.
 _TEXT_PART_TYPES = frozenset({"text", "input_text", "output_text"})
 _IMAGE_PART_TYPES = frozenset({"image_url", "input_image"})
 _FILE_PART_TYPES = frozenset({"file", "input_file"})
 
 
+def _normalize_image_part(part: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate one image part (Responses top-level ``image_url`` string or Chat Completions
+    ``{"url", "detail"}`` dict) into the canonical vision shape; raises ValueError."""
+    detail = part.get("detail")
+    image_ref = part.get("image_url")
+    if isinstance(image_ref, dict):
+        url_value = image_ref.get("url")
+        detail = image_ref.get("detail", detail)
+    else:
+        url_value = image_ref
+    if not isinstance(url_value, str) or not url_value.strip():
+        raise ValueError("invalid_image_url:Image parts must include a non-empty image URL.")
+    url_value = url_value.strip()
+    lowered = url_value.lower()
+    if lowered.startswith("data:"):
+        if not lowered.startswith("data:image/") or "," not in url_value:
+            raise ValueError(
+                "unsupported_content_type:Only image data URLs are supported. "
+                "Non-image data payloads are not supported.")
+    elif not (lowered.startswith("http://") or lowered.startswith("https://")):
+        raise ValueError(
+            "invalid_image_url:Image inputs must use http(s) URLs or data:image/... URLs.")
+    image_part: Dict[str, Any] = {"type": "image_url", "image_url": {"url": url_value}}
+    if detail is not None:
+        if not isinstance(detail, str) or not detail.strip():
+            raise ValueError("invalid_content_part:Image detail must be a non-empty string when provided.")
+        image_part["image_url"]["detail"] = detail.strip()
+    return image_part
+
+
 def _normalize_multimodal_content(content: Any) -> Any:
-    """Validate and normalize multimodal content for the API server.
+    """Validate multimodal content: a plain string when text-only, else a list of canonical
+    ``text``/``image_url`` parts (native OpenAI vision format; Anthropic conversion happens
+    downstream).
 
-    Returns a plain string when the content is text-only, or a list of
-    ``{"type": "text"|"image_url", ...}`` parts when images are present.
-    The output shape is the native OpenAI Chat Completions vision format,
-    which the agent pipeline accepts verbatim (OpenAI-wire providers) or
-    converts (``_preprocess_anthropic_content`` for Anthropic).
-
-    Raises ``ValueError`` with an OpenAI-style code on invalid input:
-      * ``unsupported_content_type`` — file/input_file/file_id parts, or
-        non-image ``data:`` URLs.
-      * ``invalid_image_url`` — missing URL or unsupported scheme.
-      * ``invalid_content_part`` — malformed text/image objects.
-
-    Callers translate the ValueError into a 400 response.
+    Raises ``ValueError("<code>:<message>")`` — codes ``unsupported_content_type`` (file
+    parts, non-image data URLs, unknown part types), ``invalid_image_url``,
+    ``invalid_content_part``. Callers translate it into a 400.
     """
-    # Scalar passthrough mirrors ``_normalize_chat_content``.
     if content is None:
         return ""
     if isinstance(content, str):
-        return content[:MAX_NORMALIZED_TEXT_LENGTH] if len(content) > MAX_NORMALIZED_TEXT_LENGTH else content
+        return _cap_text(content)
     if not isinstance(content, list):
-        # Mirror the legacy text-normalizer's fallback so callers that
-        # pre-existed image support still get a string back.
         return _normalize_chat_content(content)
-    items = content[:MAX_CONTENT_LIST_SIZE] if len(content) > MAX_CONTENT_LIST_SIZE else content
     normalized_parts: List[Dict[str, Any]] = []
-    text_accum_len = 0
-    for part in items:
+    for part in _cap_list(content):
         if isinstance(part, str):
             if part:
-                trimmed = part[:MAX_NORMALIZED_TEXT_LENGTH]
-                normalized_parts.append({"type": "text", "text": trimmed})
-                text_accum_len += len(trimmed)
+                normalized_parts.append({"type": "text", "text": _cap_text(part)})
             continue
         if not isinstance(part, dict):
-            # Ignore unknown scalars for forward compatibility with future
-            # Responses API additions (e.g. ``refusal``).  The same policy
-            # the text normalizer applies.
-            continue
+            continue  # unknown scalars are ignored for forward compatibility (e.g. ``refusal``)
         raw_type = part.get("type")
         part_type = str(raw_type or "").strip().lower()
         if part_type in _TEXT_PART_TYPES:
             text = part.get("text")
             if text is None:
                 continue
-            if not isinstance(text, str):
-                text = str(text)
+            text = text if isinstance(text, str) else str(text)
             if text:
-                trimmed = text[:MAX_NORMALIZED_TEXT_LENGTH]
-                normalized_parts.append({"type": "text", "text": trimmed})
-                text_accum_len += len(trimmed)
-            continue
-        if part_type in _IMAGE_PART_TYPES:
-            detail = part.get("detail")
-            image_ref = part.get("image_url")
-            # OpenAI Responses sends ``input_image`` with a top-level
-            # ``image_url`` string; Chat Completions sends ``image_url`` as
-            # ``{"url": "...", "detail": "..."}``.  Support both.
-            if isinstance(image_ref, dict):
-                url_value = image_ref.get("url")
-                detail = image_ref.get("detail", detail)
-            else:
-                url_value = image_ref
-            if not isinstance(url_value, str) or not url_value.strip():
-                raise ValueError("invalid_image_url:Image parts must include a non-empty image URL.")
-            url_value = url_value.strip()
-            lowered = url_value.lower()
-            if lowered.startswith("data:"):
-                if not lowered.startswith("data:image/") or "," not in url_value:
-                    raise ValueError(
-                        "unsupported_content_type:Only image data URLs are supported. "
-                        "Non-image data payloads are not supported.")
-            elif not (lowered.startswith("http://") or lowered.startswith("https://")):
-                raise ValueError(
-                    "invalid_image_url:Image inputs must use http(s) URLs or data:image/... URLs.")
-            image_part: Dict[str, Any] = {"type": "image_url", "image_url": {"url": url_value}}
-            if detail is not None:
-                if not isinstance(detail, str) or not detail.strip():
-                    raise ValueError("invalid_content_part:Image detail must be a non-empty string when provided.")
-                image_part["image_url"]["detail"] = detail.strip()
-            normalized_parts.append(image_part)
-            continue
-        if part_type in _FILE_PART_TYPES:
+                normalized_parts.append({"type": "text", "text": _cap_text(text)})
+        elif part_type in _IMAGE_PART_TYPES:
+            normalized_parts.append(_normalize_image_part(part))
+        elif part_type in _FILE_PART_TYPES:
             raise ValueError(
                 "unsupported_content_type:Inline image inputs are supported, "
                 "but uploaded files and document inputs are not supported on this endpoint.")
-
-        # Unknown part type — reject explicitly so clients get a clear error
-        # instead of a silently dropped turn.
-        raise ValueError(
-            f"unsupported_content_type:Unsupported content part type {raw_type!r}. "
-            "Only text and image_url/input_image parts are supported.")
+        else:
+            raise ValueError(
+                f"unsupported_content_type:Unsupported content part type {raw_type!r}. "
+                "Only text and image_url/input_image parts are supported.")
     if not normalized_parts:
         return ""
-
-    # Text-only: collapse to a plain string so downstream logging/trajectory
-    # code sees the native shape and prompt caching on text-only turns is
-    # unaffected.
+    # Text-only collapses to a plain string so trajectory logging and prompt caching see
+    # the native shape.
     if all(p.get("type") == "text" for p in normalized_parts):
         return "\n".join(p["text"] for p in normalized_parts if p.get("text"))
     return normalized_parts
@@ -760,14 +621,9 @@ def _multimodal_validation_error(exc: ValueError, *, param: str) -> "web.Respons
 
 def _reap_disconnected_agent_processes(
     agent: Any, *, source: str = "api_server_sse_disconnect") -> None:
-    """Reap background processes an abandoned API-server turn created.
-
-    API-server turns bypass ``TurnRunner``, so they need their own trigger for
-    the gateway's baseline-diff reap. Fire-and-forget on a daemon thread.
-    Epoch-gated: concurrent runs may share a task_id (conversation scope), so a
-    reaper holding a stale epoch declines rather than killing a newer run's
-    process; the newer run's own baseline covers its cleanup.
-    """
+    """Reap background processes an abandoned API-server turn created (these turns bypass
+    ``TurnRunner``). Daemon-thread fire-and-forget; epoch-gated so a stale reaper never kills
+    a newer run's process on a shared task_id."""
     process_task_id = getattr(agent, "_gateway_turn_process_task_id", "")
     process_baseline = getattr(agent, "_gateway_turn_process_baseline", None)
     if not process_task_id or process_baseline is None:
@@ -798,12 +654,8 @@ _TURN_PROCESS_EPOCH_COUNTER = itertools.count(1)
 
 
 def _publish_turn_process_ownership(agent: Any, task_id: str) -> None:
-    """Snapshot the process baseline and claim the task_id's current epoch.
-
-    Single place all API-server agent lifecycles (chat/responses ``_run_agent``
-    and ``/v1/runs``) record turn ownership, so the marker attribute names and
-    epoch bookkeeping cannot drift between surfaces.
-    """
+    """Snapshot the process baseline and claim the task_id's epoch — the single place every
+    API-server agent lifecycle records turn ownership (marker names cannot drift)."""
     from tools.process_registry import process_registry
     with _TURN_PROCESS_EPOCH_LOCK:
         epoch = next(_TURN_PROCESS_EPOCH_COUNTER)
@@ -814,12 +666,8 @@ def _publish_turn_process_ownership(agent: Any, task_id: str) -> None:
 
 
 def _clear_turn_process_ownership(agent: Any) -> None:
-    """Clear turn ownership the moment the turn finishes (success or crash).
-
-    A disconnect/cancel landing after this point must not reap background
-    work the turn deliberately left running — mirrors the same race-window
-    guard in ``gateway/run.py``'s ``_run_sync_with_timeout_lifecycle``.
-    """
+    """Clear turn ownership as soon as the turn ends: a later disconnect/cancel must not reap
+    background work the turn deliberately left running (same guard as gateway/run.py)."""
     task_id = getattr(agent, "_gateway_turn_process_task_id", "")
     epoch = getattr(agent, "_gateway_turn_process_epoch", None)
     if task_id and epoch is not None:
@@ -864,11 +712,7 @@ async def _abandon_agent_task(
     agent_ref, agent_task, reason: str, *,
     reap_source: str = "api_server_sse_disconnect", await_cancel: bool = True) -> None:
     """Interrupt + reap an abandoned SSE agent run, then cancel its task wrapper.
-
-    The run will never be resumed, so its background processes are reaped
-    (epoch-gated; no-op once the turn cleared its markers). ``await_cancel``
-    is False on the CancelledError path, which must not await inside the handler.
-    """
+    ``await_cancel=False`` on the CancelledError path, which must not await in the handler."""
     agent = agent_ref[0] if agent_ref else None
     if agent is not None:
         try:
@@ -891,16 +735,8 @@ def check_api_server_requirements() -> bool:
 
 
 class ResponseStore:
-    """
-    SQLite-backed LRU store for Responses API state.
-
-    Each stored response includes the full internal conversation history
-    (with tool calls and results) so it can be reconstructed on subsequent
-    requests via previous_response_id.
-
-    Persists across gateway restarts.  Falls back to in-memory SQLite
-    if the on-disk path is unavailable.
-    """
+    """SQLite-backed LRU store for Responses API state (full conversation history per response
+    for ``previous_response_id`` chaining). Persists across restarts; in-memory fallback."""
 
     def __init__(self, max_size: int = MAX_STORED_RESPONSES, db_path: str = None):
         self._max_size = max_size
@@ -920,18 +756,10 @@ class ResponseStore:
         from hermes_state import apply_wal_with_fallback
         apply_wal_with_fallback(self._conn, db_label="response_store.db")
         self._conn.execute(
-            """CREATE TABLE IF NOT EXISTS responses (
-                response_id TEXT PRIMARY KEY,
-                data TEXT NOT NULL,
-                accessed_at REAL NOT NULL
-            )"""
-        )
+            "CREATE TABLE IF NOT EXISTS responses ("
+            "response_id TEXT PRIMARY KEY, data TEXT NOT NULL, accessed_at REAL NOT NULL)")
         self._conn.execute(
-            """CREATE TABLE IF NOT EXISTS conversations (
-                name TEXT PRIMARY KEY,
-                response_id TEXT NOT NULL
-            )"""
-        )
+            "CREATE TABLE IF NOT EXISTS conversations (name TEXT PRIMARY KEY, response_id TEXT NOT NULL)")
         self._conn.commit()
         # Conversation history lives here: owner-only perms, once at init (not per commit).
         self._tighten_file_permissions()
@@ -940,15 +768,12 @@ class ResponseStore:
         """Force owner-only permissions on the DB and SQLite sidecars."""
         if not self._db_path:
             return
-        for candidate in (
-            Path(self._db_path), Path(f"{self._db_path}-wal"), Path(f"{self._db_path}-shm")):
+        for candidate in (Path(self._db_path), Path(f"{self._db_path}-wal"), Path(f"{self._db_path}-shm")):
             try:
                 if candidate.exists():
                     candidate.chmod(0o600)
             except OSError:
-                logger.debug(
-                    "Failed to restrict response store permissions for %s", candidate, exc_info=True
-                )
+                logger.debug("Failed to restrict response store permissions for %s", candidate, exc_info=True)
 
     def get(self, response_id: str) -> Optional[Dict[str, Any]]:
         """Retrieve a stored response by ID (updates access time for LRU)."""
@@ -963,8 +788,7 @@ class ResponseStore:
         try:
             return json.loads(row[0])
         except (json.JSONDecodeError, TypeError):
-            logger.warning(
-                "Corrupted JSON in response store for id=%s, evicting entry", response_id)
+            logger.warning("Corrupted JSON in response store for id=%s, evicting entry", response_id)
             self._conn.execute("DELETE FROM responses WHERE response_id = ?", (response_id,))
             self._conn.commit()
             return None
@@ -974,10 +798,8 @@ class ResponseStore:
         self._conn.execute(
             "INSERT OR REPLACE INTO responses (response_id, data, accessed_at) VALUES (?, ?, ?)",
             (response_id, json.dumps(data, default=str), time.time()))
-        # Evict oldest entries beyond max_size
         count = self._conn.execute("SELECT COUNT(*) FROM responses").fetchone()[0]
         if count > self._max_size:
-            # Collect IDs that will be evicted
             evict_ids = [
                 row[0]
                 for row in self._conn.execute(
@@ -985,17 +807,13 @@ class ResponseStore:
                     (count - self._max_size,)).fetchall()]
             if evict_ids:
                 placeholders = ",".join("?" for _ in evict_ids)
-                # Clear conversation mappings pointing to evicted responses
-                self._conn.execute(
-                    f"DELETE FROM conversations WHERE response_id IN ({placeholders})", evict_ids)
-                # Delete evicted responses
-                self._conn.execute(
-                    f"DELETE FROM responses WHERE response_id IN ({placeholders})", evict_ids)
+                # Conversation mappings pointing at evicted responses go too.
+                self._conn.execute(f"DELETE FROM conversations WHERE response_id IN ({placeholders})", evict_ids)
+                self._conn.execute(f"DELETE FROM responses WHERE response_id IN ({placeholders})", evict_ids)
         self._conn.commit()
 
     def delete(self, response_id: str) -> bool:
-        """Remove a response from the store. Returns True if found and deleted."""
-        # Clear conversation mappings pointing to this response
+        """Remove a response (and conversation mappings to it). True if found and deleted."""
         self._conn.execute("DELETE FROM conversations WHERE response_id = ?", (response_id,))
         cursor = self._conn.execute("DELETE FROM responses WHERE response_id = ?", (response_id,))
         self._conn.commit()
@@ -1003,15 +821,12 @@ class ResponseStore:
 
     def get_conversation(self, name: str) -> Optional[str]:
         """Get the latest response_id for a conversation name."""
-        row = self._conn.execute(
-            "SELECT response_id FROM conversations WHERE name = ?", (name,)).fetchone()
+        row = self._conn.execute("SELECT response_id FROM conversations WHERE name = ?", (name,)).fetchone()
         return row[0] if row else None
 
     def set_conversation(self, name: str, response_id: str) -> None:
         """Map a conversation name to its latest response_id."""
-        self._conn.execute(
-            "INSERT OR REPLACE INTO conversations (name, response_id) VALUES (?, ?)",
-            (name, response_id))
+        self._conn.execute("INSERT OR REPLACE INTO conversations (name, response_id) VALUES (?, ?)", (name, response_id))
         self._conn.commit()
 
     def close(self) -> None:
@@ -1025,10 +840,6 @@ class ResponseStore:
         row = self._conn.execute("SELECT COUNT(*) FROM responses").fetchone()
         return row[0] if row else 0
 
-
-# ---------------------------------------------------------------------------
-# CORS middleware
-# ---------------------------------------------------------------------------
 
 _CORS_HEADERS = {
     "Access-Control-Allow-Methods": "GET, POST, DELETE, OPTIONS",
@@ -1056,26 +867,17 @@ if AIOHTTP_AVAILABLE:
 else:
     cors_middleware = None  # type: ignore[assignment]
 
-_MEDIA_IMG_EXT = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
-_MEDIA_MIME = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-    ".bmp": "image/bmp"}
+_MEDIA_MIME = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+               ".webp": "image/webp", ".bmp": "image/bmp"}
+_MEDIA_IMG_EXT = set(_MEDIA_MIME)
 _MEDIA_DATA_URL_MAX_BYTES = 5 * 1024 * 1024  # skip images larger than 5MB
 
 
 def _resolve_media_to_data_urls(text: str) -> str:
-    """Replace ``MEDIA:<path>`` image tags with inline base64 data URLs.
-
-    Remote frontends can't read server paths. Small local images become
-    markdown data URLs; non-image/unreadable paths are left untouched.
-    Security: uses the shared ``MEDIA_TAG_CLEANUP_RE`` anchor +
-    ``validate_media_delivery_path`` denylist — a bare-token match would let a
-    traversal path in the model's reply exfiltrate any readable image file.
-    """
+    """Replace ``MEDIA:<path>`` tags with inline base64 data URLs (remote frontends can't read
+    server paths); non-image/unreadable paths stay untouched. Security: the shared
+    ``MEDIA_TAG_CLEANUP_RE`` anchor + ``validate_media_delivery_path`` denylist — a bare-token
+    match would let a traversal path in the reply exfiltrate any readable image."""
     if not text or "MEDIA:" not in text:
         return text
     import base64
@@ -1143,12 +945,9 @@ _api_agent_request_reservation: ContextVar[Optional[dict[str, bool]]] = ContextV
 def _admit_api_agent_request(handler):
     """Reserve an authenticated API turn before its handler first awaits.
 
-    Gateway shutdown and aiohttp requests share an event loop. Keeping the
-    drain check and reservation in one non-awaiting block prevents a request
-    admitted immediately before shutdown from becoming invisible while it is
-    still parsing its body or resolving session state. The mutable reservation
-    is intentionally shared with child tasks so agent/task bookkeeping releases
-    this one slot exactly once.
+    Drain check + reservation happen in one non-awaiting block so a request admitted
+    just before shutdown can't become invisible while parsing its body. The mutable
+    reservation is shared with child tasks so the slot is released exactly once.
     """
     @wraps(handler)
     async def _wrapped(self, request, *args, **kwargs):
@@ -1183,11 +982,8 @@ def _release_pending_api_work(adapter, reservation: dict[str, bool]) -> None:
 
 @contextmanager
 def _reserve_pending_api_work(adapter):
-    """Keep externally-triggered background work visible across awaits.
-
-    A handler can detach the reservation to an asyncio task; its done callback
-    then owns release so shutdown cannot miss the handoff to background work.
-    """
+    """Keep externally-triggered background work visible across awaits; a handler may detach
+    the reservation to a task whose done callback then owns release."""
     reservation = {"active": True, "detached": False}
     adapter._pending_agent_requests += 1
     try:
@@ -1212,9 +1008,8 @@ if AIOHTTP_AVAILABLE:
         try:
             return await handler(request)
         except web.HTTPRequestEntityTooLarge:
-            # aiohttp's client_max_size tripped mid-read (chunked bodies carry
-            # no Content-Length) — return a proper 413 instead of letting the
-            # handler's broad JSON except turn it into 400 "Invalid JSON".
+            # client_max_size tripped mid-read (chunked bodies carry no Content-Length): a
+            # proper 413, not the handler's 400 "Invalid JSON".
             return _error_response("Request body too large.", 413, code="body_too_large")
 else:
     body_limit_middleware = None  # type: ignore[assignment]
@@ -1292,15 +1087,8 @@ def _make_request_fingerprint(body: Dict[str, Any], keys: List[str]) -> str:
 
 def _derive_chat_session_id(
     system_prompt: Optional[str], first_user_message: str) -> str:
-    """Derive a stable session ID from the conversation's first user message.
-
-    OpenAI-compatible frontends (Open WebUI, LibreChat, etc.) send the full
-    conversation history with every request.  The system prompt and first user
-    message are constant across all turns of the same conversation, so hashing
-    them produces a deterministic session ID that lets the API server reuse
-    the same Hermes session (and therefore the same Docker container sandbox
-    directory) across turns.
-    """
+    """Stable session id from the system prompt + first user message (constant across all
+    turns of an Open WebUI-style conversation), so one Hermes session/sandbox is reused."""
     seed = f"{system_prompt or ''}\n{first_user_message}"
     digest = hashlib.sha256(seed.encode("utf-8")).hexdigest()[:16]
     return f"api-{digest}"
@@ -1321,22 +1109,15 @@ try:
         create_job_with_scheduler_registration as _cron_create)
     _CRON_AVAILABLE = True
 except ImportError:
-    _cron_list = None
-    _cron_get = None
-    _cron_create = None
-    _cron_update = None
-    _cron_remove = None
-    _cron_pause = None
-    _cron_resume = None
-    _cron_trigger = None
+    _cron_list = _cron_get = _cron_create = _cron_update = None
+    _cron_remove = _cron_pause = _cron_resume = _cron_trigger = None
 
     class _CronSchedulerRegistrationError(RuntimeError):
         pass
 
 
 def _notify_cron_provider_jobs_changed() -> None:
-    """Tell the active cron scheduler provider the job set changed after a REST
-    mutation (no-op for the built-in). Best-effort — never breaks the handler."""
+    """Best-effort notify of the active cron provider after a REST mutation (built-in: no-op)."""
     try:
         from cron.scheduler import _notify_provider_jobs_changed
         _notify_provider_jobs_changed()
@@ -1354,19 +1135,9 @@ except Exception:  # pragma: no cover - scanner is optional hardening
 
 
 class _ProviderAuthResolutionError(RuntimeError):
-    """Raised only when gateway.run._resolve_runtime_agent_kwargs() fails
-    to resolve provider credentials.
-
-    That function is the sole raiser of RuntimeError(format_runtime_
-    provider_error(...)) anywhere in _create_agent()'s call graph.
-    Re-raising it as this dedicated subclass -- instead of catching bare
-    RuntimeError around the much wider _create_agent()+run_conversation()
-    span -- lets callers distinguish "provider auth/credential failure"
-    from any other RuntimeError a provider adapter or run_conversation()
-    might legitimately raise (e.g. run_agent.py's "Failed to recreate
-    closed OpenAI client"), which a bare `except RuntimeError` there would
-    otherwise mislabel as an auth failure.
-    """
+    """Provider credential resolution failed (the sole RuntimeError raiser in _create_agent's
+    call graph). A typed subclass so callers never mislabel other RuntimeErrors from
+    run_conversation() (e.g. "Failed to recreate closed OpenAI client") as auth failures."""
 
 
 class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
@@ -1841,7 +1612,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             # Multiplexing off: only a self-referential prefix may fall through. Ignoring
             # any prefix served the owner's toolsets/capabilities (and misdelivered peer
             # DMs) under another profile's URL — fail closed.
-            return(None if _prefix_names_served_profile(profile) else _PROFILE_REJECTED)
+            return None if _prefix_names_served_profile(profile) else _PROFILE_REJECTED
         try:
             from hermes_cli.profiles import profiles_to_serve
             served = {
