@@ -123,17 +123,13 @@ def _duration_ms(value: Any) -> Optional[int]:
     return duration if duration >= 0 else None
 
 
-def _make_activity_event(
-    *, hook_event_name: str, session_id: Any, status: str = "ok", tool_name: Any = None,
-    tool_input: Any = None, tool_output: Any = None, error_class: Any = None, duration_ms: Any = None,
-) -> Dict[str, Any]:
-    event: Dict[str, Any] = {
-        "schema": ACTIVITY_EVENT_SCHEMA,
-        "eventId": f"hermes-{uuid.uuid4()}",
-        "sessionId": _safe_scalar(session_id, "unknown") or "unknown",
-        "hookEventName": hook_event_name,
-        "status": "error" if status == "error" else "ok",
-        "occurredAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
+def _make_activity_event(*, hook_event_name: str, session_id: Any, status: str = "ok", tool_name: Any = None,
+                         tool_input: Any = None, tool_output: Any = None, error_class: Any = None,
+                         duration_ms: Any = None) -> Dict[str, Any]:
+    event: Dict[str, Any] = {"schema": ACTIVITY_EVENT_SCHEMA, "eventId": f"hermes-{uuid.uuid4()}",
+                             "sessionId": _safe_scalar(session_id, "unknown") or "unknown",
+                             "hookEventName": hook_event_name, "status": "error" if status == "error" else "ok",
+                             "occurredAt": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")}
     for key, raw in (("toolName", tool_name), ("errorClass", error_class)):
         safe = _safe_scalar(raw)
         if safe:
@@ -300,15 +296,11 @@ def _on_pre_tool_call(**kwargs: Any) -> None:
 @_raft_hook
 def _on_post_tool_call(**kwargs: Any) -> None:
     status = "error" if kwargs.get("status") in {"error", "blocked"} or kwargs.get("error_type") else "ok"
-    _emit(
-        "PostToolUseFailure" if status == "error" else "PostToolUse",
-        kwargs,
-        status=status,
-        tool_name=kwargs.get("tool_name"),
-        tool_input=kwargs.get("args"),
-        tool_output=kwargs.get("error_message") or kwargs.get("result"),
-        error_class=kwargs.get("error_type") or ("tool_failure" if status == "error" else None),
-        duration_ms=kwargs.get("duration_ms"))
+    _emit("PostToolUseFailure" if status == "error" else "PostToolUse", kwargs, status=status,
+          tool_name=kwargs.get("tool_name"), tool_input=kwargs.get("args"),
+          tool_output=kwargs.get("error_message") or kwargs.get("result"),
+          error_class=kwargs.get("error_type") or ("tool_failure" if status == "error" else None),
+          duration_ms=kwargs.get("duration_ms"))
 
 
 @_raft_hook
@@ -409,9 +401,8 @@ class RaftAdapter(BasePlatformAdapter):
             logger.warning("[raft] RAFT_PROFILE not set; bridge not spawned")
             return
         endpoint = f"http://{self._host}:{port}{self._path}"
-        cmd: List[str] = [
-            raft_bin, "--profile", profile, "agent", "bridge",
-            "--wake-adapter", "wake-channel", "--wake-channel-endpoint", endpoint]
+        cmd: List[str] = [raft_bin, "--profile", profile, "agent", "bridge", "--wake-adapter", "wake-channel",
+                          "--wake-channel-endpoint", endpoint]
         env = {**os.environ, "RAFT_CHANNEL_TOKEN": self._bridge_token}
         try:
             self._bridge_process = subprocess.Popen(cmd, env=env, stdin=subprocess.DEVNULL)
@@ -433,9 +424,8 @@ class RaftAdapter(BasePlatformAdapter):
         except Exception:
             logger.exception("[raft] Error stopping bridge")
 
-    async def send(
-        self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None
-    ) -> SendResult:
+    async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None,
+                   metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         logger.debug("[raft] adapter send is a no-op; agent delivers via raft CLI")
         return SendResult(success=True)
 
@@ -489,12 +479,10 @@ class RaftAdapter(BasePlatformAdapter):
         delivery_id = str(
             next((payload.get(k) for k in _WAKE_ID_KEYS if payload.get(k)), None)
             or f"raft-wake-{int(time.time() * 1000)}")
-        source = self.build_source(
-            chat_id=self._runtime_session, chat_name="Raft channel", chat_type="dm",
-            user_id="raft-bridge", user_name="Raft Bridge")
-        event = MessageEvent(
-            text=_WAKE_PROMPT, message_type=MessageType.TEXT, source=source, raw_message=payload,
-            message_id=delivery_id, internal=True)
+        source = self.build_source(chat_id=self._runtime_session, chat_name="Raft channel", chat_type="dm",
+                                   user_id="raft-bridge", user_name="Raft Bridge")
+        event = MessageEvent(text=_WAKE_PROMPT, message_type=MessageType.TEXT, source=source,
+                             raw_message=payload, message_id=delivery_id, internal=True)
         try:
             await self.handle_message(event)
         except Exception:
@@ -534,8 +522,7 @@ class RaftAdapter(BasePlatformAdapter):
         if not self._message_handler:
             return
         session_key = build_session_key(
-            event.source,
-            group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
+            event.source, group_sessions_per_user=self.config.extra.get("group_sessions_per_user", True),
             thread_sessions_per_user=self.config.extra.get("thread_sessions_per_user", False),
             profile=self._session_key_profile(event.source))
         if session_key in self._active_sessions:
@@ -608,9 +595,8 @@ def register(ctx) -> None:
             "Run `raft --profile {profile} manual get raft-cli-overview` to learn available Raft commands. "
             "Always pass `--profile {profile}` to every raft CLI call."
         ).format(profile=_resolve_raft_profile() or "your-agent-profile"))
-    for hook_name, callback in (
-        ("on_session_start", _on_session_start), ("pre_llm_call", _on_pre_llm_call),
-        ("pre_tool_call", _on_pre_tool_call), ("post_tool_call", _on_post_tool_call),
-        ("post_llm_call", _on_post_llm_call), ("on_session_end", _on_session_end),
-        ("on_session_finalize", _on_session_finalize)):
+    for hook_name, callback in (("on_session_start", _on_session_start), ("pre_llm_call", _on_pre_llm_call),
+                                ("pre_tool_call", _on_pre_tool_call), ("post_tool_call", _on_post_tool_call),
+                                ("post_llm_call", _on_post_llm_call), ("on_session_end", _on_session_end),
+                                ("on_session_finalize", _on_session_finalize)):
         ctx.register_hook(hook_name, callback)

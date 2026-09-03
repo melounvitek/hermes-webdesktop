@@ -189,9 +189,8 @@ class MattermostAdapter(BasePlatformAdapter):
         logger.warning("Mattermost: falling back to flat channel delivery for notify-worthy post in %s", chat_id)
         return await self._api_post("posts", flat_payload)
 
-    async def _post_message(
-        self, chat_id: str, message: str, reply_to: Optional[str], metadata: _Metadata,
-        file_ids: Optional[List[str]] = None) -> Dict[str, Any]:
+    async def _post_message(self, chat_id: str, message: str, reply_to: Optional[str], metadata: _Metadata,
+                            file_ids: Optional[List[str]] = None) -> Dict[str, Any]:
         """Build a mentions-disabled post payload (+ optional root_id) and post it."""
         base: Dict[str, Any] = {"channel_id": chat_id, "message": message}
         if file_ids is not None:
@@ -205,15 +204,13 @@ class MattermostAdapter(BasePlatformAdapter):
                 payload["root_id"] = await self._resolve_root_id(str(candidate))
         return await self._post_preserving_thread(chat_id, payload, metadata)
 
-    async def _post_with_file(
-        self, chat_id: str, file_id: str, caption: Optional[str], reply_to: Optional[str],
-        metadata: _Metadata) -> SendResult:
+    async def _post_with_file(self, chat_id: str, file_id: str, caption: Optional[str], reply_to: Optional[str],
+                              metadata: _Metadata) -> SendResult:
         return _post_result(await self._post_message(chat_id, caption or "", reply_to, metadata, [file_id]),
                             _POST_WITH_FILE_ERROR)
 
-    async def _upload_file(
-        self, channel_id: str, file_data: bytes, filename: str, content_type: str = "application/octet-stream"
-    ) -> Optional[str]:
+    async def _upload_file(self, channel_id: str, file_data: bytes, filename: str,
+                           content_type: str = "application/octet-stream") -> Optional[str]:
         """Upload a file and return its file ID, or None on failure."""
         import aiohttp
         form = aiohttp.FormData()
@@ -301,14 +298,12 @@ class MattermostAdapter(BasePlatformAdapter):
         payload = _with_mentions_disabled({"message": self.format_message(content)})
         return _post_result(await self._api("PUT", f"posts/{message_id}/patch", payload), "Failed to edit post")
 
-    async def send_image(
-        self, chat_id: str, image_url: str, caption: Optional[str] = None,
-        reply_to: Optional[str] = None, metadata: _Metadata = None) -> SendResult:
+    async def send_image(self, chat_id: str, image_url: str, caption: Optional[str] = None,
+                         reply_to: Optional[str] = None, metadata: _Metadata = None) -> SendResult:
         return await self._send_url_as_file(chat_id, image_url, caption, reply_to, "image", metadata)
 
-    async def send_image_file(
-        self, chat_id: str, image_path: str, caption: Optional[str] = None,
-        reply_to: Optional[str] = None, metadata: _Metadata = None) -> SendResult:
+    async def send_image_file(self, chat_id: str, image_path: str, caption: Optional[str] = None,
+                              reply_to: Optional[str] = None, metadata: _Metadata = None) -> SendResult:
         return await self._send_local_file(chat_id, image_path, caption, reply_to, metadata=metadata)
 
     async def send_document(
@@ -316,14 +311,12 @@ class MattermostAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None, metadata: _Metadata = None) -> SendResult:
         return await self._send_local_file(chat_id, file_path, caption, reply_to, file_name, metadata)
 
-    async def send_voice(
-        self, chat_id: str, audio_path: str, caption: Optional[str] = None,
-        reply_to: Optional[str] = None, metadata: _Metadata = None) -> SendResult:
+    async def send_voice(self, chat_id: str, audio_path: str, caption: Optional[str] = None,
+                         reply_to: Optional[str] = None, metadata: _Metadata = None) -> SendResult:
         return await self._send_local_file(chat_id, audio_path, caption, reply_to, metadata=metadata)
 
-    async def send_video(
-        self, chat_id: str, video_path: str, caption: Optional[str] = None,
-        reply_to: Optional[str] = None, metadata: _Metadata = None) -> SendResult:
+    async def send_video(self, chat_id: str, video_path: str, caption: Optional[str] = None,
+                         reply_to: Optional[str] = None, metadata: _Metadata = None) -> SendResult:
         return await self._send_local_file(chat_id, video_path, caption, reply_to, metadata=metadata)
 
     def format_message(self, content: str) -> str:
@@ -332,9 +325,8 @@ class MattermostAdapter(BasePlatformAdapter):
 
     # --- File helpers ---
 
-    async def _send_url_as_file(
-        self, chat_id: str, url: str, caption: Optional[str], reply_to: Optional[str],
-        kind: str = "file", metadata: _Metadata = None) -> SendResult:
+    async def _send_url_as_file(self, chat_id: str, url: str, caption: Optional[str], reply_to: Optional[str],
+                                kind: str = "file", metadata: _Metadata = None) -> SendResult:
         """Download a URL and upload it as a file attachment (text fallback with the URL on failure)."""
         from tools.url_safety import is_safe_url
 
@@ -411,9 +403,8 @@ class MattermostAdapter(BasePlatformAdapter):
             return None
         return file_data, _url_filename(image_url, f"image_{index}.png"), ct
 
-    async def send_multiple_images(
-        self, chat_id: str, images: List[Tuple[str, str]], metadata: _Metadata = None,
-        human_delay: float = 0.0) -> None:
+    async def send_multiple_images(self, chat_id: str, images: List[Tuple[str, str]],
+                                   metadata: _Metadata = None, human_delay: float = 0.0) -> None:
         """Send a batch of images as one post; chunked at Mattermost's 5-``file_ids`` cap, each chunk
         falling back to the base per-image loop on failure."""
         if not images:
@@ -597,9 +588,8 @@ class MattermostAdapter(BasePlatformAdapter):
 
 # --- Plugin standalone-send (out-of-process cron delivery via Mattermost REST) ---
 
-async def _standalone_send(
-    pconfig, chat_id: str, message: str, *, thread_id: Optional[str] = None,
-    media_files: Optional[list] = None, force_document: bool = False) -> Dict[str, Any]:
+async def _standalone_send(pconfig, chat_id: str, message: str, *, thread_id: Optional[str] = None,
+                           media_files: Optional[list] = None, force_document: bool = False) -> Dict[str, Any]:
     """Send via the Mattermost v4 REST API without a live gateway adapter (out-of-process cron).
 
     Token/URL: ``pconfig`` with env fallback. ``media_files`` upload via ``POST /files`` and attach by

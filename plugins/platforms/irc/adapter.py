@@ -360,7 +360,6 @@ def interactive_setup() -> None:
             return False
         save_env_value(env, value.strip())
         return True
-
     print_header("IRC")
     existing_server = get_env_value("IRC_SERVER")
     if existing_server:
@@ -510,7 +509,6 @@ async def _sa_register(conn: _StandaloneConn, nick_base: str, server_password: s
         elif cmd in {"464", "465"}:
             return _sa_error(f"server rejected client ({cmd})")
         return True if cmd == "001" else None
-
     if server_password:
         await conn.raw(f"PASS {_strip_irc_control_chars(server_password)}")
     await conn.raw(f"NICK {standalone_nick}")
@@ -529,7 +527,6 @@ async def _sa_join(conn: _StandaloneConn, target: str) -> Optional[Dict[str, Any
         if cmd in {"403", "405", "471", "473", "474", "475"}:
             return _sa_error(f"JOIN {target} rejected ({cmd})")
         return True if cmd in {"366", "JOIN"} else None
-
     await conn.raw(f"JOIN {target}")
     # No JOIN ack within 5s (or EOF): proceed anyway, the server may still deliver.
     joined = await conn.pump(5.0, _on_join)
