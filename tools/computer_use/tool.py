@@ -24,7 +24,6 @@ from tools.computer_use.backend import ActionResult, CaptureResult, ComputerUseB
 
 logger = logging.getLogger(__name__)
 
-
 # ── Approval & safety ───────────────────────────────────────────────────────
 
 _approval_callback = None
@@ -74,7 +73,6 @@ def _input_target_mismatch(backend, requested_app: str) -> Optional[str]:
     last_app = getattr(backend, "_last_app", None)
     current, wanted = (last_app or "").strip().lower(), requested_app.strip().lower()
     return None if not current or not wanted or wanted in current or current in wanted else last_app
-
 
 # ── Backend selection — env-swappable for tests ─────────────────────────────
 
@@ -225,9 +223,7 @@ def _noop_stub(name: str, *params: str, result: Any = None):
 class _NoopBackend(ComputerUseBackend):  # pragma: no cover
     """Test/CI stub (HERMES_COMPUTER_USE_BACKEND=noop). Records ``(name, kwargs)`` calls; returns trivial results."""
 
-    def __init__(self) -> None:
-        self.calls: List[Tuple[str, Dict[str, Any]]] = []
-
+    def __init__(self) -> None: self.calls: List[Tuple[str, Dict[str, Any]]] = []
     def start(self) -> None: pass
     def stop(self) -> None: pass
     def is_available(self) -> bool: return True
@@ -238,7 +234,6 @@ class _NoopBackend(ComputerUseBackend):  # pragma: no cover
     type_text, key, set_value = _noop_stub("type", "text"), _noop_stub("key", "keys"), _noop_stub("set_value", "value", "element")
     list_apps, list_windows = _noop_stub("list_apps", result=[]), _noop_stub("list_windows", result=[])
     focus_app = _noop_stub("focus_app", "app", "raise_window")
-
 
 # ── Dispatch ────────────────────────────────────────────────────────────────
 
@@ -364,9 +359,8 @@ _ACTIONS: Dict[str, _ActionSpec] = {
     "double_click": _input(partial(_do_click, count=2), summarize=_summarize_click),
     "right_click": _input(partial(_do_click, button="right"), summarize=_summarize_click),
     "middle_click": _input(partial(_do_click, button="middle"), summarize=_summarize_click),
-    "drag": _input(_do_drag, summarize=lambda a, args, fg: (
-        f"drag {args.get('from_element') or args.get('from_coordinate')} → "
-        f"{args.get('to_element') or args.get('to_coordinate')}{fg}")),
+    "drag": _input(_do_drag, summarize=lambda a, args, fg: (f"drag {args.get('from_element') or args.get('from_coordinate')} → "
+                                                             f"{args.get('to_element') or args.get('to_coordinate')}{fg}")),
     "scroll": _input(_do_scroll, summarize=lambda a, args, fg: f"scroll {args.get('direction', '?')} x{args.get('amount', 3)}{fg}"),
     "type": _input(lambda backend, action, args, **delivery: backend.type_text(args.get("text", ""), **delivery),
                    summarize=lambda a, args, fg: (f"type {args.get('text', '')[:60]!r}"
@@ -387,9 +381,8 @@ _INPUT_ACTIONS = frozenset(a for a, s in _ACTIONS.items() if s.input)
 # Unknown actions are never aliased (no repairing bad model output), but the nearest real action is
 # named so a bare error isn't the only guidance.
 _ACTION_SUGGESTIONS = {
-    "hotkey": "key", "press_key": "key", "keypress": "key", "key_combo": "key", "shortcut": "key",
-    "type_text": "type", "input_text": "type", "screenshot": "capture", "get_window_state": "capture",
-    "left_click": "click", "mouse_click": "click",
+    "hotkey": "key", "press_key": "key", "keypress": "key", "key_combo": "key", "shortcut": "key", "type_text": "type",
+    "input_text": "type", "screenshot": "capture", "get_window_state": "capture", "left_click": "click", "mouse_click": "click",
 }
 
 def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) -> Any:
@@ -411,7 +404,6 @@ def _dispatch(backend: ComputerUseBackend, action: str, args: Dict[str, Any]) ->
                        bring_to_front=bool(args.get("bring_to_front")))
     return res if isinstance(res, (str, dict)) else _maybe_follow_capture(backend, res, bool(args.get("capture_after")))
 
-
 # ── Response shaping ────────────────────────────────────────────────────────
 
 def _classify_action_result(res: ActionResult) -> Dict[str, Any]:
@@ -430,8 +422,7 @@ def _classify_action_result(res: ActionResult) -> Dict[str, Any]:
             "re-issue by coordinate; 'foreground' (or a failed pixel click) → re-issue with "
             "delivery_mode='foreground' (separate approval). Do not predict the rung from the "
             "app being Electron/Chromium — react to this signal.")}
-    # Transport success without semantic proof is not proof of effect.
-    return {"decision": "verify_fresh_state",
+    return {"decision": "verify_fresh_state",  # transport success without semantic proof is not proof of effect
             "hint": "Transport succeeded but the effect is unproven. Re-capture and confirm before continuing."}
 
 def _present(**fields: Any) -> Dict[str, Any]:
@@ -530,18 +521,17 @@ def _capture_view(cap: CaptureResult, max_elements: int) -> SimpleNamespace:
 def _capture_summary_lines(v: SimpleNamespace) -> List[str]:
     """Human-readable capture summary; line ORDER is contract. Lists only what `elements` surfaces, otherwise the
     summary names indices the model can't find."""
-    cap = v.cap
     notes = (
         v.bounds_note and v.bounds_note + (f"; estimated scale ~{v.bounds_scale}x (screenshot position x "
                                            f"{v.bounds_scale} ≈ native coordinate)" if v.bounds_scale else ""),
         v.screenshot_path and f"shareable screenshot saved to {v.screenshot_path}",
-        cap.note,
+        v.cap.note,
         v.elements_file and (f"full element tree with untruncated labels saved to {v.elements_file} — "
                              "read_file/search_files it if you need dropped label text or elements beyond the cap"),
     )
     return [
-        f"capture mode={cap.mode} {v.width}x{v.height}"
-        + (f" app={cap.app}" if cap.app else "") + (f" window={cap.window_title!r}" if cap.window_title else ""),
+        f"capture mode={v.cap.mode} {v.width}x{v.height}"
+        + (f" app={v.cap.app}" if v.cap.app else "") + (f" window={v.cap.window_title!r}" if v.cap.window_title else ""),
         f"{v.total} interactable element(s):",
         *(f"  ({note})" for note in notes if note),
         *_format_elements(v.visible),
@@ -552,9 +542,8 @@ def _capture_summary_lines(v: SimpleNamespace) -> List[str]:
 def _text_capture_payload(v: SimpleNamespace, summary: str, extra: Optional[Dict[str, Any]] = None) -> str:
     """JSON text payload shared by the AX, vision-unavailable and aux-vision branches. Key order is contract:
     fixed fields, ``extra`` branch markers, then set optionals."""
-    cap = v.cap
     return json.dumps({
-        "mode": cap.mode, "width": v.width, "height": v.height, "app": cap.app, "window_title": cap.window_title,
+        "mode": v.cap.mode, "width": v.width, "height": v.height, "app": v.cap.app, "window_title": v.cap.window_title,
         "elements": [_element_to_dict(e) for e in v.visible], "total_elements": v.total, "summary": summary,
         **(extra or {}),
         **_present(truncated_elements=v.truncated, elements_file=v.elements_file,
@@ -618,7 +607,6 @@ def _maybe_follow_capture(backend: ComputerUseBackend, res: ActionResult, do_cap
         return resp
     return json.dumps({**json.loads(resp), **payload})  # text capture: merge the action payload in
 
-
 # ── Cache files (screenshots, element spills, vision temps) ─────────────────
 
 def _cache_file(subdir: str, legacy: str, name: str, pattern: str = "", cap: int = 0):
@@ -660,7 +648,6 @@ def _spill_elements_to_file(cap: CaptureResult) -> Optional[str]:
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
     return _write_cache_file("element spill", "cache/computer_use", "computer_use_cache",
                              f"elements_{uuid.uuid4().hex}.json", "elements_*.json", _MAX_SPILL_FILES, write)
-
 
 # ── auxiliary.vision routing for captured screenshots ───────────────────────
 
@@ -771,7 +758,6 @@ def _route_capture_through_aux_vision(
                            elements_file=elements_file, screenshot_path=screenshot_path, bounds_scale=None)
     return _text_capture_payload(view, summary, {"vision_analysis": analysis_text,
                                                  "vision_analysis_routed_via": "auxiliary.vision"})
-
 
 # ── Availability check (used by the tool registry check_fn) ─────────────────
 
