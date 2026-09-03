@@ -1,17 +1,18 @@
 """Model assignment dashboard routes: model info/options/recommended default, auxiliary + MoA slots, /api/model/set.
 
 Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch on
-``web_server`` stay there and are imported lazily at call time (cycle-safe).
+``web_server`` stay there and are resolved late at call time (cycle-safe).
 """
 
-import logging
 import asyncio
-from fastapi import APIRouter
-from hermes_cli.web_routers._common import http_failure
-from hermes_cli.web_deps import late
-from fastapi import HTTPException
-from hermes_cli.web_models import ModelAssignment, MoaModelSlot, MoaPresetPayload, MoaConfigPayload
+import logging
 from typing import Optional
+
+from fastapi import APIRouter, HTTPException
+
+from hermes_cli.web_deps import LateState, late
+from hermes_cli.web_models import ModelAssignment, MoaConfigPayload, MoaModelSlot
+from hermes_cli.web_routers._common import http_failure
 
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
@@ -24,89 +25,69 @@ _profile_scope = late("_profile_scope")
 load_config = late("load_config")
 run_in_threadpool = late("run_in_threadpool")
 save_config = late("save_config")
+_AUX_TASK_SLOTS = LateState("_AUX_TASK_SLOTS")
 
 
 _EMPTY_MODEL_INFO: dict = {
-    "model": "",
-    "provider": "",
-    "auto_context_length": 0,
-    "config_context_length": 0,
-    "effective_context_length": 0,
-    "capabilities": {},
+    "model": "", "provider": "", "auto_context_length": 0, "config_context_length": 0,
+    "effective_context_length": 0, "capabilities": {},
 }
+_CAPABILITY_FIELDS = ("supports_tools", "supports_vision", "supports_reasoning", "context_window",
+                      "max_output_tokens", "model_family")
+
+
+def _main_model_fields(model_cfg) -> tuple[str, str]:
+    """(model, provider) from config's ``model`` section, which may be a plain string."""
+    if isinstance(model_cfg, dict):
+        return model_cfg.get("default", model_cfg.get("name", "")), model_cfg.get("provider", "")
+    return (str(model_cfg) if model_cfg else ""), ""
+
+
+def _load_config_scoped(profile: Optional[str]) -> dict:
+    with _profile_scope(profile):
+        return load_config()
 
 
 @router.get("/api/model/info")
 def get_model_info(profile: Optional[str] = None):
-    """Return resolved model metadata for the currently configured model.
-
-    Calls the same context-length resolution chain the agent uses, so the
-    frontend can display "Auto-detected: 200K" alongside the override field.
-    Also returns model capabilities (vision, reasoning, tools) when available.
-    """
+    """Resolved metadata for the configured model: auto-detected vs configured
+    context length (so the UI can show "Auto-detected: 200K" beside the
+    override) plus models.dev capabilities when available."""
     try:
-        with _profile_scope(profile):
-            cfg = load_config()
-        model_cfg = cfg.get("model", "")
-
-        # Extract model name and provider from the config
-        if isinstance(model_cfg, dict):
-            model_name = model_cfg.get("default", model_cfg.get("name", ""))
-            provider = model_cfg.get("provider", "")
-            base_url = model_cfg.get("base_url", "")
-            config_ctx = model_cfg.get("context_length")
-        else:
-            model_name = str(model_cfg) if model_cfg else ""
-            provider = ""
-            base_url = ""
-            config_ctx = None
+        model_cfg = _load_config_scoped(profile).get("model", "")
+        model_name, provider = _main_model_fields(model_cfg)
+        base_url = model_cfg.get("base_url", "") if isinstance(model_cfg, dict) else ""
+        config_ctx = model_cfg.get("context_length") if isinstance(model_cfg, dict) else None
 
         if not model_name:
             return dict(_EMPTY_MODEL_INFO, provider=provider)
 
-        # Resolve auto-detected context length (pass config_ctx=None to get
-        # purely auto-detected value, then separately report the override)
         try:
             from agent.model_metadata import get_model_context_length
             auto_ctx = get_model_context_length(
                 model=model_name,
                 base_url=base_url,
                 provider=provider,
-                config_context_length=None,  # ignore override — we want auto value
+                config_context_length=None,  # ignore override — we want the auto value
             )
         except Exception:
             auto_ctx = 0
 
-        config_ctx_int = 0
-        if isinstance(config_ctx, int) and config_ctx > 0:
-            config_ctx_int = config_ctx
+        config_ctx_int = config_ctx if isinstance(config_ctx, int) and config_ctx > 0 else 0
 
-        # Effective is what the agent actually uses
-        effective_ctx = config_ctx_int if config_ctx_int > 0 else auto_ctx
-
-        # Try to get model capabilities from models.dev
         caps = {}
         try:
             from agent.models_dev import get_model_capabilities
             mc = get_model_capabilities(provider=provider, model=model_name)
             if mc is not None:
-                caps = {
-                    "supports_tools": mc.supports_tools,
-                    "supports_vision": mc.supports_vision,
-                    "supports_reasoning": mc.supports_reasoning,
-                    "context_window": mc.context_window,
-                    "max_output_tokens": mc.max_output_tokens,
-                    "model_family": mc.model_family,
-                }
+                caps = {name: getattr(mc, name) for name in _CAPABILITY_FIELDS}
         except Exception:
             pass
 
         return {
-            "model": model_name,
-            "provider": provider,
-            "auto_context_length": auto_ctx,
+            "model": model_name, "provider": provider, "auto_context_length": auto_ctx,
             "config_context_length": config_ctx_int,
-            "effective_context_length": effective_ctx,
+            "effective_context_length": config_ctx_int or auto_ctx,  # what the agent actually uses
             "capabilities": caps,
         }
     except HTTPException:
@@ -125,39 +106,28 @@ async def get_model_options(
     include_unconfigured: bool = False,
     explicit_only: bool = False,
 ):
-    """Return authenticated providers + their curated model lists.
+    """Authenticated providers + curated model lists — REST twin of the
+    ``model.options`` JSON-RPC on tui_gateway, same response shape so
+    ``ModelPickerDialog`` shares the types.
 
-    REST equivalent of the ``model.options`` JSON-RPC on tui_gateway, so the
-    dashboard Models page can render the picker without a live chat session.
-    The response shape matches ``model.options`` 1:1 so ``ModelPickerDialog``
-    can share the same types.
-
-    ``profile`` scopes the picker context (current model/provider, custom
-    providers from config, per-profile .env auth state) so the Models page
-    reads the SAME profile /api/model/set writes.
-
-    ``refresh`` busts the per-provider model-id disk cache so every row
-    re-fetches its live catalog — used by the picker's explicit "Refresh
-    Models" control. Normal opens leave it false to stay on the 1h cache.
+    ``profile`` scopes the picker context so the Models page reads the SAME
+    profile /api/model/set writes. ``refresh`` busts the per-provider model-id
+    disk cache (picker's explicit "Refresh Models"); normal opens stay on the 1h cache.
     """
     with http_failure("GET /api/model/options failed", 500, detail="Failed to list model options"):
         skew_msg = _dashboard_code_skew_guard()
         if skew_msg:
             _log.warning("GET /api/model/options refused: %s", skew_msg)
-            raise HTTPException(
-                status_code=503, detail=f"Restart required: {skew_msg}"
-            )
+            raise HTTPException(status_code=503, detail=f"Restart required: {skew_msg}")
 
         from hermes_cli.inventory import build_model_options_payload, load_picker_context
 
         def _build_payload_scoped() -> dict:
-            # Keep the profile override inside the worker thread so the full
-            # sync picker build (config load, pricing, refresh probes) runs
-            # off the event loop under the requested profile.
-            # Use _config_profile_scope (contextvar only, no skill-module
-            # lock) — the payload build can block for 15s on a models.dev
-            # cache miss, and _profile_scope's RLock held across that block
-            # starves concurrent /api/config and freezes the server (#58576).
+            # The full sync picker build runs off the event loop under the
+            # requested profile. _config_profile_scope (contextvar only, no
+            # skill-module lock): the build can block 15s on a models.dev cache
+            # miss, and _profile_scope's RLock held across that starves
+            # concurrent /api/config and freezes the server.
             with _config_profile_scope(profile):
                 return build_model_options_payload(
                     load_picker_context(),
@@ -169,82 +139,55 @@ async def get_model_options(
         return await run_in_threadpool(_build_payload_scoped)
 
 
+def _nous_recommended_default() -> dict:
+    from hermes_cli import models as m
+    from hermes_cli.auth import get_provider_auth_state
+
+    model_ids = m.get_curated_nous_model_ids()
+    pricing = m.get_pricing_for_provider("nous") or {}
+    free_tier = m.check_nous_free_tier(force_fresh=True)
+
+    try:
+        portal_url = (get_provider_auth_state("nous") or {}).get("portal_base_url", "") or ""
+    except Exception:
+        portal_url = ""
+
+    # This endpoint picks the model a user lands on without choosing it, so an
+    # unreachable one here is worse than in a picker. Narrow to policy before
+    # the tier split, so a rescued id still has to pass the free/paid predicate.
+    policy_allowed = m.nous_policy_allowed_ids()
+    union = m.union_with_portal_free_recommendations if free_tier else m.union_with_portal_paid_recommendations
+    model_ids, pricing = union(model_ids, pricing, portal_url)
+    model_ids = m.restrict_to_nous_policy(model_ids, policy_allowed, rescue_empty=True)
+    if free_tier:
+        model_ids, _unavailable = m.partition_nous_models_by_tier(model_ids, pricing, free_tier=True)
+
+    model = m.pick_silent_default_model(model_ids, provider="nous")
+    return {"provider": "nous", "model": model, "free_tier": bool(free_tier)}
+
+
 @router.get("/api/model/recommended-default")
 def get_recommended_default_model(provider: str = ""):
-    """Return the recommended default model for a freshly-authenticated provider.
+    """Recommended default model for a freshly-authenticated provider, mirroring
+    ``hermes model``'s curation so GUI onboarding lands on a sensible default.
 
-    Mirrors the model-curation `hermes model` does so GUI onboarding lands on a
-    sensible default instead of blindly taking the first curated entry. For
-    Nous this honors the user's free/paid tier: free users get a free model,
-    paid users get the full curated default. For any other provider it falls
-    back to the first curated model (same as before).
+    Nous honors the user's free/paid tier. Any other provider gets the preferred
+    silent default when its curated list carries it, else the first curated model
+    — aggregator lists lead with the priciest Anthropic flagship, which must never
+    be the model a user lands on without explicitly picking it.
 
-    Response: {"provider": str, "model": str, "free_tier": bool | None}
-    where free_tier is True/False for Nous and None otherwise. `model` may be
-    empty if nothing could be resolved (caller degrades gracefully).
+    Response: {"provider", "model", "free_tier": bool | None} — free_tier only
+    for Nous; ``model`` may be empty (caller degrades gracefully).
     """
     slug = (provider or "").strip().lower()
 
     if slug == "nous":
         try:
-            from hermes_cli.models import (
-                get_curated_nous_model_ids,
-                get_pricing_for_provider,
-                check_nous_free_tier,
-                nous_policy_allowed_ids,
-                partition_nous_models_by_tier,
-                pick_silent_default_model,
-                restrict_to_nous_policy,
-                union_with_portal_free_recommendations,
-                union_with_portal_paid_recommendations,
-            )
-            from hermes_cli.auth import get_provider_auth_state
-
-            model_ids = get_curated_nous_model_ids()
-            pricing = get_pricing_for_provider("nous") or {}
-            free_tier = check_nous_free_tier(force_fresh=True)
-
-            portal_url = ""
-            try:
-                state = get_provider_auth_state("nous") or {}
-                portal_url = state.get("portal_base_url", "") or ""
-            except Exception:
-                portal_url = ""
-
-            # This endpoint picks the model a user lands on without choosing it,
-            # so an unreachable one here is worse than in a picker. Narrow before
-            # the tier split, so a rescued id still has to pass the free/paid
-            # predicate.
-            _policy_allowed = nous_policy_allowed_ids()
-
-            if free_tier:
-                model_ids, pricing = union_with_portal_free_recommendations(
-                    model_ids, pricing, portal_url
-                )
-                model_ids = restrict_to_nous_policy(
-                    model_ids, _policy_allowed, rescue_empty=True,
-                )
-                model_ids, _unavailable = partition_nous_models_by_tier(
-                    model_ids, pricing, free_tier=True
-                )
-            else:
-                model_ids, pricing = union_with_portal_paid_recommendations(
-                    model_ids, pricing, portal_url
-                )
-                model_ids = restrict_to_nous_policy(
-                    model_ids, _policy_allowed, rescue_empty=True,
-                )
-
-            model = pick_silent_default_model(model_ids, provider="nous")
-            return {"provider": "nous", "model": model, "free_tier": bool(free_tier)}
+            return _nous_recommended_default()
         except Exception:
             _log.exception("GET /api/model/recommended-default (nous) failed")
             return {"provider": "nous", "model": "", "free_tier": None}
 
-    # Non-Nous: preferred silent default when the provider's curated list
-    # carries it, else the first curated model. Aggregator lists lead with the
-    # priciest Anthropic flagship (claude-fable-5), which must never be the
-    # model a user lands on without explicitly picking it.
     try:
         from hermes_cli.inventory import build_models_payload, load_picker_context
         from hermes_cli.models import pick_silent_default_model
@@ -262,25 +205,14 @@ def get_recommended_default_model(provider: str = ""):
 
 @router.get("/api/model/auxiliary")
 def get_auxiliary_models(profile: Optional[str] = None):
-    """Return current auxiliary task assignments.
+    """Current auxiliary task assignments: ``{"tasks": [{task, provider, model,
+    base_url}, ...], "main": {provider, model}}``.
 
-    Shape:
-      {
-        "tasks": [
-          {"task": "vision", "provider": "auto", "model": "", "base_url": ""},
-          ...
-        ],
-        "main": {"provider": "openrouter", "model": "anthropic/claude-opus-4.7"},
-      }
-
-    ``profile`` scopes the read — without it, the Models page would show
-    the dashboard profile's auxiliary pins while /api/model/set wrote the
-    selected profile's (read/write asymmetry).
+    ``profile`` scopes the read — without it the Models page would show the
+    dashboard profile's pins while /api/model/set wrote the selected profile's.
     """
-    from hermes_cli.web_server import _AUX_TASK_SLOTS
     with http_failure("GET /api/model/auxiliary failed", 500, detail="Failed to read auxiliary config"):
-        with _profile_scope(profile):
-            cfg = load_config()
+        cfg = _load_config_scoped(profile)
         aux_cfg = cfg.get("auxiliary", {})
         if not isinstance(aux_cfg, dict):
             aux_cfg = {}
@@ -289,22 +221,12 @@ def get_auxiliary_models(profile: Optional[str] = None):
         for slot in _AUX_TASK_SLOTS:
             slot_cfg = aux_cfg.get(slot, {}) if isinstance(aux_cfg.get(slot), dict) else {}
             tasks.append({
-                "task": slot,
-                "provider": str(slot_cfg.get("provider", "auto") or "auto"),
-                "model": str(slot_cfg.get("model", "") or ""),
-                "base_url": str(slot_cfg.get("base_url", "") or ""),
+                "task": slot, "provider": str(slot_cfg.get("provider", "auto") or "auto"),
+                "model": str(slot_cfg.get("model", "") or ""), "base_url": str(slot_cfg.get("base_url", "") or ""),
             })
 
-        model_cfg = cfg.get("model", {})
-        if isinstance(model_cfg, dict):
-            main = {
-                "provider": str(model_cfg.get("provider", "") or ""),
-                "model": str(model_cfg.get("default", model_cfg.get("name", "")) or ""),
-            }
-        else:
-            main = {"provider": "", "model": str(model_cfg) if model_cfg else ""}
-
-        return {"tasks": tasks, "main": main}
+        model, provider = _main_model_fields(cfg.get("model", {}))
+        return {"tasks": tasks, "main": {"provider": str(provider or ""), "model": str(model or "")}}
 
 
 @router.get("/api/model/moa")
@@ -318,29 +240,31 @@ def get_moa_models(profile: Optional[str] = None):
             return normalize_moa_config(cfg.get("moa") if isinstance(cfg, dict) else {})
 
 
+_MOA_PRESET_FIELDS = (
+    "reference_temperature", "aggregator_temperature", "reference_timeout",
+    "degraded_reference_policy", "max_tokens", "reference_max_tokens", "fanout", "enabled",
+)
+
+
+def _slot_dict(slot: MoaModelSlot) -> dict:
+    # Drop unset optionals so saved slots stay minimal ({provider, model}).
+    return {k: v for k, v in slot.dict().items() if v is not None}
+
+
+def _preset_dict(preset) -> dict:
+    """Raw preset dict from a MoaPresetPayload or the flat MoaConfigPayload fields."""
+    return {
+        "reference_models": [_slot_dict(slot) for slot in preset.reference_models],
+        "aggregator": _slot_dict(preset.aggregator),
+        **{name: getattr(preset, name) for name in _MOA_PRESET_FIELDS},
+    }
+
+
 @router.put("/api/model/moa")
 def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
     """Persist the Mixture-of-Agents provider/model slots."""
     with http_failure("PUT /api/model/moa failed", 500, detail="Failed to save MoA config"):
         from hermes_cli.moa_config import normalize_moa_config, validate_moa_payload
-
-        def _slot_dict(slot: MoaModelSlot) -> dict:
-            # Drop unset optionals so saved slots stay minimal ({provider, model}).
-            return {k: v for k, v in slot.dict().items() if v is not None}
-
-        def _preset_dict(preset: MoaPresetPayload) -> dict:
-            return {
-                "reference_models": [_slot_dict(slot) for slot in preset.reference_models],
-                "aggregator": _slot_dict(preset.aggregator),
-                "reference_temperature": preset.reference_temperature,
-                "aggregator_temperature": preset.aggregator_temperature,
-                "reference_timeout": preset.reference_timeout,
-                "degraded_reference_policy": preset.degraded_reference_policy,
-                "max_tokens": preset.max_tokens,
-                "reference_max_tokens": preset.reference_max_tokens,
-                "fanout": preset.fanout,
-                "enabled": preset.enabled,
-            }
 
         with _profile_scope(body.profile or profile):
             cfg = load_config()
@@ -351,37 +275,19 @@ def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
                     "presets": {name: _preset_dict(preset) for name, preset in body.presets.items()},
                 }
             else:
-                raw = _preset_dict(
-                    MoaPresetPayload(
-                        reference_models=body.reference_models,
-                        aggregator=body.aggregator,
-                        reference_temperature=body.reference_temperature,
-                        aggregator_temperature=body.aggregator_temperature,
-                        reference_timeout=body.reference_timeout,
-                        degraded_reference_policy=body.degraded_reference_policy,
-                        max_tokens=body.max_tokens,
-                        reference_max_tokens=body.reference_max_tokens,
-                        fanout=body.fanout,
-                        enabled=body.enabled,
-                    )
-                )
+                raw = _preset_dict(body)  # legacy flat payload from older clients
 
             # Reject-don't-repair: normalize_moa_config() silently swaps any
             # preset containing incomplete slots for the hardcoded defaults —
-            # correct tolerance for hand-edited configs at READ time, silent
-            # data loss at WRITE time (#64156: desktop autosave of a
-            # half-filled slot replaced the user's whole preset). Refuse the
-            # save loudly so no client can corrupt config through this route.
+            # correct tolerance at READ time, silent data loss at WRITE time
+            # (desktop autosave of a half-filled slot replaced the user's whole
+            # preset). Refuse loudly so no client can corrupt config here.
             problems = validate_moa_payload(raw)
             if problems:
-                raise HTTPException(
-                    status_code=422,
-                    detail="Invalid MoA config: " + "; ".join(problems),
-                )
+                raise HTTPException(status_code=422, detail="Invalid MoA config: " + "; ".join(problems))
             normalized = normalize_moa_config(raw)
-            # Merge instead of overwrite so that hand-edited keys not declared
-            # in MoaConfigPayload (e.g. save_traces, trace_dir) survive a GUI
-            # save.  See issue #58819.
+            # Merge instead of overwrite so hand-edited keys not declared in
+            # MoaConfigPayload (e.g. save_traces, trace_dir) survive a GUI save.
             cfg.setdefault("moa", {}).update(normalized)
             save_config(cfg)
             return {"ok": True, **normalized}
@@ -391,16 +297,12 @@ def set_moa_models(body: MoaConfigPayload, profile: Optional[str] = None):
 async def set_model_assignment(body: ModelAssignment, profile: Optional[str] = None):
     """Assign a model to the main slot or an auxiliary task slot.
 
-    Writes to ``~/.hermes/config.yaml`` — applies to **new** sessions only.
-    The currently running chat PTY (if any) is not affected; use the
-    ``/model`` slash command inside a chat to hot-swap that specific session.
+    Writes ``~/.hermes/config.yaml`` — applies to **new** sessions only; a
+    running chat PTY hot-swaps via the ``/model`` slash command instead.
     """
-    scope = (body.scope or "").strip().lower()
-    provider = (body.provider or "").strip()
-    model = (body.model or "").strip()
-    task = (body.task or "").strip().lower()
-    base_url = (body.base_url or "").strip()
-    api_key = (body.api_key or "").strip()
+    scope, task = (body.scope or "").strip().lower(), (body.task or "").strip().lower()
+    provider, model = (body.provider or "").strip(), (body.model or "").strip()
+    base_url, api_key = (body.base_url or "").strip(), (body.api_key or "").strip()
 
     if scope not in {"main", "auxiliary"}:
         raise HTTPException(status_code=400, detail="scope must be 'main' or 'auxiliary'")
@@ -417,27 +319,16 @@ async def set_model_assignment(body: ModelAssignment, profile: Optional[str] = N
                 # Pricing lookup can hit models.dev / a /models endpoint on a
                 # cache miss — keep it off the event loop.
                 warning = await asyncio.to_thread(
-                    combined_selection_warning,
-                    model,
-                    provider=provider,
-                    base_url=base_url,
+                    combined_selection_warning, model, provider=provider, base_url=base_url
                 )
             except Exception:
                 warning = None
             if warning is not None:
-                return {
-                    "ok": False,
-                    "scope": scope,
-                    "provider": provider,
-                    "model": model,
-                    "confirm_required": True,
-                    "confirm_message": warning.message,
-                }
+                return {"ok": False, "scope": scope, "provider": provider, "model": model,
+                        "confirm_required": True, "confirm_message": warning.message}
 
         def _apply_assignment():
             with _profile_scope(body.profile or profile):
-                return _apply_model_assignment_sync(
-                    scope, provider, model, task, base_url, api_key
-                )
+                return _apply_model_assignment_sync(scope, provider, model, task, base_url, api_key)
 
         return await asyncio.to_thread(_apply_assignment)

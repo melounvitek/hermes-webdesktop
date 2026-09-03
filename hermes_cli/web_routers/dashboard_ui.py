@@ -1,22 +1,26 @@
 """Dashboard theme/font and dashboard-plugin (discovery, hub, install/enable, asset serving) routes.
 
 Extracted from ``hermes_cli.web_server``; helpers/state that tests monkeypatch on
-``web_server`` stay there and are imported lazily at call time (cycle-safe).
+``web_server`` stay there and are resolved late at call time (cycle-safe).
 """
 
-import logging
 import asyncio
-from fastapi import APIRouter
-from hermes_cli.web_deps import late
-from fastapi import HTTPException, Request
-from fastapi.responses import FileResponse
-from hermes_cli.web_models import ThemeSetBody, FontSetBody, _AgentPluginInstallBody, _PluginProvidersPutBody, _PluginVisibilityBody
+import logging
 from pathlib import Path
+from typing import Callable
+
+from fastapi import APIRouter, HTTPException, Request
+from fastapi.responses import FileResponse
+
+from hermes_cli.web_deps import LateState, late
+from hermes_cli.web_models import (
+    FontSetBody, ThemeSetBody, _AgentPluginInstallBody, _PluginProvidersPutBody, _PluginVisibilityBody,
+)
 
 _log = logging.getLogger("hermes_cli.web_server")
 router = APIRouter()
 
-# web_server helpers, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
+# web_server helpers/state, late-bound so monkeypatch.setattr(web_server, ...) stays authoritative.
 _discover_user_themes = late("_discover_user_themes")
 _get_dashboard_plugins = late("_get_dashboard_plugins")
 _invalidate_plugins_hub_cache = late("_invalidate_plugins_hub_cache")
@@ -27,37 +31,35 @@ _require_token = late("_require_token")
 cfg_get = late("cfg_get")
 load_config = late("load_config")
 save_config = late("save_config")
+_BUILTIN_DASHBOARD_THEMES = LateState("_BUILTIN_DASHBOARD_THEMES")
+_CONFIG_MUTATION_LOCK = LateState("_CONFIG_MUTATION_LOCK")
+
+
+def _set_dashboard_key(key: str, value) -> None:
+    """Write ``dashboard.<key>`` to config.yaml under the config mutation lock."""
+    with _CONFIG_MUTATION_LOCK:
+        config = load_config()
+        if "dashboard" not in config:
+            config["dashboard"] = {}
+        config["dashboard"][key] = value
+        save_config(config)
 
 
 @router.get("/api/dashboard/themes")
 async def get_dashboard_themes():
-    """Return available themes and the currently active one.
-
-    Built-in entries ship name/label/description only (the frontend owns
-    their full definitions in `web/src/themes/presets.ts`).  User themes
-    from `~/.hermes/dashboard-themes/*.yaml` ship with their full
-    normalised definition under `definition`, so the client can apply
-    them without a stub.
-    """
-    from hermes_cli.web_server import _BUILTIN_DASHBOARD_THEMES
+    """Available themes and the active one. Built-ins ship name/label/description
+    only (the frontend owns their definitions in `web/src/themes/presets.ts`);
+    user themes from `~/.hermes/dashboard-themes/*.yaml` ship their normalised
+    definition under `definition` so the client can apply them without a stub."""
     def _run():
         config = load_config()
         active = cfg_get(config, "dashboard", "theme", default="default")
-        user_themes = _discover_user_themes()
-        seen = set()
-        themes = []
-        for t in _BUILTIN_DASHBOARD_THEMES:
-            seen.add(t["name"])
-            themes.append(t)
-        for t in user_themes:
+        themes = list(_BUILTIN_DASHBOARD_THEMES)
+        seen = {t["name"] for t in themes}
+        for t in _discover_user_themes():
             if t["name"] in seen:
                 continue
-            themes.append({
-                "name": t["name"],
-                "label": t["label"],
-                "description": t["description"],
-                "definition": t,
-            })
+            themes.append({"name": t["name"], "label": t["label"], "description": t["description"], "definition": t})
             seen.add(t["name"])
         return {"themes": themes, "active": active}
 
@@ -67,27 +69,15 @@ async def get_dashboard_themes():
 @router.put("/api/dashboard/theme")
 async def set_dashboard_theme(body: ThemeSetBody):
     """Set the active dashboard theme (persists to config.yaml)."""
-    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK
-    def _run():
-        with _CONFIG_MUTATION_LOCK:
-            config = load_config()
-            if "dashboard" not in config:
-                config["dashboard"] = {}
-            config["dashboard"]["theme"] = body.name
-            save_config(config)
-        return {"ok": True, "theme": body.name}
-
-    return await asyncio.to_thread(_run)
+    await asyncio.to_thread(_set_dashboard_key, "theme", body.name)
+    return {"ok": True, "theme": body.name}
 
 
-# Curated font-override ids. Kept in sync with FONT_CHOICES in
-# web/src/themes/fonts.ts — the frontend owns the stacks + webfont URLs;
-# the backend only needs the id allow-list so it can reject anything not
-# in the vetted catalog (the font's webfont URL is injected as a <link>,
-# so we never accept an arbitrary user-supplied id/URL here).
+# Curated font-override ids, kept in sync with FONT_CHOICES in web/src/themes/fonts.ts.
+# The frontend owns the stacks + webfont URLs; the backend only needs the id
+# allow-list so it can reject anything not in the vetted catalog (the webfont URL
+# is injected as a <link>, so we never accept an arbitrary user-supplied id/URL).
 _FONT_DEFAULT_ID = "theme"
-
-
 _FONT_CHOICES = frozenset({
     "system-sans", "system-serif", "system-mono",
     "inter", "ibm-plex-sans", "work-sans", "atkinson-hyperlegible", "dm-sans",
@@ -100,37 +90,41 @@ _FONT_CHOICES = frozenset({
 async def get_dashboard_font():
     """Return the active font override (``"theme"`` = use the theme's font)."""
     def _run():
-        config = load_config()
-        font = cfg_get(config, "dashboard", "font", default=_FONT_DEFAULT_ID)
-        if font not in _FONT_CHOICES:
-            font = _FONT_DEFAULT_ID
-        return {"font": font}
+        font = cfg_get(load_config(), "dashboard", "font", default=_FONT_DEFAULT_ID)
+        return {"font": font if font in _FONT_CHOICES else _FONT_DEFAULT_ID}
 
     return await asyncio.to_thread(_run)
 
 
 @router.put("/api/dashboard/font")
 async def set_dashboard_font(body: FontSetBody):
-    """Set the dashboard font override (persists to config.yaml).
-
-    Accepts any id in the curated catalog, or ``"theme"`` to clear the
-    override and fall back to the active theme's own font. Unknown ids are
-    coerced to ``"theme"`` rather than 400'd so a stale client can't wedge
-    the picker.
-    """
-    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK
+    """Set the dashboard font override (persists to config.yaml). Unknown ids are
+    coerced to ``"theme"`` rather than 400'd so a stale client can't wedge the picker."""
     font = body.font if body.font in _FONT_CHOICES else _FONT_DEFAULT_ID
+    await asyncio.to_thread(_set_dashboard_key, "font", font)
+    return {"ok": True, "font": font}
 
-    def _run():
-        with _CONFIG_MUTATION_LOCK:
-            config = load_config()
-            if "dashboard" not in config:
-                config["dashboard"] = {}
-            config["dashboard"]["font"] = font
-            save_config(config)
-        return {"ok": True, "font": font}
 
-    return await asyncio.to_thread(_run)
+def _plugin_enable_sets() -> tuple[set, set]:
+    """(enabled, disabled) plugin name sets; empty on any failure."""
+    try:
+        from hermes_cli.plugins_cmd import _get_enabled_set, _get_disabled_set
+        return _get_enabled_set(), _get_disabled_set()
+    except Exception:
+        return set(), set()
+
+
+def _plugin_activated(plugin: dict, enabled_set: set, disabled_set: set) -> bool:
+    """Gate: user plugins must be in plugins.enabled and not in plugins.disabled;
+    bundled plugins must not be explicitly disabled. Keeps the frontend from
+    loading JS/CSS from plugins the user never activated."""
+    name = plugin.get("name", "")
+    source = plugin.get("source")
+    if source == "user":
+        return name not in disabled_set and name in enabled_set
+    if source == "bundled":
+        return name not in disabled_set
+    return True
 
 
 @router.get("/api/dashboard/plugins")
@@ -138,42 +132,16 @@ async def get_dashboard_plugins():
     """Return discovered dashboard plugins (excludes user-hidden and non-enabled ones)."""
     def _run():
         plugins = _get_dashboard_plugins()
-        # Read user's hidden plugins list from config.
-        config = load_config()
-        hidden: list = cfg_get(config, "dashboard", "hidden_plugins", default=[]) or []
-        # Gate: only serve user plugins that are in plugins.enabled and not
-        # in plugins.disabled.  This prevents the frontend from loading JS/CSS
-        # from plugins the user has not explicitly activated.  (#46435)
-        try:
-            from hermes_cli.plugins_cmd import _get_enabled_set, _get_disabled_set
-            enabled_set = _get_enabled_set()
-            disabled_set = _get_disabled_set()
-        except Exception:
-            enabled_set = set()
-            disabled_set = set()
-        return plugins, hidden, enabled_set, disabled_set
+        hidden: list = cfg_get(load_config(), "dashboard", "hidden_plugins", default=[]) or []
+        return plugins, hidden, *_plugin_enable_sets()
 
     plugins, hidden, enabled_set, disabled_set = await asyncio.to_thread(_run)
-
-    def _is_active(p: dict) -> bool:
-        name = p.get("name", "")
-        if name in hidden:
-            return False
-        if p.get("source") == "user":
-            if name in disabled_set:
-                return False
-            if name not in enabled_set:
-                return False
-        elif p.get("source") == "bundled":
-            if name in disabled_set:
-                return False
-        return True
 
     # Strip internal fields before sending to frontend.
     return [
         {k: v for k, v in p.items() if not k.startswith("_")}
         for p in plugins
-        if _is_active(p)
+        if p.get("name", "") not in hidden and _plugin_activated(p, enabled_set, disabled_set)
     ]
 
 
@@ -195,23 +163,24 @@ async def get_plugins_hub(request: Request):
         raise HTTPException(status_code=500, detail="Failed to build plugins hub.") from exc
 
 
+def _plugin_action(result: dict, fallback_error: str, *, rescan: bool) -> dict:
+    """Common tail of the agent-plugin mutations: 400 on ``ok=False``, then
+    invalidate caches (rescanning discovery when files changed on disk)."""
+    if not result.get("ok"):
+        raise HTTPException(status_code=400, detail=result.get("error") or fallback_error)
+    if rescan:
+        _get_dashboard_plugins(force_rescan=True)
+    _invalidate_plugins_hub_cache()
+    return result
+
+
 @router.post("/api/dashboard/agent-plugins/install")
 async def post_agent_plugin_install(request: Request, body: _AgentPluginInstallBody):
     _require_token(request)
     from hermes_cli.plugins_cmd import dashboard_install_plugin
 
-    result = dashboard_install_plugin(
-        body.identifier.strip(),
-        force=body.force,
-        enable=body.enable,
-    )
-    if not result.get("ok"):
-        raise HTTPException(
-            status_code=400,
-            detail=result.get("error") or "Install failed.",
-        )
-    _get_dashboard_plugins(force_rescan=True)
-    _invalidate_plugins_hub_cache()
+    result = dashboard_install_plugin(body.identifier.strip(), force=body.force, enable=body.enable)
+    result = _plugin_action(result, "Install failed.", rescan=True)
     # Strip internal paths from the response
     result.pop("after_install_path", None)
     return result
@@ -225,69 +194,42 @@ def _validate_plugin_name(name: str) -> str:
     return name
 
 
+def _named_plugin_action(request: Request, name: str, action: Callable[[str], dict], fallback_error: str, *, rescan: bool) -> dict:
+    _require_token(request)
+    return _plugin_action(action(_validate_plugin_name(name)), fallback_error, rescan=rescan)
+
+
 @router.post("/api/dashboard/agent-plugins/{name:path}/enable")
 async def post_agent_plugin_enable(request: Request, name: str):
-    _require_token(request)
-    name = _validate_plugin_name(name)
     from hermes_cli.plugins_cmd import dashboard_set_agent_plugin_enabled
-
-    result = dashboard_set_agent_plugin_enabled(name, enabled=True)
-    if not result.get("ok"):
-        raise HTTPException(status_code=400, detail=result.get("error") or "Enable failed.")
-    _invalidate_plugins_hub_cache()
-    return result
+    return _named_plugin_action(request, name, lambda n: dashboard_set_agent_plugin_enabled(n, enabled=True),
+                                "Enable failed.", rescan=False)
 
 
 @router.post("/api/dashboard/agent-plugins/{name:path}/disable")
 async def post_agent_plugin_disable(request: Request, name: str):
-    _require_token(request)
-    name = _validate_plugin_name(name)
     from hermes_cli.plugins_cmd import dashboard_set_agent_plugin_enabled
-
-    result = dashboard_set_agent_plugin_enabled(name, enabled=False)
-    if not result.get("ok"):
-        raise HTTPException(status_code=400, detail=result.get("error") or "Disable failed.")
-    _invalidate_plugins_hub_cache()
-    return result
+    return _named_plugin_action(request, name, lambda n: dashboard_set_agent_plugin_enabled(n, enabled=False),
+                                "Disable failed.", rescan=False)
 
 
 @router.post("/api/dashboard/agent-plugins/{name:path}/update")
 async def post_agent_plugin_update(request: Request, name: str):
-    _require_token(request)
-    name = _validate_plugin_name(name)
     from hermes_cli.plugins_cmd import dashboard_update_user_plugin
-
-    result = dashboard_update_user_plugin(name)
-    if not result.get("ok"):
-        raise HTTPException(status_code=400, detail=result.get("error") or "Update failed.")
-    _get_dashboard_plugins(force_rescan=True)
-    _invalidate_plugins_hub_cache()
-    return result
+    return _named_plugin_action(request, name, dashboard_update_user_plugin, "Update failed.", rescan=True)
 
 
 @router.delete("/api/dashboard/agent-plugins/{name:path}")
 async def delete_agent_plugin(request: Request, name: str):
-    _require_token(request)
-    name = _validate_plugin_name(name)
     from hermes_cli.plugins_cmd import dashboard_remove_user_plugin
-
-    result = dashboard_remove_user_plugin(name)
-    if not result.get("ok"):
-        raise HTTPException(status_code=400, detail=result.get("error") or "Remove failed.")
-    _get_dashboard_plugins(force_rescan=True)
-    _invalidate_plugins_hub_cache()
-    return result
+    return _named_plugin_action(request, name, dashboard_remove_user_plugin, "Remove failed.", rescan=True)
 
 
 @router.put("/api/dashboard/plugin-providers")
 async def put_plugin_providers(request: Request, body: _PluginProvidersPutBody):
     """Persist memory provider / context engine selection (writes config.yaml)."""
-    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK
     _require_token(request)
-    from hermes_cli.plugins_cmd import (
-        _save_context_engine,
-        _save_memory_provider,
-    )
+    from hermes_cli.plugins_cmd import _save_context_engine, _save_memory_provider
 
     def _run():
         with _CONFIG_MUTATION_LOCK:
@@ -306,7 +248,6 @@ async def put_plugin_providers(request: Request, body: _PluginProvidersPutBody):
 @router.post("/api/dashboard/plugins/{name:path}/visibility")
 async def post_plugin_visibility(request: Request, name: str, body: _PluginVisibilityBody):
     """Toggle a plugin's sidebar visibility (persists to config.yaml dashboard.hidden_plugins)."""
-    from hermes_cli.web_server import _CONFIG_MUTATION_LOCK
     _require_token(request)
     name = _validate_plugin_name(name)
 
@@ -318,12 +259,10 @@ async def post_plugin_visibility(request: Request, name: str, body: _PluginVisib
             hidden_list: list = config["dashboard"].get("hidden_plugins") or []
             if not isinstance(hidden_list, list):
                 hidden_list = []
-
             if body.hidden and name not in hidden_list:
                 hidden_list.append(name)
             elif not body.hidden and name in hidden_list:
                 hidden_list.remove(name)
-
             config["dashboard"]["hidden_plugins"] = hidden_list
             save_config(config)
         _invalidate_plugins_hub_cache()
@@ -332,47 +271,34 @@ async def post_plugin_visibility(request: Request, name: str, body: _PluginVisib
     return await asyncio.to_thread(_run)
 
 
+# Browser-asset suffix allowlist. Everything outside this set is 404'd so we
+# never leak ``.py`` backend sources, READMEs, ``.env.example`` templates, etc.
+# Add to it deliberately when a new asset type comes up; do NOT add a fallback.
+_PLUGIN_ASSET_CONTENT_TYPES = {
+    ".js": "application/javascript", ".mjs": "application/javascript", ".css": "text/css",
+    ".json": "application/json", ".html": "text/html", ".svg": "image/svg+xml",
+    ".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
+    ".webp": "image/webp", ".ico": "image/x-icon", ".woff2": "font/woff2", ".woff": "font/woff",
+    ".ttf": "font/ttf", ".otf": "font/otf", ".map": "application/json",
+}
+
+
 @router.get("/dashboard-plugins/{plugin_name}/{file_path:path}")
 async def serve_plugin_asset(plugin_name: str, file_path: str):
-    """Serve static assets from a dashboard plugin directory.
+    """Serve static assets from a dashboard plugin's ``dashboard/`` directory.
 
-    Only serves files from the plugin's ``dashboard/`` subdirectory.
-    Path traversal is blocked by checking ``resolve().is_relative_to()``.
-
-    Restricted to a browser-fetchable suffix allowlist (JS/CSS/JSON/HTML/
-    SVG/PNG/JPG/WOFF). The dashboard loads plugin JS via ``<script src>``
-    and CSS via ``<link href>``, neither of which can attach a custom
-    auth header — so this route stays unauthenticated to keep the SPA
-    working. But user-installed plugins ship a ``plugin_api.py``
-    backend module that the browser never fetches; it's only imported
-    by :func:`_mount_plugin_api_routes` at startup. Without a suffix
-    allowlist, anyone on the loopback port can curl the ``.py`` source
-    of a private third-party plugin. Reject everything outside the
-    browser-asset set.
-
-    User plugins must be in plugins.enabled before their assets are
-    served. (#46435, GHSA-mcfc-hp25-cjv7)
+    Unauthenticated on purpose: the SPA loads plugin JS via ``<script src>``
+    and CSS via ``<link href>``, which cannot attach an auth header. That is
+    why the suffix allowlist exists — user plugins ship a ``plugin_api.py``
+    backend the browser never fetches, and without it anyone on the loopback
+    port could curl a private plugin's source. Path traversal is blocked via
+    ``resolve().is_relative_to()``; user plugins must be enabled (bundled ones
+    not disabled) before their assets are served (GHSA-mcfc-hp25-cjv7).
     """
     plugins = _get_dashboard_plugins()
     plugin = next((p for p in plugins if p["name"] == plugin_name), None)
-    if not plugin:
+    if not plugin or not _plugin_activated(plugin, *_plugin_enable_sets()):
         raise HTTPException(status_code=404, detail="Plugin not found")
-
-    # Gate: user plugins must be enabled to serve assets;
-    # bundled plugins must not be explicitly disabled.
-    try:
-        from hermes_cli.plugins_cmd import _get_enabled_set, _get_disabled_set
-        enabled_set = _get_enabled_set()
-        disabled_set = _get_disabled_set()
-    except Exception:
-        enabled_set = set()
-        disabled_set = set()
-    if plugin.get("source") == "user":
-        if plugin_name in disabled_set or plugin_name not in enabled_set:
-            raise HTTPException(status_code=404, detail="Plugin not found")
-    elif plugin.get("source") == "bundled":
-        if plugin_name in disabled_set:
-            raise HTTPException(status_code=404, detail="Plugin not found")
 
     base = Path(plugin["_dir"])
     target = (base / file_path).resolve()
@@ -382,39 +308,7 @@ async def serve_plugin_asset(plugin_name: str, file_path: str):
     if not target.exists() or not target.is_file():
         raise HTTPException(status_code=404, detail="File not found")
 
-    # Browser-asset suffix allowlist. Everything outside this set is
-    # rejected with 404 so we don't leak ``.py`` backend sources, README
-    # files, ``.env.example`` templates, etc. — none of which the SPA
-    # actually fetches. Add to this set deliberately when a new asset
-    # type comes up; do NOT change the default fallback.
-    suffix = target.suffix.lower()
-    content_types = {
-        ".js": "application/javascript",
-        ".mjs": "application/javascript",
-        ".css": "text/css",
-        ".json": "application/json",
-        ".html": "text/html",
-        ".svg": "image/svg+xml",
-        ".png": "image/png",
-        ".jpg": "image/jpeg",
-        ".jpeg": "image/jpeg",
-        ".gif": "image/gif",
-        ".webp": "image/webp",
-        ".ico": "image/x-icon",
-        ".woff2": "font/woff2",
-        ".woff": "font/woff",
-        ".ttf": "font/ttf",
-        ".otf": "font/otf",
-        ".map": "application/json",
-    }
-    if suffix not in content_types:
-        raise HTTPException(
-            status_code=404,
-            detail="File not found",
-        )
-    media_type = content_types[suffix]
-    return FileResponse(
-        target,
-        media_type=media_type,
-        headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
-    )
+    media_type = _PLUGIN_ASSET_CONTENT_TYPES.get(target.suffix.lower())
+    if media_type is None:
+        raise HTTPException(status_code=404, detail="File not found")
+    return FileResponse(target, media_type=media_type, headers={"Cache-Control": "no-store, no-cache, must-revalidate"})
