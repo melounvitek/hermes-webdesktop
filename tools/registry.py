@@ -70,10 +70,8 @@ def _is_registry_register_call(node: ast.AST) -> bool:
 
 def _module_registers_tools(module_path: Path) -> bool:
     """True when the module body (or a module-level ``for``) calls ``registry.register(...)``.
-
-    Only module-body statements count, so helpers that register inside a function are
-    skipped. A text prefilter avoids ``ast.parse`` for files lacking both words.
-    """
+    Only module-body statements count, so helpers registering inside a function are skipped;
+    a text prefilter avoids ``ast.parse`` for files lacking both words."""
     try:
         source = module_path.read_text(encoding="utf-8")
     except OSError:
@@ -92,12 +90,10 @@ def _module_registers_tools(module_path: Path) -> bool:
 
 
 def discover_builtin_tools(tools_dir: Optional[Path] = None) -> List[str]:
-    """Import built-in self-registering tool modules and return their module names.
-
-    The per-file AST scan costs ~145 ms over ~100 files, so verdicts are memoized on
-    disk keyed by ``(mtime_ns, size)``; a mismatch or corrupt cache re-scans that file.
-    The cache write is best-effort and atomic, so concurrent processes race harmlessly.
-    """
+    """Import built-in self-registering tool modules and return their module names. The
+    per-file AST scan costs ~145 ms over ~100 files, so verdicts are memoized on disk keyed
+    by ``(mtime_ns, size)``; a mismatch or corrupt cache re-scans that file. The write is
+    best-effort and atomic, so concurrent processes race harmlessly."""
     tools_path = Path(tools_dir) if tools_dir is not None else Path(__file__).resolve().parent
 
     cache = _load_discovery_cache()
@@ -211,17 +207,13 @@ _OVERRIDE_DENIED_MSG = (
 
 
 # ---- check_fn TTL cache ----------------------------------------------------
-# check_fns probe external state (Docker daemon, Modal SDK, playwright binary) that
-# changes on human timescales, so results are cached ~30 s: env-var flips via
-# ``hermes tools`` still propagate within a turn or two with no explicit invalidation.
-#
-# Transient-failure suppression: probes can flap (a ``docker version`` timing out under
-# load), which would silently strip a whole toolset from the agent being built at that
-# instant — most visibly a delegate_task subagent reporting "Tool read_file does not
-# exist". So each check's last success is remembered and a fresh failure within a short
-# grace window serves the last-good True WITHOUT caching the failure. A failure
-# persisting past the window is honored, so a backend that really went down stops
-# advertising its tools.
+# check_fns probe external state (Docker, Modal SDK, playwright) that changes on human
+# timescales, so results are cached ~30 s: env-var flips via ``hermes tools`` still land
+# within a turn or two. Transient-failure suppression: a flapping probe (``docker version``
+# timing out under load) would silently strip a whole toolset from the agent being built —
+# most visibly a subagent reporting "Tool read_file does not exist" — so a failure within a
+# short grace window of the last success serves the last-good True WITHOUT caching it; a
+# failure persisting past the window is honored so a dead backend stops advertising tools.
 
 _CHECK_FN_TTL_SECONDS = 30.0
 # Grace window after a success in which a failure counts as a flake; kept short
@@ -267,12 +259,11 @@ def _prune_check_fn_caches(now: float) -> None:
 def check_fn_cache_scope() -> Optional[str]:
     """Return the active profile key when availability is profile-scoped.
 
-    Browser-controller availability is request-bound and can change on every
-    attach/detach, so a fully bound browser-control request bypasses both this cache
-    and model_tools' outer definition cache (same sentinel) — one Browser session's
-    live tools must not leak into another. Single-profile processes keep the
-    process-wide cache; a multiplex gateway installs a Hermes-home override per
-    profile turn, so the canonical profile key is the isolation boundary.
+    Browser-controller availability is request-bound (changes on every attach/detach), so a
+    fully bound browser-control request bypasses this cache AND model_tools' outer definition
+    cache (same sentinel) — one Browser session's live tools must not leak into another.
+    Single-profile processes keep the process-wide cache; a multiplex gateway installs a
+    Hermes-home override per profile turn, so the canonical profile key is the boundary.
     """
     try:
         from gateway.session_context import get_session_env
@@ -407,23 +398,19 @@ class ToolRegistry:
     """Singleton registry that collects tool schemas + handlers from tool files."""
 
     def __init__(self):
-        # Built-in and other process-global registrations.
-        self._tools: Dict[str, ToolEntry] = {}
-        # Plugin registrations are overlays keyed by resolved HERMES_HOME: a profile
-        # sees its own overlay first, then the global built-ins.
+        self._tools: Dict[str, ToolEntry] = {}  # built-in / process-global registrations
+        # Plugin overlays keyed by resolved HERMES_HOME; a profile sees its overlay first.
         self._scoped_tools: Dict[str, Dict[str, ToolEntry]] = {}
-        # Plugin module namespace -> operator opt-in for built-in override. Policies
-        # are lifecycle-managed; scope attribution below stays durable after policy
-        # removal so delayed callbacks remain confined to the profile that loaded them.
+        # Plugin namespace -> operator opt-in for built-in override (lifecycle-managed);
+        # scope attribution stays durable after policy removal so delayed callbacks
+        # remain confined to the profile that loaded them.
         self._plugin_override_policy: Dict[tuple[Optional[str], str], _PluginOverridePolicy] = {}
         self._plugin_module_scopes: Dict[str, Set[Optional[str]]] = {}
         self._toolset_checks: Dict[str, Callable] = {}
         self._toolset_aliases: Dict[str, str] = {}
-        # MCP dynamic refresh can mutate the registry while other threads read tool
-        # metadata: mutations are serialized and readers get stable snapshots.
+        # MCP refresh mutates while other threads read: serialize writes, snapshot reads.
         self._lock = threading.RLock()
-        # Bumped on every mutation; external callers (get_tool_definitions) memoize
-        # against it — an entry keyed on the generation is valid until it changes.
+        # Bumped on every mutation; get_tool_definitions memoizes against it.
         self._generation: int = 0
 
     @staticmethod
@@ -467,12 +454,10 @@ class ToolRegistry:
         return self._snapshot_state()[0]
 
     def _toolset_has_exposable_tools(self, toolset: str, entries: List[ToolEntry]) -> bool:
-        """True when at least one tool in *toolset* would be exposed.
-
-        Mirrors :meth:`get_definitions` per-tool filtering so doctor, banners and other
-        toolset-level surfaces agree with runtime exposure: mixed toolsets (``terminal``
-        plus desktop-only ``read_terminal``) must not be gated by the first ``check_fn``.
-        """
+        """True when at least one tool in *toolset* would be exposed. Mirrors
+        :meth:`get_definitions` per-tool filtering so doctor/banners agree with runtime:
+        mixed toolsets (``terminal`` + desktop-only ``read_terminal``) must not be gated
+        by the first ``check_fn``."""
         check_results: Dict[Callable, bool] = {}
         return any(
             not entry.check_fn or _memo_check(entry.check_fn, check_results)
@@ -545,12 +530,8 @@ class ToolRegistry:
             return self._plugin_override_policy.get((scope, module_namespace))
 
     def restore_plugin_override_policy(
-        self,
-        module_namespace: str,
-        current: _PluginOverridePolicy,
-        previous: Optional[_PluginOverridePolicy],
-        *,
-        scope: Optional[str] = None) -> bool:
+        self, module_namespace: str, current: _PluginOverridePolicy,
+        previous: Optional[_PluginOverridePolicy], *, scope: Optional[str] = None) -> bool:
         """CAS-restore policy state while retaining durable scope attribution."""
         with self._lock:
             key = (scope, module_namespace)
@@ -569,12 +550,10 @@ class ToolRegistry:
         return bool(policy and policy.allowed)
 
     def _plugin_owner_of(self, handler: Callable) -> Optional[str]:
-        """Plugin namespace that DEFINED *handler* (None for built-in/MCP handlers).
-
-        Bound to ``handler.__globals__["__name__"]``, fixed at definition time so it
-        cannot drift with call site, thread, or timing; lambdas and nested functions
-        inherit it, so a plugin cannot launder an override via a callback.
-        """
+        """Plugin namespace that DEFINED *handler* (None for built-in/MCP handlers). Bound to
+        ``handler.__globals__["__name__"]``, fixed at definition time so it cannot drift with
+        call site/thread/timing; lambdas and nested functions inherit it, so a plugin cannot
+        launder an override via a callback."""
         mod = self._callable_module(handler)
         return self._plugin_namespace_of_module(mod) if mod else None
 
@@ -654,27 +633,14 @@ class ToolRegistry:
             return ""
 
     def register(
-        self,
-        name: str,
-        toolset: str,
-        schema: dict,
-        handler: Callable,
-        check_fn: Callable = None,
-        requires_env: list = None,
-        is_async: bool = False,
-        description: str = "",
-        emoji: str = "",
-        max_result_size_chars: int | float | None = None,
-        dynamic_schema_overrides: Callable = None,
-        override: bool = False,
+        self, name: str, toolset: str, schema: dict, handler: Callable,
+        check_fn: Callable = None, requires_env: list = None, is_async: bool = False,
+        description: str = "", emoji: str = "", max_result_size_chars: int | float | None = None,
+        dynamic_schema_overrides: Callable = None, override: bool = False,
         scope: Optional[str] = None):
-        """Register a tool. Called at module-import time by each tool file.
-
-        ``override=True`` is an explicit opt-in for plugins that intend to replace an
-        existing built-in tool implementation (e.g. swap the default browser tool for a
-        headed-Chrome CDP backend). Without it, registrations that would shadow an
-        existing tool from a different toolset are rejected.
-        """
+        """Register a tool (called at import time by each tool file). ``override=True`` is an
+        explicit opt-in for plugins replacing a built-in implementation (e.g. a headed-Chrome
+        browser backend); without it, cross-toolset shadowing is rejected."""
         handler_owner = self._plugin_owner_of(handler)
         caller_owner = self._plugin_namespace_of_module(self._caller_module())
         owner = caller_owner or handler_owner
@@ -725,15 +691,9 @@ class ToolRegistry:
                         name, toolset, existing.toolset)
                     return
             target[name] = ToolEntry(
-                name=name,
-                toolset=toolset,
-                schema=schema,
-                handler=handler,
-                check_fn=check_fn,
-                requires_env=requires_env or [],
-                is_async=is_async,
-                description=description or schema.get("description", ""),
-                emoji=emoji,
+                name=name, toolset=toolset, schema=schema, handler=handler, check_fn=check_fn,
+                requires_env=requires_env or [], is_async=is_async,
+                description=description or schema.get("description", ""), emoji=emoji,
                 max_result_size_chars=max_result_size_chars,
                 dynamic_schema_overrides=dynamic_schema_overrides)
             # Availability is derived per-tool (_toolset_has_exposable_tools), so this
@@ -745,16 +705,14 @@ class ToolRegistry:
             self._generation += 1
 
     def deregister(self, name: str, *, scope: Optional[str] = None) -> None:
-        """Remove a tool; drops the toolset check/aliases if it was the last tool in its toolset.
+        """Remove a tool; drops the toolset check/aliases if it was the last in its toolset.
 
         ``scope`` selects a profile overlay explicitly (multiplexed MCP tools live in the
-        owning profile's overlay). Plugin callers may not name another scope; non-plugin
-        callers without ``scope`` target the process-global map.
-
-        Gated by the same opt-in as ``register(override=True)``: otherwise a plugin
-        could deregister a tool it doesn't own and re-register over the empty slot,
-        skipping the override check (which only runs when an entry exists).
-        ``mcp-*`` toolsets are exempt — discovery repaves its own tools per refresh.
+        owning profile's overlay); plugin callers may not name another scope, non-plugin
+        callers default to the process-global map. Gated by the same opt-in as
+        ``register(override=True)``, else a plugin could deregister a tool it doesn't own
+        and re-register over the empty slot (the override check only runs when an entry
+        exists). ``mcp-*`` toolsets are exempt — discovery repaves its own tools per refresh.
         """
         with self._lock:
             caller_mod = self._caller_module()

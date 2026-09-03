@@ -46,11 +46,8 @@ _WRAPPER_OPTIONS_WITH_ARG: dict[str, frozenset[str]] = {
         "-C", "--chdir", "-c", "--close-from", "-g", "--group", "-h", "--host",
         "-p", "--prompt", "-R", "--chroot", "-T", "--command-timeout", "-u", "--user"}),
     "env": frozenset({"-a", "--argv0", "-C", "--chdir", "-S", "--split-string", "-u", "--unset"}),
-    "command": _NO_OPTIONS,
-    "builtin": _NO_OPTIONS,
+    "command": _NO_OPTIONS, "builtin": _NO_OPTIONS, "nohup": _NO_OPTIONS, "setsid": _NO_OPTIONS,
     "exec": frozenset({"-a"}),
-    "nohup": _NO_OPTIONS,
-    "setsid": _NO_OPTIONS,
     "time": frozenset({"-f", "--format", "-o", "--output"})}
 _MAX_RECURSION = 4
 # git global options that consume the next argument (-C/--work-tree/-c are acted on).
@@ -245,17 +242,12 @@ def _heredoc_specs(line: str) -> list[_Heredoc]:
         char = line[index]
         if quote:
             if char == "\\" and quote == '"' and index + 1 < len(line):
-                index += 2
-                continue
-            if char == quote:
+                index += 1  # skip the escaped character too
+            elif char == quote:
                 quote = None
-            index += 1
-            continue
-        if char in {"'", '"'}:
+        elif char in {"'", '"'}:
             quote = char
-            index += 1
-            continue
-        if not line.startswith("<<", index) or line.startswith("<<<", index):
+        if quote or not line.startswith("<<", index) or line.startswith("<<<", index):
             index += 1
             continue
 
@@ -417,9 +409,7 @@ def _mutates_worktree(subcommand: str, args: list[str]) -> bool:
 def _inspect_git_worktree(args: list[str], cwd: Path, root: Path) -> str | None:
     """Block `worktree remove|move` aimed at the running root, from any directory."""
     action_index = _consume_options(args, 0)
-    if action_index >= len(args):
-        return None
-    action = args[action_index].lower()
+    action = args[action_index].lower() if action_index < len(args) else None
     if action not in _WORKTREE_TARGET_ACTIONS:
         return None
     target_index = _consume_options(args, action_index + 1)

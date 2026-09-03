@@ -107,12 +107,10 @@ def _sanitize_single_tool(tool: dict) -> dict:
     top = _sanitize_node(params, path=name)
     # Guarantee the top level is an object with properties.
     if not isinstance(top, dict):
-        top = _empty_object()
-    else:
-        if top.get("type") != "object":
-            top["type"] = "object"
-        if not isinstance(top.get("properties"), dict):
-            top["properties"] = {}
+        top = {}
+    top["type"] = "object"
+    if not isinstance(top.get("properties"), dict):
+        top["properties"] = {}
     # Collapse nullable unions the recursive pass leaves intact (it only handles the
     # array-form ``type: [X, "null"]``); keep ``nullable: true`` so runtime coercion
     # (``model_tools._schema_allows_null``) still maps a model-emitted ``"null"`` to None.
@@ -368,6 +366,18 @@ def _sanitize_node(node: Any, path: str) -> Any:
 _STRIP_ON_RECOVERY_KEYS = frozenset({"pattern", "format"})
 
 
+def _dict_nodes(node: Any):
+    """Pre-order walk yielding every dict node; each is yielded before its values are visited,
+    so a consumer may mutate it in place."""
+    if isinstance(node, dict):
+        yield node
+        for v in node.values():
+            yield from _dict_nodes(v)
+    elif isinstance(node, list):
+        for item in node:
+            yield from _dict_nodes(item)
+
+
 def _reactive_strip(
     tools: list[dict], strip_node: Callable[[dict], int], log_msg: str,
 ) -> tuple[list[dict], int]:
@@ -377,26 +387,15 @@ def _reactive_strip(
     if not tools:
         return tools, 0
     stripped = 0
-
-    def _walk(node: Any) -> None:
-        nonlocal stripped
-        if isinstance(node, dict):
-            stripped += strip_node(node)
-            for v in node.values():
-                _walk(v)
-        elif isinstance(node, list):
-            for item in node:
-                _walk(item)
-
     for tool in tools:
         if not isinstance(tool, dict):
             continue
         fn = tool.get("function")
-        if isinstance(fn, dict) and isinstance(fn.get("parameters"), dict):
-            _walk(fn["parameters"])
-        elif isinstance(tool.get("parameters"), dict):
-            _walk(tool["parameters"])
-
+        params = fn.get("parameters") if isinstance(fn, dict) else None
+        if not isinstance(params, dict):
+            params = tool.get("parameters")
+        if isinstance(params, dict):
+            stripped += sum(strip_node(node) for node in _dict_nodes(params))
     if stripped:
         logger.info(log_msg, stripped)
     return tools, stripped
