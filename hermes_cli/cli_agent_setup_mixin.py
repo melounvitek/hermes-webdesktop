@@ -1,10 +1,8 @@
 """Agent-construction and session-resume display methods for ``HermesCLI``.
 
-Holds the agent lifecycle cluster lifted from ``cli.py``: runtime-credential
-resolution, per-turn agent config, first-use agent construction, and resumed-session
-preload + history recap. ``cli.py``-internal helpers are imported lazily inside each
-method (``from cli import ...`` resolves once ``cli`` is fully loaded) so this module
-never imports ``cli`` at import time -> no import cycle.
+Runtime-credential resolution, per-turn agent config, first-use agent construction, and
+resumed-session preload + history recap. ``cli.py`` helpers are imported lazily inside
+each method so this module never imports ``cli`` at import time (import cycle).
 """
 
 from __future__ import annotations
@@ -49,13 +47,18 @@ def _current_runtime(cli) -> dict:
 def _route_signature(model, runtime: dict) -> tuple:
     """Hashable identity of (model, routing) used to detect when the agent must be rebuilt."""
     return (
-        model,
-        runtime.get("provider"),
-        runtime.get("requested_provider"),
-        runtime.get("base_url"),
-        runtime.get("api_mode"),
-        runtime.get("command"),
-        tuple(runtime.get("args") or ()),
+        model, runtime.get("provider"), runtime.get("requested_provider"), runtime.get("base_url"),
+        runtime.get("api_mode"), runtime.get("command"), tuple(runtime.get("args") or ()),
+    )
+
+
+def _keyless_custom_base(base_url) -> bool:
+    """Custom/local endpoints (llama.cpp, ollama, vLLM) often need no auth; only a
+    non-OpenRouter base_url qualifies."""
+    return bool(
+        isinstance(base_url, str)
+        and base_url
+        and not base_url_host_matches(base_url, "openrouter.ai")
     )
 
 
@@ -69,6 +72,30 @@ def _compression_descendant(session_db, session_id):
     return resolved_id if resolved_id and resolved_id != session_id else None
 
 
+def _user_display_text(content) -> str:
+    """Recap text for a user row; multimodal lists become text parts + ``[image]`` markers."""
+    if isinstance(content, list):
+        return " ".join(
+            part.get("text", "") if part.get("type") == "text" else "[image]"
+            for part in content
+            if isinstance(part, dict) and part.get("type") in ("text", "image_url")
+        )
+    return "" if content is None else str(content)
+
+
+def _tool_calls_summary(tool_calls) -> str:
+    """``[N tool call(s): name, ...]`` with up to 4 distinct names."""
+    names = []
+    for tc in tool_calls:
+        fn = tc.get("function", {})
+        name = fn.get("name", "unknown") if isinstance(fn, dict) else "unknown"
+        if name not in names:
+            names.append(name)
+    names_str = ", ".join(names[:4]) + (", ..." if len(names) > 4 else "")
+    noun = "call" if len(tool_calls) == 1 else "calls"
+    return f"[{len(tool_calls)} tool {noun}: {names_str}]"
+
+
 # display_kind -> recap event line; ``hidden`` rows are skipped before this lookup.
 _RESUME_EVENT_TEXT = {
     "model_switch": "model changed",
@@ -78,9 +105,7 @@ _RESUME_EVENT_TEXT = {
 
 # (skin key, fallback) for recap panel colors: body text, session label, border, assistant label.
 _RESUME_SKIN_COLORS = (
-    ("banner_text", "#FFF8DC"),
-    ("session_label", "#DAA520"),
-    ("session_border", "#8B8682"),
+    ("banner_text", "#FFF8DC"), ("session_label", "#DAA520"), ("session_border", "#8B8682"),
     ("ui_ok", "#8FBC8F"),
 )
 
@@ -91,51 +116,25 @@ class CLIAgentSetupMixin:
     def _ensure_runtime_credentials(self) -> bool:
         """Re-resolve provider credentials before agent use so key rotation / token
         refresh are picked up without restarting the CLI. False on auth failure."""
-        from cli import ChatConsole, _cprint, logger
+        from cli import ChatConsole, logger
         from hermes_cli.runtime_provider import resolve_runtime_provider, format_runtime_provider_error
 
         _primary_exc = None
         runtime = None
         try:
             runtime = resolve_runtime_provider(
-                requested=self.requested_provider,
-                explicit_api_key=self._explicit_api_key,
+                requested=self.requested_provider, explicit_api_key=self._explicit_api_key,
                 explicit_base_url=self._explicit_base_url,
             )
         except Exception as exc:
             _primary_exc = exc
 
-        # Primary provider auth failed — try fallback providers before giving up.
         if runtime is None and _primary_exc is not None:
             from hermes_cli.auth import AuthError
             if isinstance(_primary_exc, AuthError):
-                _fb_chain = self._fallback_model if isinstance(self._fallback_model, list) else []
-                for _fb in _fb_chain:
-                    _fb_provider = (_fb.get("provider") or "").strip().lower()
-                    _fb_model = (_fb.get("model") or "").strip()
-                    if not _fb_provider or not _fb_model:
-                        continue
-                    try:
-                        from hermes_cli.fallback_config import resolve_entry_api_key
-
-                        _fb_kwargs = {"requested": _fb_provider}
-                        if _fb.get("base_url"):
-                            _fb_kwargs["explicit_base_url"] = _fb["base_url"]
-                        _fb_api_key = resolve_entry_api_key(_fb)
-                        if _fb_api_key:
-                            _fb_kwargs["explicit_api_key"] = _fb_api_key
-                        runtime = resolve_runtime_provider(**_fb_kwargs)
-                        logger.warning(
-                            "Primary provider auth failed (%s). Falling through to fallback: %s/%s",
-                            _primary_exc, _fb_provider, _fb_model,
-                        )
-                        _cprint(f"⚠️  Primary auth failed — switching to fallback: {_fb_provider} / {_fb_model}")
-                        self.requested_provider = _fb_provider
-                        self.model = _fb_model
-                        _primary_exc = None
-                        break
-                    except Exception:
-                        continue
+                runtime = self._resolve_fallback_runtime(_primary_exc)
+                if runtime is not None:
+                    _primary_exc = None
 
         if runtime is None:
             message = format_runtime_provider_error(_primary_exc) if _primary_exc else "Provider resolution failed."
@@ -145,27 +144,21 @@ class CLIAgentSetupMixin:
         api_key = runtime.get("api_key")
         base_url = runtime.get("base_url")
         resolved_provider = runtime.get("provider", "openrouter")
-        resolved_api_mode = runtime.get("api_mode", self.api_mode)
-        resolved_acp_command = runtime.get("command")
-        resolved_acp_args = list(runtime.get("args") or [])
+        resolved_routing = (
+            resolved_provider, runtime.get("api_mode", self.api_mode), runtime.get("command"),
+            list(runtime.get("args") or []),
+        )
         # A callable api_key is a bearer-token provider (Azure Entra ID): the OpenAI SDK
         # invokes it per request, so skip string validation / placeholder substitution.
         _is_callable_provider = callable(api_key) and not isinstance(api_key, str)
         if not _is_callable_provider and (not isinstance(api_key, str) or not api_key):
-            # Custom/local endpoints (llama.cpp, ollama, vLLM) often need no auth: with a
-            # non-OpenRouter base_url use a placeholder key so the SDK doesn't reject it.
-            _source = runtime.get("source", "")
-            _has_custom_base = (
-                isinstance(base_url, str)
-                and base_url
-                and not base_url_host_matches(base_url, "openrouter.ai")
-            )
-            if _has_custom_base:
+            if _keyless_custom_base(base_url):
+                # Placeholder key so the SDK doesn't reject the keyless local endpoint.
                 api_key = "no-key-required"
                 logger.debug(
                     "No API key for custom endpoint %s (source=%s), "
                     "using placeholder — local servers typically ignore auth",
-                    base_url, _source,
+                    base_url, runtime.get("source", ""),
                 )
             else:
                 _prov = (resolved_provider or self.requested_provider or "").strip()
@@ -182,16 +175,8 @@ class CLIAgentSetupMixin:
             return False
 
         credentials_changed = api_key != self.api_key or base_url != self.base_url
-        routing_changed = (
-            resolved_provider != self.provider
-            or resolved_api_mode != self.api_mode
-            or resolved_acp_command != self.acp_command
-            or resolved_acp_args != self.acp_args
-        )
-        self.provider = resolved_provider
-        self.api_mode = resolved_api_mode
-        self.acp_command = resolved_acp_command
-        self.acp_args = resolved_acp_args
+        routing_changed = resolved_routing != (self.provider, self.api_mode, self.acp_command, self.acp_args)
+        self.provider, self.api_mode, self.acp_command, self.acp_args = resolved_routing
         self._credential_pool = runtime.get("credential_pool")
         self._provider_source = runtime.get("source")
         self.api_key = api_key
@@ -231,6 +216,39 @@ class CLIAgentSetupMixin:
 
         return True
 
+    def _resolve_fallback_runtime(self, primary_exc):
+        """Primary provider auth failed: try each fallback entry in order and switch the
+        CLI's requested_provider/model to the first that resolves. None if none do."""
+        from cli import _cprint, logger
+        from hermes_cli.runtime_provider import resolve_runtime_provider
+        _fb_chain = self._fallback_model if isinstance(self._fallback_model, list) else []
+        for _fb in _fb_chain:
+            _fb_provider = (_fb.get("provider") or "").strip().lower()
+            _fb_model = (_fb.get("model") or "").strip()
+            if not _fb_provider or not _fb_model:
+                continue
+            try:
+                from hermes_cli.fallback_config import resolve_entry_api_key
+
+                _fb_kwargs = {"requested": _fb_provider}
+                if _fb.get("base_url"):
+                    _fb_kwargs["explicit_base_url"] = _fb["base_url"]
+                _fb_api_key = resolve_entry_api_key(_fb)
+                if _fb_api_key:
+                    _fb_kwargs["explicit_api_key"] = _fb_api_key
+                runtime = resolve_runtime_provider(**_fb_kwargs)
+                logger.warning(
+                    "Primary provider auth failed (%s). Falling through to fallback: %s/%s",
+                    primary_exc, _fb_provider, _fb_model,
+                )
+                _cprint(f"⚠️  Primary auth failed — switching to fallback: {_fb_provider} / {_fb_model}")
+                self.requested_provider = _fb_provider
+                self.model = _fb_model
+                return runtime
+            except Exception:
+                continue
+        return None
+
     def _runtime_credentials_ready(self) -> bool:
         """Silently probe whether any inference provider can be resolved.
 
@@ -240,8 +258,7 @@ class CLIAgentSetupMixin:
 
         try:
             runtime = resolve_runtime_provider(
-                requested=self.requested_provider,
-                explicit_api_key=self._explicit_api_key,
+                requested=self.requested_provider, explicit_api_key=self._explicit_api_key,
                 explicit_base_url=self._explicit_base_url,
             )
         except Exception:
@@ -252,12 +269,7 @@ class CLIAgentSetupMixin:
         base_url = runtime.get("base_url")
         if (callable(api_key) and not isinstance(api_key, str)) or (isinstance(api_key, str) and api_key):
             return bool(base_url)
-        # Keyless custom/local endpoints (ollama, llama.cpp, vLLM…) are fine.
-        return bool(
-            isinstance(base_url, str)
-            and base_url
-            and not base_url_host_matches(base_url, "openrouter.ai")
-        )
+        return _keyless_custom_base(base_url)
 
     def _offer_first_run_setup(self) -> bool:
         """Offer the provider picker when no provider is configured at all (interactive
@@ -296,12 +308,9 @@ class CLIAgentSetupMixin:
             from hermes_cli.config import load_config
             _model_cfg = (load_config().get("model") or {})
             if isinstance(_model_cfg, dict):
-                _new_provider = (_model_cfg.get("provider") or "").strip()
-                if _new_provider:
-                    self.requested_provider = _new_provider
+                self.requested_provider = (_model_cfg.get("provider") or "").strip() or self.requested_provider
                 _new_model = (_model_cfg.get("default") or _model_cfg.get("model") or "").strip()
-                if _new_model:
-                    self.model = _new_model
+                self.model = _new_model or self.model
         except Exception as exc:
             logger.debug("first-run config re-sync failed: %s", exc)
         # Force credential re-resolution + agent rebuild on next use.
@@ -322,19 +331,33 @@ class CLIAgentSetupMixin:
 
         runtime = _current_runtime(self)
         route = {"model": self.model, "runtime": runtime, "signature": _route_signature(self.model, runtime)}
-
-        if getattr(self, "service_tier", None) != "priority":
-            route["request_overrides"] = None
-            return route
-
-        try:
-            overrides = resolve_fast_mode_overrides(
-                route["model"], provider=runtime["provider"], base_url=runtime["base_url"],
-            )
-        except Exception:
-            overrides = None
+        overrides = None
+        if getattr(self, "service_tier", None) == "priority":
+            try:
+                overrides = resolve_fast_mode_overrides(
+                    route["model"], provider=runtime["provider"], base_url=runtime["base_url"],
+                )
+            except Exception:
+                overrides = None
         route["request_overrides"] = overrides
         return route
+
+    def _follow_compression_chain(self, session_meta, announce):
+        """If the resumed id is an empty compression-chain head, announce and switch to
+        the descendant holding the messages; returns the (possibly refreshed) meta."""
+        resolved_id = _compression_descendant(self._session_db, self.session_id)
+        if resolved_id:
+            announce(resolved_id)
+            self.session_id = resolved_id
+            session_meta = self._session_db.get_session(self.session_id) or session_meta
+        return session_meta
+
+    def _reopen_session(self) -> None:
+        """Clear ended_at so the resumed session is active again (best effort)."""
+        try:
+            self._session_db.reopen_session(self.session_id)
+        except Exception:
+            pass
 
     def _load_resumed_history_late(self) -> bool:
         """Late resume path: validate the session and load its history from the DB when
@@ -360,15 +383,14 @@ class CLIAgentSetupMixin:
                 _cprint(f"\033[1;31mSession not found: {self.session_id}{_RST}")
                 _cprint(f"{_DIM}Use a session ID from a previous CLI run (hermes sessions list).{_RST}")
             return False
-        resolved_id = _compression_descendant(self._session_db, self.session_id)
-        if resolved_id:
-            ChatConsole().print(
+        session_meta = self._follow_compression_chain(
+            session_meta,
+            lambda rid: ChatConsole().print(
                 f"[dim]Session {_escape(self.session_id)} was compressed into "
-                f"{_escape(resolved_id)}; resuming the descendant with your "
+                f"{_escape(rid)}; resuming the descendant with your "
                 f"transcript.[/dim]"
-            )
-            self.session_id = resolved_id
-            session_meta = self._session_db.get_session(self.session_id) or session_meta
+            ),
+        )
         if getattr(self, "_resume_history_error", None):
             return False
         # Only the TIP session's rows are loaded here (no ancestors), so use the
@@ -401,11 +423,7 @@ class CLIAgentSetupMixin:
                 f"Session {self.session_id} found but has no messages. Starting fresh.",
                 f"[bold {_accent_hex()}]Session {_escape(self.session_id)} found but has no messages. Starting fresh.[/]",
             )
-        # Re-open the session (clear ended_at so it's active again)
-        try:
-            self._session_db.reopen_session(self.session_id)
-        except Exception:
-            pass
+        self._reopen_session()
         return True
 
     def _init_agent(self, *, model_override: str = None, runtime_override: dict = None, request_overrides: dict | None = None) -> bool:
@@ -429,8 +447,7 @@ class CLIAgentSetupMixin:
         from hermes_cli.mcp_startup import ensure_mcp_discovery_before_agent_build
 
         ensure_mcp_discovery_before_agent_build(
-            logger=logger,
-            single_query=getattr(self, "_single_query_mode", False),
+            logger=logger, single_query=getattr(self, "_single_query_mode", False)
         )
 
         if self._session_db is None:
@@ -439,7 +456,6 @@ class CLIAgentSetupMixin:
                 self._session_db = SessionDB()
             except Exception as e:
                 logger.warning("SQLite session store not available — session will NOT be indexed: %s", e)
-
         if (
             self._resumed and self._session_db and not self.conversation_history
             and not self._load_resumed_history_late()
@@ -449,63 +465,48 @@ class CLIAgentSetupMixin:
         try:
             runtime = runtime_override or _current_runtime(self)
             effective_model = model_override or self.model
+            # -q never builds the prompt_toolkit app, so the clarify modal can't be
+            # answered — answer headless instead of polling until clarify_timeout.
+            clarify_callback = (
+                _single_query_clarify_callback
+                if getattr(self, "_single_query_mode", False)
+                else self._clarify_callback
+            )
             self.agent = AIAgent(
-                model=effective_model,
-                api_key=runtime.get("api_key"),
-                base_url=runtime.get("base_url"),
-                provider=runtime.get("provider"),
+                model=effective_model, api_key=runtime.get("api_key"),
+                base_url=runtime.get("base_url"), provider=runtime.get("provider"),
                 requested_provider=runtime.get("requested_provider"),
-                api_mode=runtime.get("api_mode"),
-                acp_command=runtime.get("command"),
-                acp_args=runtime.get("args"),
-                credential_pool=runtime.get("credential_pool"),
-                max_tokens=self.max_tokens,
-                max_iterations=self.max_turns,
+                api_mode=runtime.get("api_mode"), acp_command=runtime.get("command"),
+                acp_args=runtime.get("args"), credential_pool=runtime.get("credential_pool"),
+                max_tokens=self.max_tokens, max_iterations=self.max_turns,
                 run_budget_seconds=getattr(self, "run_budget_seconds", None),
-                enabled_toolsets=self.enabled_toolsets,
-                disabled_toolsets=self.disabled_toolsets,
-                verbose_logging=self.verbose,
-                quiet_mode=not self.verbose,
+                enabled_toolsets=self.enabled_toolsets, disabled_toolsets=self.disabled_toolsets,
+                verbose_logging=self.verbose, quiet_mode=not self.verbose,
                 tool_progress_mode=getattr(self, "tool_progress_mode", "all"),
                 ephemeral_system_prompt=self.system_prompt if self.system_prompt else None,
                 prefill_messages=self.prefill_messages or None,
-                reasoning_config=self.reasoning_config,
-                service_tier=self.service_tier,
-                request_overrides=request_overrides,
-                providers_allowed=self._providers_only,
-                providers_ignored=self._providers_ignore,
-                providers_order=self._providers_order,
+                reasoning_config=self.reasoning_config, service_tier=self.service_tier,
+                request_overrides=request_overrides, providers_allowed=self._providers_only,
+                providers_ignored=self._providers_ignore, providers_order=self._providers_order,
                 provider_sort=self._provider_sort,
                 provider_require_parameters=self._provider_require_params,
                 provider_data_collection=self._provider_data_collection,
                 openrouter_min_coding_score=self._openrouter_min_coding_score,
-                session_id=self.session_id,
-                platform="cli",
-                session_db=self._session_db,
-                # -q never builds the prompt_toolkit app, so the clarify modal can't be
-                # answered — answer headless instead of polling until clarify_timeout.
-                clarify_callback=(
-                    _single_query_clarify_callback
-                    if getattr(self, "_single_query_mode", False)
-                    else self._clarify_callback
-                ),
+                session_id=self.session_id, platform="cli", session_db=self._session_db,
+                clarify_callback=clarify_callback,
                 reasoning_callback=self._current_reasoning_callback(),
-                fallback_model=self._fallback_model,
-                thinking_callback=self._on_thinking,
+                fallback_model=self._fallback_model, thinking_callback=self._on_thinking,
                 checkpoints_enabled=self.checkpoints_enabled,
                 checkpoint_max_snapshots=self.checkpoint_max_snapshots,
                 checkpoint_max_total_size_mb=self.checkpoint_max_total_size_mb,
                 checkpoint_max_file_size_mb=self.checkpoint_max_file_size_mb,
-                pass_session_id=self.pass_session_id,
-                skip_context_files=self.ignore_rules,
-                skip_memory=self.ignore_rules,
-                tool_progress_callback=self._on_tool_progress,
+                pass_session_id=self.pass_session_id, skip_context_files=self.ignore_rules,
+                skip_memory=self.ignore_rules, tool_progress_callback=self._on_tool_progress,
                 tool_start_callback=self._on_tool_start if self._inline_diffs_enabled else None,
                 tool_complete_callback=self._on_tool_complete if self._inline_diffs_enabled else None,
                 stream_delta_callback=self._stream_delta if self.streaming_enabled else None,
                 tool_gen_callback=self._on_tool_gen_start if self.streaming_enabled else None,
-                notice_callback=self._on_notice,
-                notice_clear_callback=self._on_notice_clear,
+                notice_callback=self._on_notice, notice_clear_callback=self._on_notice_clear,
                 reaction_callback=self._on_reaction,
             )
             # Reference for atexit memory-provider shutdown: ``_run_cleanup`` in cli.py
@@ -535,7 +536,7 @@ class CLIAgentSetupMixin:
                         _cprint(f"  Session title applied: {self._pending_title}")
                         self._pending_title = None
                     # else: row creation failed transiently — keep _pending_title for retry
-                except (ValueError, Exception) as e:
+                except Exception as e:
                     _cprint(f"  Could not apply pending title: {e}")
                     # Keep _pending_title so it can be retried after row creation succeeds
             return True
@@ -574,7 +575,6 @@ class CLIAgentSetupMixin:
                 "Resume safety check failed for %s (proceeding without guard): %s",
                 self.session_id, exc,
             )
-            return None
         return None
 
     def _preload_resumed_session(self) -> bool:
@@ -591,23 +591,20 @@ class CLIAgentSetupMixin:
             self._console_print("[dim]Use a session ID from a previous CLI run (hermes sessions list).[/]")
             return False
 
-        resolved_id = _compression_descendant(self._session_db, self.session_id)
-        if resolved_id:
-            self._console_print(
+        session_meta = self._follow_compression_chain(
+            session_meta,
+            lambda rid: self._console_print(
                 f"[dim]Session {self.session_id} was compressed into "
-                f"{resolved_id}; resuming the descendant with your transcript.[/]"
-            )
-            self.session_id = resolved_id
-            session_meta = self._session_db.get_session(self.session_id) or session_meta
-
+                f"{rid}; resuming the descendant with your transcript.[/]"
+            ),
+        )
         resume_limit_error = self._resume_history_limit_error()
         if resume_limit_error:
             self._resume_history_error = resume_limit_error
             self._console_print(f"[bold red]Cannot resume session:[/] {resume_limit_error}")
             return False
 
-        model_history, display_history = self._session_db.get_resume_conversations(self.session_id)
-        restored = model_history
+        restored, display_history = self._session_db.get_resume_conversations(self.session_id)
         accent_color = _accent_hex()
         if not restored:
             self._console_print(
@@ -635,12 +632,7 @@ class CLIAgentSetupMixin:
         self._restore_session_yolo(session_meta)
         self._restore_session_model(session_meta)
 
-        # Re-open the session (clear ended_at so it's active again)
-        try:
-            self._session_db.reopen_session(self.session_id)
-        except Exception:
-            pass
-
+        self._reopen_session()
         return True
 
     def _display_resumed_history(self):
@@ -668,7 +660,6 @@ class CLIAgentSetupMixin:
             display_kind = msg.get("display_kind")
             content = msg.get("content")
             tool_calls = msg.get("tool_calls") or []
-
             if display_kind == "hidden":
                 continue
             if display_kind in _RESUME_EVENT_TEXT:
@@ -677,17 +668,10 @@ class CLIAgentSetupMixin:
             if role in ("system", "tool"):
                 continue
 
+            # Stored history is untrusted for display: strip escape sequences/control
+            # chars so replay can't clear the screen, retitle the window or restyle the panel.
             if role == "user":
-                text = "" if content is None else str(content)
-                if isinstance(content, list):  # multimodal: text parts + [image] markers
-                    text = " ".join(
-                        part.get("text", "") if part.get("type") == "text" else "[image]"
-                        for part in content
-                        if isinstance(part, dict) and part.get("type") in ("text", "image_url")
-                    )
-                # Stored history is untrusted for display: strip escape sequences/control
-                # chars so replay can't clear the screen, retitle the window or restyle the panel.
-                text = _sanitize_display_text(text)
+                text = _sanitize_display_text(_user_display_text(content))
                 if len(text) > MAX_USER_LEN:
                     text = text[:MAX_USER_LEN] + "..."
                 entries.append(("user", text))
@@ -706,17 +690,8 @@ class CLIAgentSetupMixin:
                         text = text[:MAX_ASST_LEN] + "..."
                     parts.append(text)
                 if tool_calls:
-                    names = []
-                    for tc in tool_calls:
-                        fn = tc.get("function", {})
-                        name = fn.get("name", "unknown") if isinstance(fn, dict) else "unknown"
-                        if name not in names:
-                            names.append(name)
-                    names_str = ", ".join(names[:4]) + (", ..." if len(names) > 4 else "")
-                    noun = "call" if len(tool_calls) == 1 else "calls"
-                    tc_summary = f"[{len(tool_calls)} tool {noun}: {names_str}]"
-                    parts.append(tc_summary)
-                    full_parts.append(tc_summary)
+                    parts.append(_tool_calls_summary(tool_calls))
+                    full_parts.append(parts[-1])
                 # Skip pure-reasoning messages with no visible output, and tool-call-only
                 # entries when SKIP_TOOL_ONLY is enabled.
                 if not text and (SKIP_TOOL_ONLY or not tool_calls):
@@ -728,10 +703,8 @@ class CLIAgentSetupMixin:
         if not entries:
             return
 
-        skipped = 0
-        if len(entries) > MAX_DISPLAY_EXCHANGES * 2:
-            skipped = len(entries) - MAX_DISPLAY_EXCHANGES * 2
-            entries = entries[skipped:]
+        skipped = max(0, len(entries) - MAX_DISPLAY_EXCHANGES * 2)
+        entries = entries[skipped:]
 
         # Show the last assistant entry in full so the user sees where they left off.
         if _last_asst_idx is not None and _last_asst_full:
@@ -778,11 +751,8 @@ class CLIAgentSetupMixin:
                 lines.append("")  # small gap
 
         panel = Panel(
-            lines,
-            title=f"[dim {_session_label_c}]Previous Conversation[/]",
-            border_style=f"dim {_session_border_c}",
-            padding=(0, 1),
-            style=_history_text_c,
+            lines, title=f"[dim {_session_label_c}]Previous Conversation[/]",
+            border_style=f"dim {_session_border_c}", padding=(0, 1), style=_history_text_c,
         )
         _record_output_history_entry(lambda: self._render_resume_history_panel_lines(panel))
         with _suspend_output_history():
