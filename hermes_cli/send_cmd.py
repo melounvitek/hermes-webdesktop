@@ -24,16 +24,9 @@ def _fail(msg: str, exit_code: int | None = None) -> int:
     return _FAILURE_EXIT
 
 
-def _read_message_body(
-    positional: Optional[str],
-    file_path: Optional[str],
-) -> Optional[str]:
-    """Resolve the message body from the positional arg, ``--file``, or piped stdin.
-
-    Order: explicit positional argument, then ``--file PATH`` / ``--file -`` (stdin), then piped
-    stdin when not attached to a TTY. Returns ``None`` when nothing is available — callers must
-    treat that as a usage error.
-    """
+def _read_message_body(positional: Optional[str], file_path: Optional[str]) -> Optional[str]:
+    """Resolve the message body: positional arg, then ``--file PATH`` / ``--file -`` (stdin), then
+    piped stdin when not attached to a TTY. ``None`` when nothing is available (a usage error)."""
     if positional:
         return positional
 
@@ -57,28 +50,17 @@ def _read_message_body(
         except OSError as exc:
             _fail(f"hermes send: cannot read {file_path}: {exc}", _USAGE_EXIT)
 
-    # Piped input: only consume stdin when it is not a TTY. Reading from a
-    # TTY would block the user in a half-broken "type your message" state,
-    # which is a poor default for an ops CLI.
+    # Reading from a TTY would block the user in a half-broken "type your message" state.
     return (sys.stdin.read() or None) if not sys.stdin.isatty() else None
 
 
-def _emit_result(
-    result_json: str,
-    *,
-    json_mode: bool,
-    quiet: bool,
-) -> int:
-    """Print the tool result in the requested format and return the exit code.
-
-    The underlying ``send_message_tool`` always returns a JSON string. We parse it, decide
-    success/failure, and format accordingly.
-    """
+def _emit_result(result_json: str, *, json_mode: bool, quiet: bool) -> int:
+    """Print the ``send_message_tool`` JSON result in the requested format; return the exit code.
+    Unknown / unexpected shapes are failures so scripts notice."""
     try:
         payload = json.loads(result_json) if result_json else {}
     except json.JSONDecodeError:
-        # Shouldn't happen with the shared tool, but be defensive — pass the
-        # raw string through so the user can still see what went wrong.
+        # Pass the raw string through so the user can still see what went wrong.
         payload = {"error": "invalid JSON from send_message_tool", "raw": result_json}
 
     if json_mode:
@@ -89,21 +71,16 @@ def _emit_result(
         elif payload.get("success"):
             print(payload.get("note") or "sent")
         else:
-            # Unknown shape — dump it so nothing is silently dropped.
-            print(json.dumps(payload, indent=2))
+            print(json.dumps(payload, indent=2))  # unknown shape — dump it, drop nothing
 
-    # Unknown / unexpected shapes are failures so scripts notice.
     if not payload.get("error") and (payload.get("skipped") or payload.get("success")):
         return _SUCCESS_EXIT
     return _FAILURE_EXIT
 
 
 def _list_targets(platform_filter: Optional[str], *, json_mode: bool) -> int:
-    """Print the channel directory (all configured targets across platforms).
-
-    Uses ``load_directory()`` for JSON and ``format_directory_for_display()`` for the human
-    rendering the send_message tool shows the model, keeping the two surfaces identical.
-    """
+    """Print the channel directory (all configured targets across platforms), reusing the
+    ``format_directory_for_display`` rendering the send_message tool shows the model."""
     try:
         from gateway.channel_directory import format_directory_for_display, load_directory
     except Exception as exc:
@@ -116,24 +93,19 @@ def _list_targets(platform_filter: Optional[str], *, json_mode: bool) -> int:
 
     platforms = dict(raw.get("platforms") or {})
 
-    # Merge in configured-but-undiscovered platforms so `--list` never hides
-    # a working send target. The directory only contains platforms the
-    # gateway has discovered channels for; a platform configured via env /
-    # config.yaml that has never run channel discovery (e.g. a fresh SimpleX
-    # setup used only for outbound `hermes send`) would otherwise be
-    # invisible, leaving users guessing at platform names.
+    # Merge in configured-but-undiscovered platforms so `--list` never hides a working send
+    # target: the directory only holds platforms the gateway has discovered channels for, so a
+    # platform configured via env/config.yaml that never ran discovery (e.g. a fresh SimpleX
+    # setup used only for outbound `hermes send`) would otherwise be invisible.
     try:
         from gateway.config import load_gateway_config
 
-        gw_config = load_gateway_config()
-        for plat in gw_config.get_connected_platforms():
+        for plat in load_gateway_config().get_connected_platforms():
             plat_name = getattr(plat, "value", str(plat))
             if plat_name not in ("local", "api_server", "webhook"):
                 platforms.setdefault(plat_name, [])
     except Exception:
-        # Directory contents alone are still useful; don't fail --list over
-        # a config parse problem.
-        pass
+        pass  # directory contents alone are still useful; don't fail --list on a config problem
 
     if platform_filter:
         key = platform_filter.strip().lower()
@@ -155,9 +127,7 @@ def _list_targets(platform_filter: Optional[str], *, json_mode: bool) -> int:
         print("channel discovery can populate ~/.hermes/channel_directory.json.")
         return _SUCCESS_EXIT
 
-    # Human display — when unfiltered, reuse the shared formatter the agent
-    # already sees (passing the merged view so configured-but-undiscovered
-    # platforms are listed too). When filtered, build a minimal view ourselves.
+    # Unfiltered: the shared formatter over the merged view. Filtered: a minimal view of our own.
     if platform_filter is None:
         print(format_directory_for_display(platforms))
         return _SUCCESS_EXIT
@@ -180,10 +150,7 @@ def _list_targets(platform_filter: Optional[str], *, json_mode: bool) -> int:
 
 def _load_hermes_env() -> None:
     """Populate ``os.environ`` from ``~/.hermes/.env`` AND bridge top-level ``config.yaml`` keys into
-    the environment so the underlying gateway config loader sees platform credentials and home
-    channel IDs.
-    """
-    # Step 1: dotenv
+    the environment so the gateway config loader sees platform credentials and home channels."""
     try:
         from dotenv import load_dotenv
     except Exception:
@@ -198,11 +165,9 @@ def _load_hermes_env() -> None:
     env_path = home / ".env"
     if load_dotenv and env_path.exists():
         try:
-            # utf-8-sig strips a leading UTF-8 BOM if present (PowerShell 5.1
-            # Set-Content -Encoding UTF8 / Notepad) and is a no-op for
-            # BOM-less UTF-8. Plain "utf-8" would keep U+FEFF on the first
-            # key name and silently drop it from os.environ under its
-            # canonical name.
+            # utf-8-sig strips a leading UTF-8 BOM (PowerShell 5.1 Set-Content -Encoding UTF8 /
+            # Notepad) and is a no-op otherwise; plain "utf-8" would keep U+FEFF on the first key
+            # name and silently drop it from os.environ under its canonical name.
             load_dotenv(str(env_path), override=True, encoding="utf-8-sig")
         except UnicodeDecodeError:
             try:
@@ -219,17 +184,16 @@ def _load_hermes_env() -> None:
         except Exception:
             pass
 
-    # Step 2: bridge top-level config.yaml values into the environment so
-    # gateway.config.load_gateway_config() sees them. Scalars only; don't
-    # override values already in the env.
+    # Bridge top-level config.yaml scalars into the environment (never overriding values already
+    # in the env) so gateway.config.load_gateway_config() sees them.
     import os
     config_path = home / "config.yaml"
     if not config_path.exists():
         return
 
     try:
-        # Presence-sensitive env bridge: raw read is deliberate — only keys
-        # the user actually wrote get bridged. Overlay + expansion below.
+        # Presence-sensitive env bridge: raw read is deliberate — only keys the user actually
+        # wrote get bridged. Overlay + expansion below.
         from hermes_cli.config import read_user_config_raw
         raw = read_user_config_raw(config_path)
     except Exception:
@@ -241,8 +205,8 @@ def _load_hermes_env() -> None:
     except Exception:
         pass
 
-    # Managed scope: overlay administrator-pinned values before bridging to env,
-    # so a managed top-level scalar wins here too. Fail-open via the helper.
+    # Managed scope: overlay administrator-pinned values before bridging to env, so a managed
+    # top-level scalar wins here too. Fail-open via the helper.
     try:
         from hermes_cli import managed_scope
         raw = managed_scope.apply_managed_overlay(raw if isinstance(raw, dict) else {})
@@ -259,18 +223,13 @@ def _load_hermes_env() -> None:
 
 def cmd_send(args: argparse.Namespace) -> None:
     """Entry point wired into the top-level argparse dispatcher."""
-
-    # Bridge ~/.hermes/.env and ~/.hermes/config.yaml into os.environ so the
-    # gateway config loader (invoked downstream by send_message_tool and by
-    # the channel directory) can see platform credentials and home channels.
+    # The gateway config loader (used downstream by send_message_tool and the channel directory)
+    # needs platform credentials and home channels in os.environ.
     _load_hermes_env()
 
-    # --list short-circuits everything else.
-    if getattr(args, "list_targets", False):
-        # When `--list telegram` is used, argparse stores "telegram" in the
-        # `message` positional (since list_targets takes no argument).
-        platform_filter = getattr(args, "message", None)
-        exit_code = _list_targets(platform_filter, json_mode=getattr(args, "json", False))
+    if getattr(args, "list_targets", False):  # --list short-circuits everything else
+        # `hermes send --list telegram` lands "telegram" in the `message` positional.
+        exit_code = _list_targets(getattr(args, "message", None), json_mode=getattr(args, "json", False))
         sys.exit(exit_code)
 
     target = (getattr(args, "to", None) or "").strip()
@@ -292,21 +251,17 @@ def cmd_send(args: argparse.Namespace) -> None:
             _USAGE_EXIT,
         )
 
-    # Optional: prepend a subject line. Useful for alerting scripts that
-    # want a consistent header without inlining it into every call.
+    # Optional subject line: a consistent header for alerting scripts.
     subject = getattr(args, "subject", None)
     if subject:
         message = f"{subject}\n\n{message.lstrip()}"
 
-    # Import lazily so `hermes send --help` stays fast and does not pull in
-    # the full tool registry / gateway config stack.
+    # Lazy import keeps `hermes send --help` fast (no tool registry / gateway config stack).
     from tools.send_message_tool import send_message_tool
 
-    # send_message_tool auto-loads gateway config + env and routes to the
-    # appropriate platform adapter (bot-token path for Telegram/Discord/Slack/
-    # Signal/SMS/WhatsApp; live-adapter path for plugin platforms).
-    #
-    # It expects the standard tool-call dict and returns a JSON string.
+    # send_message_tool auto-loads gateway config + env and routes to the platform adapter
+    # (bot-token path for Telegram/Discord/Slack/Signal/SMS/WhatsApp; live-adapter path for
+    # plugin platforms). It takes the standard tool-call dict and returns a JSON string.
     result = send_message_tool({"action": "send", "target": target, "message": message})
     sys.exit(_emit_result(result, json_mode=getattr(args, "json", False), quiet=getattr(args, "quiet", False)))
 
@@ -325,7 +280,6 @@ _SEND_ARGUMENTS = (
         ),
     )),
     (("message",), dict(nargs="?", default=None, help="Message text. If omitted, read from --file or stdin.")),
-    # Legacy / convenience positional removed — use --to for clarity.
     (("-f", "--file"), dict(
         metavar="PATH",
         default=None,

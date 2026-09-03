@@ -1,6 +1,6 @@
-"""Messaging-platform setup wizards (Telegram, BlueBubbles, QQ Bot, webhooks) and the
-``hermes setup gateway`` flow. Extracted from hermes_cli/setup.py; setup.py re-exports
-the public names, and tests monkeypatch prompt/print/env helpers on hermes_cli.setup."""
+"""Messaging-platform setup wizards (Telegram, BlueBubbles, webhooks) and the ``hermes setup
+gateway`` flow. setup.py re-exports the public names, and tests monkeypatch prompt/print/env
+helpers on hermes_cli.setup, so those are imported lazily per function."""
 
 import logging
 import re
@@ -9,6 +9,7 @@ from pathlib import Path
 logger = logging.getLogger("hermes_cli.setup")
 
 _TELEGRAM_BOT_TOKEN_RE = re.compile(r"^\d+:[A-Za-z0-9_-]{30,}$")
+_RULE = "━" * 50
 
 
 def _is_valid_telegram_bot_token(token: str) -> bool:
@@ -17,9 +18,7 @@ def _is_valid_telegram_bot_token(token: str) -> bool:
 
 def _profile_name_from_hermes_home(hermes_home) -> str | None:
     """Return the active profile name when HERMES_HOME is a profile dir."""
-    if hermes_home.parent.name == "profiles":
-        return hermes_home.name
-    return None
+    return hermes_home.name if hermes_home.parent.name == "profiles" else None
 
 
 def _setup_telegram_auto_result():
@@ -47,10 +46,21 @@ def _declines_reconfigure(env_var: str, label: str, question: str) -> bool:
     return not prompt_yes_no(question, False)
 
 
-def _save_if_set(env_var: str, value: str) -> None:
-    from hermes_cli.setup import save_env_value
+def _save_prompted(env_var: str, question: str, *, password: bool = False, success_msg: str | None = None,
+                   skip_msg: str | None = None, transform=None) -> str:
+    """Prompt, persist the (optionally transformed) answer when non-empty, and report either way.
+
+    ``success_msg`` may reference ``{value}``. Returns the raw answer ("" when skipped).
+    """
+    from hermes_cli.setup import print_success, print_warning, prompt, save_env_value
+    value = prompt(question, password=password)
     if value:
-        save_env_value(env_var, value)
+        save_env_value(env_var, transform(value) if transform else value)
+        if success_msg:
+            print_success(success_msg.format(value=value))
+    elif skip_msg:
+        print_warning(skip_msg)
+    return value
 
 
 def _save_allowlist(env_var: str, users: str, success_msg: str) -> None:
@@ -77,13 +87,10 @@ def _prompt_telegram_bot_token() -> str | None:
     print_info("Create a bot via @BotFather on Telegram")
     while True:
         token = prompt("Telegram bot token", password=True)
-        if not token:
-            return None
-        if not _is_valid_telegram_bot_token(token):
-            print_error("Invalid token format. Expected: <numeric_id>:<alphanumeric_hash> "
-                        "(e.g., 123456789:ABCdefGHI-jklMNOpqrSTUvwxYZ)")
-            continue
-        return token
+        if not token or _is_valid_telegram_bot_token(token):
+            return token or None
+        print_error("Invalid token format. Expected: <numeric_id>:<alphanumeric_hash> "
+                    "(e.g., 123456789:ABCdefGHI-jklMNOpqrSTUvwxYZ)")
 
 
 def _telegram_allowlist_nudge() -> None:
@@ -109,18 +116,14 @@ def _obtain_telegram_token():
           "  [2] Manual",
           "      Create a bot via @BotFather yourself and paste the token.", None)
 
-    choice = prompt("Choice [1/2]", default="1")
-    token = None
-    setup_result = None
-
-    if choice.strip() == "1":
+    token = setup_result = None
+    if prompt("Choice [1/2]", default="1").strip() == "1":
         setup_result = _setup_telegram_auto_result()
         if setup_result:
             token = setup_result.token
             if not _is_valid_telegram_bot_token(token):
                 print_error("Automatic setup returned an invalid Telegram bot token.")
-                token = None
-                setup_result = None
+                token = setup_result = None
         if not token:
             _info(None, "Falling back to manual setup...", None)
 
@@ -131,8 +134,7 @@ def _obtain_telegram_token():
 
 def _setup_telegram():
     """Configure Telegram bot credentials and allowlist."""
-    from hermes_cli.setup import print_header, print_info, print_success, prompt, prompt_yes_no
-    from hermes_cli.setup import _info, save_env_value
+    from hermes_cli.setup import _info, print_info, print_header, print_success, prompt, prompt_yes_no, save_env_value
     print_header("Telegram")
     if _declines_reconfigure("TELEGRAM_BOT_TOKEN", "Telegram", "Reconfigure Telegram?"):
         _telegram_allowlist_nudge()
@@ -177,19 +179,17 @@ def _setup_telegram():
     first_user_id = allowed_users.split(",")[0].strip() if allowed_users else ""
     if not first_user_id:
         print_info("   You can also set this later by typing /set-home in your Telegram chat.")
-        _save_if_set("TELEGRAM_HOME_CHANNEL", prompt("Home channel ID (leave empty to set later)"))
+        _save_prompted("TELEGRAM_HOME_CHANNEL", "Home channel ID (leave empty to set later)")
     elif prompt_yes_no(f"Use your user ID ({first_user_id}) as the home channel?", True):
         save_env_value("TELEGRAM_HOME_CHANNEL", first_user_id)
         print_success(f"Telegram home channel set to {first_user_id}")
     else:
-        q = "Home channel ID (or leave empty to set later with /set-home in Telegram)"
-        _save_if_set("TELEGRAM_HOME_CHANNEL", prompt(q))
+        _save_prompted("TELEGRAM_HOME_CHANNEL", "Home channel ID (or leave empty to set later with /set-home in Telegram)")
 
 
 def _setup_bluebubbles():
     """Configure BlueBubbles iMessage gateway."""
-    from hermes_cli.setup import print_header, print_info, print_success, print_warning, prompt
-    from hermes_cli.setup import _info, prompt_yes_no, save_env_value
+    from hermes_cli.setup import _info, print_header, print_info, print_success, prompt, prompt_yes_no
     print_header("BlueBubbles (iMessage)")
     if _declines_reconfigure("BLUEBUBBLES_SERVER_URL", "BlueBubbles", "Reconfigure BlueBubbles?"):
         return
@@ -200,15 +200,14 @@ def _setup_bluebubbles():
           "   Download: https://bluebubbles.app/", None,
           "In BlueBubbles Server → Settings → API, note your Server URL and Password.", None)
 
-    for label, env_var, secret, what in (
-        ("BlueBubbles server URL (e.g. http://192.168.1.10:1234)", "BLUEBUBBLES_SERVER_URL", False, "Server URL"),
-        ("BlueBubbles server password", "BLUEBUBBLES_PASSWORD", True, "Password"),
+    for label, env_var, secret, what, transform in (
+        ("BlueBubbles server URL (e.g. http://192.168.1.10:1234)", "BLUEBUBBLES_SERVER_URL", False, "Server URL",
+         lambda v: v.rstrip("/")),
+        ("BlueBubbles server password", "BLUEBUBBLES_PASSWORD", True, "Password", None),
     ):
-        value = prompt(label, password=secret)
-        if not value:
-            print_warning(f"{what} is required — skipping BlueBubbles setup")
+        if not _save_prompted(env_var, label, password=secret, transform=transform,
+                              skip_msg=f"{what} is required — skipping BlueBubbles setup"):
             return
-        save_env_value(env_var, value.rstrip("/") if env_var == "BLUEBUBBLES_SERVER_URL" else value)
     print_success("BlueBubbles credentials saved")
 
     _info(None, "🔒 Security: Restrict who can message your bot",
@@ -221,7 +220,7 @@ def _setup_bluebubbles():
 
     _info(None, "📬 Home Channel: phone or email for cron job delivery and notifications.",
           "   You can also set this later with /set-home in your iMessage chat.")
-    _save_if_set("BLUEBUBBLES_HOME_CHANNEL", prompt("Home channel address (leave empty to set later)"))
+    _save_prompted("BLUEBUBBLES_HOME_CHANNEL", "Home channel address (leave empty to set later)")
 
     _info(None, "Advanced settings (defaults are fine for most setups):")
     if prompt_yes_no("Configure webhook listener settings?", False):
@@ -247,13 +246,9 @@ def _setup_webhooks():
     _info("   Full guide: https://hermes-agent.nousresearch.com/docs/user-guide/messaging/webhooks/", None)
 
     _save_port("WEBHOOK_PORT", prompt("Webhook port (default 8644)"), "8644")
-
-    secret = prompt("Global HMAC secret (shared across all routes)", password=True)
-    if secret:
-        save_env_value("WEBHOOK_SECRET", secret)
-        print_success("Webhook secret saved")
-    else:
-        print_warning("No secret set — you must configure per-route secrets in config.yaml")
+    _save_prompted("WEBHOOK_SECRET", "Global HMAC secret (shared across all routes)", password=True,
+                   success_msg="Webhook secret saved",
+                   skip_msg="No secret set — you must configure per-route secrets in config.yaml")
 
     save_env_value("WEBHOOK_ENABLED", "true")
     print()
@@ -364,7 +359,7 @@ def setup_gateway(config: dict):
     any_messaging = any(_is_progress(_platform_status(p)) for p in _all_platforms())
     if any_messaging:
         print()
-        print_info("━" * 50)
+        print_info(_RULE)
         print_success("Messaging platforms configured!")
         _warn_missing_home_channels()
 
@@ -383,4 +378,4 @@ def setup_gateway(config: dict):
         # Not running: install (if needed) and start, no questions asked.
         ensure_gateway_service(context="setup")
 
-    print_info("━" * 50)
+    print_info(_RULE)

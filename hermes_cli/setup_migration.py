@@ -1,7 +1,5 @@
-"""Post-migration section-skip logic and the OpenClaw first-run migration flow.
-
-Extracted from hermes_cli/setup.py, which re-exports the names it still uses.
-"""
+"""Post-migration section-skip logic and the OpenClaw first-run migration flow (setup.py
+re-exports the names it still uses; setup helpers are imported lazily so test patches apply)."""
 
 import importlib.util
 import logging
@@ -33,7 +31,6 @@ def _model_section_has_credentials(config: dict) -> bool:
             return True
     except Exception:
         pass
-
     try:
         from hermes_cli.auth import PROVIDER_REGISTRY
     except Exception:
@@ -44,8 +41,7 @@ def _model_section_has_credentials(config: dict) -> bool:
         # mirrors is_provider_explicitly_configured in auth.py.
         return any(get_env_value(v) for v in pconfig.api_key_env_vars if v != "CLAUDE_CODE_OAUTH_TOKEN")
 
-    def _any_openrouter_key() -> bool:
-        return any(get_env_value(v) for v in _OPENROUTER_ENV_VARS)
+    any_openrouter_key = any(get_env_value(v) for v in _OPENROUTER_ENV_VARS)
 
     # Prefer the provider declared in config.yaml, avoids false positives from stray
     # env vars (GH_TOKEN, etc.) when the user has already picked a different provider.
@@ -54,21 +50,15 @@ def _model_section_has_credentials(config: dict) -> bool:
         provider_id = (model_cfg.get("provider") or "").strip().lower()
         if provider_id in PROVIDER_REGISTRY and _has_key(PROVIDER_REGISTRY[provider_id]):
             return True
-        if provider_id == "openrouter" and _any_openrouter_key():
+        if provider_id == "openrouter" and any_openrouter_key:
             return True
 
     # OpenRouter aggregator fallback (no provider declared in config).
-    if _any_openrouter_key():
+    if any_openrouter_key:
         return True
-
-    # Skip copilot in auto-detect: GH_TOKEN / GITHUB_TOKEN are commonly set for
-    # git tooling.  Mirrors resolve_provider in auth.py.
+    # Skip copilot in auto-detect: GH_TOKEN / GITHUB_TOKEN are commonly set for git tooling.
+    # Mirrors resolve_provider in auth.py.
     return any(_has_key(pconfig) for pid, pconfig in PROVIDER_REGISTRY.items() if pid != "copilot")
-
-
-def _gateway_platform_short_label(label: str) -> str:
-    """Strip trailing parenthetical qualifiers from a gateway platform label."""
-    return label.split("(", 1)[0].strip() or label
 
 
 def _model_summary(config: dict) -> Optional[str]:
@@ -92,7 +82,8 @@ def _gateway_summary(config: dict) -> Optional[str]:
     # Any non-empty status other than "not configured" counts — WhatsApp ("enabled, not paired"),
     # Matrix ("configured + E2EE"), Signal ("partially configured") mean setup already started.
     configured = [
-        _gateway_platform_short_label(plat["label"])
+        # Trailing parenthetical qualifiers are stripped from the label.
+        plat["label"].split("(", 1)[0].strip() or plat["label"]
         for plat in _all_platforms()
         if _platform_status(plat) and _platform_status(plat) != "not configured"
     ]
@@ -122,20 +113,15 @@ _SECTION_SUMMARIES = {
 
 
 def _get_section_config_summary(config: dict, section_key: str) -> Optional[str]:
-    """Return a short summary if a setup section is already configured, else None.
-
-    Used after OpenClaw migration to detect which sections can be skipped. ``get_env_value`` is
-    reached through hermes_cli.setup so that test patches on ``setup_mod.get_env_value`` apply.
-    """
+    """Short summary if a setup section is already configured (post-OpenClaw-migration skip
+    detection), else None. ``get_env_value`` is reached through hermes_cli.setup so test patches
+    on ``setup_mod.get_env_value`` apply."""
     summarize = _SECTION_SUMMARIES.get(section_key)
     return summarize(config) if summarize else None
 
 
 def _skip_configured_section(config: dict, section_key: str, label: str) -> bool:
-    """Show an already-configured section summary and offer to skip.
-
-    Returns True if the user chose to skip, False if the section should run.
-    """
+    """Show an already-configured section summary and offer to skip; True when the user skips."""
     from hermes_cli.setup import print_success, prompt_yes_no
     summary = _get_section_config_summary(config, section_key)
     if not summary:
@@ -162,8 +148,7 @@ def _load_openclaw_migration_module():
     if spec is None or spec.loader is None:
         return None
     mod = importlib.util.module_from_spec(spec)
-    # Register in sys.modules so @dataclass can resolve the module
-    # (Python 3.11+ requires this for dynamically loaded modules)
+    # Registered in sys.modules so @dataclass can resolve the module (Python 3.11+ requirement).
     sys.modules[spec.name] = mod
     try:
         spec.loader.exec_module(mod)
@@ -255,6 +240,21 @@ def _run_migrator(mod, openclaw_dir: Path, hermes_home: Path, selected, *, execu
     ).migrate()
 
 
+_FAILED = object()
+
+
+def _migration_step(label: str, log_label: str, fn):
+    """Run one migration phase; on failure warn ``"<label>: <exc>"``, log the trace and return
+    ``_FAILED`` (the caller aborts)."""
+    from hermes_cli.setup import print_warning
+    try:
+        return fn()
+    except Exception as e:
+        print_warning(f"{label}: {e}")
+        logger.debug(log_label, exc_info=True)
+        return _FAILED
+
+
 def _offer_openclaw_migration(hermes_home: Path) -> bool:
     """Detect ~/.openclaw and offer to migrate during first-time setup: dry-run preview first,
     execute only after explicit confirmation. Returns True iff migration ran successfully."""
@@ -278,24 +278,22 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
     if not get_config_path().exists():
         save_config(load_config())
 
-    try:
-        mod = _load_openclaw_migration_module()
-        if mod is None:
-            print_warning("Could not load migration script.")
-            return False
-    except Exception as e:
-        print_warning(f"Could not load migration script: {e}")
-        logger.debug("OpenClaw migration module load error", exc_info=True)
+    mod = _migration_step("Could not load migration script", "OpenClaw migration module load error",
+                          _load_openclaw_migration_module)
+    if mod is None:
+        print_warning("Could not load migration script.")
+    if mod is None or mod is _FAILED:
         return False
 
     # ── Phase 1: Dry-run preview (overwrite=True shows everything, including conflicts) ──
-    try:
+    def _preview():
         selected = mod.resolve_selected_options(None, None, preset="full")
-        preview_report = _run_migrator(mod, openclaw_dir, hermes_home, selected, execute=False, overwrite=True)
-    except Exception as e:
-        print_warning(f"Migration preview failed: {e}")
-        logger.debug("OpenClaw migration preview error", exc_info=True)
+        return selected, _run_migrator(mod, openclaw_dir, hermes_home, selected, execute=False, overwrite=True)
+
+    previewed = _migration_step("Migration preview failed", "OpenClaw migration preview error", _preview)
+    if previewed is _FAILED:
         return False
+    selected, preview_report = previewed
 
     preview_count = preview_report.get("summary", {}).get("migrated", 0)
     if preview_count == 0:
@@ -312,13 +310,11 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
               "Use --dry-run to preview again, or --preset minimal for a lighter import.")
         return False
 
-    # overwrite=False so existing Hermes configs are preserved. The user saw the
-    # preview; conflicts are skipped by default.
-    try:
-        report = _run_migrator(mod, openclaw_dir, hermes_home, selected, execute=True, overwrite=False)
-    except Exception as e:
-        print_warning(f"Migration failed: {e}")
-        logger.debug("OpenClaw migration error", exc_info=True)
+    # overwrite=False so existing Hermes configs are preserved. The user saw the preview;
+    # conflicts are skipped by default.
+    report = _migration_step("Migration failed", "OpenClaw migration error", lambda: _run_migrator(
+        mod, openclaw_dir, hermes_home, selected, execute=True, overwrite=False))
+    if report is _FAILED:
         return False
 
     summary = report.get("summary", {})
