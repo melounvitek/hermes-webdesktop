@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """Text-to-speech tool: config resolution, built-in provider dispatch, output policy, registration.
 
-Built-in providers: Edge (free default), ElevenLabs, OpenAI, DeepInfra, MiniMax, Mistral,
-Gemini, xAI, and the local NeuTTS / KittenTTS / Piper engines; plus any ``type: command``
-provider under ``tts.providers.<name>`` and plugin-registered providers. Output is Opus
-(.ogg) for voice-bubble platforms, MP3 elsewhere. Sibling ``tts_tool_*`` modules hold the
-backends/delivery/lifecycle; their names are re-imported here so ``tools.tts_tool.<name>``
-keeps resolving and tests patching ``tools.tts_tool.<seam>`` still take effect (siblings
-resolve those seams through ``_origin()`` at call time).
+Built-ins: Edge (free default), ElevenLabs, OpenAI, DeepInfra, MiniMax, Mistral, Gemini, xAI,
+local NeuTTS / KittenTTS / Piper; plus ``type: command`` providers under ``tts.providers.<name>``
+and plugin-registered ones. Output is Opus (.ogg) on voice-bubble platforms, MP3 elsewhere.
+Sibling ``tts_tool_*`` modules hold backends/delivery/lifecycle; their names are re-imported
+here so ``tools.tts_tool.<name>`` resolves and test patches on this module still apply
+(siblings read those seams through ``_origin()`` at call time).
 """
 
 import asyncio
+import contextlib
 import datetime
 import importlib.util
 import json
@@ -92,16 +92,14 @@ from tools.tts_tool_lifecycle import (  # noqa: F401 — historical names re-exp
 def _sdk_importer(module: str, attr: Optional[str] = None, feature: Optional[str] = None) -> Callable[[], Any]:
     """Lazy SDK importer: returns ``module`` (or ``module.attr``), raising ImportError when absent.
 
-    ``feature`` names a ``tools.lazy_deps`` feature to best-effort install first (users who
-    enabled a provider in config.yaml never ran the post-setup hook); any failure there falls
-    through so the raw import still raises cleanly. sounddevice also raises OSError without PortAudio."""
+    ``feature`` names a ``tools.lazy_deps`` feature to best-effort install first (users who enabled
+    a provider in config.yaml never ran the post-setup hook); any failure there falls through so
+    the raw import still raises cleanly. sounddevice also raises OSError without PortAudio."""
     def _import():
         if feature:
-            try:
+            with contextlib.suppress(Exception):
                 from tools.lazy_deps import ensure
                 ensure(feature, prompt=False)
-            except Exception:
-                pass
         mod = importlib.import_module(module)
         return getattr(mod, attr) if attr else mod
     _import.__name__ = f"_import_{module.split('.')[0]}"
@@ -146,8 +144,7 @@ def _get_default_output_dir() -> str:
     return str(get_hermes_dir("cache/audio", "audio_cache"))
 
 
-DEFAULT_OUTPUT_DIR = _get_default_output_dir()
-_DEFAULT_OUTPUT_DIR_AT_IMPORT = DEFAULT_OUTPUT_DIR
+DEFAULT_OUTPUT_DIR = _DEFAULT_OUTPUT_DIR_AT_IMPORT = _get_default_output_dir()
 
 
 def _default_output_dir() -> str:
@@ -172,8 +169,8 @@ def _load_tts_config() -> Dict[str, Any]:
 
 
 def _get_provider(tts_config: Dict[str, Any]) -> str:
-    """The configured TTS provider, or the free default — inference credentials never imply consent
-    to paid speech. ``nous`` is serviced by the OpenAI path via the managed openai-audio gateway."""
+    """Configured provider or the free default (inference credentials never imply consent to paid
+    speech); ``nous`` is serviced by the OpenAI path through the managed openai-audio gateway."""
     provider = (tts_config.get("provider") or DEFAULT_PROVIDER).lower().strip()
     return "openai" if provider == NOUS_MANAGED_PROVIDER else provider
 
@@ -187,8 +184,7 @@ _FFMPEG_OPUS_PROVIDERS = frozenset({"edge", "neutts", "minimax", "xai", "kittent
 
 # --- Built-in provider dispatch ---
 # provider -> (availability predicate or None, log label, generator name, "package missing" error).
-# Predicates and generator names resolve module globals at call time so tests that monkeypatch
-# ``tools.tts_tool._import_x`` / ``_check_x`` / ``_generate_x`` apply.
+# Predicates/generator names resolve module globals at call time so test monkeypatches apply.
 _BUILTIN_DISPATCH: Dict[str, tuple] = {
     "elevenlabs": (lambda: _importable(_import_elevenlabs), "ElevenLabs", "_generate_elevenlabs",
                    "ElevenLabs provider selected but 'elevenlabs' package not installed. Run: pip install elevenlabs"),
@@ -221,17 +217,18 @@ def _error_json(message: str) -> str:
 
 def _run_edge_tts(text: str, file_str: str, tts_config: Dict[str, Any]) -> None:
     """Run the async Edge generator from sync code (worker thread; direct run if that fails)."""
+    run = lambda: asyncio.run(_generate_edge_tts(text, file_str, tts_config))  # noqa: E731
     try:
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            pool.submit(lambda: asyncio.run(_generate_edge_tts(text, file_str, tts_config))).result(timeout=60)
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(run).result(timeout=60)
     except RuntimeError:
-        asyncio.run(_generate_edge_tts(text, file_str, tts_config))
+        run()
 
 
 def _select_builtin_engine(provider: str) -> tuple:
-    """Check a built-in provider's SDK -> ``(engine, None)`` or ``(provider, error_json)``. Unknown
-    names take the Edge default; without edge-tts NeuTTS is the fallback (engine != provider)."""
+    """SDK check -> ``(engine, None)`` or ``(provider, error_json)``. Unknown names take the Edge
+    default; without edge-tts NeuTTS is the fallback (engine != provider)."""
     entry = _BUILTIN_DISPATCH.get(provider)
     if entry is not None:
         available, _label, _generator, missing_error = entry
@@ -261,7 +258,7 @@ def _synthesize_builtin(engine: str, text: str, file_str: str, tts_config: Dict[
 def _finalize_voice_delivery(
     file_str: str, provider: str, command_provider_config: Optional[Dict[str, Any]], want_opus: bool,
 ) -> tuple:
-    """Decide voice-bubble eligibility, Opus-converting when needed -> ``(path, voice_compatible)``.
+    """Voice-bubble eligibility (Opus-converting when needed) -> ``(path, voice_compatible)``.
 
     Command/plugin providers are documents unless they opt in via ``voice_compatible``; native-Opus
     built-ins qualify when the platform wants Opus and they wrote .ogg; MP3/WAV built-ins are
@@ -316,8 +313,7 @@ def _resolve_output_base(
         if has_traversal_component(output_path):
             return None, _error_json(
                 f"output_path contains '..' traversal component: {output_path}. "
-                "Use an absolute path or one relative to the current directory "
-                "without '..'.")
+                "Use an absolute path or one relative to the current directory without '..'.")
         file_path = Path(output_path).expanduser()
         if command_provider_config is not None:
             file_path = _configured_command_tts_output_path(file_path, command_provider_config)
@@ -327,14 +323,12 @@ def _resolve_output_base(
                 f"output_path targets a protected credential or system path: "
                 f"{file_path}. Choose a normal audio output location.")
     else:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        out_dir = Path(_default_output_dir())
-        out_dir.mkdir(parents=True, exist_ok=True)
         if command_provider_config is not None:
             ext = _get_command_tts_output_format(command_provider_config)
         else:
             ext = "ogg" if want_opus and provider in _NATIVE_OPUS_PROVIDERS else "mp3"
-        file_path = out_dir / f"tts_{timestamp}.{ext}"
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        file_path = Path(_default_output_dir()) / f"tts_{timestamp}.{ext}"
     file_path.parent.mkdir(parents=True, exist_ok=True)
     return file_path, None
 
@@ -356,7 +350,7 @@ def _text_to_speech_single(
     text: str, file_str: str, *, provider: str, tts_config: Dict[str, Any],
     command_provider_config: Optional[Dict[str, Any]], want_opus: bool, instructions: Optional[str],
 ) -> str:
-    """Synthesize one normalized, provider-safe chunk into *file_str*; returns the result envelope.
+    """Synthesize one provider-safe chunk into *file_str*; returns the result envelope.
 
     Command providers resolve BEFORE built-in dispatch, but built-in names short-circuit so
     ``tts.providers.openai.command`` can't shadow OpenAI. Plugins fire only for names that are
@@ -438,9 +432,8 @@ def text_to_speech_tool(
     separate valid files and no over-limit artifact is ever returned."""
     if not text or not text.strip():
         return tool_error("Text is required", success=False)
+    try:  # shared cleaner: markdown, emoji, think blocks, verifier footer, units, newlines
 
-    # Shared cleaner: markdown, emoji, think blocks, verifier footer, units, newlines.
-    try:
         from tools.tts_text_normalize import prepare_spoken_text
         text = prepare_spoken_text(text, max_chars=None)
     except Exception:
@@ -513,7 +506,6 @@ def _minimax_requirements() -> bool:
 def _xai_requirements() -> bool:
     try:
         from tools.xai_http import resolve_xai_http_credentials
-
         return bool(resolve_xai_http_credentials().get("api_key"))
     except Exception:
         return False
@@ -542,9 +534,7 @@ def check_tts_requirements() -> bool:
     if _resolve_command_provider_config(provider, tts_config) is not None:
         return True
     check = _BUILTIN_REQUIREMENTS.get(provider)
-    if check is not None:
-        return check()
-    return _plugin_provider_is_available(provider)
+    return check() if check is not None else _plugin_provider_is_available(provider)
 
 
 # --- Registry ---
