@@ -28,11 +28,8 @@ DEFAULT_TIMEOUT = 15.0
 
 
 class BillingError(Exception):
-    """A billing HTTP call failed.
-
-    Carries what a surface needs to render the right message and affordance: server ``error``
-    code, HTTP ``status``, the ``portalUrl`` deep-link (present on every gate denial),
-    ``retry_after`` seconds (429/503), and the parsed ``payload`` when available.
+    """A billing HTTP call failed; carries server ``error`` code, HTTP ``status``, the ``portalUrl``
+    deep-link (present on every gate denial), ``retry_after`` seconds (429/503) and the parsed ``payload``.
     """
 
     def __init__(
@@ -42,25 +39,18 @@ class BillingError(Exception):
         code: Optional[str] = None, recovery: Optional[str] = None,
     ) -> None:
         super().__init__(message)
-        self.status = status
-        self.error = error
-        self.portal_url = portal_url
-        self.retry_after = retry_after
+        self.status, self.error, self.portal_url, self.retry_after = status, error, portal_url, retry_after
         self.payload = payload or {}
         # Remote-Spending contract extras: `actor` (self|admin) on a revoke, `code` (machine code
         # dual-emitted alongside `error`), `recovery` (reconnect|login|enable_account_toggle).
         # Additive — absent on older NAS / unrelated errors.
-        self.actor = actor
-        self.code = code
-        self.recovery = recovery
+        self.actor, self.code, self.recovery = actor, code, recovery
 
 
 class BillingScopeRequired(BillingError):
-    """``403 insufficient_scope`` — the held token lacks ``billing:manage``.
-
-    The lazy step-up trigger: catching this kicks off a device-connect requesting ``billing:manage``
-    (an ADMIN must select "Allow Remote Spending"). Also fires mid-session if the scope is stripped
-    on refresh after the user loses ADMIN.
+    """``403 insufficient_scope`` — the held token lacks ``billing:manage``; the lazy step-up trigger
+    (catching it kicks off a device-connect requesting the scope — an ADMIN must select "Allow Remote
+    Spending"). Also fires mid-session if the scope is stripped on refresh after the user loses ADMIN.
     """
 
 
@@ -69,50 +59,41 @@ class BillingAuthError(BillingError):
 
 
 class BillingRemoteSpendingRevoked(BillingError):
-    """``403 remote_spending_revoked`` — THIS terminal's spending was revoked.
-
-    Distinct from ``insufficient_scope`` (never had the grant) and ``session_revoked`` (full logout):
-    the terminal stays logged in, only the money path is cut. ``actor`` is ``"admin"``/``"self"``
-    (absent → ``"self"``); recovery is **reconnect** (re-consent device-auth).
+    """``403 remote_spending_revoked`` — THIS terminal's spending was revoked (still logged in; only
+    the money path is cut, unlike ``insufficient_scope``/``session_revoked``). ``actor`` is
+    ``"admin"``/``"self"`` (absent → ``"self"``); recovery is **reconnect** (re-consent device-auth).
     """
 
 
 class BillingSessionRevoked(BillingAuthError):
-    """``401 session_revoked`` — the whole session was logged out; recovery is **re-login**.
-
-    A :class:`BillingAuthError` so 401 handling still treats it as not-logged-in, while the typed
-    code lets the surface route to re-login with the right copy.
+    """``401 session_revoked`` — the whole session was logged out; recovery is **re-login**. A
+    :class:`BillingAuthError` so 401 handling still treats it as not-logged-in, with typed copy.
     """
 
 
 class BillingTransient(BillingError):
     """Deterministic non-charge outcome: the request definitely did NOT complete at Stripe, so a
     retry after backoff is always safe — never the "maybe charged" ambiguity of a real 5xx/timeout.
-    Covers 429 rate limiting, 503 gate-unavailable, Stripe down, and the daily upgrade cap. Catch
-    this wherever the intent is "any transient, definitely-not-charged failure: back off, retry".
+    Covers 429 rate limiting, 503 gate-unavailable, Stripe down, and the daily upgrade cap.
     """
 
 
 class BillingRateLimited(BillingTransient):
-    """``429 rate_limited`` or ``503 temporarily_unavailable`` — NOT a payment failure.
-
-    Carries ``retry_after`` seconds; never auto-retry-spam (limiter is 5/org/hr + 5/token/hr).
-    A 503 is the gate failing closed — back off, do NOT treat as revoked.
+    """``429 rate_limited`` or ``503 temporarily_unavailable`` — NOT a payment failure. Carries
+    ``retry_after``; never auto-retry-spam (limiter is 5/org/hr + 5/token/hr). A 503 is the gate
+    failing closed — back off, do NOT treat as revoked.
     """
 
 
 class BillingStripeUnavailable(BillingTransient):
-    """``503 stripe_unavailable`` — Stripe itself is down; retry using Retry-After.
-
-    Not our rate limiter: surfaces must read ``.error`` and not render "rate limited" copy.
+    """``503 stripe_unavailable`` — Stripe itself is down; retry using Retry-After. Not our rate
+    limiter: surfaces must read ``.error`` and not render "rate limited" copy.
     """
 
 
 class BillingUpgradeCapExceeded(BillingTransient):
-    """``429 upgrade_cap_exceeded`` — the org hit its 5-upgrades/day cap.
-
-    Same HTTP status as the hourly ``rate_limited`` charge cap but no useful short backoff; a
-    sibling (not subclass) of BillingRateLimited — surfaces read ``.error`` to tell them apart.
+    """``429 upgrade_cap_exceeded`` — the org hit its 5-upgrades/day cap. Same status as the hourly
+    ``rate_limited`` cap but no useful short backoff; a sibling (not subclass) of BillingRateLimited.
     """
 
 
