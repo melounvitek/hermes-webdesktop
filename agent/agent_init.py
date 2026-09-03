@@ -889,6 +889,36 @@ def _routed_client_kwargs(agent, fallback_model, _provider_timeout) -> Dict[str,
 _FINE_GRAINED_BETA = "fine-grained-tool-streaming-2025-05-14"
 
 
+def _apply_openai_header_policy(agent, client_kwargs: Dict[str, Any]) -> None:
+    """Mutate ``client_kwargs`` (== ``agent._client_kwargs``) with header/TLS policy, in order:
+    OpenRouter Claude beta header → model.default_headers → custom-provider TLS/extra_headers."""
+    # Fine-grained tool streaming for Claude on OpenRouter: without the beta header
+    # Anthropic buffers the whole tool call and OpenRouter's proxy times out.
+    _effective_base = str(client_kwargs.get("base_url", "")).lower()
+    if base_url_host_matches(_effective_base, "openrouter.ai") and "claude" in (agent.model or "").lower():
+        headers = client_kwargs.get("default_headers") or {}
+        existing_beta = headers.get("x-anthropic-beta", "")
+        if _FINE_GRAINED_BETA not in existing_beta:
+            headers["x-anthropic-beta"] = ",".join(filter(None, (existing_beta, _FINE_GRAINED_BETA)))
+            client_kwargs["default_headers"] = headers
+    # model.default_headers override provider/SDK defaults (WAFs rejecting SDK headers).
+    agent._apply_user_default_headers()
+    try:
+        from hermes_cli.config import (
+            apply_custom_provider_extra_headers_to_client_kwargs,
+            apply_custom_provider_tls_to_client_kwargs, get_compatible_custom_providers,
+            load_config,
+        )
+        _cp_entries = get_compatible_custom_providers(load_config())
+        _cp_base_url = str(client_kwargs.get("base_url") or agent.base_url or "")
+        apply_custom_provider_tls_to_client_kwargs(client_kwargs, _cp_base_url, _cp_entries)
+        # Per-provider extra_headers applied last so the most specific config level wins.
+        # SECURITY: values may carry credentials — never log them.
+        apply_custom_provider_extra_headers_to_client_kwargs(client_kwargs, _cp_base_url, _cp_entries)
+    except Exception:
+        logger.debug("custom-provider TLS resolution skipped", exc_info=True)
+
+
 def _init_openai_client(agent, api_key, base_url, fallback_model, _provider_timeout):
     """OpenAI-wire client: resolve kwargs, apply header/TLS policy, construct."""
     if api_key and base_url:
@@ -903,37 +933,7 @@ def _init_openai_client(agent, api_key, base_url, fallback_model, _provider_time
             raise
 
     agent._client_kwargs = client_kwargs  # stored for rebuilding after interrupt
-
-    # Fine-grained tool streaming for Claude on OpenRouter: without the beta header
-    # Anthropic buffers the whole tool call and OpenRouter's proxy times out.
-    _effective_base = str(client_kwargs.get("base_url", "")).lower()
-    if base_url_host_matches(_effective_base, "openrouter.ai") and "claude" in (agent.model or "").lower():
-        headers = client_kwargs.get("default_headers") or {}
-        existing_beta = headers.get("x-anthropic-beta", "")
-        if _FINE_GRAINED_BETA not in existing_beta:
-            headers["x-anthropic-beta"] = ",".join(filter(None, (existing_beta, _FINE_GRAINED_BETA)))
-            client_kwargs["default_headers"] = headers
-
-    # model.default_headers override provider/SDK defaults (WAFs rejecting SDK headers);
-    # mutates agent._client_kwargs in place.
-    agent._apply_user_default_headers()
-
-    try:
-        from hermes_cli.config import (
-            apply_custom_provider_extra_headers_to_client_kwargs,
-            apply_custom_provider_tls_to_client_kwargs, get_compatible_custom_providers,
-            load_config,
-        )
-
-        _cp_entries = get_compatible_custom_providers(load_config())
-        _cp_base_url = str(client_kwargs.get("base_url") or agent.base_url or "")
-        apply_custom_provider_tls_to_client_kwargs(client_kwargs, _cp_base_url, _cp_entries)
-        # Per-provider extra_headers applied last so the most specific config level wins.
-        # SECURITY: values may carry credentials — never log them.
-        apply_custom_provider_extra_headers_to_client_kwargs(client_kwargs, _cp_base_url, _cp_entries)
-    except Exception:
-        logger.debug("custom-provider TLS resolution skipped", exc_info=True)
-
+    _apply_openai_header_policy(agent, client_kwargs)
     agent.api_key = client_kwargs.get("api_key", "")
     agent.base_url = client_kwargs.get("base_url", agent.base_url)
     try:
@@ -1182,11 +1182,9 @@ def _apply_display_config(agent, _agent_cfg, platform):
 
     # lmstudio_load_mode: "explicit" (preload via management API) or "jit" (Auto-Evict path).
     _model_section = _cfg_dict(_agent_cfg, "model")
-    agent.lmstudio_load_mode = "explicit"
     _load_mode = str(_model_section.get("lmstudio_load_mode", "explicit") or "explicit").strip().lower()
-    if _load_mode in {"explicit", "jit"}:
-        agent.lmstudio_load_mode = _load_mode
-    else:
+    agent.lmstudio_load_mode = _load_mode if _load_mode in {"explicit", "jit"} else "explicit"
+    if agent.lmstudio_load_mode != _load_mode:
         logger.warning(
             "Invalid model.lmstudio_load_mode=%r; expected 'explicit' or 'jit'. Using explicit.",
             _model_section.get("lmstudio_load_mode"),
@@ -1194,11 +1192,9 @@ def _apply_display_config(agent, _agent_cfg, platform):
 
     # model.streaming=false seeds _disable_streaming (the loop's runtime fallback) for
     # backends with broken streaming tool calls. Session-scoped; orthogonal to display.streaming.
-    agent._disable_streaming = False
     _streaming = str(_model_section.get("streaming", "true")).strip().lower()
-    if _streaming in {"false", "0", "no", "off"}:
-        agent._disable_streaming = True
-    elif _streaming not in {"true", "1", "yes", "on"}:
+    agent._disable_streaming = _streaming in {"false", "0", "no", "off"}
+    if not agent._disable_streaming and _streaming not in {"true", "1", "yes", "on"}:
         logger.warning(
             "Invalid model.streaming=%r; expected a boolean. Using streaming (default).",
             _model_section.get("streaming"),
@@ -1238,10 +1234,7 @@ def _memory_provider_init_kwargs(agent, platform) -> Dict[str, Any]:
             pass
     # Gateway user/chat identity for per-user scoping (gateway_session_key: stable per-chat
     # Honcho session isolation).
-    for _ident in (
-        "user_id", "user_id_alt", "user_name", "chat_id", "chat_name",
-        "chat_type", "thread_id", "gateway_session_key",
-    ):
+    for _ident in _GATEWAY_IDENTITY_PARAMS:
         _val = getattr(agent, f"_{_ident}")
         if _val:
             kwargs[_ident] = _val
@@ -1272,16 +1265,14 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
     if not skip_memory or _memory_toolset_requested:
         try:
             from tools.memory_tool import (
-                get_builtin_memory_config, get_builtin_memory_store_flags
+                MemoryStore, get_builtin_memory_config, get_builtin_memory_store_flags,
             )
-
             mem_config = get_builtin_memory_config(_agent_cfg)
             agent._memory_enabled, agent._user_profile_enabled = get_builtin_memory_store_flags(
                 _agent_cfg
             )
             agent._memory_nudge_interval = int(mem_config.get("nudge_interval", 10))
             if agent._memory_enabled or agent._user_profile_enabled:
-                from tools.memory_tool import MemoryStore
                 agent._memory_store = MemoryStore(
                     memory_char_limit=mem_config.get("memory_char_limit", 2200),
                     user_char_limit=mem_config.get("user_char_limit", 1375),
@@ -1297,7 +1288,6 @@ def _init_memory(agent, _agent_cfg, skip_memory, platform):
     if not skip_memory:
         try:
             _mem_provider_name = mem_config.get("provider", "") if mem_config else ""
-
             if _mem_provider_name and _mem_provider_name.strip():
                 from agent.memory_manager import MemoryManager as _MemoryManager
                 from plugins.memory import load_memory_provider as _load_mem
@@ -1918,12 +1908,13 @@ def _build_context_engine(agent, _agent_cfg, cs, _custom_providers, _effective_c
             "rewrite passes through the checkpoint-gated compressor."
         )
         cs.micro_compact = False
-    if hasattr(_cc, "_micro_compact_enabled"):
-        _cc._micro_compact_enabled = cs.micro_compact
-    if hasattr(_cc, "_micro_compact_every_n_turns"):
-        _cc._micro_compact_every_n_turns = cs.micro_compact_every_n_turns
-    if hasattr(_cc, "_micro_compact_defrag_threshold_tokens"):
-        _cc._micro_compact_defrag_threshold_tokens = cs.micro_compact_defrag_tokens
+    for _attr, _value in (
+        ("_micro_compact_enabled", cs.micro_compact),
+        ("_micro_compact_every_n_turns", cs.micro_compact_every_n_turns),
+        ("_micro_compact_defrag_threshold_tokens", cs.micro_compact_defrag_tokens),
+    ):
+        if hasattr(_cc, _attr):
+            setattr(_cc, _attr, _value)
     agent.compression_checkpoint_required = cs.checkpoint_required
     agent.codex_app_server_auto_compaction = cs.codex_app_server_auto
     agent.codex_responses_native_compaction = cs.codex_responses_native
