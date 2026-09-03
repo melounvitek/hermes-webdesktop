@@ -1,7 +1,8 @@
 """Endpoint resolution for llamacpp-alias requests (provider integration).
 
-The seam between the existing provider mechanism and the managed runtime: ``provider: llamacpp``
-with no explicit base_url resolves, in order, to
+``provider: llamacpp`` with no explicit base_url resolves, in order, to the managed server (state
+file), a detected external llama-server, or — during a backend boot race — the managed server once
+its state file appears.
 """
 
 from __future__ import annotations
@@ -10,8 +11,6 @@ import json
 import logging
 import threading
 import time
-import urllib.error
-import urllib.request
 
 LLAMACPP_ALIASES = frozenset({"llamacpp", "llama.cpp", "llama-cpp"})
 
@@ -19,11 +18,8 @@ logger = logging.getLogger(__name__)
 
 
 def _pid_alive(pid: int) -> bool:
-    """Liveness for the state file's supervisor-child pid.
-
-    psutil when available; otherwise fall back to True (optimistic) — on Windows ``os.kill(pid, 0)``
-    TERMINATES the process, so it must never be used as a probe (windows-git-bash interop pitfall).
-    """
+    """Liveness for the state file's supervisor-child pid: psutil when available, else True
+    (optimistic). On Windows ``os.kill(pid, 0)`` TERMINATES the process — never use it as a probe."""
     if not pid or pid < 0:
         return False
     try:
@@ -47,30 +43,16 @@ def _state_endpoint() -> dict | None:
     base_url = state.get("base_url", "")
     if not base_url:
         return None
-    endpoint = {"base_url": base_url, "api_key": state.get("api_key", "")}
-    # Ownership proof: the stable port means a SECOND install (different
-    # HERMES_HOME — a scratch profile, say) can own 127.0.0.1:18434 with a
-    # different api key while this install's state file still points there.
-    # /health is a public route, so it answers 200 for ANYONE's server —
-    # trusting it alone sent every chat request and the load-progress
-    # watcher at a server that 401s our key, silently. The recorded
-    # supervisor pid is the tiebreaker: health-200 from a server whose
-    # recorded child is DEAD is someone else's server, never a starting one.
-    pid_ok = _pid_alive(int(state.get("pid") or 0))
-    # Healthy server: done (when it's ours).
-    try:
-        health = base_url.rsplit("/v1", 1)[0] + "/health"
-        with urllib.request.urlopen(health, timeout=3) as r:
-            if r.status == 200:
-                return endpoint if pid_ok else None
-    except (urllib.error.URLError, OSError, TimeoutError):
-        pass
-    # Not healthy YET: a live supervisor child is a STARTING server (state
-    # is written at spawn; llama-server takes seconds to listen). Resolve
-    # optimistically so readiness probes racing the boot see a configured
-    # provider, not missing credentials. A dead pid is a crashed-without-
-    # cleanup leftover — ignore it so requests don't blackhole.
-    return endpoint if pid_ok else None
+    # Ownership proof: on the stable port a SECOND install (different HERMES_HOME) can own
+    # 127.0.0.1:18434 with a different api key while this install's state file still points
+    # there. /health is public and answers 200 for ANYONE's server — trusting it sent every
+    # request at a server that 401s our key, silently — so the recorded supervisor pid is the
+    # ONLY tiebreaker: a live pid is ours (healthy, or STARTING — state is written at spawn, and
+    # readiness probes racing the boot must see a configured provider, not missing credentials);
+    # a dead pid is a crashed-without-cleanup leftover, ignored so requests don't blackhole.
+    if not _pid_alive(int(state.get("pid") or 0)):
+        return None
+    return {"base_url": base_url, "api_key": state.get("api_key", "")}
 
 
 def resolve_llamacpp_endpoint(config: dict | None = None,
@@ -78,8 +60,8 @@ def resolve_llamacpp_endpoint(config: dict | None = None,
     """Managed-first, detection-second endpoint for llamacpp aliases.
 
     Boot-race rung: on a fresh backend start there is NO state file yet — the lifespan boot thread
-    is still spawning the server (config load + preset generation + spawn ≈ 1-3 s) while the
-    desktop's readiness probe fires the moment the WebSocket connects.
+    is still spawning the server (≈1-3 s) while the desktop's readiness probe fires the moment the
+    WebSocket connects.
     """
     managed = _state_endpoint()
     if managed:
@@ -115,11 +97,8 @@ def _load_config_if_none(config: dict | None) -> dict | None:
 
 
 def _kick_managed_boot(config: dict | None) -> None:
-    """Actively start the managed server when resolution finds it missing.
-
-    The wait loop above assumes some OTHER thread is bringing the server up — true only at backend
-    start (the lifespan boot thread).
-    """
+    """Actively start the managed server when resolution finds it missing — the wait loop assumes
+    some OTHER thread is bringing it up, which is true only at backend start."""
     if not _KICK_LOCK.acquire(blocking=False):
         return  # a kick is already in flight
 
@@ -138,24 +117,15 @@ def _kick_managed_boot(config: dict | None) -> None:
 
 
 def _boot_in_flight(config: dict | None) -> bool:
-    """True when the managed runtime is enabled and installed — the state
-
-    Installed-ness is a verified-manifest scan under runtimes_root(), NOT a bare ``server_binary()``
-    call: that helper needs an install_dir, and calling it bare made this gate throw-and-return
-    False forever, silently disabling the boot wait.
-    """
+    """True when the managed runtime is enabled and installed (a verified-manifest scan under
+    runtimes_root(), NOT a bare ``server_binary()`` call — that needs an install_dir, and calling
+    it bare once made this gate throw-and-return False forever, disabling the boot wait)."""
     try:
         config = _load_config_if_none(config)
         if not ((config or {}).get("local_runtime") or {}).get("enabled"):
             return False
-        from hermes_cli.local_runtime.binaries import runtimes_root
+        from hermes_cli.local_runtime.binaries import manifest_verified, runtimes_root
 
-        for manifest in runtimes_root().glob("*/*/manifest.json"):
-            try:
-                if json.loads(manifest.read_text(encoding="utf-8")).get("verified_version"):
-                    return True
-            except (ValueError, OSError):
-                continue
-        return False
+        return any(manifest_verified(m) for m in runtimes_root().glob("*/*/manifest.json"))
     except Exception:  # noqa: BLE001
         return False

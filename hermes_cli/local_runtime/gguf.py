@@ -6,11 +6,21 @@ run at picker time on multi-GB files.
 
 from __future__ import annotations
 
+import re
 import struct
 from dataclasses import dataclass, field
 from pathlib import Path
 
 _GGUF_MAGIC = b"GGUF"
+
+# Split GGUF naming: "<stem>-00001-of-00003.gguf"; the part suffix is not part of the model id.
+SPLIT_PART_RE = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$")
+_PART_SUFFIX_RE = re.compile(r"-\d{5}-of-\d{5}$")
+
+
+def model_id_from_stem(stem: str) -> str:
+    """Model id from a GGUF file stem (split-part suffix stripped)."""
+    return _PART_SUFFIX_RE.sub("", stem)
 
 # ggml tensor type sizes: type_id -> (block_bytes, block_elems).
 # IQ-family sizes verified against ggml-common.h.

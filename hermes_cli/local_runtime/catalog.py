@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import json
 import logging
-import re
 import threading
 import time
 import urllib.request
@@ -31,10 +30,9 @@ from hermes_cli.local_runtime.estimator import (
     ModelProfile,
     ctx_bytes,
 )
+from hermes_cli.local_runtime.gguf import model_id_from_stem
 
 logger = logging.getLogger(__name__)
-
-_PART_SUFFIX = re.compile(r"-\d{5}-of-\d{5}$")
 
 
 @dataclass(frozen=True)
@@ -66,8 +64,7 @@ class QuantVariant:
 
     @property
     def model_id(self) -> str:
-        stem = PurePosixPath(self.files[0].path).name.removesuffix(".gguf")
-        return _PART_SUFFIX.sub("", stem)
+        return model_id_from_stem(PurePosixPath(self.files[0].path).name.removesuffix(".gguf"))
 
     @property
     def size_bytes(self) -> int:

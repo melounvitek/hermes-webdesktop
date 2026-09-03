@@ -1,8 +1,7 @@
 """Bootstrap for the managed runtime: config -> installed binaries -> running supervised server.
 
-One public call, ``ensure_local_runtime(config)``, safe to call at any session start: - disabled or
-already-running (state file answers /health) -> no-op - enabled -> install binaries if missing
-(idempotent), spawn supervisor
+One public call, ``ensure_local_runtime(config)``, safe at any session start: disabled or
+already-running -> no-op; enabled -> install binaries if missing (idempotent), spawn supervisor.
 
 Kept import-light: callers gate on config before importing this module so sessions with
 local_runtime disabled never pay the import.
@@ -12,13 +11,13 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 import signal
 import subprocess
 import time
 from pathlib import Path
 
 from hermes_cli.local_runtime.binaries import runtimes_root
+from hermes_cli.local_runtime.gguf import SPLIT_PART_RE, model_id_from_stem
 
 logger = logging.getLogger(__name__)
 
@@ -26,10 +25,9 @@ _SUPERVISOR = None  # process-wide singleton; one router per Hermes process
 
 
 def _detect_gpu_vendor() -> str | None:
-    """Best-effort GPU vendor for backend selection. NVIDIA via nvidia-smi (resolved by the hardware
-    probe's PATH-independent ladder — a stripped service PATH must not demote an NVIDIA box to
-    vulkan/cpu); anything else defers to select_backend's fallback ladder.
-    """
+    """Best-effort GPU vendor for backend selection. NVIDIA via nvidia-smi resolved by the hardware
+    probe's PATH-independent ladder (a stripped service PATH must not demote an NVIDIA box to
+    vulkan/cpu); anything else defers to select_backend's fallback ladder."""
     from hermes_cli.local_runtime.hardware import _nvidia_smi_path
 
     smi = _nvidia_smi_path()
@@ -47,52 +45,52 @@ def _detect_gpu_vendor() -> str | None:
 
 
 def models_dir() -> Path:
-    """Machine-scoped, deliberately NOT profile-scoped: a 20 GB GGUF is a
-    machine asset, and every profile shares the one managed server that
-    serves it. See runtimes_root() for the same rule on the engine."""
+    """Machine-scoped, deliberately NOT profile-scoped: a 20 GB GGUF is a machine asset, and every
+    profile shares the one managed server that serves it (same rule as runtimes_root())."""
     from hermes_constants import get_default_hermes_root
 
     return get_default_hermes_root() / "models"
 
 
 def assets_dir() -> Path:
-    """Non-model companion files (mmproj vision projectors, spec-decode
-    draft models). A subdirectory so the router's model listing — and our
-    staged_models() — never mistakes an asset for a servable model."""
+    """Non-model companion files (mmproj projectors, spec-decode drafts). A subdirectory so the
+    router's model listing — and staged_models() — never mistakes an asset for a servable model."""
     return models_dir() / "assets"
 
 
-def staged_models() -> "list[Path]":
-    """Servable staged models: single-file GGUFs count when present; a split GGUF counts once, by its
-    first part, and only when EVERY part is on disk — a mid-download split is not servable and must
-    not surface anywhere as a model. Continuation parts and assets/ never count.
-    """
-    part = re.compile(r"-(\d{5})-of-(\d{5})\.gguf$")
-    files = sorted(models_dir().glob("*.gguf"))
+def staged_in(models_dir: Path, *, require_complete: bool = True) -> "list[Path]":
+    """Servable GGUFs in a directory: single files, plus split GGUFs once by their first part.
+    With ``require_complete`` a split counts only when EVERY part is on disk — a mid-download split
+    is not servable and must not surface anywhere as a model."""
+    files = sorted(models_dir.glob("*.gguf"))
     names = {p.name for p in files}
     out = []
     for p in files:
-        m = part.search(p.name)
+        m = SPLIT_PART_RE.search(p.name)
         if m is None:
             out.append(p)
             continue
         if m.group(1) != "00001":
             continue
-        stem = p.name[: m.start()]
-        total = int(m.group(2))
-        if all(f"{stem}-{i:05d}-of-{m.group(2)}.gguf" in names
-               for i in range(2, total + 1)):
+        stem, total = p.name[: m.start()], int(m.group(2))
+        if not require_complete or all(f"{stem}-{i:05d}-of-{m.group(2)}.gguf" in names
+                                       for i in range(2, total + 1)):
             out.append(p)
     return out
 
 
+def staged_models() -> "list[Path]":
+    """Servable staged models (continuation parts, incomplete splits and assets/ never count)."""
+    return staged_in(models_dir())
+
+
 def staged_model_ids() -> "list[str]":
-    return [re.sub(r"-\d{5}-of-\d{5}$", "", p.stem) for p in staged_models()]
+    return [model_id_from_stem(p.stem) for p in staged_models()]
 
 
 def _presets_stale() -> bool:
-    """True when a staged model has no section in the preset INI — it
-    would autoload with stock fit instead of a policy decision."""
+    """True when a staged model has no section in the preset INI — it would autoload with stock
+    fit instead of a policy decision."""
     try:
         from hermes_cli.local_runtime.presets import read_preset_decisions
 
@@ -104,8 +102,8 @@ def _presets_stale() -> bool:
 
 def _stop_state_server(state: dict) -> None:
     """Best-effort stop of the server the state file points at (an incumbent this process doesn't
-    supervise). The state pid is ours by contract — the file only ever describes the managed server.
-    """
+    supervise). The state pid is ours by contract — the file only ever describes the managed
+    server."""
     from hermes_cli.local_runtime.endpoint import _pid_alive
 
     try:
@@ -118,9 +116,8 @@ def _stop_state_server(state: dict) -> None:
         os.kill(pid, signal.SIGTERM)
     except (OSError, ValueError):
         return
-    # Give it a moment to release the port and the GPU. Liveness via
-    # psutil — on Windows os.kill(pid, 0) TERMINATES the process, it is
-    # not a probe (the endpoint.py pitfall note; #local-models review).
+    # Give it a moment to release the port and the GPU. Liveness via psutil — on Windows
+    # os.kill(pid, 0) TERMINATES the process, it is not a probe.
     for _ in range(50):
         if not _pid_alive(pid):
             return
@@ -128,12 +125,9 @@ def _stop_state_server(state: dict) -> None:
 
 
 def refresh_local_runtime() -> bool:
-    """Restart the managed server so it rescans the models directory.
-
-    The router's model list is SPAWN-ONLY: a GGUF added after start is invisible to GET /models and
-    400s on completion, so anything that changes the staged set while the server runs must bounce
-    it.
-    """
+    """Restart the managed server so it rescans the models directory. The router's model list is
+    SPAWN-ONLY: a GGUF added after start is invisible to GET /models and 400s on completion, so
+    anything that changes the staged set while the server runs must bounce it."""
     global _SUPERVISOR
     try:
         from hermes_cli.config import load_config
@@ -155,11 +149,41 @@ def refresh_local_runtime() -> bool:
         return False
 
 
+def _generate_presets(mdir: Path, preset_path: Path) -> Path | None:
+    """Write the launch-policy INI for every staged model; returns the path to hand the router.
+
+    Priced against CAPACITY, not live free VRAM: this runs while the outgoing server instance may
+    still hold the card (restart, refresh after a download), and its memory is freed before the new
+    instance loads anything. Pricing against live-free once pinned a fitting model's weights to CPU.
+
+    Degradation ladder on failure: a STALE policy still beats no policy — stock fit (f16 KV at max
+    context, no placement) is the silent-busy-wait failure on Windows. Keep serving with the
+    previous INI when one exists; only a first boot with no INI at all falls to stock fit.
+    """
+    from hermes_cli.local_runtime.hardware import probe_budget
+    from hermes_cli.local_runtime.presets import generate_presets
+
+    try:
+        for entry in generate_presets(mdir, probe_budget(planning=True), preset_path):
+            if entry.refusal:
+                logger.warning("model refused by physics check: %s", entry.refusal)
+        return preset_path
+    except Exception as exc:  # noqa: BLE001 — policy failure must not block serving
+        if preset_path.exists():
+            logger.error("preset generation failed (%s); serving with the "
+                         "PREVIOUS launch policies — models staged since "
+                         "the last successful generation run unpoliced "
+                         "until this is fixed", exc)
+            return preset_path
+        logger.error("preset generation failed (%s) and no previous "
+                     "policy file exists; router runs stock fit", exc)
+        return None
+
+
 def ensure_local_runtime(config: dict, force: bool = False) -> "object | None":
     """Idempotent boot of the managed runtime. Returns the supervisor (or None when
     disabled/unavailable). Never raises into a session start — failures log and return None; chat
-    falls back to configured providers.
-    """
+    falls back to configured providers."""
     global _SUPERVISOR
     section = (config or {}).get("local_runtime") or {}
     if not force and not section.get("enabled"):
@@ -167,21 +191,17 @@ def ensure_local_runtime(config: dict, force: bool = False) -> "object | None":
     if _SUPERVISOR is not None:
         return _SUPERVISOR
 
-    # Residency: no staged models means nothing to serve — don't boot an
-    # empty server. The walked-away story handled with zero configuration
-    # (delete your last model and boots stop); Use force-boots as ever.
+    # Residency: no staged models means nothing to serve — don't boot an empty server (delete
+    # your last model and boots stop). force boots as ever.
     if not force and not staged_models():
         logger.info("local runtime enabled but no models staged; not booting")
         return None
 
-    # Another Hermes process may already be supervising — reuse via state,
-    # but ONLY while its launch policy still covers every staged model. A
-    # server whose preset file predates a download serves the new model
-    # with no policy at all (--models-autoload + stock fit: f16 KV at max
-    # context, no placement — the silent-demotion busy-wait on WDDM). A
-    # stale incumbent gets stopped and replaced by a fresh boot with
-    # regenerated presets; sessions ride through exactly like any other
-    # supervised restart (stable port + persisted key).
+    # Another Hermes process may already be supervising — reuse via state, but ONLY while its
+    # launch policy still covers every staged model. A server whose preset file predates a
+    # download serves the new model with no policy at all (--models-autoload + stock fit). A stale
+    # incumbent gets stopped and replaced by a fresh boot with regenerated presets; sessions ride
+    # through like any other supervised restart (stable port + persisted key).
     from hermes_cli.local_runtime.endpoint import _state_endpoint
 
     state = _state_endpoint()
@@ -200,20 +220,16 @@ def ensure_local_runtime(config: dict, force: bool = False) -> "object | None":
             installed_tags,
             select_backend,
         )
-        from hermes_cli.local_runtime.hardware import probe_budget
-        from hermes_cli.local_runtime.presets import generate_presets
         from hermes_cli.local_runtime.supervisor import LlamaServerSupervisor
 
         backend = section.get("backend", "auto")
         if backend == "auto":
             backend = select_backend(_detect_gpu_vendor())
-        # Boot ladder: serve what is INSTALLED, never download here. The
-        # configured tag (config root-of-trust; deep-merge supplies the
-        # Hermes-release default when unpinned) is preferred; when it isn't
-        # installed yet, the newest installed tag serves and the status
-        # endpoint reports the pending update — the download is a deliberate
-        # button click in the pane, not a boot-path surprise (a multi-minute
-        # inline download here is exactly how the onboarding bounce returns).
+        # Boot ladder: serve what is INSTALLED, never download here. The configured tag is
+        # preferred; when it isn't installed yet, the newest installed tag serves and the status
+        # endpoint reports the pending update — the download is a deliberate click in the pane,
+        # not a boot-path surprise (a multi-minute inline download here is exactly how the
+        # onboarding bounce returns).
         tag = section.get("tag") or default_tag()
         have = installed_tags()
         if tag not in have:
@@ -228,35 +244,7 @@ def ensure_local_runtime(config: dict, force: bool = False) -> "object | None":
 
         mdir = models_dir()
         mdir.mkdir(parents=True, exist_ok=True)
-
-        # Context policy: one launch decision per staged model, carried to
-        # the router via the preset INI. Priced against CAPACITY, not live
-        # free VRAM: this runs while the outgoing server instance may still
-        # hold the card (restart, refresh after a download), and its memory
-        # is freed before the new instance loads anything. Pricing against
-        # live-free here once pinned a fitting model's weights to CPU
-        # because the probe saw the predecessor's VRAM as gone.
-        preset_path = runtimes_root() / "presets.ini"
-        try:
-            entries = generate_presets(mdir, probe_budget(planning=True), preset_path)
-            for entry in entries:
-                if entry.refusal:
-                    logger.warning("model refused by physics check: %s", entry.refusal)
-        except Exception as exc:  # noqa: BLE001 — policy failure must not block serving
-            # Degradation ladder: a STALE policy still beats no policy —
-            # stock fit (f16 KV at max context, no placement) is the
-            # silent-busy-wait failure on Windows. Keep serving with the
-            # previous INI when one exists; only a first boot with no INI
-            # at all falls to stock fit.
-            if preset_path.exists():
-                logger.error("preset generation failed (%s); serving with the "
-                             "PREVIOUS launch policies — models staged since "
-                             "the last successful generation run unpoliced "
-                             "until this is fixed", exc)
-            else:
-                logger.error("preset generation failed (%s) and no previous "
-                             "policy file exists; router runs stock fit", exc)
-                preset_path = None
+        preset_path = _generate_presets(mdir, runtimes_root() / "presets.ini")
 
         sup = LlamaServerSupervisor(
             install_dir, mdir,
@@ -267,9 +255,8 @@ def ensure_local_runtime(config: dict, force: bool = False) -> "object | None":
         try:
             sup.start()
         except Exception:
-            # start() can fail after the router process exists (health
-            # timeout, spawn error): leaving it running unsupervised
-            # strands its VRAM behind a port nothing will clean up.
+            # start() can fail after the router process exists (health timeout): leaving it
+            # running unsupervised strands its VRAM behind a port nothing will clean up.
             try:
                 sup.stop()
             except Exception:  # noqa: BLE001 — cleanup is best-effort
@@ -293,15 +280,14 @@ def shutdown_local_runtime() -> None:
 
 
 def get_supervisor():
-    """The process-local supervisor, or None (server may still be running
-    under another process — check the state file)."""
+    """The process-local supervisor, or None (a server may still run under another process —
+    check the state file)."""
     return _SUPERVISOR
 
 
 def _start_idle_sweeper(sup) -> None:
-    """Idle-residency loop: every couple of minutes, unload non-primary
-    models idle past the supervisor's threshold. Daemon thread tied to the
-    supervisor's lifetime — exits when the server stops."""
+    """Idle-residency loop: every couple of minutes, unload models idle past the supervisor's
+    threshold. Daemon thread tied to the supervisor's lifetime — exits when the server stops."""
     import threading
 
     def _loop():
