@@ -207,10 +207,7 @@ def copilot_device_code_login(
         print("  ✗ GitHub did not return a device code.")
         return None
 
-    print()
-    print(f"  Open this URL in your browser: {verification_uri}")
-    print(f"  Enter this code: {user_code}")
-    print()
+    print(f"\n  Open this URL in your browser: {verification_uri}\n  Enter this code: {user_code}\n")
     print("  Waiting for authorization...", end="", flush=True)
 
     deadline = time.monotonic() + timeout_seconds
@@ -238,22 +235,18 @@ def copilot_device_code_login(
 
         error = result.get("error", "")
         if error == "slow_down":
-            # RFC 8628: add 5 seconds to polling interval
+            # RFC 8628: add 5 seconds to polling interval (or honor a server-supplied one)
             server_interval = result.get("interval")
-            if isinstance(server_interval, (int, float)) and server_interval > 0:
-                interval = int(server_interval)
-            else:
-                interval += 5
+            is_num = isinstance(server_interval, (int, float)) and server_interval > 0
+            interval = int(server_interval) if is_num else interval + 5
         if error in ("authorization_pending", "slow_down"):
             print(".", end="", flush=True)
             continue
         if error:
-            print()
-            print(_DEVICE_CODE_TERMINAL_ERRORS.get(error, f"  ✗ Authorization failed: {error}"))
+            print("\n" + _DEVICE_CODE_TERMINAL_ERRORS.get(error, f"  ✗ Authorization failed: {error}"))
             return None
 
-    print()
-    print("  ✗ Timed out waiting for authorization.")
+    print("\n  ✗ Timed out waiting for authorization.")
     return None
 
 
@@ -463,6 +456,41 @@ def _urlopen_bounded(req, timeout: float):
     return box["resp"]
 
 
+def _fetch_exchange_with_retry(req, timeout: float, fp: str) -> dict:
+    """GET the exchange with backoff for startup network races; raises ValueError on failure.
+
+    Permanent HTTP rejections (401/403/404) skip the retry loop entirely — sleeping on an auth
+    rejection blocks the caller for ~4.5s with an identical outcome. Failures populate the
+    negative cache (long TTL for permanent, short for transient); success clears it.
+    """
+    last_exc: Optional[Exception] = None
+    permanent_failure = False
+    for attempt in range(1, _EXCHANGE_MAX_ATTEMPTS + 1):
+        try:
+            with _urlopen_bounded(req, timeout) as resp:
+                data = json.loads(resp.read().decode())
+            _exchange_failure_cache.pop(fp, None)
+            return data
+        except Exception as exc:  # noqa: BLE001 — retry all, re-raise below
+            last_exc = exc
+            status = getattr(exc, "code", None) or getattr(exc, "status", None)
+            permanent_failure = status in _EXCHANGE_PERMANENT_HTTP_STATUSES
+            if permanent_failure:
+                logger.debug("Copilot token exchange rejected (HTTP %s); not retrying", status)
+                break
+            if attempt < _EXCHANGE_MAX_ATTEMPTS:
+                sleep_s = _EXCHANGE_BACKOFF_BASE_SECONDS * attempt
+                logger.debug("Copilot token exchange attempt %d/%d failed (%s); retrying in %.1fs",
+                             attempt, _EXCHANGE_MAX_ATTEMPTS, exc, sleep_s)
+                time.sleep(sleep_s)
+    ttl = (_EXCHANGE_FAILURE_TTL_PERMANENT_SECONDS if permanent_failure
+           else _EXCHANGE_FAILURE_TTL_TRANSIENT_SECONDS)
+    _exchange_failure_cache[fp] = time.time() + ttl
+    raise ValueError(
+        f"Copilot token exchange failed after {_EXCHANGE_MAX_ATTEMPTS} attempts: {last_exc}"
+    ) from last_exc
+
+
 def _cache_entry_fresh(cached) -> bool:
     return bool(cached) and time.time() < cached[1] - _JWT_REFRESH_MARGIN_SECONDS
 
@@ -521,46 +549,12 @@ def _exchange_copilot_token_locked(
         },
     )
 
-    # Retry with backoff for startup network races; permanent HTTP rejections (401/403/404)
-    # skip the loop entirely — sleeping on an auth rejection blocks the caller for ~4.5s with
-    # an identical outcome.
-    data = None
-    last_exc: Optional[Exception] = None
-    permanent_failure = False
-    for attempt in range(1, _EXCHANGE_MAX_ATTEMPTS + 1):
-        try:
-            with _urlopen_bounded(req, timeout) as resp:
-                data = json.loads(resp.read().decode())
-            break
-        except Exception as exc:  # noqa: BLE001 — retry all, re-raise below
-            last_exc = exc
-            status = getattr(exc, "code", None) or getattr(exc, "status", None)
-            permanent_failure = status in _EXCHANGE_PERMANENT_HTTP_STATUSES
-            if permanent_failure:
-                logger.debug("Copilot token exchange rejected (HTTP %s); not retrying", status)
-                break
-            if attempt < _EXCHANGE_MAX_ATTEMPTS:
-                sleep_s = _EXCHANGE_BACKOFF_BASE_SECONDS * attempt
-                logger.debug("Copilot token exchange attempt %d/%d failed (%s); retrying in %.1fs",
-                             attempt, _EXCHANGE_MAX_ATTEMPTS, exc, sleep_s)
-                time.sleep(sleep_s)
-    if data is None:
-        ttl = (
-            _EXCHANGE_FAILURE_TTL_PERMANENT_SECONDS
-            if permanent_failure
-            else _EXCHANGE_FAILURE_TTL_TRANSIENT_SECONDS
-        )
-        _exchange_failure_cache[fp] = time.time() + ttl
-        raise ValueError(
-            f"Copilot token exchange failed after {_EXCHANGE_MAX_ATTEMPTS} attempts: {last_exc}"
-        ) from last_exc
-    _exchange_failure_cache.pop(fp, None)
+    data = _fetch_exchange_with_retry(req, timeout, fp)
 
     api_token = data.get("token", "")
     if not api_token:
         raise ValueError("Copilot token exchange returned empty token")
-    expires_at = data.get("expires_at", 0)
-    expires_at = float(expires_at) if expires_at else time.time() + 1800
+    expires_at = float(data.get("expires_at") or 0) or time.time() + 1800
 
     # Account-specific API base URL: GitHub advertises the authoritative endpoint under
     # ``endpoints.api`` (differs for Copilot Enterprise / proxied accounts); when omitted,
@@ -585,10 +579,8 @@ def _derive_base_url_from_proxy_ep(token: str) -> Optional[str]:
     m = re.search(r'(?:^|;)\s*proxy-ep=([^;\s]+)', token)
     if not m:
         return None
-
     proxy_ep = re.sub(r"^https?://", "", m.group(1), count=1).rstrip("/")
-    if proxy_ep.startswith("proxy."):
-        proxy_ep = "api." + proxy_ep[len("proxy."):]
+    proxy_ep = re.sub(r"^proxy\.", "api.", proxy_ep, count=1)
     return f"https://{proxy_ep}"
 
 
