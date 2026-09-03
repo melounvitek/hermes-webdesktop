@@ -45,12 +45,8 @@ def _fmt_ts(ts: float) -> str:
 
 
 def _evict_oldest(container, cap: int) -> None:
-    """Pop entries until *container* is within *cap*.
-
-    Sets pop arbitrary entries (they only feed diagnostic summaries); dicts pop
-    oldest by insertion order. An evicted entry costs one redundant re-send
-    (dedup) or one non-mtime staleness check — graceful degradation, not a bug.
-    """
+    """Pop entries until *container* is within *cap* (sets: arbitrary; dicts: oldest
+    by insertion order). An eviction only costs one redundant re-send or staleness check."""
     for _ in range(len(container) - cap):
         try:
             if isinstance(container, set):
@@ -110,22 +106,15 @@ class FileStateRegistry:
             self._stamp(task_id, resolved, mtime, now, False)
 
     def check_stale(self, task_id: str, resolved: str) -> Optional[str]:
-        """Model-facing warning if this write would be stale, else ``None``.
-
-        Checked in severity order: (1) a sibling subagent wrote after this
-        agent's last read; (2) mtime drifted since our read (external edit) or
-        the read was partial; (3) this agent never read the file. Never raises
-        — callers decide whether to block or warn.
-        """
+        """Model-facing warning if this write would be stale, else ``None``. Severity
+        order: sibling wrote after our read > mtime drift / partial read > never read."""
         if _disabled():
             return None
         with self._state_lock:
             stamp = self._reads.get(task_id, {}).get(resolved)
             last_writer = self._last_writer.get(resolved)
 
-        # Never read and no write record: net-new file or first touch —
-        # existing sensitive-path / file-exists logic handles it.
-        if stamp is None and last_writer is None:
+        if stamp is None and last_writer is None:  # net-new file / first touch
             return None
         current_mtime = _mtime_or_none(resolved)
         if current_mtime is None:

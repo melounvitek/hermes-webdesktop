@@ -1,12 +1,8 @@
-"""Environment variable passthrough registry.
-
-Skills that declare ``required_environment_variables`` need those vars in sandboxed
-execution environments (execute_code, terminal), which strip secrets from the child
-env by default. This module is the session-scoped allowlist, fed by skill
-declarations (registered by ``skill_view``) and ``terminal.env_passthrough`` in
-config.yaml. When profile multiplexing is active, forwarded values are resolved
-through the current profile's secret scope rather than the process environment.
-"""
+"""Environment variable passthrough registry: the session-scoped allowlist of vars a
+skill's ``required_environment_variables`` (registered by ``skill_view``) or
+``terminal.env_passthrough`` in config.yaml may forward into sandboxed children
+(execute_code, terminal), which strip secrets by default. Under profile multiplexing,
+forwarded values resolve through the profile's secret scope, not the process env."""
 
 from __future__ import annotations
 
@@ -46,29 +42,20 @@ def _is_hermes_provider_credential(name: str) -> bool:
     registerable. Fails closed when the blocklist cannot be imported."""
     try:
         from tools.environments.local import (
-            _HERMES_PROVIDER_ENV_BLOCKLIST,
-            _is_hermes_internal_secret,
-        )
+            _HERMES_PROVIDER_ENV_BLOCKLIST, _is_hermes_internal_secret)
     except Exception as e:
         logger.warning(
             "env passthrough: provider credential blocklist import failed; "
-            "failing closed and refusing passthrough registration for %r: %s",
-            name,
-            e,
-        )
+            "failing closed and refusing passthrough registration for %r: %s", name, e)
         return True
     return _is_hermes_internal_secret(name) or name in _HERMES_PROVIDER_ENV_BLOCKLIST
 
 
 def register_env_passthrough(var_names: Iterable[str]) -> None:
-    """Register env var names as allowed in sandboxed environments (typically
-    from a skill's ``required_environment_variables``).
-
-    Hermes-managed provider credentials are rejected to preserve the
-    ``execute_code`` sandbox's credential-scrubbing guarantee (GHSA-rhgp-j443-p4rf);
-    a skill needing a Hermes-managed provider should use the main-process tools
-    (web_search, web_extract, …). Third-party keys pass normally.
-    """
+    """Register env var names as allowed in sandboxed environments (typically a
+    skill's ``required_environment_variables``). Hermes-managed provider credentials
+    are rejected (GHSA-rhgp-j443-p4rf) — such skills should use the main-process tools
+    (web_search, web_extract, …); third-party keys pass normally."""
     for name in _accepted((n.strip() for n in var_names), (
         "env passthrough: refusing to register Hermes provider "
         "credential %r (blocked by _HERMES_PROVIDER_ENV_BLOCKLIST). "
@@ -98,7 +85,6 @@ def _load_config_passthrough() -> frozenset[str]:
     global _config_passthrough
     if _config_passthrough is not None:
         return _config_passthrough
-
     result: set[str] = set()
     try:
         passthrough = cfg_get(read_raw_config(), "terminal", "env_passthrough")
@@ -113,7 +99,6 @@ def _load_config_passthrough() -> frozenset[str]:
         )))
     except Exception as e:
         logger.debug("Could not read tools.env_passthrough from config: %s", e)
-
     _config_passthrough = frozenset(result)
     return _config_passthrough
 
@@ -129,28 +114,18 @@ def get_all_passthrough() -> frozenset[str]:
 
 
 def resolve_passthrough_value(name: str, fallback: str | None = None) -> str | None:
-    """Resolve an allowlisted variable without crossing profile boundaries.
-
-    ``fallback`` is the value the caller would have forwarded before profile secret
-    scopes existed (a snapshot of ``os.environ`` or the profile's ``.env``). An
-    active multiplex scope is authoritative: a missing key returns ``None`` and
-    never falls back to the process-global environment; an unscoped read while
-    multiplexing is active raises the fail-closed ``UnscopedSecretError`` from
-    :mod:`agent.secret_scope`. Outside multiplexing, an installed scope keeps the
-    overlay semantics and an unscoped caller keeps its already-resolved fallback.
-    """
+    """Resolve an allowlisted variable without crossing profile boundaries. ``fallback``
+    is what the caller would have forwarded before secret scopes existed (a snapshot of
+    ``os.environ`` / the profile ``.env``). An active multiplex scope is authoritative:
+    a missing key returns ``None``, never the process-global env, and an unscoped read
+    raises the fail-closed ``UnscopedSecretError``. Outside multiplexing an installed
+    scope keeps overlay semantics and an unscoped caller keeps its fallback."""
     from agent.secret_scope import (
-        _is_global_env,
-        current_secret_scope,
-        get_secret,
-        is_multiplex_active,
-    )
-
+        _is_global_env, current_secret_scope, get_secret, is_multiplex_active)
     # Global terminal/runtime settings are not profile secrets; ``fallback`` is
     # already the caller's effective value (incl. an explicit per-call override).
     if _is_global_env(name) and fallback is not None:
         return fallback
-
     multiplex_active = is_multiplex_active()
     if current_secret_scope() is None:
         return get_secret(name) if multiplex_active else fallback

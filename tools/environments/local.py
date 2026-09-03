@@ -1,5 +1,6 @@
 """Local execution environment — spawn-per-call with session snapshot."""
 
+import contextlib
 import logging
 import ntpath
 import os
@@ -115,9 +116,7 @@ def _msys_to_windows_path(cwd: str) -> str:
     """``/c/Users/x`` / ``/cygdrive/c/..`` / ``/mnt/c/..`` -> native ``C:\\Users\\x`` so
     ``isdir``/``Popen(cwd=)`` find it. No-op off Windows, for empty input and for
     multi-segment POSIX paths like ``/home/x``; idempotent on native paths."""
-    if not _IS_WINDOWS or not cwd:
-        return cwd
-    m = re.match(r'^/(?:(?:cygdrive|mnt)/)?([a-zA-Z])(/.*)?$', cwd)
+    m = _IS_WINDOWS and cwd and re.match(r'^/(?:(?:cygdrive|mnt)/)?([a-zA-Z])(/.*)?$', cwd)
     if not m:
         return cwd
     tail = (m.group(2) or "").replace('/', '\\')
@@ -137,7 +136,6 @@ def _resolve_local_initial_cwd(cwd: str) -> str:
             return expanded
     if os.path.isabs(expanded):
         return expanded
-
     candidate = os.path.abspath(expanded)
     current = os.getcwd()
     # Relative name matching the tail of the current dir: use the current dir.
@@ -151,9 +149,7 @@ def _resolve_local_initial_cwd(cwd: str) -> str:
 def _windows_to_msys_path(cwd: str) -> str:
     """Native ``C:\\Users\\x`` -> Git Bash ``/c/Users/x`` so ``builtin cd`` resolves
     it. No-op off Windows / for non-drive paths."""
-    if not _IS_WINDOWS or not cwd:
-        return cwd
-    m = re.match(r'^([a-zA-Z]):[\\/]*(.*)$', cwd)
+    m = _IS_WINDOWS and cwd and re.match(r'^([a-zA-Z]):[\\/]*(.*)$', cwd)
     if not m:
         return cwd
     tail = (m.group(2) or "").replace('\\', '/').lstrip('/')
@@ -164,9 +160,7 @@ def _bash_safe_path(path: str) -> str:
     """*path* safe to embed in a Git Bash script: ``C:\\Users\\x`` / ``C:/Users/x``
     become ``/c/Users/x`` (MSYS argument conversion mangles ``C:/`` forms) and
     leftover backslashes are normalized so bash does not eat ``\\U``. No-op off Windows."""
-    if not _IS_WINDOWS or not path:
-        return path
-    return _windows_to_msys_path(path).replace("\\", "/")
+    return _windows_to_msys_path(path).replace("\\", "/") if _IS_WINDOWS and path else path
 
 
 def _quote_bash_path(path: str) -> str:
@@ -186,7 +180,7 @@ def _resolve_safe_cwd(cwd: str) -> str:
     ``tempfile.gettempdir()``. MSYS paths are normalized first on Windows so a valid
     ``pwd -P`` result is not rejected. Lets ``_run_bash`` recover from a deleted or
     inaccessible cwd instead of ``Popen`` raising and wedging every later call."""
-    cwd = _msys_to_windows_path(cwd) if _IS_WINDOWS else cwd
+    cwd = _msys_to_windows_path(cwd)
     if cwd and _cwd_usable(cwd):
         return cwd
     if cwd and os.path.isdir(cwd):
@@ -209,14 +203,12 @@ def _resolve_safe_cwd(cwd: str) -> str:
 # --- Child-process environment construction ---
 def _apply_profile_home(env: dict) -> None:
     """Bridge the context-local HERMES_HOME override, then the subprocess HOME contract."""
+    from hermes_constants import apply_subprocess_home_env, get_hermes_home_override
     try:
-        from hermes_constants import get_hermes_home_override
-        value = get_hermes_home_override()
-        if value:
+        if value := get_hermes_home_override():
             env["HERMES_HOME"] = value
     except Exception:
         pass
-    from hermes_constants import apply_subprocess_home_env
     apply_subprocess_home_env(env)
 
 
@@ -230,7 +222,6 @@ def _inject_session_context_env(env: dict) -> None:
         from gateway.session_context import _UNSET, _VAR_MAP, session_context_engaged
     except Exception:
         return
-
     _engaged = session_context_engaged()
     for var_name, var in _VAR_MAP.items():
         value = var.get()
@@ -420,9 +411,9 @@ def _compute_git_bash_bin_dirs() -> list[str]:
         return []
     parent = os.path.dirname(os.path.dirname(bash))  # bash in <root>\bin or <root>\usr\bin (MinGit)
     root = os.path.dirname(parent) if os.path.basename(parent).lower() == "usr" else parent
-    subs = (("mingw64", "bin"), ("mingw32", "bin"), ("usr", "local", "bin"), ("usr", "bin"),
-            ("bin",))
-    return list(dict.fromkeys(c for sub in subs if os.path.isdir(c := os.path.join(root, *sub))))
+    subs = ("mingw64/bin", "mingw32/bin", "usr/local/bin", "usr/bin", "bin")
+    dirs = (os.path.join(root, *sub.split("/")) for sub in subs)
+    return list(dict.fromkeys(d for d in dirs if os.path.isdir(d)))
 
 
 def _prepend_missing_path_entries(existing_path: str, dirs: list[str]) -> str:
@@ -477,8 +468,6 @@ def _resolve_hermes_bin_dir() -> str | None:
     global _HERMES_BIN_DIR
     if _HERMES_BIN_DIR is not _SENTINEL:
         return _HERMES_BIN_DIR  # type: ignore[return-value]
-
-    candidate: str | None = None
     which = shutil.which("hermes")
     argv0 = sys.argv[0] if sys.argv else ""
     base = os.path.basename(argv0).lower()
@@ -489,12 +478,10 @@ def _resolve_hermes_bin_dir() -> str | None:
     elif (os.path.isabs(argv0) and (base == "hermes" or base.startswith("hermes."))
             and os.path.isfile(argv0)):
         candidate = os.path.dirname(argv0)
-    elif exe_dir and os.path.isfile(os.path.join(exe_dir, shim)):
-        candidate = exe_dir
-    if candidate and not os.path.isdir(candidate):
-        candidate = None
-    _HERMES_BIN_DIR = candidate
-    return candidate
+    else:
+        candidate = exe_dir if exe_dir and os.path.isfile(os.path.join(exe_dir, shim)) else None
+    _HERMES_BIN_DIR = candidate if candidate and os.path.isdir(candidate) else None
+    return _HERMES_BIN_DIR
 
 
 def _prepend_hermes_bin_dir(existing_path: str) -> str:
@@ -509,8 +496,7 @@ def _managed_runtime_path_entries() -> list[str]:
     profile-scoped and a managed tree can appear mid-process."""
     try:
         from hermes_constants import get_hermes_home, iter_hermes_node_dirs
-        candidates = [*iter_hermes_node_dirs(), get_hermes_home() / "bin"]
-        return [str(d) for d in candidates if d.is_dir()]
+        return [str(d) for d in (*iter_hermes_node_dirs(), get_hermes_home() / "bin") if d.is_dir()]
     except Exception:
         return []
 
@@ -532,18 +518,15 @@ def _apply_windows_msys_bash_env_defaults(env: dict) -> None:
     """Disable MSYS argument path conversion (``/FO`` -> ``C:/.../git/FO`` breaks
     tasklist/schtasks/wmic/``cmd /c``). Git for Windows honors ``MSYS_NO_PATHCONV``;
     MSYS2/Cygwin bash honor ``MSYS2_ARG_CONV_EXCL`` — set both; users can override."""
-    if not _IS_WINDOWS:
-        return
-    env.setdefault("MSYS_NO_PATHCONV", "1")
-    env.setdefault("MSYS2_ARG_CONV_EXCL", "*")
+    if _IS_WINDOWS:
+        env.setdefault("MSYS_NO_PATHCONV", "1")
+        env.setdefault("MSYS2_ARG_CONV_EXCL", "*")
 
 
 def _path_env_key(run_env: dict) -> str | None:
     """PATH env key to update without altering Windows casing (``Path`` vs ``PATH``);
     None when a Windows env has no PATH key at all."""
-    if not _IS_WINDOWS:
-        return "PATH"
-    return next((key for key in run_env if key.upper() == "PATH"), None)
+    return next((k for k in run_env if k.upper() == "PATH"), None) if _IS_WINDOWS else "PATH"
 
 
 def _make_run_env(env: dict) -> dict:
@@ -554,19 +537,16 @@ def _make_run_env(env: dict) -> dict:
 
 # --- Hermes venv / repo-root detection (module-level, computed once) ---
 # Owned here; read lazily by tools.environments.local_pythonpath (tests patch here).
-#: Repo root (three levels up). The Electron app prepends it to PYTHONPATH so the
-#: backend can ``import tools``; other subprocesses must not inherit it.
+# The Electron app prepends the repo root to PYTHONPATH so the backend can ``import
+# tools``; other subprocesses must not inherit it. Aliases: launchers may emit other
+# spellings — the Windows gateway launcher renders Hermes-owned paths under the
+# configured HERMES_HOME spelling (possibly a junction to another drive).
 _hermes_repo_root: Path = Path(__file__).resolve().parents[2]
-#: Alternate repo-root spellings launchers may emit: ``resolve()`` canonicalizes
-#: junctions, but the Windows gateway launcher renders Hermes-owned paths under the
-#: configured HERMES_HOME spelling (possibly a junction to another drive).
 _hermes_repo_root_aliases: tuple[Path, ...] = _build_hermes_repo_root_aliases(
     _hermes_repo_root, Path(__file__).absolute().parents[2], get_process_hermes_home())
-#: Whether the interpreter runs inside a venv (``sys.real_prefix``: virtualenv<20).
 _in_venv: bool = (getattr(sys, "base_prefix", sys.prefix) != sys.prefix
-                  or hasattr(sys, "real_prefix"))
-#: Lazily-cached site-packages dirs of the running interpreter's own venv.
-_hermes_site_packages: list[Path] | None = None
+                  or hasattr(sys, "real_prefix"))  # real_prefix: virtualenv<20
+_hermes_site_packages: list[Path] | None = None  # lazily cached by local_pythonpath
 
 
 # --- Login-shell init files ---
@@ -597,10 +577,10 @@ def _resolve_shell_init_files() -> list[str]:
     for raw in candidates:
         try:
             path = os.path.expandvars(os.path.expanduser(raw))
+            if path and os.path.isfile(path):
+                resolved.append(path)
         except Exception:
             continue
-        if path and os.path.isfile(path):
-            resolved.append(path)
     return resolved
 
 
@@ -609,10 +589,8 @@ def _prepend_shell_init(cmd_string: str, files: list[str]) -> str:
     errors, ``2>/dev/null`` hides noisy prompts, ``|| true`` neutralises the status."""
     if not files:
         return cmd_string
-    prelude = ["set +e"]
-    for path in files:
-        safe = path.replace("'", "'\\''")
-        prelude.append(f"[ -r '{safe}' ] && . '{safe}' 2>/dev/null || true")
+    safe = [p.replace("'", "'\\''") for p in files]
+    prelude = ["set +e", *(f"[ -r '{p}' ] && . '{p}' 2>/dev/null || true" for p in safe)]
     return "\n".join(prelude) + "\n" + cmd_string
 
 
@@ -649,7 +627,7 @@ def _sweep_escaped_descendants(descendants: list, pgid: int) -> None:
             try:
                 if os.getpgid(child.pid) == pgid:
                     continue  # group-kill already covers it
-            except (ProcessLookupError, PermissionError, OSError):
+            except OSError:  # ProcessLookupError / PermissionError included
                 pass
             child.kill()
         except Exception:
@@ -664,8 +642,7 @@ def _kill_process_group_posix(proc) -> None:
     try:
         pgid = os.getpgid(proc.pid)
     except ProcessLookupError:
-        pgid = getattr(proc, "_hermes_pgid", None)
-        if pgid is None:
+        if (pgid := getattr(proc, "_hermes_pgid", None)) is None:
             raise
     try:  # psutil children snapshot; empty on any failure (must never break the kill)
         import psutil
@@ -678,10 +655,8 @@ def _kill_process_group_posix(proc) -> None:
         if not _wait_for_group_exit(proc, pgid, 1.0):
             os.killpg(pgid, signal.SIGKILL)
             _wait_for_group_exit(proc, pgid, 2.0)
-            try:
+            with contextlib.suppress(subprocess.TimeoutExpired, OSError):
                 proc.wait(timeout=0.2)
-            except (subprocess.TimeoutExpired, OSError):
-                pass
     except ProcessLookupError:
         pass
     _sweep_escaped_descendants(descendants, pgid)
@@ -694,10 +669,8 @@ def _kill_process_windows(proc) -> None:
         terminate_pid(proc.pid, force=True, expected_start_time=get_process_start_time(proc.pid))
     except Exception:
         proc.kill()
-    try:
+    with contextlib.suppress(subprocess.TimeoutExpired, OSError):
         proc.wait(timeout=2.0)
-    except (subprocess.TimeoutExpired, OSError):
-        pass
 
 
 class LocalEnvironment(BaseEnvironment):
@@ -776,8 +749,7 @@ class LocalEnvironment(BaseEnvironment):
         safe_cwd = _resolve_safe_cwd(self.cwd)
         if safe_cwd == self.cwd:
             return
-        normalized = _msys_to_windows_path(self.cwd) if _IS_WINDOWS else self.cwd
-        if safe_cwd != normalized:
+        if safe_cwd != _msys_to_windows_path(self.cwd):
             logger.warning(
                 "LocalEnvironment cwd %r is missing on disk; "
                 "falling back to %r so terminal commands keep working.",
@@ -792,19 +764,16 @@ class LocalEnvironment(BaseEnvironment):
         if login:
             cmd_string = _prepend_shell_init(cmd_string, _resolve_shell_init_files())
         args = [bash, *(["-l"] if login else []), "-c", cmd_string]
-        run_env = _make_run_env(self.env)
         self._recover_cwd()
         proc = subprocess.Popen(
-            args, text=True, env=run_env, encoding="utf-8", errors="replace",
+            args, text=True, env=_make_run_env(self.env), encoding="utf-8", errors="replace",
             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
             start_new_session=True, cwd=self.cwd,
             **({"creationflags": windows_hide_flags()} if _IS_WINDOWS else {}))
         if not _IS_WINDOWS:
-            try:
+            with contextlib.suppress(ProcessLookupError):
                 proc._hermes_pgid = os.getpgid(proc.pid)
-            except ProcessLookupError:
-                pass
         if stdin_data is not None:
             _pipe_stdin(proc, stdin_data)
         return proc
@@ -812,15 +781,10 @@ class LocalEnvironment(BaseEnvironment):
     def _kill_process(self, proc):
         """Kill the entire process group (all children)."""
         try:
-            if _IS_WINDOWS:
-                _kill_process_windows(proc)
-            else:
-                _kill_process_group_posix(proc)
-        except (ProcessLookupError, PermissionError, OSError):
-            try:
+            (_kill_process_windows if _IS_WINDOWS else _kill_process_group_posix)(proc)
+        except OSError:  # ProcessLookupError / PermissionError included
+            with contextlib.suppress(Exception):
                 proc.kill()
-            except Exception:
-                pass
 
     def _extract_cwd_from_output(self, result: dict):
         """Base semantics plus: Git Bash ``pwd -P`` emits MSYS form on Windows —
@@ -830,7 +794,7 @@ class LocalEnvironment(BaseEnvironment):
         prev_cwd = self.cwd
         super()._extract_cwd_from_output(result)
         if self.cwd != prev_cwd:
-            normalized = _msys_to_windows_path(self.cwd) if _IS_WINDOWS else self.cwd
+            normalized = _msys_to_windows_path(self.cwd)
             if normalized and os.path.isdir(normalized):
                 self.cwd = normalized
                 result["cwd"] = normalized
@@ -848,7 +812,5 @@ class LocalEnvironment(BaseEnvironment):
         except Exception:
             stale = []
         for f in (self._snapshot_path, self._cwd_file, *stale):
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(f)
-            except OSError:
-                pass

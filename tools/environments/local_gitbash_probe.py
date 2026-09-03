@@ -37,27 +37,19 @@ def _mandatory_aslr_enabled() -> "bool | None":
     global _mandatory_aslr_enabled_cache
     if _mandatory_aslr_enabled_cache is not None:
         return _mandatory_aslr_enabled_cache
+    cmd = [shutil.which("powershell.exe") or "powershell.exe", "-NoProfile", "-NonInteractive",
+           "-Command", "(Get-ProcessMitigation -System).Aslr.ForceRelocateImages.ToString()"]
     try:
-        result = subprocess.run(
-            [
-                shutil.which("powershell.exe") or "powershell.exe",
-                "-NoProfile", "-NonInteractive", "-Command",
-                "(Get-ProcessMitigation -System).Aslr.ForceRelocateImages.ToString()",
-            ],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=10, creationflags=windows_hide_flags(),
-        )
-        if result.returncode != 0:
-            return None
-        value = (result.stdout or "").strip().upper()
-        if value == "ON":
-            _mandatory_aslr_enabled_cache = True
-        elif value in {"OFF", "NOTSET"}:
-            _mandatory_aslr_enabled_cache = False
-        return _mandatory_aslr_enabled_cache
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=10, creationflags=windows_hide_flags())
     except Exception as exc:
         logger.debug("Could not query Windows Mandatory ASLR state: %s", exc)
-    return None
+        return None
+    if result.returncode != 0:
+        return None
+    value = (result.stdout or "").strip().upper()
+    _mandatory_aslr_enabled_cache = {"ON": True, "OFF": False, "NOTSET": False}.get(value)
+    return _mandatory_aslr_enabled_cache
 
 
 def _git_root_from_bash(bash: str) -> str:
@@ -92,15 +84,13 @@ def _bash_starts(bash: str) -> bool:
     """True if *bash* can launch external MSYS programs (cached per path).
     ``--noprofile --norc`` so a broken login post-install (``Directory
     \\drivers\\etc``) does not falsely condemn an otherwise usable bash."""
-    cached = _bash_starts_cache.get(bash)
-    if cached is not None:
-        return cached
+    if bash in _bash_starts_cache:
+        return _bash_starts_cache[bash]
     try:
         result = subprocess.run(
             [bash, "--noprofile", "--norc", "-c", _BASH_EXTERNAL_PROGRAM_PROBE],
             capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=15, creationflags=windows_hide_flags() if _IS_WINDOWS else 0,
-        )
+            timeout=15, creationflags=windows_hide_flags() if _IS_WINDOWS else 0)
         ok = result.returncode == 0
         if not ok:
             combined = f"{result.stdout or ''}{result.stderr or ''}".strip()

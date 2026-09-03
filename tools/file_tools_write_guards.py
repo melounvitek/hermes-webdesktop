@@ -30,36 +30,42 @@ _real_hermes_home_cached: str | None = None
 _real_hermes_home_loaded = False
 
 
-def _get_hermes_config_resolved() -> str | None:
-    """Return the resolved absolute path of the Hermes config file (cached)."""
-    global _hermes_config_resolved, _hermes_config_resolved_loaded
-    if not _hermes_config_resolved_loaded:
-        _hermes_config_resolved_loaded = True
+def _cached_lookup(slot: str, flag: str, primary, fallback) -> str | None:
+    """Fill module global *slot* once (guarded by *flag*) from ``primary()``, else
+    ``fallback()``, else None. Module globals so tests can monkeypatch the slots."""
+    g = globals()
+    if not g[flag]:
+        g[flag] = True
         try:
-            from hermes_cli.config import get_config_path
-            _hermes_config_resolved = str(get_config_path().resolve())
+            g[slot] = primary()
         except Exception:
             try:
-                _hermes_config_resolved = str(Path(_expand_tilde("~/.hermes/config.yaml")).resolve())
+                g[slot] = fallback()
             except Exception:
-                _hermes_config_resolved = None
-    return _hermes_config_resolved
+                g[slot] = None
+    return g[slot]
+
+
+def _config_path_resolved() -> str:
+    from hermes_cli.config import get_config_path
+    return str(get_config_path().resolve())
+
+
+def _hermes_home_real() -> str:
+    from hermes_constants import get_hermes_home
+    return os.path.realpath(str(get_hermes_home()))
+
+
+def _get_hermes_config_resolved() -> str | None:
+    """Return the resolved absolute path of the Hermes config file (cached)."""
+    return _cached_lookup("_hermes_config_resolved", "_hermes_config_resolved_loaded", _config_path_resolved,
+                          lambda: str(Path(_expand_tilde("~/.hermes/config.yaml")).resolve()))
 
 
 def _get_real_hermes_home() -> str | None:
     """Return the realpath of the authoritative Hermes home (cached)."""
-    global _real_hermes_home_cached, _real_hermes_home_loaded
-    if not _real_hermes_home_loaded:
-        _real_hermes_home_loaded = True
-        try:
-            from hermes_constants import get_hermes_home
-            _real_hermes_home_cached = os.path.realpath(str(get_hermes_home()))
-        except Exception:
-            try:
-                _real_hermes_home_cached = os.path.realpath(_expand_tilde("~/.hermes"))
-            except Exception:
-                _real_hermes_home_cached = None
-    return _real_hermes_home_cached
+    return _cached_lookup("_real_hermes_home_cached", "_real_hermes_home_loaded", _hermes_home_real,
+                          lambda: os.path.realpath(_expand_tilde("~/.hermes")))
 
 
 def _resolved_or_raw(filepath: str, task_id: str) -> str:
@@ -99,10 +105,8 @@ _PROTECTED_INSTRUCTION_BASENAMES = frozenset({
 
 def _protected_instruction_config() -> tuple[bool, list[str]]:
     """Return ``(enabled, extra_patterns)`` from ``security.protected_instruction_files`` /
-    ``security.protected_instruction_extra_patterns`` (fnmatch on basename).
-
-    Config read failures keep the gate ON — fail-safe for a security boundary.
-    """
+    ``security.protected_instruction_extra_patterns`` (fnmatch on basename). Config read
+    failures keep the gate ON — fail-safe for a security boundary."""
     try:
         from hermes_cli.config import load_config, cfg_get
         cfg = load_config()
@@ -121,11 +125,7 @@ def _protected_instruction_reason(filepath: str, task_id: str = "default",
                                   *, enabled: bool | None = None,
                                   extra_patterns: list[str] | None = None) -> str | None:
     """Return a short label when ``filepath`` targets a protected instruction file, else ``None``.
-
-    Matches BOTH the normalized input and its realpath so neither a symlink
-    pointing AT a protected file nor a protected name that is itself a symlink
-    escapes; ``..`` traversal is neutralized by normpath/realpath first.
-    """
+    Matches BOTH the normalized input and its realpath so no symlink direction escapes."""
     if enabled is None or extra_patterns is None:
         enabled, extra_patterns = _protected_instruction_config()
     if not enabled:
@@ -164,12 +164,11 @@ _NO_HUMAN = "requires approval but no interactive user or gateway is present to 
 
 
 def _request_protected_instruction_approval(reasons: list[str], task_id: str = "default") -> str | None:
-    """Ask the human to approve a write to protected instruction file(s).
+    """Ask the human to approve a write to protected instruction file(s); ``None`` when approved.
 
-    Returns ``None`` when approved, else a BLOCKED error string. Deliberately
-    NOT routed through ``_run_approval_gate``: that honors --yolo and
-    session/permanent allowlists, and this gate is one-operation approval EVERY
-    time with no persisted scope. Fail-closed when no human channel exists.
+    Deliberately NOT routed through ``_run_approval_gate`` (honors --yolo and
+    allowlists): this gate is one-operation approval EVERY time, no persisted
+    scope, fail-closed without a human channel.
     """
     targets = ", ".join(dict.fromkeys(reasons))
     description = (
@@ -232,12 +231,8 @@ def _request_protected_instruction_approval(reasons: list[str], task_id: str = "
 
 
 def _check_protected_instruction_write(paths: list[str], task_id: str = "default") -> str | None:
-    """Gate a write/patch touching protected instruction files.
-
-    ONE protected file gates the ENTIRE multi-file patch: a single prompt lists
-    every protected target and a deny applies nothing (atomic all-or-nothing
-    beats a partially-applied patch).
-    """
+    """Gate a write/patch touching protected instruction files. ONE protected file gates
+    the ENTIRE multi-file patch (one prompt, all-or-nothing)."""
     enabled, extra = _protected_instruction_config()
     if not enabled:
         return None
@@ -249,13 +244,9 @@ def _check_protected_instruction_write(paths: list[str], task_id: str = "default
 
 
 def _check_approval_required_write(paths: list[str], task_id: str = "default") -> str | None:
-    """Gate a write/patch touching an approval-required path (``~/.ssh/config``).
-
-    Not credentials and not hard-denied, but they can steer process execution
-    (SSH ``ProxyCommand`` / ``Match exec``). Unlike the protected-instruction
-    gate this is a routine user edit: the prompt offers once/session/always and
-    honors --yolo. Fail-closed when no interactive/gateway channel exists.
-    """
+    """Gate a write/patch touching an approval-required path (``~/.ssh/config`` can steer
+    execution via ``ProxyCommand``). Routine gate: once/session/always, honors --yolo,
+    fail-closed without an interactive/gateway channel."""
     try:
         from agent.file_safety import is_write_approval_required
     except Exception:
@@ -319,14 +310,9 @@ def _get_container_mirror_prefix_for_task(task_id: str = "default") -> str | Non
 
 
 def _check_cross_profile_path(filepath: str, task_id: str = "default") -> str | None:
-    """Soft-guard: warn when ``filepath`` lands on a host-side or Docker sandbox
-    MIRROR of Hermes state — a write the host process never reads (lost work).
-
-    Not profile isolation: the former cross-PROFILE guard was removed by
-    maintainer decision (profiles were never isolated). ``cross_profile=True``
-    on the tools still bypasses these mirror guards (name kept for replay compat).
-    Fails open on import error — the sensitive-path guard and denylist still apply.
-    """
+    """Soft-guard: warn when ``filepath`` lands on a host-side or Docker sandbox MIRROR of
+    Hermes state (a write the host never reads). Not profile isolation — that guard was
+    removed; ``cross_profile=True`` keeps bypassing this one for replay compat. Fails open."""
     try:
         from agent.file_safety import get_container_mirror_warning, get_sandbox_mirror_warning
     except Exception:
@@ -339,14 +325,9 @@ def _check_cross_profile_path(filepath: str, task_id: str = "default") -> str | 
 
 
 def _check_binary_document_write(filepath: str, task_id: str = "default") -> str | None:
-    """Reject text-tool writes that would corrupt a binary document.
-
-    ``read_file`` auto-extracts Office/PDF to text, so the model plausibly
-    believes it holds the file's bytes and writes edited text back — which can
-    never form a valid container. Opaque formats (.docx/.xlsx/.pptx/.odt/...)
-    are always rejected; .pdf only when OVERWRITING an existing regular file
-    (raw PDF syntax is text-authorable, so new-file creation stays allowed).
-    """
+    """Reject text-tool writes that would corrupt a binary document (read_file showed
+    EXTRACTED text, so the model may write it back). Opaque formats are always rejected;
+    .pdf only when OVERWRITING an existing file (raw PDF syntax is text-authorable)."""
     if has_opaque_document_extension(filepath):
         ext = filepath[filepath.rfind("."):].lower()
         return (
@@ -382,13 +363,8 @@ _READ_DEDUP_STATUS_MESSAGE = (
 
 
 def _is_internal_file_status_text(content: str) -> bool:
-    """True when content is the read_file dedup status message (verbatim or lightly framed).
-
-    Models echo the message verbatim OR wrap it with short framing ("Note:",
-    a trailing comment). Any write whose stripped body contains the full
-    message and is <=2x its length is status-dominated — a real file quoting
-    this message would be dramatically longer.
-    """
+    """True when content is the read_file dedup status message, verbatim or lightly framed
+    (contains the full message and is <=2x its length — a real file quoting it would be longer)."""
     if not isinstance(content, str):
         return False
     stripped = content.strip()
@@ -397,12 +373,8 @@ def _is_internal_file_status_text(content: str) -> bool:
 
 
 def _looks_like_read_file_line_numbered_content(content: str) -> bool:
-    """True for content dominated by read_file's ``LINE_NUM|CONTENT`` display.
-
-    Rejects writes whose non-empty lines are mostly (>=60%) consecutive
-    numbered lines, while allowing sparse literal pipe content such as a
-    single ``1|value`` line.
-    """
+    """True for content dominated by read_file's ``LINE_NUM|CONTENT`` display (>=60% of
+    non-empty lines are consecutive numbered lines; a lone ``1|value`` is allowed)."""
     if not isinstance(content, str):
         return False
     lines = [line for line in content.splitlines() if line.strip()]

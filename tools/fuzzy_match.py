@@ -26,8 +26,7 @@ UNICODE_MAP = {
     "\u2014": "--", "\u2013": "-",  # em/en dashes
     "\u2026": "...", "\u00a0": " ",  # ellipsis and non-breaking space
     "\u2212": "-",  # typographic minus (math/scientific docs)
-    # Space-separator family (Zs) beyond NBSP: otherwise such files miss every
-    # precise strategy and fall to the similarity fallback (wrong-region risk).
+    # Space-separator family (Zs): otherwise such files fall to the similarity fallback.
     "\u2000": " ", "\u2001": " ", "\u2002": " ", "\u2003": " ",
     "\u2004": " ", "\u2005": " ", "\u2006": " ", "\u2007": " ",
     "\u2008": " ", "\u2009": " ", "\u200a": " ", "\u202f": " ",
@@ -260,11 +259,7 @@ def _strategy_block_anchor(content: str, pattern: str) -> list[Span]:
 
 def _strategy_context_aware(content: str, pattern: str) -> list[Span]:
     """Strategy 9 (last resort): anchored per-line similarity, every non-blank line >= 0.80.
-
-    The first/last-line anchor pre-filter keeps a miss from being an
-    O(file x pattern) scan; the all-lines requirement stops one coincidental
-    line match from replacing an unrelated block.
-    """
+    The anchor pre-filter bounds the scan; the all-lines rule stops coincidental matches."""
     pattern_lines = pattern.split('\n')
     content_lines = content.split('\n')
     n = len(pattern_lines)
@@ -309,11 +304,8 @@ SIMILARITY_STRATEGIES = frozenset({"block_anchor", "context_aware"})
 # ── Orchestrator ─────────────────────────────────────────────────────────
 
 def is_already_applied(content: str, old_string: str, new_string: str) -> bool:
-    """True when the requested edit is already present (re-sent edit -> success-shaped no-op).
-
-    Conservative: new_string must be non-trivial (>= 8 chars stripped) and
-    appear EXACTLY; when it differs from old_string, old_string must be gone.
-    """
+    """True when the edit is already present (re-sent edit -> success-shaped no-op).
+    Conservative: new_string non-trivial (>= 8 chars) and present EXACTLY; old_string gone."""
     if not new_string or len(new_string.strip()) < 8 or new_string not in content:
         return False
     return old_string == new_string or old_string not in content
@@ -398,12 +390,8 @@ def fuzzy_find_and_replace(content: str, old_string: str, new_string: str,
 
 def _detect_escape_drift(content: str, matches: list[Span],
                          old_string: str, new_string: str) -> Optional[str]:
-    """Error string when new_string carries tool-call escape artifacts, else None.
-
-    Fires on ``\\'``/``\\"`` present in both old_string and new_string but
-    absent from the matched region (spurious shell-style escaping), and on
-    JSON double-escaped backslash runs (see ``_detect_backslash_doubling``).
-    """
+    """Error string when new_string carries tool-call escape artifacts, else None:
+    ``\\'``/``\\"`` in both strings but not the matched region, or doubled backslash runs."""
     has_quote_suspects = "\\'" in new_string or '\\"' in new_string
     if not has_quote_suspects and "\\" not in old_string:
         return None
@@ -431,14 +419,9 @@ def _backslash_runs(s: str) -> list[int]:
 
 def _detect_backslash_doubling(matched_regions: str, old_string: str,
                                new_string: str) -> Optional[str]:
-    """Detect old_string whose every backslash run is exactly 2x the file's.
-
-    That pattern means the arguments were JSON-escaped one extra time; a
-    similarity strategy still matches, and writing new_string verbatim would
-    double every backslash in the file. Requires the same run count, a
-    non-trivial signal (a run >= 2 or 2+ runs), and new_string not already
-    matching the file's counts.
-    """
+    """Detect old_string whose every backslash run is exactly 2x the file's (arguments
+    JSON-escaped one extra time). Requires the same run count, a non-trivial signal
+    (a run >= 2 or 2+ runs), and new_string not already matching the file's counts."""
     old_runs = _backslash_runs(old_string)
     file_runs = _backslash_runs(matched_regions)
     if (not old_runs or not file_runs or len(old_runs) != len(file_runs)
@@ -458,14 +441,9 @@ def _detect_backslash_doubling(matched_regions: str, old_string: str,
 
 
 def _maybe_unescape_new_string(new_string: str, content: str, matches: list[Span]) -> str:
-    """Convert literal ``\\t``/``\\r`` in new_string to control chars, per sequence,
-    only when the matched file region already contains the real control char.
-
-    Files that legitimately contain the two-char string (e.g. ``sep = "\\t"``)
-    have a backslash+t in the region, not a tab, so they're left alone.
-    ``\\n`` is deliberately excluded: newlines serialize correctly through
-    JSON and rewriting them would mangle escape sequences in source literals.
-    """
+    """Convert literal ``\\t``/``\\r`` in new_string to control chars, per sequence, only
+    when the matched region already contains the real control char (so ``sep = "\\t"`` files
+    are left alone). ``\\n`` is excluded: rewriting it would mangle source escape literals."""
     if "\\t" not in new_string and "\\r" not in new_string:
         return new_string
     matched_regions = _matched_regions(content, matches)
@@ -486,13 +464,9 @@ def _first_meaningful_line(text: str) -> Optional[str]:
 
 
 def _reindent_replacement(file_region: str, old_string: str, new_string: str) -> str:
-    """Re-anchor ``new_string``'s indentation onto the file's actual base indent.
-
-    After a non-exact match the LLM's base indent (first non-blank line of
-    old_string) may differ from the file's. Each non-blank new_string line
-    swaps the LLM base prefix for the file's, preserving relative nesting;
-    lines shallower than the LLM base are anchored to the file base.
-    """
+    """Re-anchor ``new_string``'s indentation onto the file's actual base indent after a
+    non-exact match: swap the LLM base prefix (first non-blank old_string line) for the
+    file's, preserving relative nesting; shallower lines anchor to the file base."""
     if not new_string:
         return new_string
     old_first = _first_meaningful_line(old_string)
@@ -517,13 +491,8 @@ def _reindent_replacement(file_region: str, old_string: str, new_string: str) ->
 
 def _preserve_unicode_in_replacement(content: str, matches: list[Span],
                                      old_string: str, new_string: str) -> str:
-    """Apply only the old->new edits onto the file's original (Unicode) text.
-
-    After a unicode_normalized match, writing the LLM's ASCII new_string
-    verbatim would flatten the file's em-dashes/smart quotes. Diff the
-    normalized old_string against new_string and keep the file's original
-    characters for every ``equal`` span.
-    """
+    """Apply only the old->new edits onto the file's original (Unicode) text, so a
+    unicode_normalized match doesn't flatten the file's em-dashes/smart quotes."""
     file_region = _matched_regions(content, matches)
     norm_old = _unicode_normalize(old_string)
     if norm_old != _unicode_normalize(file_region):
@@ -545,11 +514,8 @@ def _preserve_unicode_in_replacement(content: str, matches: list[Span],
 
 def _apply_replacements(content: str, matches: list[Span],
                         new_string: str, old_string: Optional[str] = None) -> str:
-    """Splice ``new_string`` over each span (end-to-start so offsets stay valid).
-
-    ``old_string`` non-None signals a non-exact match: new_string is
-    re-indented per region to the file's actual indentation.
-    """
+    """Splice ``new_string`` over each span (end-to-start so offsets stay valid);
+    ``old_string`` non-None (non-exact match) re-indents it per region."""
     result = content
     for start, end in sorted(matches, key=lambda x: x[0], reverse=True):
         adjusted = new_string
@@ -581,18 +547,11 @@ def find_closest_lines(old_string: str, content: str, context_lines: int = 2, ma
     if not anchor:
         return ""
 
-    scored = []
-    for i, line in enumerate(content_lines):
-        stripped = line.strip()
-        if not stripped:
-            continue
-        ratio = SequenceMatcher(None, anchor, stripped).ratio()
-        if ratio > 0.3:
-            scored.append((ratio, i))
-    if not scored:
+    scored = sorted(((SequenceMatcher(None, anchor, line.strip()).ratio(), i)
+                     for i, line in enumerate(content_lines) if line.strip()), key=lambda x: -x[0])
+    top = [s for s in scored if s[0] > 0.3][:max_results]
+    if not top:
         return ""
-    scored.sort(key=lambda x: -x[0])
-    top = scored[:max_results]
 
     parts = []
     seen_ranges = set()
@@ -604,8 +563,6 @@ def find_closest_lines(old_string: str, content: str, context_lines: int = 2, ma
         seen_ranges.add((start, end))
         parts.append("\n".join(
             f"{start + j + 1:4d}| {content_lines[start + j]}" for j in range(end - start)))
-    if not parts:
-        return ""
     result = "\n---\n".join(parts)
 
     # Whitespace-shaped miss: best line equals the anchor once stripped. Show
@@ -622,11 +579,8 @@ def find_closest_lines(old_string: str, content: str, context_lines: int = 2, ma
 
 def format_no_match_hint(error: Optional[str], match_count: int,
                          old_string: str, content: str) -> str:
-    """'\\n\\nDid you mean...' snippet for plain no-match errors only, else ''.
-
-    Ambiguous-match, escape-drift and identical-strings errors also have
-    ``match_count == 0`` but a hint would mislead there.
-    """
+    """'\\n\\nDid you mean...' snippet for plain no-match errors only, else '' (ambiguous /
+    escape-drift / identical errors also have ``match_count == 0`` but a hint would mislead)."""
     if match_count != 0 or not error or not error.startswith("Could not find"):
         return ""
     hint = find_closest_lines(old_string, content)
