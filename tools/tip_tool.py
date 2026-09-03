@@ -19,11 +19,8 @@ def tip_tool(text: str, selector: str, title: str = "", side: str = "") -> str:
     if not text:
         return tool_error("tip needs text — the one line the bubble says.")
     if not selector:
-        return tool_error(
-            "tip needs a selector to point at. Call tour(action='targets') to see "
-            "what's on screen and prefer a target reporting stable: true."
-        )
-
+        return tool_error("tip needs a selector to point at. Call tour(action='targets') to see "
+                          "what's on screen and prefer a target reporting stable: true.")
     if side and side not in SIDES:
         return tool_error(f"side must be one of: {', '.join(SIDES)}.")
     payload = {"selector": selector, "text": text}

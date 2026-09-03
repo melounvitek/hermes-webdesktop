@@ -1,39 +1,32 @@
 #!/usr/bin/env python3
-"""Todo tool: in-memory, revisioned task list for multi-step work.
-
-State lives on the AIAgent (one per session), is re-injected after context
-compression, and every write bumps a monotonic revision so UI clients can
-reject stale updates. One ``todo_list`` tool: pass ``todos`` to write, omit to
-read; every call returns the full list. No system-prompt mutation.
-"""
+"""Todo tool: in-memory, revisioned task list for multi-step work. State lives on the
+AIAgent (one per session), is re-injected after context compression, and every write bumps
+a monotonic revision so UI clients can reject stale updates. One ``todo_list`` tool: pass
+``todos`` to write, omit to read; every call returns the full list. No system-prompt mutation."""
 
 import json
 from typing import Any, Dict, List, Optional
 
-
 VALID_STATUSES = {"pending", "in_progress", "completed", "cancelled"}
-
-# The list is re-read after every compression (format_for_injection), so
-# unbounded content/count would defeat the compression it rides through. Caps
-# apply equally to model-authored items and caller-replayed API history.
+# The list is re-read after every compression (format_for_injection), so unbounded
+# content/count would defeat the compression it rides through. Caps apply equally to
+# model-authored items and caller-replayed API history.
 MAX_TODO_CONTENT_CHARS = 4000
 MAX_TODO_ITEMS = 256
-# Max single todo tool-result payload accepted during history hydration, so a
-# forged oversized result is dropped before parsing (AIAgent._hydrate_todo_store).
+# Max single todo tool-result payload accepted during history hydration, so a forged
+# oversized result is dropped before parsing (AIAgent._hydrate_todo_store).
 MAX_TODO_RESULT_CHARS = 512_000
 _TRUNCATION_MARKER = "… [truncated]"
-# Persisted as ordinary message content; ContextCompressor keys on this stable
-# header to tell the synthetic post-compaction row from a real user message.
-TODO_INJECTION_HEADER = (
-    "[Your active task list was preserved across context compression]"
-)
+# Persisted as ordinary message content; ContextCompressor keys on this stable header to
+# tell the synthetic post-compaction row from a real user message.
+TODO_INJECTION_HEADER = "[Your active task list was preserved across context compression]"
 _STATUS_MARKERS = {"completed": "[x]", "in_progress": "[>]", "pending": "[ ]", "cancelled": "[~]"}
 _ACTIVE_STATUSES = {"pending", "in_progress"}
 
 
 class TodoStore:
-    """In-memory todo list, one per AIAgent. List position is priority.
-    Items: ``{id, content, status, parent?}`` — ``parent`` nests a subtask."""
+    """In-memory todo list, one per AIAgent. List position is priority; items are
+    ``{id, content, status, parent?}`` — ``parent`` nests a subtask."""
 
     def __init__(self):
         self._items: List[Dict[str, str]] = []
@@ -50,8 +43,7 @@ class TodoStore:
             self._merge(todos)
         else:
             self._items = self._fresh_items(todos)
-        # Keep the highest-priority head so a replayed list can't grow re-injection unbounded.
-        del self._items[MAX_TODO_ITEMS:]
+        del self._items[MAX_TODO_ITEMS:]  # keep the priority head; replays can't grow unbounded
         self._sanitize_parents(self._items)
         if self._items != before:
             self._revision += 1
@@ -63,7 +55,7 @@ class TodoStore:
         for t in self._dedupe_by_id(todos):
             item_id = str(t.get("id", "")).strip()
             if not item_id:
-                continue  # Can't merge without an id
+                continue  # can't merge without an id
             cur = existing.get(item_id)
             if cur is None:
                 validated = self._validate(t)
@@ -72,10 +64,8 @@ class TodoStore:
                 continue
             if t.get("content"):
                 cur["content"] = self._cap_content(str(t["content"]).strip())
-            if t.get("status"):
-                status = str(t["status"]).strip().lower()
-                if status in VALID_STATUSES:
-                    cur["status"] = status
+            if t.get("status") and str(t["status"]).strip().lower() in VALID_STATUSES:
+                cur["status"] = str(t["status"]).strip().lower()
             if "parent" in t:
                 parent = str(t["parent"] or "").strip()
                 if parent:
@@ -113,18 +103,17 @@ class TodoStore:
         return self.read()
 
     def format_for_injection(self) -> Optional[str]:
-        """Render the list for post-compression injection, or None if nothing active.
-        Only pending/in_progress items are injected — finished ones make the
-        model re-do work after compression. A parent is kept (with its real
-        status marker) when any descendant is active so subtasks keep context."""
+        """Render the list for post-compression injection, or None if nothing active. Only
+        pending/in_progress items are injected — finished ones make the model re-do work after
+        compression. A parent is kept (with its real status marker) when any descendant is
+        active so subtasks keep context."""
         if not self._items:
             return None
         children: Dict[str, List[Dict[str, str]]] = {}
         roots: List[Dict[str, str]] = []
         for item in self._items:
-            parent = item.get("parent")
-            if parent:
-                children.setdefault(parent, []).append(item)
+            if item.get("parent"):
+                children.setdefault(item["parent"], []).append(item)
             else:
                 roots.append(item)
 
@@ -136,10 +125,8 @@ class TodoStore:
             keep = item["status"] in _ACTIVE_STATUSES or has_active_kid
             if keep:
                 marker = _STATUS_MARKERS.get(item["status"], "[?]")
-                out.append(
-                    f"{'  ' * depth}- {marker} {item['id']}. "
-                    f"{item['content']} ({item['status']})"
-                )
+                out.append(f"{'  ' * depth}- {marker} {item['id']}. "
+                           f"{item['content']} ({item['status']})")
                 out.extend(kid_lines)
             return keep
 
@@ -157,7 +144,7 @@ class TodoStore:
 
     @staticmethod
     def _validate(item: Dict[str, Any]) -> Dict[str, str]:
-        """Normalize one item to ``{id, content, status, parent?}`` with placeholders for missing fields."""
+        """Normalize one item to ``{id, content, status, parent?}`` (placeholders when missing)."""
         if not isinstance(item, dict):
             return {"id": "?", "content": "(invalid item)", "status": "pending"}
         item_id = str(item.get("id", "")).strip() or "?"
@@ -194,8 +181,7 @@ class TodoStore:
         """Collapse duplicate ids, keeping the last occurrence in its position."""
         last_index: Dict[str, int] = {}
         for i, item in enumerate(todos):
-            if not isinstance(item, dict):
-                # Non-dict items get a synthetic key so _validate can handle them
+            if not isinstance(item, dict):  # synthetic key so _validate can handle them
                 last_index[f"__invalid_{i}"] = i
                 continue
             last_index[str(item.get("id", "")).strip() or "?"] = i
@@ -203,8 +189,8 @@ class TodoStore:
 
     @staticmethod
     def _normalize_order(items: List[Dict[str, str]]) -> List[Dict[str, str]]:
-        """Lift the in_progress step ahead of any earlier pending placeholder.
-        Nested lists keep authored order — reordering would tear a subtask from its siblings."""
+        """Lift the in_progress step ahead of any earlier pending placeholder. Nested lists
+        keep authored order — reordering would tear a subtask from its siblings."""
         if any(item.get("parent") for item in items):
             return items
         statuses = [item["status"] for item in items]
@@ -218,15 +204,14 @@ class TodoStore:
         return normalized
 
 
-def todo_tool(
-    todos: Optional[List[Dict[str, Any]]] = None,
-    merge: bool = False,
-    store: Optional[TodoStore] = None,
-) -> str:
-    """Write ``todos`` (replace or ``merge`` by id) or read when None; returns list + summary JSON."""
+def todo_tool(todos: Optional[List[Dict[str, Any]]] = None, merge: bool = False,
+              store: Optional[TodoStore] = None) -> str:
+    """Write ``todos`` (replace, or ``merge`` by id) or read when None -> list + summary JSON."""
     if store is None:
         return tool_error("TodoStore not initialized")
-    if todos is not None:
+    if todos is None:
+        items = store.read()
+    else:
         if isinstance(todos, str):  # LLMs sometimes send a JSON string instead of a list
             try:
                 todos = json.loads(todos)
@@ -235,17 +220,11 @@ def todo_tool(
         if not isinstance(todos, list):
             return tool_error(f"todos must be a list, got {type(todos).__name__}")
         items = store.write(todos, merge)
-    else:
-        items = store.read()
-
     summary = {"total": len(items)}
     for status in ("pending", "in_progress", "completed", "cancelled"):
         summary[status] = sum(1 for i in items if i["status"] == status)
-    return json.dumps({
-        "todos": items,
-        "revision": store.snapshot()["revision"],
-        "summary": summary,
-    }, ensure_ascii=False)
+    return json.dumps({"todos": items, "revision": store.snapshot()["revision"],
+                       "summary": summary}, ensure_ascii=False)
 
 
 def check_todo_requirements() -> bool:
@@ -253,8 +232,8 @@ def check_todo_requirements() -> bool:
     return True
 
 
-# Behavioral guidance is baked into the (static, cached) description; item
-# shape and merge semantics live ONLY in the parameter schema.
+# Behavioral guidance is baked into the (static, cached) description; item shape and merge
+# semantics live ONLY in the parameter schema.
 TODO_SCHEMA = {
     "name": "todo_list",
     "description": (
@@ -311,7 +290,6 @@ TODO_SCHEMA = {
 }
 
 
-# --- Registry ---
 from tools.registry import registry, tool_error
 
 registry.register(
