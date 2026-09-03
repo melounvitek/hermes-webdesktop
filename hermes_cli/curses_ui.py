@@ -111,7 +111,6 @@ def _read_numbered_input(prompt_text: str) -> str | _NumberedNavigation:
 
     # Setup may run without the classic CLI, which normally installs CSI-u aliases at startup.
     from hermes_cli.pt_input_extras import install_modify_other_keys_aliases
-
     install_modify_other_keys_aliases()
     bindings = KeyBindings()
 
@@ -155,7 +154,6 @@ def _curses_style_attr(curses, style: Optional[str], *, is_cursor: bool):
 def _addnstr(stdscr, y: int, x: int, text: str, n: int, attr) -> None:
     """``stdscr.addnstr`` that swallows ``curses.error`` (drawing past the screen edge)."""
     import curses
-
     try:
         stdscr.addnstr(y, x, text, n, attr)
     except curses.error:
@@ -165,7 +163,6 @@ def _addnstr(stdscr, y: int, x: int, text: str, n: int, attr) -> None:
 def _draw_title_and_hint(stdscr, title: str, hint: str, max_x: int, *, hint_row: int = 1) -> None:
     """Bold/yellow menu title on row 0, dim key hint on ``hint_row``."""
     import curses
-
     hattr = curses.A_BOLD | (curses.color_pair(2) if curses.has_colors() else 0)
     _addnstr(stdscr, 0, 0, title, max_x - 1, hattr)
     _addnstr(stdscr, hint_row, 0, hint, max_x - 1, curses.A_DIM)
@@ -186,7 +183,6 @@ def _draw_segments(stdscr, y: int, x: int, segments, max_x: int) -> None:
 def _draw_description_line(stdscr, y: int, text: str, max_x: int) -> None:
     """Draw a description line, highlighting ★ in yellow when colors exist."""
     import curses
-
     star_attr = curses.color_pair(2) if curses.has_colors() else curses.A_NORMAL
     segments = []
     for i, part in enumerate(text.split("★")):
@@ -201,7 +197,6 @@ def _draw_radio_item(
     stdscr, y: int, x: int, item: RadioItem, max_x: int, *, is_cursor: bool) -> None:
     """Draw a plain or segmented radiolist item starting at column ``x``."""
     import curses
-
     if isinstance(item, str):
         attr = _curses_style_attr(curses, None, is_cursor=is_cursor)
         _addnstr(stdscr, y, x, item, max(0, max_x - 1 - x), attr)
@@ -215,7 +210,6 @@ def _draw_radio_item(
 def _draw_plain_row(stdscr, y: int, line: str, max_x: int, *, is_cursor: bool) -> None:
     """Draw a plain menu row, bold green when it is the cursor row."""
     import curses
-
     _addnstr(stdscr, y, 0, line, max_x - 1, _curses_style_attr(curses, None, is_cursor=is_cursor))
 
 
@@ -462,7 +456,6 @@ def _decode_escape_sequence(stdscr) -> str:
 def _decode_menu_key(stdscr, key: int) -> str:
     """Normalize an already-read keypress to a menu action (lets loops peek the raw key first)."""
     import curses
-
     plain = {
         curses.KEY_UP: NAV_UP, ord("k"): NAV_UP, curses.KEY_DOWN: NAV_DOWN, ord("j"): NAV_DOWN,
         curses.KEY_LEFT: NAV_BACK, 3: NAV_INTERRUPT,  # 3 = Ctrl+C in raw/cbreak mode

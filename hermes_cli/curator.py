@@ -66,7 +66,6 @@ def _print_unmanaged_summary() -> None:
     ``skill_manage(create)`` are eligible but unmanaged, so no automatic transition touches them.
     """
     from tools import skill_usage
-
     try:
         unmanaged = skill_usage.unmanaged_report()
     except Exception:
@@ -84,7 +83,6 @@ def _print_unmanaged_summary() -> None:
 def _cmd_status(args) -> int:
     from agent import curator
     from tools import skill_usage
-
     state = curator.load_state()
     paused = state.get("paused", False)
     summary = state.get("last_run_summary") or "(none)"
@@ -249,7 +247,6 @@ def _cmd_unpin(args) -> int: return _set_pin(args, False)
 def _cmd_list_unmanaged(args) -> int:
     """Itemize the unmanaged population that `status` summarizes (input for `adopt`)."""
     from tools import skill_usage
-
     rows = skill_usage.unmanaged_report()
     if not rows:
         print("curator: no unmanaged skills — every eligible skill is managed")
@@ -276,7 +273,6 @@ def _cmd_adopt(args) -> int:
     skill, not that it AUTHORED it.
     """
     from tools import skill_usage
-
     names = list(getattr(args, "skill", None) or [])
     adopt_all = bool(getattr(args, "all_unmanaged", False))
     if adopt_all:
@@ -413,7 +409,6 @@ def _cmd_backup(args) -> int:
 def _cmd_ledger(args) -> int:
     """List per-mutation audit ledger entries (newest first)."""
     from tools import skill_ledger
-
     rows = skill_ledger.list_entries(
         skill=getattr(args, "skill", None), limit=getattr(args, "limit", None) or 20)
     if not rows:
@@ -446,7 +441,6 @@ def _cmd_purge(args) -> int:
     from hermes_cli.config import cfg_get, load_config
     from tools import skill_ledger
     from tools.skill_usage import _archive_dir
-
     ttl_days = getattr(args, "days", None)
     if ttl_days is None:
         ttl_days = int(cfg_get(load_config(), "curator", "archive_ttl_days", default=0) or 0)
@@ -463,7 +457,6 @@ def _cmd_purge(args) -> int:
 
     import shutil
     import time
-
     cutoff = time.time() - ttl_days * 86400
     candidates = sorted(
         p for p in archive_root.iterdir() if p.is_dir() and p.stat().st_mtime < cutoff)
@@ -508,7 +501,6 @@ def _rollback_ledger_entry(args, entry_id: str) -> int:
     A pre-rollback safety ledger entry is taken first; fails closed if that capture fails.
     """
     from tools import skill_ledger
-
     entry = skill_ledger.get_entry(entry_id)
     if entry is None:
         print(
@@ -532,7 +524,6 @@ def _rollback_ledger_entry(args, entry_id: str) -> int:
 def _cmd_rollback(args) -> int:
     """Restore the skills tree from a snapshot, or a single mutation from the audit ledger."""
     from agent import curator_backup
-
     entry_id = getattr(args, "entry_id", None)
     if entry_id:
         return _rollback_ledger_entry(args, entry_id)
@@ -595,7 +586,6 @@ def _cmd_usage(args) -> int:
     """Usage telemetry for ALL skills on disk (bundled + hub included), with provenance."""
     import json as _json
     from tools import skill_usage
-
     rows = skill_usage.usage_report()
     prov_filter = getattr(args, "provenance", None)
     if prov_filter:

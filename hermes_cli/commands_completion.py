@@ -34,10 +34,8 @@ def _personalities_from_cli_config() -> Dict[str, Any]:
     global _personalities_memo
     from cli import load_cli_config
     from hermes_cli.personality import available_personalities
-
     try:
         from hermes_cli.config import get_config_path
-
         cfg_path = get_config_path()
         st = cfg_path.stat()
         sig = (str(cfg_path), st.st_mtime_ns, st.st_size)
@@ -107,7 +105,6 @@ def _personality_completions(sub_text: str, sub_lower: str):
     """/personality — ``none`` plus configured personalities."""
     try:
         from hermes_cli.personality import describe_personality
-
         personalities = _personalities_from_cli_config()
         rows = chain(
             [("none", "clear personality overlay")],
@@ -162,7 +159,6 @@ def _handoff_completions(sub_text: str, sub_lower: str):
         return
     try:
         from gateway.config import load_gateway_config
-
         gw = load_gateway_config()
         platforms = gw.get_connected_platforms()
     except Exception:

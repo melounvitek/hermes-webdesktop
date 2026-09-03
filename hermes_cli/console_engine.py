@@ -107,7 +107,6 @@ def _table_summary(summary: str, *, limit: int = 76) -> str:
 def _split_line(line: str) -> list[str]:
     # Windows-safe splitter: plain shlex posix=True eats backslashes in paths.
     from hermes_cli._subprocess_compat import split_command_line
-
     try:
         return split_command_line(line)
     except ValueError as exc:
@@ -139,7 +138,6 @@ def _format_sessions(sessions: Sequence[dict]) -> str:
 
 def _format_job(job: dict, action: str) -> str:
     from cron.jobs import effective_job_state
-
     job_id = job.get("id") or job.get("job_id") or "?"
     return f"{action} job: {job.get('name') or '(unnamed)'} ({job_id}) [{effective_job_state(job)}]"
 
@@ -594,14 +592,12 @@ def _apply_confirmed_defaults(args: argparse.Namespace) -> None:
 def _version(_engine: HermesConsoleEngine, args: list[str]) -> str:
     _expect_no_args(args, "version")
     from hermes_cli._startup_fast import print_fast_version_info
-
     return _capture_output(lambda: print_fast_version_info(check_updates=True))
 
 
 def _status(_engine: HermesConsoleEngine, args: list[str]) -> str:
     _expect_no_args(args, "status")
     from hermes_cli.status import show_status
-
     output = _capture_output(lambda: show_status(SimpleNamespace(all=False, deep=False)))
     return _strip_console_status_footer(output)
 
@@ -622,7 +618,6 @@ def _logs(_engine: HermesConsoleEngine, args: list[str]) -> str:
     if ns.lines < 1 or ns.lines > 500:
         raise ConsoleCommandError("logs --lines must be between 1 and 500")
     from hermes_cli.logs import list_logs, tail_log
-
     if ns.log_name == "list":
         return _capture_output(list_logs)
     return _capture_output(
@@ -634,7 +629,6 @@ def _logs(_engine: HermesConsoleEngine, args: list[str]) -> str:
 def _session_db():
     """``with _session_db() as db:`` — SessionDB closed on exit."""
     from hermes_state import SessionDB
-
     return closing(SessionDB())
 
 
@@ -667,7 +661,6 @@ def _sessions_stats(_engine: HermesConsoleEngine, args: list[str]) -> str:
 def _config_path(_engine: HermesConsoleEngine, args: list[str]) -> str:
     _expect_no_args(args, "config path")
     from hermes_cli.config import get_config_path
-
     return str(get_config_path())
 
 
@@ -675,7 +668,6 @@ def _config_set(_engine: HermesConsoleEngine, args: list[str]) -> str:
     if len(args) < 2:
         raise ConsoleCommandError("Usage: config set <key> <value>")
     from hermes_cli.config import set_config_value
-
     return _capture_output(lambda: set_config_value(args[0], " ".join(args[1:])))
 
 
@@ -683,7 +675,6 @@ def _config_set(_engine: HermesConsoleEngine, args: list[str]) -> str:
 def _config_migrate(_engine: HermesConsoleEngine, args: list[str]) -> None:
     _expect_no_args(args, "config migrate")
     from hermes_cli.config import migrate_config
-
     results = migrate_config(interactive=False, quiet=False)
     if results.get("env_added") or results.get("config_added"):
         print("Configuration updated.")
@@ -696,7 +687,6 @@ def _config_migrate(_engine: HermesConsoleEngine, args: list[str]) -> None:
 def _guard_exports(db, session_ids: list[str]) -> None:
     """Per-session export budget: only an individual runaway transcript trips it; 0 disables."""
     from hermes_state import SessionExportTooLargeError, resolved_max_export_messages
-
     limit = resolved_max_export_messages()
     if limit <= 0:
         return
@@ -765,7 +755,6 @@ def _sessions_repair(_engine: HermesConsoleEngine, args: list[str]) -> None:
         "sessions repair", args, (("--check-only",), dict(action="store_true")),
         (("--no-backup",), dict(action="store_true")))
     from hermes_state import DEFAULT_DB_PATH, _db_opens_cleanly, repair_state_db_schema
-
     db_path = DEFAULT_DB_PATH
     if not db_path.exists():
         print(f"No session database at {db_path} (nothing to repair).")
@@ -794,7 +783,6 @@ def _profile_status(_engine: HermesConsoleEngine, args: list[str]) -> str:
 def _cron_list(_engine: HermesConsoleEngine, args: list[str]) -> str:
     ns = _parse("cron list", args, (("--all",), dict(action="store_true")))
     from hermes_cli.cron import cron_list
-
     return _capture_output(lambda: cron_list(show_all=ns.all))
 
 
@@ -803,7 +791,6 @@ def _cron_job_action(args: list[str], usage: str, action: str, run) -> str:
     if len(args) != 1:
         raise ConsoleCommandError(f"Usage: {usage}")
     from cron.jobs import AmbiguousJobReference
-
     try:
         job = run(args[0])
     except AmbiguousJobReference as exc:
@@ -815,7 +802,6 @@ def _cron_job_action(args: list[str], usage: str, action: str, run) -> str:
 
 def _cron_pause(_engine: HermesConsoleEngine, args: list[str]) -> str:
     from cron.jobs import pause_job
-
     return _cron_job_action(
         args, "cron pause <job>", "Paused",
         lambda ref: pause_job(ref, reason="paused from hermes console"))
@@ -826,7 +812,6 @@ def _cron_resume(_engine: HermesConsoleEngine, args: list[str]) -> str:
     if ns.at and ns.run_now:
         raise ConsoleCommandError("Use exactly one of --at or --run-now.")
     from cron.jobs import AmbiguousJobReference, _hermes_now, rearm_oneshot, resume_job
-
     try:
         if ns.at or ns.run_now:
             job = rearm_oneshot(ns.job, _hermes_now().isoformat() if ns.run_now else ns.at)
@@ -841,7 +826,6 @@ def _cron_resume(_engine: HermesConsoleEngine, args: list[str]) -> str:
 
 def _cron_run(_engine: HermesConsoleEngine, args: list[str]) -> str:
     from cron.jobs import trigger_job
-
     return _cron_job_action(args, "cron run <job>", "Triggered", trigger_job)
 
 
