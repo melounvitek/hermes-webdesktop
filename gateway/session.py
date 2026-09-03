@@ -1,11 +1,7 @@
 """
-Session management for the gateway.
-
-Handles:
-- Session context tracking (where messages come from)
-- Session storage (conversations persisted to disk)
-- Reset policy evaluation (when to start fresh)
-- Dynamic system prompt injection (agent knows its context)
+Session management for the gateway: source tracking (where messages come
+from), the persisted routing index (SessionStore), reset policy evaluation and
+the dynamic "Current Session Context" system prompt section.
 """
 
 import asyncio
@@ -14,65 +10,34 @@ import logging
 import os
 import json
 import threading
-import uuid
 from pathlib import Path
 from datetime import datetime, timedelta
 from dataclasses import dataclass, field, fields
 from typing import Dict, List, Optional, Any
 
+from .config import (
+    Platform,
+    GatewayConfig,
+    SessionResetPolicy,  # noqa: F401 — re-exported via gateway/__init__.py
+    HomeChannel,
+)
+from .whatsapp_identity import (
+    canonical_whatsapp_identifier,
+    normalize_whatsapp_identifier,  # noqa: F401 - re-exported for gateway.session callers
+)
+from gateway.session_persistence import SessionPersistenceMixin, _DB_UNPINNED  # noqa: F401
+from gateway.session_recovery import SessionRecoveryMixin
+from gateway.session_lifecycle import (  # noqa: F401 — _now & co. re-exported for callers/tests
+    SessionLifecycleMixin,
+    _iso,
+    _new_session_id,
+    _now,
+    _parse_iso,
+    auto_continue_freshness_window,
+)
+from gateway.session_transcript import SessionTranscriptMixin, TranscriptReadError  # noqa: F401
+
 logger = logging.getLogger(__name__)
-
-
-class TranscriptReadError(RuntimeError):
-    """Raised when persisted history cannot be read safely."""
-
-    def __init__(self, session_id: str) -> None:
-        self.session_id = session_id
-        super().__init__(f"transcript read failed for session {session_id}")
-
-
-def _now() -> datetime:
-    """Return the current local time."""
-    return datetime.now()
-
-
-def _new_session_id(now: datetime) -> str:
-    return f"{now.strftime('%Y%m%d_%H%M%S')}_{uuid.uuid4().hex[:8]}"
-
-
-def _iso(dt: Optional[datetime]) -> Optional[str]:
-    return dt.isoformat() if dt else None
-
-
-def _parse_iso(value) -> Optional[datetime]:
-    """``datetime.fromisoformat`` that returns None for empty/malformed input."""
-    if not value:
-        return None
-    try:
-        return datetime.fromisoformat(value)
-    except (TypeError, ValueError):
-        return None
-
-
-# Default auto-continue freshness window (1 hour): a restart-interrupted
-# session is only auto-resumed while within this window of when
-# ``resume_pending`` was marked. ``gateway/run.py`` bridges config.yaml
-# ``agent.gateway_auto_continue_freshness`` into the env var at startup.
-_AUTO_CONTINUE_FRESHNESS_SECS_DEFAULT = 60 * 60
-
-
-def auto_continue_freshness_window() -> float:
-    """Auto-continue freshness window in seconds (single source of truth for
-    the resume scheduler and the routing-time zombie gate).
-
-    Reads ``HERMES_AUTO_CONTINUE_FRESHNESS``; falls back to the default when
-    unset or malformed. Non-positive disables the gate.
-    """
-    raw = os.environ.get("HERMES_AUTO_CONTINUE_FRESHNESS")
-    try:
-        return float(raw) if raw else float(_AUTO_CONTINUE_FRESHNESS_SECS_DEFAULT)
-    except (TypeError, ValueError):
-        return float(_AUTO_CONTINUE_FRESHNESS_SECS_DEFAULT)
 
 
 # ---------------------------------------------------------------------------
@@ -90,50 +55,27 @@ def _hash_sender_id(value: str) -> str:
 
 
 def _hash_chat_id(value: str) -> str:
-    """Hash the numeric portion of a chat ID, preserving platform prefix.
-
-    ``telegram:12345`` → ``telegram:<hash>``
-    ``12345``          → ``<hash>``
-    """
+    """Hash the numeric portion of a chat ID, preserving a ``platform:`` prefix."""
     colon = value.find(":")
     if colon > 0:
-        prefix = value[:colon]
-        return f"{prefix}:{_hash_id(value[colon + 1:])}"
+        return f"{value[:colon]}:{_hash_id(value[colon + 1:])}"
     return _hash_id(value)
 
-
-from .config import (
-    Platform,
-    GatewayConfig,
-    SessionResetPolicy,  # noqa: F401 — re-exported via gateway/__init__.py
-    HomeChannel,
-)
-from .whatsapp_identity import (
-    canonical_whatsapp_identifier,
-    normalize_whatsapp_identifier,  # noqa: F401 - re-exported for gateway.session callers
-)
-from gateway.session_persistence import SessionPersistenceMixin
-from gateway.session_recovery import SessionRecoveryMixin
-from gateway.session_lifecycle import SessionLifecycleMixin
-from gateway.session_transcript import SessionTranscriptMixin
 
 def _is_path_unsafe(value: object, *, strict: bool = True) -> bool:
     """True if ``value`` could traverse outside the sessions dir.
 
-    Session ids become filenames (``sessions_dir / f"{session_id}.json"``), so
-    the strict form rejects ``..``, ANY path separator, and a leading Windows
-    drive letter. The relaxed form (``strict=False``) is for *logical* session
-    keys, where interior ``/`` is legitimate (Google Chat
+    Session ids become filenames, so the strict form rejects ``..``, ANY path
+    separator, and a leading Windows drive letter. ``strict=False`` is for
+    *logical* session keys, where interior ``/`` is legitimate (Google Chat
     ``spaces/<id>/threads/<id>``): only a *leading* separator is rejected.
     """
     if not value:
         return False
     s = str(value)
-    if ".." in s:
+    if ".." in s or (strict and ("/" in s or "\\" in s)):
         return True
-    if strict and ("/" in s or "\\" in s):
-        return True
-    if not strict and (s.startswith("/") or s.startswith("\\")):
+    if not strict and s.startswith(("/", "\\")):
         return True
     return len(s) >= 2 and s[0].isalpha() and s[1] == ":"
 
@@ -151,43 +93,39 @@ class SessionSource:
     chat_type: str = "dm"  # "dm", "group", "channel", "thread"
     user_id: Optional[str] = None
     user_name: Optional[str] = None
-    thread_id: Optional[str] = None  # For forum topics, Discord threads, etc.
-    chat_topic: Optional[str] = None  # Channel topic/description (Discord, Slack)
-    user_id_alt: Optional[str] = None  # Platform-specific stable alt ID (Signal UUID, Feishu union_id)
+    thread_id: Optional[str] = None  # forum topics, Discord threads, etc.
+    chat_topic: Optional[str] = None  # channel topic/description (Discord, Slack)
+    user_id_alt: Optional[str] = None  # platform-specific stable alt ID (Signal UUID, Feishu union_id)
     chat_id_alt: Optional[str] = None  # Signal group internal ID
-    is_bot: bool = False  # True when the message author is a bot/webhook (Discord)
+    is_bot: bool = False  # message author is a bot/webhook (Discord)
     # Platform-neutral SCOPE discriminator (Discord guild / Slack workspace /
-    # Matrix server); drives server/workspace isolation. `scope_id` is
-    # canonical; `guild_id` is a deprecated alias kept during the cross-repo
-    # dual-read/dual-write overlap (both written, scope_id wins on read).
+    # Matrix server) driving server/workspace isolation. ``scope_id`` is
+    # canonical; ``guild_id`` is a deprecated alias kept while the cross-repo
+    # dual-read/dual-write overlap lasts (both written, scope_id wins on read).
     scope_id: Optional[str] = None
-    guild_id: Optional[str] = None  # @deprecated legacy alias for scope_id
-    parent_chat_id: Optional[str] = None  # Parent channel when chat_id refers to a thread
-    message_id: Optional[str] = None  # ID of the triggering message (for pin/reply/react)
-    role_authorized: bool = False  # True when adapter granted access via role (not user ID)
+    guild_id: Optional[str] = None
+    parent_chat_id: Optional[str] = None  # parent channel when chat_id is a thread
+    message_id: Optional[str] = None  # triggering message (pin/reply/react)
+    role_authorized: bool = False  # adapter granted access via role, not user ID
     # Profile this message is routed to in a multiplexing gateway (None =>
-    # active/default). Drives session-key namespacing and per-turn scope.
+    # active/default); drives session-key namespacing and per-turn scope.
     profile: Optional[str] = None
     # Transport-local fail-closed signal for an explicit profile route whose
     # target is not served. Excluded from repr/equality and wire serialization.
     profile_route_rejected: bool = field(default=False, repr=False, compare=False)
-
     # Discord auto-thread metadata: explicit so pre-existing or human-renamed
     # threads are never mistaken for safe rename targets.
     auto_thread_created: bool = False
     auto_thread_initial_name: Optional[str] = None
-
     # Discord auto-thread continuity: set by the connector on a CHANNEL message
-    # (no thread_id yet) that WILL be delivered into a new thread whose id ==
-    # this message id. Keying the session on it makes the initiating channel
-    # message and later in-thread follow-ups share ONE session.
+    # that WILL be delivered into a new thread whose id == this message id, so
+    # the initiating message and later in-thread follow-ups share ONE session.
     prospective_thread_id: Optional[str] = None
-
-    # Wire-INVISIBLE trust signal: True when delivered over the per-instance
-    # authenticated relay WebSocket, whose connector already resolved
-    # owner-only author bindings. ``platform`` carries the UNDERLYING platform
-    # (not ``relay``), so authz must key upstream trust off THIS flag.
-    # Excluded from to_dict/from_dict so a peer can never forge or persist it.
+    # Wire-INVISIBLE trust signal: delivered over the per-instance authenticated
+    # relay WebSocket whose connector already resolved owner-only author
+    # bindings. ``platform`` carries the UNDERLYING platform (not ``relay``), so
+    # authz must key upstream trust off THIS flag. Excluded from to_dict/
+    # from_dict so a peer can never forge or persist it.
     delivered_via_upstream_relay: bool = False
 
     def __post_init__(self) -> None:
@@ -202,22 +140,17 @@ class SessionSource:
     def _describe(chat_type: str, user_label: str, chat_label: str) -> str:
         if chat_type == "dm":
             return f"DM with {user_label}"
-        prefix = _CHAT_TYPE_PREFIX.get(chat_type, "")
-        return f"{prefix}{chat_label}"
+        return f"{_CHAT_TYPE_PREFIX.get(chat_type, '')}{chat_label}"
 
     @property
     def description(self) -> str:
         """Human-readable description of the source."""
         if self.platform == Platform.LOCAL:
             return "CLI terminal"
-        parts = [self._describe(
-            self.chat_type,
-            self.user_name or self.user_id or "user",
-            self.chat_name or self.chat_id,
-        )]
-        if self.thread_id:
-            parts.append(f"thread: {self.thread_id}")
-        return ", ".join(parts)
+        desc = self._describe(
+            self.chat_type, self.user_name or self.user_id or "user", self.chat_name or self.chat_id
+        )
+        return f"{desc}, thread: {self.thread_id}" if self.thread_id else desc
 
     # Wire layout (order matters for byte-stable JSON): always-present fields,
     # then truthy-only optionals around the dual-written scope pair.
@@ -231,17 +164,13 @@ class SessionSource:
         d.update((name, getattr(self, name)) for name in self._ALWAYS_FIELDS)
 
         def _optional(names) -> None:
-            for name in names:
-                value = getattr(self, name)
-                if value:
-                    d[name] = value
+            d.update((name, v) for name in names if (v := getattr(self, name)))
 
         _optional(self._OPTIONAL_PRE_SCOPE)
         # Dual-write scope_id + deprecated guild_id alias during the migration.
         scope = self.scope_id if self.scope_id is not None else self.guild_id
         if scope:
-            d["scope_id"] = scope
-            d["guild_id"] = scope
+            d["scope_id"] = d["guild_id"] = scope
         _optional(self._OPTIONAL_POST_SCOPE)
         if self.auto_thread_created:
             d["auto_thread_created"] = True
@@ -265,7 +194,6 @@ class SessionSource:
         )
 
 
-
 @dataclass
 class SessionContext:
     """Full session context for dynamic system prompt injection."""
@@ -273,8 +201,6 @@ class SessionContext:
     connected_platforms: List[Platform]
     home_channels: Dict[Platform, HomeChannel]
     shared_multi_user_session: bool = False
-
-    # Session metadata
     session_key: str = ""
     session_id: str = ""
     created_at: Optional[datetime] = None
@@ -284,9 +210,7 @@ class SessionContext:
         return {
             "source": self.source.to_dict(),
             "connected_platforms": [p.value for p in self.connected_platforms],
-            "home_channels": {
-                p.value: hc.to_dict() for p, hc in self.home_channels.items()
-            },
+            "home_channels": {p.value: hc.to_dict() for p, hc in self.home_channels.items()},
             "shared_multi_user_session": self.shared_multi_user_session,
             "session_key": self.session_key,
             "session_id": self.session_id,
@@ -295,25 +219,22 @@ class SessionContext:
         }
 
 
+# Platforms where user IDs can be redacted: no ``<@user_id>``-style mention
+# system that needs raw IDs (which is why Discord is excluded).
 _PII_SAFE_PLATFORMS = frozenset({
-    Platform.WHATSAPP,
-    Platform.SIGNAL,
-    Platform.TELEGRAM,
-    Platform.BLUEBUBBLES,
+    Platform.WHATSAPP, Platform.SIGNAL, Platform.TELEGRAM, Platform.BLUEBUBBLES,
 })
-"""Platforms where user IDs can be redacted (no ``<@user_id>``-style mention
-system that needs raw IDs — which is why Discord is excluded)."""
 
 
 def _slack_tools_loaded() -> bool:
     """True iff the agent will actually have Slack tools this session.
 
-    Either (1) the native `slack` toolset is enabled for the platform AND
-    `SLACK_BOT_TOKEN` is set (the tool's `check_fn` gates on it), or (2) an
-    MCP server whose name suggests Slack has ACTUALLY registered tools into
-    the live registry (configured-but-unconnected servers don't count; MCP
-    servers are process-wide, so this is intentionally not per-session).
-    Returns False on any error so a bad config never promises missing tools.
+    Either the native `slack` toolset is enabled for the platform AND
+    `SLACK_BOT_TOKEN` is set (the tool's `check_fn` gates on it), or an MCP
+    server whose name suggests Slack has ACTUALLY registered tools (configured
+    -but-unconnected servers don't count; MCP servers are process-wide, so this
+    is intentionally not per-session). False on any error so a bad config
+    never promises missing tools.
     """
     try:
         from tools.mcp_tool import get_registered_mcp_server_names
@@ -376,8 +297,8 @@ def neutralize_untrusted_inline_text(value: Any, *, max_chars: int = _MAX_PROMPT
 
     Sibling of :func:`_format_untrusted_prompt_value` for inline call sites
     (e.g. a ``[Name]`` turn prefix) where JSON-quoting would visibly change
-    rendering. Embedded newlines are the injection vector: they let a display
-    name masquerade as a new markdown section. Collapsing them keeps a normal
+    rendering. Embedded newlines are the injection vector (a display name
+    masquerading as a new markdown section); collapsing them keeps a normal
     value byte-identical while making a hostile one inert.
     """
     text = str(value).replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ")
@@ -494,11 +415,12 @@ def build_session_context_prompt(
     ``pii_safe``), user/chat IDs are replaced with deterministic hashes for the
     LLM only; routing keeps the originals in SessionSource.
     """
-    _is_pii_safe = context.source.platform in _PII_SAFE_PLATFORMS
+    src = context.source
+    _is_pii_safe = src.platform in _PII_SAFE_PLATFORMS
     if not _is_pii_safe:
         try:
             from gateway.platform_registry import platform_registry
-            entry = platform_registry.get(context.source.platform.value)
+            entry = platform_registry.get(src.platform.value)
             if entry and entry.pii_safe:
                 _is_pii_safe = True
         except Exception:
@@ -519,12 +441,10 @@ def build_session_context_prompt(
         "",
     ]
 
-    # Source info
-    platform_name = context.source.platform.value.title()
-    if context.source.platform == Platform.LOCAL:
+    platform_name = src.platform.value.title()
+    if src.platform == Platform.LOCAL:
         lines.append(f"**Source:** {platform_name} (the machine running this agent)")
     else:
-        src = context.source
         if redact_pii:
             # Safe description without raw IDs (note: no thread suffix).
             desc = SessionSource._describe(
@@ -534,17 +454,12 @@ def build_session_context_prompt(
             )
         else:
             desc = src.description
-        lines.append(
-            f"**Source:** {platform_name} ({_format_untrusted_prompt_value(desc)})"
-        )
+        lines.append(f"**Source:** {platform_name} ({_format_untrusted_prompt_value(desc)})")
 
-    if context.source.chat_topic:
-        lines.append(
-            f"**Channel Topic:** {_format_untrusted_prompt_value(context.source.chat_topic)}"
-        )
+    if src.chat_topic:
+        lines.append(f"**Channel Topic:** {_format_untrusted_prompt_value(src.chat_topic)}")
 
-    if context.source.platform == Platform.MATRIX:
-        src = context.source
+    if src.platform == Platform.MATRIX:
         lines += [
             "",
             f"**Matrix Room:** {_format_untrusted_prompt_value(src.chat_name or src.chat_id)}",
@@ -562,28 +477,22 @@ def build_session_context_prompt(
     # prompt (changes per turn -> busts the prompt cache); sender names are
     # prefixed on each user message instead.
     if context.shared_multi_user_session:
-        session_label = "Multi-user thread" if context.source.thread_id else "Multi-user session"
+        session_label = "Multi-user thread" if src.thread_id else "Multi-user session"
         lines.append(
             f"**Session type:** {session_label} — messages are prefixed "
             "with [sender name]. Multiple users may participate."
         )
-    elif context.source.user_name:
-        lines.append(
-            f"**User:** {_format_untrusted_prompt_value(context.source.user_name)}"
-        )
-    elif context.source.user_id:
-        uid = context.source.user_id
-        if redact_pii:
-            uid = _hash_sender_id(uid)
+    elif src.user_name:
+        lines.append(f"**User:** {_format_untrusted_prompt_value(src.user_name)}")
+    elif src.user_id:
+        uid = _hash_sender_id(src.user_id) if redact_pii else src.user_id
         lines.append(f"**User ID:** {_format_untrusted_prompt_value(uid)}")
 
-    lines.extend(_PLATFORM_NOTES.get(context.source.platform, lambda ctx: [])(context))
+    lines.extend(_PLATFORM_NOTES.get(src.platform, lambda ctx: [])(context))
 
-    platforms_list = ["local (files on this machine)"]
-    for p in context.connected_platforms:
-        if p != Platform.LOCAL:
-            platforms_list.append(f"{p.value}: Connected ✓")
-
+    platforms_list = ["local (files on this machine)"] + [
+        f"{p.value}: Connected ✓" for p in context.connected_platforms if p != Platform.LOCAL
+    ]
     lines.append(f"**Connected Platforms:** {', '.join(platforms_list)}")
 
     if context.home_channels:
@@ -597,17 +506,13 @@ def build_session_context_prompt(
 
     from hermes_constants import display_hermes_home
 
-    if context.source.platform == Platform.LOCAL:
+    if src.platform == Platform.LOCAL:
         lines.append("- `\"origin\"` → Local output (saved to files)")
     else:
-        _origin_label = _format_untrusted_prompt_value(
-            context.source.chat_name or _chat_label(context.source.chat_id)
-        )
+        _origin_label = _format_untrusted_prompt_value(src.chat_name or _chat_label(src.chat_id))
         lines.append(f"- `\"origin\"` → Back to this chat ({_origin_label})")
 
-    lines.append(
-        f"- `\"local\"` → Save to local files only ({display_hermes_home()}/cron/output/)"
-    )
+    lines.append(f"- `\"local\"` → Save to local files only ({display_hermes_home()}/cron/output/)")
     for platform, home in context.home_channels.items():
         home_name = _format_untrusted_prompt_value(home.name)
         lines.append(f"- `\"{platform.value}\"` → Home channel ({home_name})")
@@ -641,19 +546,12 @@ class SessionEntry:
     session_id: str
     created_at: datetime
     updated_at: datetime
-
-    # Origin metadata for delivery routing
-    origin: Optional[SessionSource] = None
-
-    # Display metadata
+    origin: Optional[SessionSource] = None  # delivery routing
     display_name: Optional[str] = None
     platform: Optional[Platform] = None
     chat_type: str = "dm"
-
-    # Small, JSON-serializable per-entry state (e.g. Slack thread watermarks);
-    # persisted in the routing index.
+    # Small, JSON-serializable per-entry state (e.g. Slack thread watermarks).
     metadata: Dict[str, Any] = field(default_factory=dict)
-
     # Token tracking
     input_tokens: int = 0
     output_tokens: int = 0
@@ -662,32 +560,23 @@ class SessionEntry:
     total_tokens: int = 0
     estimated_cost_usd: float = 0.0
     cost_status: str = "unknown"
-
-    # Last API-reported prompt tokens (for accurate compression pre-check)
-    last_prompt_tokens: int = 0
-
+    last_prompt_tokens: int = 0  # last API-reported prompt tokens (compression pre-check)
     # Set when a session was created because the previous one expired;
-    # consumed once by the message handler to inject a notice into context
+    # consumed once by the message handler to inject a notice into context.
     was_auto_reset: bool = False
     auto_reset_reason: Optional[str] = None  # "idle" or "daily"
-    reset_had_activity: bool = False  # whether the expired session had any messages
-
-    # session_id replaced by an auto-reset; feeds build_channel_continuity_note.
-    prev_session_id: Optional[str] = None
-
+    reset_had_activity: bool = False  # the expired session had messages
+    prev_session_id: Optional[str] = None  # replaced by an auto-reset; feeds build_channel_continuity_note
     # Set by reset_session() on explicit /new or /reset; consumed once to
     # re-inject topic/channel skills. Distinct from was_auto_reset, which
     # fires the "expired due to inactivity" notice (wrong for a manual reset).
     is_fresh_reset: bool = False
-
-    # Set by the expiry watcher after finalizing an expired session; persisted
-    # so restarts don't re-run finalization.
+    # Set by the expiry watcher after finalizing; persisted so restarts don't
+    # re-run finalization.
     expiry_finalized: bool = False
-
     # Next get_or_create_session() auto-resets (new session_id). Set by /stop
     # to break stuck-resume loops.
     suspended: bool = False
-
     # Interrupted by a restart/drain timeout but recovery expected. Unlike
     # ``suspended``, the session_id is preserved so the agent auto-continues
     # the same transcript. Cleared after the next successful turn; escalation
@@ -695,13 +584,11 @@ class SessionEntry:
     resume_pending: bool = False
     resume_reason: Optional[str] = None  # e.g. "restart_timeout"
     last_resume_marked_at: Optional[datetime] = None
-
     # Durable marker of the executing agent turn; CAS-cleared on normal
     # unwind, left behind by SIGKILL/OOM so unclean startup recovers the exact
     # interrupted session instead of guessing from ``updated_at``.
     active_turn_token: Optional[str] = None
     active_turn_started_at: Optional[datetime] = None
-
     # Session-scoped /model override (model/provider/base_url ONLY — never
     # credentials; see sanitize_model_override). Persisted so a restart does
     # not revert sessions to the global default model.
@@ -713,6 +600,9 @@ class SessionEntry:
         "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
         "total_tokens", "last_prompt_tokens", "estimated_cost_usd", "cost_status",
         "expiry_finalized", "suspended", "resume_pending", "resume_reason",
+    )
+    _RESET_FIELDS = (
+        "is_fresh_reset", "was_auto_reset", "auto_reset_reason", "reset_had_activity", "prev_session_id",
     )
 
     def to_dict(self) -> Dict[str, Any]:
@@ -726,14 +616,11 @@ class SessionEntry:
             "chat_type": self.chat_type,
             "metadata": self.metadata,
         }
-        for name in self._PLAIN_FIELDS:
-            result[name] = getattr(self, name)
+        result.update((name, getattr(self, name)) for name in self._PLAIN_FIELDS)
         result["last_resume_marked_at"] = _iso(self.last_resume_marked_at)
         result["active_turn_token"] = self.active_turn_token
         result["active_turn_started_at"] = _iso(self.active_turn_started_at)
-        for name in ("is_fresh_reset", "was_auto_reset", "auto_reset_reason",
-                     "reset_had_activity", "prev_session_id"):
-            result[name] = getattr(self, name)
+        result.update((name, getattr(self, name)) for name in self._RESET_FIELDS)
         if self.model_override:
             # Defence-in-depth against an unsanitized dict stored directly.
             result["model_override"] = sanitize_model_override(self.model_override)
@@ -751,18 +638,15 @@ class SessionEntry:
             except ValueError as e:
                 logger.debug("Unknown platform value %r: %s", data["platform"], e)
 
-        last_resume_marked_at = _parse_iso(data.get("last_resume_marked_at"))
         active_turn_started_at = _parse_iso(data.get("active_turn_started_at"))
         active_turn_token = data.get("active_turn_token")
         if not isinstance(active_turn_token, str) or not active_turn_token:
             # The token/timestamp pair is written atomically; a partial or
             # malformed pair is not trustworthy enough to auto-resume.
-            active_turn_token = None
-            active_turn_started_at = None
+            active_turn_token = active_turn_started_at = None
 
         session_key = data["session_key"]
         session_id = data["session_id"]
-
         # CWE-22: session_id becomes a filename (strict guard); session_key is
         # a logical routing key where interior ``/`` is legitimate (relaxed).
         if _is_path_unsafe(session_id):
@@ -771,7 +655,7 @@ class SessionEntry:
             raise ValueError("Invalid session_key: potential directory traversal detected")
 
         defaults = {f.name: f.default for f in fields(cls)}
-        plain = {name: data.get(name, defaults[name]) for name in cls._PLAIN_FIELDS}
+        plain = {name: data.get(name, defaults[name]) for name in cls._PLAIN_FIELDS + cls._RESET_FIELDS}
         plain["expiry_finalized"] = data.get("expiry_finalized", data.get("memory_flushed", False))
         return cls(
             session_key=session_key,
@@ -783,16 +667,11 @@ class SessionEntry:
             platform=platform,
             chat_type=data.get("chat_type", "dm"),
             metadata=dict(data.get("metadata") or {}),
-            **plain,
-            last_resume_marked_at=last_resume_marked_at,
+            last_resume_marked_at=_parse_iso(data.get("last_resume_marked_at")),
             active_turn_token=active_turn_token,
             active_turn_started_at=active_turn_started_at,
-            is_fresh_reset=data.get("is_fresh_reset", False),
-            was_auto_reset=data.get("was_auto_reset", False),
-            auto_reset_reason=data.get("auto_reset_reason"),
-            reset_had_activity=data.get("reset_had_activity", False),
-            prev_session_id=data.get("prev_session_id"),
             model_override=sanitize_model_override(data.get("model_override")),
+            **plain,
         )
 
 
@@ -804,9 +683,8 @@ def build_channel_continuity_note(
 
     After an auto-reset the agent could bind a new request to an unrelated
     recent session; this points it at the prior session in *this* channel so
-    it recalls context via ``session_search``. Returns ``None`` unless the
-    platform is Slack/Discord, the auto-reset had real activity, and the
-    previous session_id is recorded.
+    it recalls context via ``session_search``. ``None`` unless the platform is
+    Slack/Discord, the auto-reset had real activity, and prev_session_id is set.
     """
     if source.platform not in (Platform.SLACK, Platform.DISCORD):
         return None
@@ -852,6 +730,15 @@ def _session_key_namespace(profile: Optional[str]) -> str:
     return f"agent:{profile}"
 
 
+def _canonical_participant(source: SessionSource) -> Optional[str]:
+    """Sender id for key isolation; WhatsApp JID/LID aliases are canonicalized
+    so alias flips cannot split one member into two sessions."""
+    participant_id = source.user_id_alt or source.user_id
+    if participant_id and source.platform == Platform.WHATSAPP:
+        participant_id = canonical_whatsapp_identifier(str(participant_id)) or participant_id
+    return participant_id
+
+
 def build_session_key(
     source: SessionSource,
     group_sessions_per_user: bool = True,
@@ -870,9 +757,7 @@ def build_session_key(
     ns = _session_key_namespace(profile)
     platform = source.platform.value
     slack_scope_id = (
-        str(source.scope_id)
-        if source.platform == Platform.SLACK and source.scope_id
-        else None
+        str(source.scope_id) if source.platform == Platform.SLACK and source.scope_id else None
     )
     if source.chat_type == "dm":
         dm_chat_id = source.chat_id
@@ -887,22 +772,14 @@ def build_session_key(
         else:
             # No chat_id: fall back to the sender id before the bare
             # per-platform sink, or every chat_id-less DM shares one agent.
-            dm_participant_id = source.user_id_alt or source.user_id
-            if dm_participant_id and source.platform == Platform.WHATSAPP:
-                dm_participant_id = (
-                    canonical_whatsapp_identifier(str(dm_participant_id))
-                    or dm_participant_id
-                )
+            dm_participant_id = _canonical_participant(source)
             if dm_participant_id:
                 dm_parts.append(str(dm_participant_id))
         if source.thread_id:
             dm_parts.append(source.thread_id)
         return ":".join(str(part) for part in dm_parts)
 
-    participant_id = source.user_id_alt or source.user_id
-    if participant_id and source.platform == Platform.WHATSAPP:
-        # JID/LID alias flips would otherwise split one member into two sessions.
-        participant_id = canonical_whatsapp_identifier(str(participant_id)) or participant_id
+    participant_id = _canonical_participant(source)
     # Discord auto-thread continuity: key a channel-initiating message on the
     # thread it WILL be delivered into (prospective_thread_id), and normalize
     # the chat_type slot to "thread" so in-thread follow-ups byte-match. A
@@ -939,6 +816,31 @@ class _SessionFlight:
         self.error: Optional[BaseException] = None
 
 
+@dataclass
+class _RouteChecks:
+    """Lock-free I/O results for an existing route (phase 1b of a transition)."""
+    session_id: str  # the entry's session_id when snapshotted
+    canonical_id: Optional[str]  # compression tip (may equal session_id)
+    is_stale: bool  # row already ended in state.db
+    reset_reason: Optional[str]
+
+
+@dataclass
+class _RouteDecision:
+    """What the locked apply-phase decided for one routing transition."""
+    entry: Optional["SessionEntry"] = None
+    needs_save: bool = False
+    # Healthy-path saves take the single-row UPSERT fast path; structural
+    # transitions (recover/create) keep the full rewrite.
+    metadata_only_save: bool = False
+    needs_recover: bool = False
+    # Auto-reset bookkeeping: reason (None = no auto-reset), whether the ended
+    # session had activity, and its id (predecessor to end + continuity hint).
+    reset_reason: Optional[str] = None
+    reset_had_activity: bool = False
+    prev_session_id: Optional[str] = None
+
+
 class AsyncSessionStore:
     """Async boundary for the synchronous, thread-safe SessionStore."""
 
@@ -954,11 +856,6 @@ class AsyncSessionStore:
             return await asyncio.to_thread(attr, *args, **kwargs)
 
         return _offloaded
-
-
-# "No SessionDB pinned" sentinel: lets ``_db`` distinguish "resolve from the
-# active scope" from a deliberate ``store._db = None`` (JSONL fallback).
-_DB_UNPINNED = object()
 
 
 class SessionStore(
@@ -1053,9 +950,8 @@ class SessionStore(
             setattr(self, name, value)
         return value
 
-
     def _has_active_processes_safe(self, session_key: str, *, context: str) -> bool:
-        """Return whether a session has active work, failing closed on registry errors."""
+        """Whether a session has active work, failing closed on registry errors."""
         if self._has_active_processes_fn is None:
             return False
         try:
@@ -1063,22 +959,9 @@ class SessionStore(
         except Exception as exc:
             logger.warning(
                 "has_active_processes_fn raised during %s for %s; keeping session alive: %s",
-                context,
-                session_key,
-                exc,
+                context, session_key, exc,
             )
             return True
-
-
-
-
-
-
-
-
-
-
-
 
     def has_any_sessions(self) -> bool:
         """Whether any session has ever been created (across all platforms).
@@ -1116,12 +999,9 @@ class SessionStore(
 
         with inflight_lock:
             slot = self._inflight_sessions.get(session_key)
-            if slot is None:
-                slot = _SessionFlight()
-                self._inflight_sessions[session_key] = slot
-                owner = True
-            else:
-                owner = False
+            owner = slot is None
+            if owner:
+                slot = self._inflight_sessions[session_key] = _SessionFlight()
 
         if not owner:
             slot.event.wait()
@@ -1133,13 +1013,10 @@ class SessionStore(
             return slot.result
 
         try:
-            result = self._get_or_create_session_impl(
-                source,
-                force_new=force_new,
-                touch_activity=touch_activity,
+            slot.result = self._get_or_create_session_impl(
+                source, force_new=force_new, touch_activity=touch_activity,
             )
-            slot.result = result
-            return result
+            return slot.result
         except BaseException as exc:
             slot.error = exc
             raise
@@ -1147,7 +1024,6 @@ class SessionStore(
             slot.event.set()
             with inflight_lock:
                 self._inflight_sessions.pop(session_key, None)
-
 
     def _get_or_create_session_impl(
         self,
@@ -1166,159 +1042,167 @@ class SessionStore(
         if not force_new:
             self._adopt_legacy_slack_entry(source, session_key)
 
-        db_end_session_id = None
-        db_create_kwargs = None
-        force_new_observed_entry = None
-
-        # ---- Phase 1: lock read -- entry snapshot for stale/reset checks ----
-        _stale_session_id = None
-        _entry_for_checks = None
+        # Phase 1 (lock): snapshot the entry for stale/reset checks.
         with self._lock:
             self._ensure_loaded_locked()
-            if force_new:
-                force_new_observed_entry = self._entries.get(session_key)
-            elif session_key in self._entries:
-                _entry_for_checks = self._entries[session_key]
-                _stale_session_id = _entry_for_checks.session_id
+            observed = self._entries.get(session_key)
+        # Phase 1b (no lock): compression tip + stale check + reset policy.
+        checks = None if force_new or observed is None else self._route_checks(observed, source, now)
+        # Phase 2 (lock): apply the decisions to _entries.
+        decision = self._apply_route_checks(session_key, checks, force_new, touch_activity, now)
 
-        # ---- Phase 1b: no-lock I/O -- compression tip + stale check + reset policy ----
-        canonical_existing_session_id = None
-        _is_stale = False
-        _reset_reason = None
-        if _entry_for_checks is not None:
-            canonical_existing_session_id = self._compression_tip_for_session_id(_stale_session_id)
-            _is_stale = self._is_session_ended_in_db(_stale_session_id)
-            _reset_reason = self._route_reset_reason(_entry_for_checks, source, now)
+        # Phase 3 (no lock): recovery + create + save + DB ops.
+        if decision.needs_recover and decision.prev_session_id is None:
+            self._route_recover(decision, session_key, source, now)
+        create_kwargs = None
+        if decision.entry is None:
+            create_kwargs = self._route_create(decision, session_key, source, now, force_new, observed)
 
-        # ---- Phase 2: lock write -- apply decisions to _entries ----
-        _needs_save = False
-        # Healthy-path saves take the single-row UPSERT fast path; structural
-        # transitions (recover/create) keep the full rewrite.
-        _metadata_only_save = False
-        _needs_recover = False
-        entry: Optional[SessionEntry] = None
-        was_auto_reset = False
-        auto_reset_reason = None
-        reset_had_activity = False
-        prev_session_id: Optional[str] = None
-
-        with self._lock:
-            self._ensure_loaded_locked()
-
-            if session_key in self._entries and not force_new:
-                entry = self._entries[session_key]
-                # A heal rewrites entry.session_id, so it must reach the
-                # sessions.json mirror too (forces the full-rewrite save).
-                _healed = self._heal_compression_tip_locked(
-                    entry, _stale_session_id, canonical_existing_session_id
-                )
-                # If another thread replaced the entry during our lock-free
-                # window, the stale/reset decisions no longer apply: healthy.
-                _checked = entry.session_id == _stale_session_id
-                _stale_hit = _is_stale and _checked
-                if _stale_hit:
-                    # Stale routing self-heal: the entry points at a session
-                    # ALREADY ended in state.db. Drop it and fall through to
-                    # recovery (reopens agent_close / ws_orphan_reap rows,
-                    # fresh session for other end_reasons).
-                    logger.warning(
-                        "gateway.session: routing key %r -> %s is ended in "
-                        "state.db but still live in sessions.json; dropping "
-                        "stale entry and recovering/recreating the session "
-                        "(#54878)",
-                        session_key, entry.session_id,
-                    )
-                if _stale_hit or (_checked and _reset_reason):
-                    # Honour an expiry/reset decision instead of silently
-                    # reopening the session via recovery.
-                    if _reset_reason:
-                        was_auto_reset = True
-                        auto_reset_reason = _reset_reason
-                        reset_had_activity = entry.last_prompt_tokens > 0
-                        db_end_session_id = entry.session_id
-                        prev_session_id = entry.session_id
-                    self._entries.pop(session_key, None)
-                    entry = None
-                    _needs_recover = True
-                else:
-                    # Internal/system events preserve the user-activity clock.
-                    if touch_activity:
-                        entry.updated_at = now
-                    _needs_save = touch_activity or _healed
-                    _metadata_only_save = touch_activity and not _healed
-            elif not force_new:
-                _needs_recover = True
-
-        # ---- Phase 3: no-lock I/O -- recovery + create + save + DB ops ----
-        if _needs_recover and db_end_session_id is None:
-            recovered = self._query_recoverable_session(
-                session_key=session_key, source=source, now=now,
-            )
-            if recovered is not None:
-                recovered_reset_reason = self._should_reset(recovered, source)
-                if recovered_reset_reason:
-                    was_auto_reset = True
-                    auto_reset_reason = recovered_reset_reason
-                    reset_had_activity = recovered.reset_had_activity
-                    db_end_session_id = recovered.session_id
-                    prev_session_id = recovered.session_id
-                else:
-                    self._reopen_session_row(session_key, recovered.session_id)
-                    with self._lock:
-                        entry = self._entries.setdefault(session_key, recovered)
-                    _needs_save = True
-
-        if entry is None:
-            # Create a candidate outside the lock, then publish only if another
-            # worker has not already populated this routing key.
-            session_id = _new_session_id(now)
-            candidate = SessionEntry(
-                session_key=session_key,
-                session_id=session_id,
-                created_at=now,
-                updated_at=now,
-                origin=source,
-                display_name=source.chat_name,
-                platform=source.platform,
-                chat_type=source.chat_type,
-                was_auto_reset=was_auto_reset,
-                auto_reset_reason=auto_reset_reason,
-                reset_had_activity=reset_had_activity,
-                prev_session_id=prev_session_id,
-            )
-            with self._lock:
-                current = self._entries.get(session_key)
-                if current is None or (force_new and current is force_new_observed_entry):
-                    self._entries[session_key] = candidate
-                    current = candidate
-            entry = current
-            _needs_save = True
-            if entry is candidate:
-                db_create_kwargs = self._session_create_kwargs(
-                    session_id=session_id,
-                    session_key=session_key,
-                    origin=source,
-                    source_value=source.platform.value,
-                    display_name=source.chat_name,
-                    parent_session_id=prev_session_id,
-                )
-
-        if _needs_save:
-            if _metadata_only_save:
+        if decision.needs_save:
+            if decision.metadata_only_save:
                 self._save_entry(session_key)
             else:
                 self._save_entries()
 
         self._finish_route_transition(
             session_key,
-            end_session_id=db_end_session_id,
-            end_reason=auto_reset_reason if auto_reset_reason else "session_reset",
-            create_kwargs=db_create_kwargs,
+            end_session_id=decision.prev_session_id,
+            end_reason=decision.reset_reason or "session_reset",
+            create_kwargs=create_kwargs,
             origin=source,
-            display_name=entry.display_name,
+            display_name=decision.entry.display_name,
         )
-        return entry
+        return decision.entry
 
+    def _route_checks(self, entry: SessionEntry, source: SessionSource, now: datetime) -> _RouteChecks:
+        """Lock-free DB/config I/O for an existing route."""
+        sid = entry.session_id
+        canonical = self._compression_tip_for_session_id(sid)
+        is_stale = self._is_session_ended_in_db(sid)
+        return _RouteChecks(sid, canonical, is_stale, self._route_reset_reason(entry, source, now))
+
+    def _apply_route_checks(
+        self,
+        session_key: str,
+        checks: Optional[_RouteChecks],
+        force_new: bool,
+        touch_activity: bool,
+        now: datetime,
+    ) -> _RouteDecision:
+        """Apply stale/reset decisions to ``_entries`` under ``_lock``.
+
+        If another thread replaced the entry during the lock-free window, the
+        snapshot's decisions no longer apply and the route is treated as healthy.
+        """
+        decision = _RouteDecision()
+        with self._lock:
+            self._ensure_loaded_locked()
+            if force_new:
+                return decision
+            entry = self._entries.get(session_key)
+            if entry is None:
+                decision.needs_recover = True
+                return decision
+            snapshot_sid = checks.session_id if checks else None
+            # A heal rewrites entry.session_id, so it must reach the
+            # sessions.json mirror too (forces the full-rewrite save).
+            healed = self._heal_compression_tip_locked(
+                entry, snapshot_sid, checks.canonical_id if checks else None
+            )
+            checked = entry.session_id == snapshot_sid
+            stale_hit = checked and checks.is_stale
+            reset_reason = checks.reset_reason if checked else None
+            if stale_hit:
+                # Stale routing self-heal: the entry points at a session
+                # ALREADY ended in state.db. Drop it and fall through to
+                # recovery (reopens agent_close / ws_orphan_reap rows,
+                # fresh session for other end_reasons).
+                logger.warning(
+                    "gateway.session: routing key %r -> %s is ended in "
+                    "state.db but still live in sessions.json; dropping "
+                    "stale entry and recovering/recreating the session "
+                    "(#54878)",
+                    session_key, entry.session_id,
+                )
+            if stale_hit or reset_reason:
+                # Honour an expiry/reset decision instead of silently
+                # reopening the session via recovery.
+                if reset_reason:
+                    decision.reset_reason = reset_reason
+                    decision.reset_had_activity = entry.last_prompt_tokens > 0
+                    decision.prev_session_id = entry.session_id
+                self._entries.pop(session_key, None)
+                decision.needs_recover = True
+            else:
+                # Internal/system events preserve the user-activity clock.
+                if touch_activity:
+                    entry.updated_at = now
+                decision.entry = entry
+                decision.needs_save = touch_activity or healed
+                decision.metadata_only_save = touch_activity and not healed
+        return decision
+
+    def _route_recover(
+        self, decision: _RouteDecision, session_key: str, source: SessionSource, now: datetime
+    ) -> None:
+        """Adopt a recoverable state.db row, or schedule its reset (no lock held on entry)."""
+        recovered = self._query_recoverable_session(session_key=session_key, source=source, now=now)
+        if recovered is None:
+            return
+        reset_reason = self._should_reset(recovered, source)
+        if reset_reason:
+            decision.reset_reason = reset_reason
+            decision.reset_had_activity = recovered.reset_had_activity
+            decision.prev_session_id = recovered.session_id
+            return
+        self._reopen_session_row(session_key, recovered.session_id)
+        with self._lock:
+            decision.entry = self._entries.setdefault(session_key, recovered)
+        decision.needs_save = True
+
+    def _route_create(
+        self,
+        decision: _RouteDecision,
+        session_key: str,
+        source: SessionSource,
+        now: datetime,
+        force_new: bool,
+        observed: Optional[SessionEntry],
+    ) -> Optional[Dict[str, Any]]:
+        """Create a candidate outside the lock, publish it only if another worker
+        has not already populated this routing key; returns ``create_session``
+        kwargs when the candidate won."""
+        session_id = _new_session_id(now)
+        candidate = SessionEntry(
+            session_key=session_key,
+            session_id=session_id,
+            created_at=now,
+            updated_at=now,
+            origin=source,
+            display_name=source.chat_name,
+            platform=source.platform,
+            chat_type=source.chat_type,
+            was_auto_reset=decision.reset_reason is not None,
+            auto_reset_reason=decision.reset_reason,
+            reset_had_activity=decision.reset_had_activity,
+            prev_session_id=decision.prev_session_id,
+        )
+        with self._lock:
+            current = self._entries.get(session_key)
+            if current is None or (force_new and current is observed):
+                self._entries[session_key] = current = candidate
+        decision.entry = current
+        decision.needs_save = True
+        if current is not candidate:
+            return None
+        return self._session_create_kwargs(
+            session_id=session_id,
+            session_key=session_key,
+            origin=source,
+            source_value=source.platform.value,
+            display_name=source.chat_name,
+            parent_session_id=decision.prev_session_id,
+        )
 
     def update_session(
         self,
@@ -1341,18 +1225,14 @@ class SessionStore(
                 entry.last_prompt_tokens = last_prompt_tokens
             # Snapshot peer fields under _lock so a concurrent reset/heal
             # cannot produce a torn peer row.
-            peer_session_id = entry.session_id
-            peer_origin = entry.origin
-            peer_display_name = entry.display_name
+            peer_session_id, peer_origin, peer_display_name = (
+                entry.session_id, entry.origin, entry.display_name
+            )
         # Metadata-only: single-row UPSERT, outside ``_lock``.
         self._save_entry(session_key)
         self._record_gateway_session_peer(
-            peer_session_id,
-            session_key,
-            peer_origin,
-            display_name=peer_display_name,
+            peer_session_id, session_key, peer_origin, display_name=peer_display_name,
         )
-
 
     def get_session_metadata(self, session_key: str, key: str, default: Any = None) -> Any:
         """Return a metadata value stored on a live session entry."""
@@ -1386,7 +1266,6 @@ class SessionStore(
         with self._lock:
             entry = self._entry_locked(session_key)
             return dict(entry.model_override) if entry and entry.model_override else None
-
 
     def reset_session(self, session_key: str, display_name: Optional[str] = None) -> Optional[SessionEntry]:
         """Force reset a session, creating a new session ID."""
@@ -1436,41 +1315,34 @@ class SessionStore(
         self._save()
         return new_entry
 
-
     def switch_session(self, session_key: str, target_session_id: str) -> Optional[SessionEntry]:
         """Point a session key at an existing session ID (``/resume``): ends
         the current row, reopens the target so resume matches the CLI."""
-        db_end_session_id = None
-        new_entry = None
-
         with self._lock:
             old_entry = self._entry_locked(session_key)
             if old_entry is None:
                 return None
             if old_entry.session_id == target_session_id:
                 return old_entry
-            db_end_session_id = old_entry.session_id
             new_entry = self._replace_route_locked(
                 session_key, old_entry, target_session_id, _now(),
                 display_name=old_entry.display_name,
             )
 
-        if self._db_for_key(session_key) and db_end_session_id:
+        if self._db_for_key(session_key) and old_entry.session_id:
             self._promote_session_reset(
-                session_key, db_end_session_id, "session_switch",
+                session_key, old_entry.session_id, "session_switch",
                 log=lambda e: logger.debug("Session DB end_session failed: %s", e),
             )
-
         if self._db_for_key(session_key):
             self._reopen_session_row(session_key, target_session_id, log_prefix="Session DB reopen_session failed")
             self._record_gateway_session_peer(
                 target_session_id,
                 session_key,
-                new_entry.origin if new_entry else None,
-                display_name=new_entry.display_name if new_entry else None,
+                new_entry.origin,
+                display_name=new_entry.display_name,
                 include_compression_ancestors=True,
             )
-
         return new_entry
 
     def list_sessions(self, active_minutes: Optional[int] = None) -> List[SessionEntry]:
@@ -1508,13 +1380,6 @@ class SessionStore(
             return entry.session_id if entry else None
 
 
-
-    # Max in-memory pending messages per session (DB persistently broken).
-
-
-
-
-
 def build_session_context(
     source: SessionSource,
     config: GatewayConfig,
@@ -1522,11 +1387,7 @@ def build_session_context(
 ) -> SessionContext:
     """Build a full session context (for system prompt injection)."""
     connected = config.get_connected_platforms()
-    home_channels = {}
-    for platform in connected:
-        home = config.get_home_channel(platform)
-        if home:
-            home_channels[platform] = home
+    home_channels = {p: home for p in connected if (home := config.get_home_channel(p))}
     context = SessionContext(
         source=source,
         connected_platforms=connected,

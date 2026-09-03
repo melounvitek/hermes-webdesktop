@@ -33,10 +33,7 @@ def _origin_json(source) -> Optional[str]:
 
 
 class SessionRecoveryMixin:
-    """SessionStore durable-row recovery: session-key generation, legacy Slack
-    key migration, rebuilding a routing entry from state.db, and the SQLite
-    side of routing transitions (promote/reopen/create/peer).
-    """
+    """SessionStore durable-row recovery and the SQLite side of routing transitions."""
 
     def _resolve_profile_for_key(self, source: Optional[SessionSource] = None) -> Optional[str]:
         """Profile namespace for session keys: None when multiplexing is off
@@ -115,9 +112,7 @@ class SessionRecoveryMixin:
         """
         if source.platform != Platform.SLACK or not source.scope_id:
             return None
-        return self._generate_session_key(
-            source, replace(source, scope_id=None, guild_id=None)
-        )
+        return self._generate_session_key(source, replace(source, scope_id=None, guild_id=None))
 
     def _claim_legacy_slack_key(self, legacy_key: Optional[str]) -> bool:
         """Atomically reserve one ambiguous legacy Slack key for migration."""
@@ -140,11 +135,7 @@ class SessionRecoveryMixin:
         names the same scope_id; rows without a parseable origin are rejected
         (an unattributable transcript is exactly the ambiguity to avoid).
         """
-        if (
-            source.platform != Platform.SLACK
-            or source.chat_type == "dm"
-            or not source.scope_id
-        ):
+        if source.platform != Platform.SLACK or source.chat_type == "dm" or not source.scope_id:
             return True
         try:
             origin = json.loads(recovered.get("origin_json") or "")
@@ -163,6 +154,7 @@ class SessionRecoveryMixin:
         now: datetime,
     ) -> SessionEntry:
         from gateway.session import SessionEntry
+
         def _ts(value, default: datetime) -> datetime:
             try:
                 return datetime.fromtimestamp(float(value))
@@ -176,9 +168,7 @@ class SessionRecoveryMixin:
         updated_at = _ts(last_activity, created_at) if last_activity is not None else created_at
         had_activity = row.get("_has_messages")
         if had_activity is None:
-            had_activity = bool(row.get("message_count") or 0) or (
-                last_activity is not None
-            )
+            had_activity = bool(row.get("message_count") or 0) or last_activity is not None
         return SessionEntry(
             session_key=session_key,
             session_id=str(row["id"]),
@@ -298,11 +288,7 @@ class SessionRecoveryMixin:
             raise_on_lookup_error=raise_on_lookup_error,
         )
         migrated_legacy = False
-        if (
-            not recovered
-            and legacy_key
-            and self._claim_legacy_slack_key(legacy_key)
-        ):
+        if not recovered and legacy_key and self._claim_legacy_slack_key(legacy_key):
             recovered = self._find_gateway_session_row(
                 session_key=legacy_key,
                 source=source,
@@ -383,12 +369,11 @@ class SessionRecoveryMixin:
             thread_id=source.thread_id,
         )
         try:
-            origin_json = _origin_json(source)
             recorder(
                 session_id,
                 **peer,
                 display_name=display_name or source.chat_name,
-                origin_json=origin_json,
+                origin_json=_origin_json(source),
                 include_compression_ancestors=include_compression_ancestors,
             )
         except TypeError:
@@ -483,7 +468,6 @@ class SessionRecoveryMixin:
         Identity (origin_json) and lineage (parent/_reset_from) land atomically
         in the INSERT so a crash right after cannot strand the row unroutable.
         """
-        origin_json = _origin_json(origin)
         return {
             "session_id": session_id,
             "source": source_value,
@@ -493,12 +477,10 @@ class SessionRecoveryMixin:
             "chat_type": origin.chat_type if origin else None,
             "thread_id": origin.thread_id if origin else None,
             "profile_name": origin.profile if origin else None,
-            "origin_json": origin_json,
+            "origin_json": _origin_json(origin),
             "display_name": display_name,
             "parent_session_id": parent_session_id,
-            "model_config": (
-                {"_reset_from": parent_session_id} if parent_session_id else None
-            ),
+            "model_config": {"_reset_from": parent_session_id} if parent_session_id else None,
         }
 
     def _create_session_row(self, session_key, db_create_kwargs, origin, display_name, *, log) -> None:
@@ -510,10 +492,7 @@ class SessionRecoveryMixin:
         try:
             self._db_for_key(session_key).create_session(**db_create_kwargs)
             self._record_gateway_session_peer(
-                db_create_kwargs["session_id"],
-                session_key,
-                origin,
-                display_name=display_name,
+                db_create_kwargs["session_id"], session_key, origin, display_name=display_name,
             )
         except Exception as e:
             log(e)

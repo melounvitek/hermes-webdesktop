@@ -18,6 +18,14 @@ if TYPE_CHECKING:
 logger = logging.getLogger("gateway.session")
 
 
+class TranscriptReadError(RuntimeError):
+    """Raised when persisted history cannot be read safely."""
+
+    def __init__(self, session_id: str) -> None:
+        self.session_id = session_id
+        super().__init__(f"transcript read failed for session {session_id}")
+
+
 def _plain_text(content) -> str:
     """Text of a message content (str or text-part list); "" for anything else."""
     if isinstance(content, list):
@@ -26,11 +34,22 @@ def _plain_text(content) -> str:
     return content if isinstance(content, str) else ""
 
 
+def _spool_dropped(session_id: str, message: Dict[str, Any]):
+    """Spool one evicted/undeliverable message to disk (same machinery as the
+    shutdown flush, so it is replayed after DB recovery); path or None."""
+    try:
+        from gateway.shutdown_flush import spool_dropped_transcript_message
+
+        return spool_dropped_transcript_message(session_id, message)
+    except Exception:
+        return None
+
+
 class SessionTranscriptMixin:
     """SessionStore transcript I/O: SQLite append with a per-session retry queue,
-    compression-reroute following, FTS corruption recovery,
-    rewrite/rewind/load.
-    """
+    compression-reroute following, FTS corruption recovery, rewrite/rewind/load."""
+
+    _MAX_PENDING_PER_SESSION = 200  # in-memory pending messages per session (DB broken)
 
     def _compression_tip_for_session_id(self, session_id: Optional[str]) -> Optional[str]:
         """Latest compression continuation for *session_id* (heals a mapping
@@ -62,8 +81,7 @@ class SessionTranscriptMixin:
             return False
         logger.info(
             "SessionStore healed compressed session mapping: %s -> %s",
-            entry.session_id,
-            canonical_session_id,
+            entry.session_id, canonical_session_id,
         )
         entry.session_id = canonical_session_id
         return True
@@ -91,11 +109,7 @@ class SessionTranscriptMixin:
                 return entry
             if entry.session_id != expected_session_id:
                 return None
-            if not self._heal_compression_tip_locked(
-                entry,
-                expected_session_id,
-                target_session_id,
-            ):
+            if not self._heal_compression_tip_locked(entry, expected_session_id, target_session_id):
                 return None
             # Bookkeeping, not user activity: leave ``updated_at`` alone.
             self._save()
@@ -110,9 +124,7 @@ class SessionTranscriptMixin:
         if not self._db_for_session_id(session_id) or skip_db:
             return
         with self._get_transcript_drain_lock():
-            self._append_to_transcript_serialized(
-                self._follow_reroutes(session_id), message
-            )
+            self._append_to_transcript_serialized(self._follow_reroutes(session_id), message)
 
     def _follow_reroutes(self, session_id: str) -> str:
         """Follow the compression reroute chain (cycle-guarded)."""
@@ -123,25 +135,12 @@ class SessionTranscriptMixin:
             session_id = reroutes[session_id]
         return session_id
 
-    def _spool_dropped(self, session_id: str, message: Dict[str, Any]):
-        """Spool one evicted/undeliverable message to disk; path or None."""
-        try:
-            from gateway.shutdown_flush import spool_dropped_transcript_message
-
-            return spool_dropped_transcript_message(session_id, message)
-        except Exception:
-            return None
-
     def _enqueue_transcript_message(self, session_id: str, message: Dict[str, Any]) -> list:
-        """Queue *message* (retry lock held); evicts + spools the oldest past the cap.
-
-        Spooling uses the same machinery as shutdown flush so the message is
-        replayed after DB recovery instead of being lost.
-        """
+        """Queue *message* (retry lock held); evicts + spools the oldest past the cap."""
         pending = self._dirty_transcripts.setdefault(session_id, [])
         pending.append(dict(message))
         if len(pending) > self._MAX_PENDING_PER_SESSION:
-            spool_path = self._spool_dropped(session_id, pending.pop(0))
+            spool_path = _spool_dropped(session_id, pending.pop(0))
             if spool_path is not None:
                 self._lazy("_spooled_drop_sessions", set).add(session_id)
                 logger.warning(
@@ -240,8 +239,7 @@ class SessionTranscriptMixin:
         previous_failures = self._transcript_append_failures.pop(queue_session_id, 0)
         if previous_failures:
             self._transcript_append_failures[child_id] = max(
-                previous_failures,
-                self._transcript_append_failures.get(child_id, 0),
+                previous_failures, self._transcript_append_failures.get(child_id, 0),
             )
         self._transcript_reroutes[session_id] = child_id
         return pending
@@ -372,10 +370,7 @@ class SessionTranscriptMixin:
             from gateway.shutdown_flush import drain_transcript_spool
 
             _replayed, remaining = drain_transcript_spool(
-                session_id,
-                lambda message: self._append_transcript_message(
-                    session_id, message
-                ),
+                session_id, lambda message: self._append_transcript_message(session_id, message),
             )
             if not remaining:
                 spooled_sessions.discard(session_id)
@@ -415,8 +410,6 @@ class SessionTranscriptMixin:
             display_metadata=message.get("display_metadata"),
         )
 
-    _MAX_PENDING_PER_SESSION = 200
-
     @staticmethod
     def _is_fts_corruption_error(exc: Exception) -> bool:
         """True only when the failure is provably scoped to the FTS index.
@@ -426,16 +419,13 @@ class SessionTranscriptMixin:
         ``SessionDB._is_fts_write_corruption_error``) may authorize the
         one-shot rebuild-and-retry. Everything else takes the retry path.
         """
-        text = str(exc).lower()
-        if "messages_fts" in text:
+        if "messages_fts" in str(exc).lower():
             return True
         import sqlite3
 
         from hermes_state import SessionDB
 
-        if isinstance(exc, sqlite3.DatabaseError):
-            return SessionDB._is_fts_write_corruption_error(exc)
-        return False
+        return isinstance(exc, sqlite3.DatabaseError) and SessionDB._is_fts_write_corruption_error(exc)
 
     def _rebuild_fts_once(self) -> bool:
         """Attempt FTS5 ``rebuild`` once per store lifetime; True if any index was rebuilt."""
@@ -462,10 +452,7 @@ class SessionTranscriptMixin:
             logger.warning("Session DB FTS rebuild failed: %s", exc)
             return False
         if rebuilt:
-            logger.warning(
-                "Rebuilt %d Session DB FTS index(es) after append corruption",
-                rebuilt,
-            )
+            logger.warning("Rebuilt %d Session DB FTS index(es) after append corruption", rebuilt)
         return rebuilt > 0
 
     def _clear_dirty_transcript(self, session_id: str) -> None:
@@ -482,9 +469,7 @@ class SessionTranscriptMixin:
         if not db:
             return False
         try:
-            return db.has_platform_message_id(
-                session_id, platform_message_id
-            )
+            return db.has_platform_message_id(session_id, platform_message_id)
         except Exception:
             logger.debug("has_platform_message_id lookup failed", exc_info=True)
             return False
@@ -529,7 +514,6 @@ class SessionTranscriptMixin:
         (compression rotation), then the durable compression tip — otherwise
         the transcript "vanishes" while every message sits under the child.
         """
-        from gateway.session import TranscriptReadError
         if not self._db_for_session_id(session_id):
             return []
         session_id = self._follow_reroutes(session_id)
@@ -552,9 +536,7 @@ class SessionTranscriptMixin:
             logger.error(
                 "Transcript read failed for session %s; refusing to treat the "
                 "conversation as empty: %s",
-                session_id,
-                e,
-                exc_info=True,
+                session_id, e, exc_info=True,
             )
             raise TranscriptReadError(session_id) from e
 
@@ -577,8 +559,7 @@ class SessionTranscriptMixin:
         if not db:
             return None
         with self._get_transcript_drain_lock():
-            if n < 1:
-                n = 1
+            n = max(n, 1)
             from agent.context_compressor import (
                 retryable_user_text,
                 split_user_originated_turn,
@@ -587,10 +568,7 @@ class SessionTranscriptMixin:
 
             try:
                 expected_active_ids = db.get_active_message_ids(session_id)
-                durable = db.get_messages_as_conversation(
-                    session_id,
-                    include_row_ids=True,
-                )
+                durable = db.get_messages_as_conversation(session_id, include_row_ids=True)
                 user_indices = [
                     index
                     for index, message in enumerate(durable)
