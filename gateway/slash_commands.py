@@ -464,7 +464,6 @@ class GatewaySlashCommandsMixin(
             await self._interrupt_and_clear_session(
                 key, source, interrupt_reason=_INTERRUPT_REASON_STOP, invalidation_reason=invalidation_reason,
             )
-
         agent = self._running_agents.get(session_key)
         if agent is _AGENT_PENDING_SENTINEL:
             # Force-clean the sentinel so the session is unlocked.
@@ -510,7 +509,6 @@ class GatewaySlashCommandsMixin(
             parts = parts[1:]
         action = (parts[0] if parts else "list").lower()
         target = parts[1].lower() if len(parts) > 1 else ""
-
         failed = getattr(self, "_failed_platforms", {}) or {}
         if action == "list":
             connected = ", ".join(sorted(p.value for p in self.adapters)) or "(none)"
@@ -636,10 +634,8 @@ class GatewaySlashCommandsMixin(
                 or not callable(fronts_platform)
                 or not fronts_platform(source.platform)
             ):
-                return t(
-                    "gateway.set_home.save_failed",
-                    error="Relay does not authenticate this logical home target",
-                )
+                return t("gateway.set_home.save_failed",
+                         error="Relay does not authenticate this logical home target")
 
         thread_id = _home_thread_from_source(source)
         home = HomeChannel(
@@ -648,14 +644,12 @@ class GatewaySlashCommandsMixin(
             user_id=str(source.user_id) if getattr(source, "user_id", None) else None,
             scope_id=str(source.scope_id) if getattr(source, "scope_id", None) else None,
         )
-
         # config.yaml is canonical because it can persist the authenticated logical-target
         # provenance required by Relay after a restart.
         try:
             persist_home_channel(home, enabled_if_new=not via_relay)
         except Exception as e:
             return t("gateway.set_home.save_failed", error=e)
-
         # Preserve legacy home env vars for existing cron/setup consumers.
         try:
             from hermes_cli.config import save_env_value
@@ -663,14 +657,10 @@ class GatewaySlashCommandsMixin(
             save_env_value(_home_thread_env_var(platform_name), str(thread_id or ""))
         except Exception as e:
             logger.warning("Home config saved but legacy env persistence failed: %s", e)
-
         # Keep the running gateway config in sync too. The pre-restart notification path reads
         # self.config before the process reloads config.
-        platform_config = self.config.platforms.setdefault(
-            source.platform, PlatformConfig(enabled=not via_relay)
-        )
+        platform_config = self.config.platforms.setdefault(source.platform, PlatformConfig(enabled=not via_relay))
         platform_config.home_channel = home
-
         return t("gateway.set_home.success", name=chat_name, chat_id=chat_id)
 
     async def _handle_voice_command(self, event: MessageEvent) -> str:
@@ -686,11 +676,10 @@ class GatewaySlashCommandsMixin(
         def _set_mode(mode: str) -> None:
             self._voice_mode[voice_key] = mode
             self._save_voice_modes()
-            if adapter:
-                if mode == "off":
-                    self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
-                else:
-                    self._set_adapter_auto_tts_enabled(adapter, chat_id, enabled=True)
+            if adapter and mode == "off":
+                self._set_adapter_auto_tts_disabled(adapter, chat_id, disabled=True)
+            elif adapter:
+                self._set_adapter_auto_tts_enabled(adapter, chat_id, enabled=True)
 
         if args in _VOICE_MODE_BY_ARG:
             mode, reply_key = _VOICE_MODE_BY_ARG[args]
@@ -985,14 +974,12 @@ class GatewaySlashCommandsMixin(
             gate_enabled = False
         if not gate_enabled:
             return t("gateway.verbose.not_enabled")
-
         # Cycle mode (per-platform), reading the current effective mode via the resolver.
         from gateway.display_config import resolve_display_setting
         cycle = ["off", "new", "all", "verbose", "log"]
         current = resolve_display_setting(user_config, platform_key, "tool_progress", "all")
         new_mode = cycle[(cycle.index(current if current in cycle else "all") + 1) % len(cycle)]
         description = t(f"gateway.verbose.mode_{new_mode}")
-
         try:
             _nested_dict(user_config, "display", "platforms", platform_key)["tool_progress"] = new_mode
             atomic_config_write(config_path, user_config)
@@ -1094,14 +1081,12 @@ class GatewaySlashCommandsMixin(
         invalidates the provider prompt cache (tool schemas live in the system prompt), so it routes
         through slash-confirm; "Always Approve" persists ``approvals.mcp_reload_confirm: false``."""
         session_key = self._session_key_for_source(event.source)
-
         # Read the gate fresh from disk so a prior "always" click takes effect on the next
         # invocation without restarting the gateway.
         user_config = self._read_user_config()
         approvals = user_config.get("approvals") if isinstance(user_config, dict) else None
         if isinstance(approvals, dict) and not approvals.get("mcp_reload_confirm", True):
             return await self._execute_mcp_reload(event)
-
         # Route through slash-confirm. The primitive sends the prompt and stores the resume handler;
         # the button/text response triggers ``_resolve_slash_confirm`` which invokes the handler
         # with the chosen outcome.
