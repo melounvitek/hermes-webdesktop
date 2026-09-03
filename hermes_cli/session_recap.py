@@ -60,9 +60,7 @@ def _iter_assistant_tool_calls(messages: Sequence[Mapping[str, Any]]) -> Iterabl
         if not isinstance(msg, Mapping) or msg.get("role") != "assistant":
             continue
         tool_calls = msg.get("tool_calls") or []
-        if not isinstance(tool_calls, list):
-            continue
-        for tc in tool_calls:
+        for tc in tool_calls if isinstance(tool_calls, list) else ():
             name, args = _tool_call_name_and_args(tc)
             if name:
                 yield name, args
@@ -90,8 +88,7 @@ def _recent_window(
     """Tail slice covering at most ``window`` user+assistant turns (tool messages ride along)."""
     count = 0
     for i in range(len(messages) - 1, -1, -1):
-        msg = messages[i]
-        if isinstance(msg, Mapping) and msg.get("role") in {"user", "assistant"}:
+        if isinstance(messages[i], Mapping) and messages[i].get("role") in {"user", "assistant"}:
             count += 1
             if count >= window:
                 return list(messages[i:])
@@ -104,12 +101,11 @@ def _shortened_path(path: str) -> str:
         return path
     try:
         abs_path = os.path.abspath(os.path.expanduser(path))
-        cwd = os.getcwd()
+        cwd, home = os.getcwd(), os.path.expanduser("~")
         if abs_path == cwd:
             return "."
         if abs_path.startswith(cwd + os.sep):
             return abs_path[len(cwd) + 1 :]
-        home = os.path.expanduser("~")
         if abs_path.startswith(home + os.sep):
             return "~/" + abs_path[len(home) + 1 :]
         return abs_path
@@ -122,18 +118,13 @@ def _summarise_tool_activity(
 ) -> Tuple[List[Tuple[str, int]], List[str]]:
     """``(tool_counts_sorted_desc, recently_edited_files)`` — files are distinct paths, newest first."""
     counter: Counter[str] = Counter()
-    files_seen: List[str] = []
-    files_set: set[str] = set()
+    files_seen: dict[str, str] = {}  # raw path -> shortened, insertion ordered
     for name, args in reversed(list(tool_calls)):  # reversed so files_seen comes out newest -> oldest
         counter[name] += 1
-        arg_key = _FILE_EDIT_TOOLS.get(name)
-        if arg_key:
-            path = args.get(arg_key)
-            if isinstance(path, str) and path and path not in files_set:
-                files_set.add(path)
-                files_seen.append(_shortened_path(path))
-    tool_counts = sorted(counter.items(), key=lambda kv: (-kv[1], kv[0]))
-    return tool_counts, files_seen
+        path = args.get(_FILE_EDIT_TOOLS[name]) if name in _FILE_EDIT_TOOLS else None
+        if isinstance(path, str) and path and path not in files_seen:
+            files_seen[path] = _shortened_path(path)
+    return sorted(counter.items(), key=lambda kv: (-kv[1], kv[0])), list(files_seen.values())
 
 
 def _join_capped(items: List[str], limit: int) -> str:
@@ -157,10 +148,8 @@ def build_recap(
     """Multi-line plain-text recap of recent activity (80-col terminal / gateway bubble friendly).
     ``platform`` is accepted for forward compat and does not change behavior."""
     lines: List[str] = ["Session recap"]
-    if session_title:
-        lines[0] += f" — {session_title}"
-    elif session_id:
-        lines[0] += f" — {session_id[:8]}"
+    if session_title or session_id:
+        lines[0] += f" — {session_title or session_id[:8]}"
     if not messages:
         lines.append("  (nothing to recap — no messages yet)")
         return "\n".join(lines)
@@ -181,12 +170,11 @@ def build_recap(
         lines.append(f"  Tools used: {top}")
     if files:
         lines.append(f"  Files touched: {_join_capped(files, _MAX_FILES_LISTED)}")
-    latest_user = _latest_text(window, "user")
-    if latest_user:
-        lines.append(f"  Last ask: {_truncate(latest_user, _PROMPT_PREVIEW_CHARS)}")
-    latest_reply = _latest_text(window, "assistant")
-    if latest_reply:
-        lines.append(f"  Last reply: {_truncate(latest_reply, _ASSISTANT_PREVIEW_CHARS)}")
+    previews = (("user", "Last ask", _PROMPT_PREVIEW_CHARS), ("assistant", "Last reply", _ASSISTANT_PREVIEW_CHARS))
+    for role, label, limit in previews:
+        latest = _latest_text(window, role)
+        if latest:
+            lines.append(f"  {label}: {_truncate(latest, limit)}")
     if len(lines) == 2:  # only header + scope line: nothing substantive to show
         lines.append("  (no assistant activity yet in this window)")
     return "\n".join(lines)
