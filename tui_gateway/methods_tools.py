@@ -496,7 +496,7 @@ def _dispatch_quick(rid, params, session, name, arg):
         from tools.environments.local import build_subprocess_env
         sanitized_env = build_subprocess_env()
         r = subprocess.run(qc.get("command", ""), shell=True, env=sanitized_env, **_capture_run_kwargs(30))
-        output = ((r.stdout or "") + ("\n" if r.stdout and r.stderr else "") + (r.stderr or "")).strip()[:4000]
+        output = "\n".join(p for p in (r.stdout or "", r.stderr or "") if p).strip()[:4000]
         if output:
             from agent.redact import redact_sensitive_text
             output = redact_sensitive_text(output)
@@ -800,14 +800,11 @@ def _cmd_undo(rid, params, session, name, arg):
     session_key = session.get("session_key", "")
     if not session_key:
         return _err(rid, 4001, "no session key for undo")
-    n = 1
     arg_str = (arg or "").strip()
-    if arg_str:
-        try:
-            n = int(arg_str.split()[0])
-        except (ValueError, IndexError):
-            return _err(rid, 4004, f"undo: invalid count {arg_str!r} — use /undo or /undo N")
-    n = max(n, 1)
+    try:
+        n = max(int(arg_str.split()[0]), 1) if arg_str else 1
+    except (ValueError, IndexError):
+        return _err(rid, 4004, f"undo: invalid count {arg_str!r} — use /undo or /undo N")
     from agent.message_content import flatten_message_text
     with session["history_lock"]:
         if busy := _busy_error(rid, session, "undo"):
@@ -971,17 +968,15 @@ def _(rid, params: dict) -> dict:
 
 
 @method("insights.get")
+@_guarded(5017)
 def _(rid, params: dict) -> dict:
     days = params.get("days", 30)
     db = _get_db()
     if db is None:
         return _db_unavailable_error(rid, code=5017)
-    try:
-        cutoff = time.time() - days * 86400
-        rows = [s for s in db.list_sessions_rich(limit=500, compact_rows=True) if (s.get("started_at") or 0) >= cutoff]
-        return _ok(rid, {"days": days, "sessions": len(rows), "messages": sum(s.get("message_count", 0) for s in rows)})
-    except Exception as e:
-        return _err(rid, 5017, str(e))
+    cutoff = time.time() - days * 86400
+    rows = [s for s in db.list_sessions_rich(limit=500, compact_rows=True) if (s.get("started_at") or 0) >= cutoff]
+    return _ok(rid, {"days": days, "sessions": len(rows), "messages": sum(s.get("message_count", 0) for s in rows)})
 
 
 @method("rollback.list")

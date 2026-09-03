@@ -87,11 +87,9 @@ def _live_session_messages(session: dict) -> Optional[list]:
     profile's state.db, and through the launch handle this read comes back empty."""
     with _session_db(session) as db:
         if db is not None and session.get("session_key"):
-            try:
+            with contextlib.suppress(Exception):
                 return db.get_messages_as_conversation(
                     session["session_key"], include_ancestors=True, include_row_ids=True)
-            except Exception:
-                pass
     return None
 
 
@@ -129,6 +127,7 @@ def _format_live_prompt_output(sid: str, session: dict, arg: str) -> str:
 
 
 def _format_live_context_output(sid: str, session: dict, arg: str) -> str:
+    from collections import Counter
     try:
         messages = _history_to_messages(_live_session_messages(session) or [])
     except Exception:
@@ -139,10 +138,7 @@ def _format_live_context_output(sid: str, session: dict, arg: str) -> str:
     usage = _session_usage_snapshot(session)
     mirror = _metadata_mirror(session)
     lines = [f"Conversation: {len(messages)} messages" if messages else "Conversation is empty (no messages yet)."]
-    roles: dict[str, int] = {}
-    for msg in messages:
-        role = str(msg.get("role") or "unknown")
-        roles[role] = roles.get(role, 0) + 1
+    roles = Counter(str(msg.get("role") or "unknown") for msg in messages)
     lines.append(
         f"  user: {roles.get('user', 0)}, assistant: {roles.get('assistant', 0)}, "
         f"tool: {roles.get('tool', 0)}, system: {roles.get('system', 0)}")
