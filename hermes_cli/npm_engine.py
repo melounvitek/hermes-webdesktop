@@ -93,9 +93,7 @@ def _repo_npm_range() -> str | None:
     except (OSError, ValueError):
         return None
     engines = data.get("engines")
-    if not isinstance(engines, dict):
-        return None
-    value = engines.get("npm")
+    value = engines.get("npm") if isinstance(engines, dict) else None
     return str(value).strip() if value else None
 
 

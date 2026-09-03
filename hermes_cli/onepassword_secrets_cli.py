@@ -392,5 +392,4 @@ def _op_whoami(binary: Path, account: str, *, token_value: str = "") -> Optional
         return None
     if res.returncode != 0:
         return None
-    out = (res.stdout or "").strip()
-    return out.replace("\n", " ")[:120] or "authenticated"
+    return (res.stdout or "").strip().replace("\n", " ")[:120] or "authenticated"
