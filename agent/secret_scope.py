@@ -109,16 +109,12 @@ def _environ_or(name: str, default: Optional[str]) -> Optional[str]:
 def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
     """Resolve a credential by env-var name, honoring the active profile scope.
 
-    1. Global vars (``_is_global_env``) always read ``os.environ``.
-    2. Scope installed: read from it. Under multiplexing the scope is
-       authoritative (a miss returns ``default``, never ``os.environ``, which
-       may hold another profile's value). With multiplexing OFF a miss falls
-       through to ``os.environ``: single-profile deployments legitimately
-       inject credentials via the process env (systemd, ``op run``, shell
-       exports) and the scope — installed around e.g. every cron job — must
-       stay a ``.env`` overlay, not a blindfold (otherwise cron 401s).
-    3. No scope: multiplex INACTIVE reads ``os.environ`` (legacy behavior);
-       ACTIVE raises ``UnscopedSecretError`` (fail closed).
+    Global vars always read ``os.environ``. With a scope installed, a miss returns
+    ``default`` under multiplexing (never another profile's ``os.environ`` value)
+    but falls through to ``os.environ`` otherwise — single-profile deployments
+    inject credentials via the process env (systemd, ``op run``), so the scope
+    must stay a ``.env`` overlay, not a blindfold (otherwise cron 401s). With no
+    scope: multiplex INACTIVE reads ``os.environ``; ACTIVE raises (fail closed).
     """
     if _is_global_env(name):
         return _environ_or(name, default)
@@ -143,15 +139,10 @@ def get_secret(name: str, default: Optional[str] = None) -> Optional[str]:
 
 
 def _strip_inline_comment(value: str) -> str:
-    """Strip a dotenv-style inline comment from a raw ``.env`` value.
-
-    Mirrors python-dotenv semantics: for quoted values scan to the matching
-    close quote (backslash-escape-aware for double quotes, since
-    ``save_env_value`` writes ``\\"``/``\\\\``) and drop a trailing ``# ...``;
-    other trailing junk (or an unterminated quote) leaves the value untouched.
-    Unquoted values truncate only at a ``#`` PRECEDED BY WHITESPACE, so
-    ``foo#bar`` and a leading ``#`` survive while ``value # comment`` → ``value``.
-    """
+    """Strip a dotenv-style inline comment (python-dotenv semantics): quoted values
+    scan to the matching close quote (backslash-aware for double quotes) and drop a
+    trailing ``# ...``, else stay untouched; unquoted values truncate only at a
+    ``#`` PRECEDED BY WHITESPACE (``foo#bar`` survives, ``value # c`` → ``value``)."""
     value = value.strip()
     if not value:
         return value
@@ -171,14 +162,9 @@ def _strip_inline_comment(value: str) -> str:
 
 
 def load_env_file(env_path: Path) -> Dict[str, str]:
-    """Parse a ``.env`` file into a dict WITHOUT touching ``os.environ``.
-
-    Handles the subset Hermes writes (``export`` prefix, full-line and inline
-    ``#`` comments, quotes with the writer's escapes reversed via the canonical
-    ``_parse_env_value`` — stripping only outer quotes would corrupt credentials
-    containing ``"`` or ``\\``). ``utf-8-sig`` so a Windows BOM doesn't prefix
-    the first key as ``\\ufeffNAME``.
-    """
+    """Parse a ``.env`` file into a dict WITHOUT touching ``os.environ``: ``export``
+    prefix, ``#`` comments, and the writer's quote escapes reversed via the canonical
+    ``_parse_env_value``. ``utf-8-sig`` so a BOM doesn't prefix the first key."""
     secrets: Dict[str, str] = {}
     try:
         text = env_path.read_text(encoding="utf-8-sig")

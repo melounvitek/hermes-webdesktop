@@ -47,9 +47,8 @@ _BWS_CHECKSUM_NAME = f"bws-sha256-checksums-{_BWS_VERSION}.txt"
 _BWS_DOWNLOAD_TIMEOUT = 60
 _BWS_RUN_TIMEOUT = 30
 
-# Cache layout: <hermes_home>/cache/bws_cache.json holds only secret VALUES
-# (never the access token) — plaintext-equivalent to .env but kept out of it so
-# users editing .env don't commit BSM-sourced secrets.
+# <hermes_home>/cache/bws_cache.json holds only secret VALUES (never the access
+# token); kept out of .env so users editing .env don't commit BSM-sourced secrets.
 _CacheKey = Tuple[str, str, str]  # (access_token_fingerprint, project_id, server_url)
 _DISK_CACHE_BASENAME = "bws_cache.json"
 _ENCRYPTED_CACHE_BASENAME = "bws_cache.enc.json"
@@ -129,8 +128,7 @@ def _platform_asset_name() -> str:
     if system == "Windows":
         return f"bws-{arch}-pc-windows-msvc-{_BWS_VERSION}.zip"
     if system == "Linux":
-        # glibc default; musl only if ldd says so (glibc prints to stderr, musl
-        # to stdout). A wrong guess surfaces as a loader error we catch.
+        # glibc default; musl only if ldd says so (a wrong guess surfaces as a loader error).
         libc = "gnu"
         try:
             res = subprocess.run(["ldd", "--version"], capture_output=True, text=True, encoding='utf-8',
@@ -145,11 +143,8 @@ def _platform_asset_name() -> str:
 
 
 def install_bws(*, force: bool = False) -> Path:
-    """Download, verify, and install the pinned ``bws`` binary; raises on any failure.
-
-    The auto-install path catches; ``hermes secrets bitwarden setup`` lets the
-    error propagate so the wizard can show it.
-    """
+    """Download, verify, and install the pinned ``bws`` binary; raises on any failure
+    (the auto-install path catches; the setup wizard shows the error)."""
     bin_dir = _hermes_bin_dir()
     bin_dir.mkdir(parents=True, exist_ok=True)
     target = bin_dir / _platform_binary_name()
@@ -222,11 +217,8 @@ def _pick_zip_member(zf: zipfile.ZipFile, binary_name: str) -> str:
 
 
 def _safe_extract_member(zf: zipfile.ZipFile, member: str, dest_dir: Path) -> Path:
-    """Extract one member, refusing zip-slip (``../`` or absolute member names).
-
-    ``ZipFile.extract`` joins the member onto ``dest_dir`` without verifying the
-    result stays inside it, so containment is checked here first.
-    """
+    """Extract one member, refusing zip-slip: ``ZipFile.extract`` never verifies the
+    joined path stays inside ``dest_dir``, so containment is checked here first."""
     dest_root = os.path.realpath(dest_dir)
     target = os.path.realpath(os.path.join(dest_root, member))
     try:  # commonpath raises for e.g. different Windows drives — treat as escape
@@ -248,12 +240,8 @@ def _b64e(raw: bytes) -> str:
 
 
 def _derive_encrypted_cache_key(access_token: str, salt: bytes) -> bytes:
-    """HKDF the local cache key from the bootstrap BWS token.
-
-    cryptography is imported lazily: most CLI commands import this module while
-    building argparse, and eagerly mapping ``_rust.pyd`` on Windows blocks the
-    updater from replacing that file.
-    """
+    """HKDF the local cache key from the bootstrap BWS token. cryptography is imported
+    lazily: eagerly mapping ``_rust.pyd`` on Windows blocks the updater replacing it."""
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.kdf.hkdf import HKDF
 
@@ -263,11 +251,8 @@ def _derive_encrypted_cache_key(access_token: str, salt: bytes) -> bytes:
 
 def _write_encrypted_disk_cache(*, cache_key: _CacheKey, access_token: str, entry: _CachedFetch,
                                 home_path: Optional[Path] = None) -> None:
-    """Persist an AES-GCM encrypted last-good entry atomically (best-effort).
-
-    The raw token is never stored; it only derives the key. A successful write
-    completes migration, so the legacy plaintext cache is removed.
-    """
+    """Persist an AES-GCM encrypted last-good entry atomically (best-effort). The raw
+    token only derives the key; a successful write removes the legacy plaintext cache."""
     try:
         from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
@@ -397,12 +382,8 @@ def fetch_bitwarden_secrets(
 
 
 def _summarize_bws_stderr(raw: str) -> str:
-    """Reduce a bws (Rust color-eyre) error dump to its cause line(s).
-
-    Keeps the numbered ``0: ...`` cause lines (joined with ``; ``), drops
-    everything from ``Location:``/``Backtrace omitted`` on, and falls back to
-    the stripped raw text when the shape is unrecognized.
-    """
+    """Reduce a bws (color-eyre) error dump to its numbered cause lines joined with
+    ``; `` (dropping ``Location:``/``Backtrace`` on); raw text if unrecognized."""
     text = raw.replace("\x1b", "").strip()
     if not text:
         return text
@@ -460,12 +441,8 @@ def _run_bws_list(bws: Path, access_token: str, project_id: str, server_url: str
 
 
 class BitwardenSource(SecretSource):
-    """Bitwarden Secrets Manager as a registered **bulk** source.
-
-    ``fetch()`` only fetches — precedence, overrides and the ``os.environ``
-    writes are the orchestrator's. Bulk: it injects every secret in the BSM
-    project, so explicit per-var bindings from mapped sources outrank it.
-    """
+    """Bitwarden Secrets Manager as a registered **bulk** source (injects every
+    secret in the project, so explicit mapped bindings outrank it)."""
 
     name = "bitwarden"
     label = "Bitwarden Secrets Manager"
@@ -543,11 +520,7 @@ class BitwardenSource(SecretSource):
 
 
 def clear_caches(home_path: Optional[Path] = None) -> None:
-    """Drop in-process AND disk caches (plaintext and encrypted).
-
-    Used after a token rotation so the next startup fetches fresh instead of
-    serving a pull cached under the old token's fingerprint.
-    """
+    """Drop in-process AND disk caches (plaintext and encrypted), e.g. after a token rotation."""
     _STORE.clear(home_path)
     try:
         _encrypted_disk_cache_path(home_path).unlink()

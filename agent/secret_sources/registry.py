@@ -101,13 +101,9 @@ def _validate_source(source: SecretSource) -> Optional[str]:
 
 def register_source(source: SecretSource, *, replace: bool = False, builtin: bool = False,
                     scope: Optional[str] = None) -> bool:
-    """Register a secret source. Returns True on success.
-
-    Rejections are logged, never raised — a bad plugin must not take down
-    startup. ``replace`` lets tests / user plugins override a same-named
-    source (last-writer-wins); scheme collisions across *different* names are
-    always rejected.
-    """
+    """Register a secret source; True on success. Rejections are logged, never
+    raised. ``replace`` allows same-name override (last-writer-wins); scheme
+    collisions across *different* names are always rejected."""
     problem = _validate_source(source)
     if problem:
         logger.warning(problem)
@@ -188,11 +184,8 @@ def list_plugin_sources() -> List[SecretSource]:
 
 
 def _ensure_builtin_sources() -> None:
-    """Idempotently register the bundled sources.
-
-    Lazy so importing this module stays cheap, and per-source guarded so a
-    broken bundled source can never break registration of the others.
-    """
+    """Idempotently register the bundled sources (lazy so import stays cheap;
+    per-source guarded so one broken source can't block the others)."""
     global _BUILTINS_LOADED
     with _REGISTRY_LOCK:
         if _BUILTINS_LOADED:
@@ -222,10 +215,9 @@ def _fetch_with_timeout(source: SecretSource, cfg: dict, home_path: Path,
                         environ: MutableMapping[str, str]) -> FetchResult:
     """Run source.fetch() under a wall-clock budget; never raises.
 
-    A daemon worker thread enforces the budget: a source that blows it is
-    reported as TIMEOUT and its eventual result discarded. The thread may
-    linger until process exit — acceptable for a startup-only path, and far
-    better than an unbounded hang on every ``hermes`` invocation.
+    A worker thread enforces the budget: a source that blows it is reported as
+    TIMEOUT and its eventual result discarded (the thread may linger until
+    process exit — acceptable for a startup-only path).
     """
     timeout = source.fetch_timeout_seconds(cfg)
     executor = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix=f"secret-src-{source.name}")
@@ -263,9 +255,8 @@ def _section(secrets_cfg: dict, name: str) -> dict:
 
 
 def _ordered_enabled_sources(secrets_cfg: dict, *, scope: Optional[str] = None) -> List[SecretSource]:
-    """Which sources run, in which order: ``secrets.sources`` first, then the
-    rest in registration order; enabled = the source's own ``is_enabled``.
-    Mapped-vs-bulk precedence is applied on top by :func:`apply_all`."""
+    """Enabled sources: ``secrets.sources`` order first, then registration order
+    (mapped-vs-bulk precedence is applied on top by :func:`apply_all`)."""
     sources = {source.name: source for source in list_sources(scope=scope)}
 
     explicit = secrets_cfg.get("sources")

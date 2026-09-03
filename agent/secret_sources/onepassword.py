@@ -97,12 +97,8 @@ def _validate_references(references: Optional[Dict[str, str]]) -> Tuple[Dict[str
 
 
 def _auth_fingerprint(token_env: str) -> str:
-    """SHA-256 prefix over everything `op` would authenticate with.
-
-    Folds in the service-account token, OP_ACCOUNT, Connect host/token and all
-    ``OP_SESSION_*`` vars, so signing into a different identity changes the
-    cache key and a value cached under the old identity is never served.
-    """
+    """SHA-256 prefix over everything `op` would authenticate with (token, account,
+    Connect host/token, ``OP_SESSION_*``), so a new identity never sees old cached values."""
     source_env = get_source_environment()
     parts: List[str] = [f"{label}={source_env.get(var, '')}" for label, var in (
         ("token", token_env), ("account", "OP_ACCOUNT"),
@@ -116,11 +112,8 @@ def _refs_fingerprint(references: Dict[str, str]) -> str:
 
 
 def find_op(binary_path: str = "") -> Optional[Path]:
-    """Resolve a usable ``op`` binary, or None.
-
-    A pinned ``binary_path`` is used verbatim (PATH is NOT consulted) and a
-    pinned-but-missing path returns None rather than silently falling back.
-    """
+    """Resolve a usable ``op`` binary, or None. A pinned ``binary_path`` is used
+    verbatim — pinned-but-missing returns None rather than falling back to PATH."""
     if binary_path:
         pinned = Path(binary_path)
         return pinned if pinned.exists() and os.access(pinned, os.X_OK) else None
@@ -146,11 +139,8 @@ def _op_child_env(token_value: str) -> Dict[str, str]:
 
 
 def _run_op_read(op: Path, reference: str, *, account: str = "", token_value: str = "") -> str:
-    """Resolve one ``op://`` reference; raises ``RuntimeError`` on any failure.
-
-    An exit-0 empty/whitespace-only value is a failure too — applying it would
-    silently clobber a good .env/shell credential with ``""``.
-    """
+    """Resolve one ``op://`` reference; raises ``RuntimeError`` on any failure, including
+    an exit-0 empty value (applying it would clobber a good credential with ``""``)."""
     cmd: List[str] = [str(op), "read"]
     if account:
         cmd += ["--account", account]
@@ -179,10 +169,9 @@ def fetch_onepassword_secrets(
 ) -> Tuple[Dict[str, str], List[str]]:
     """Resolve ``references`` (name → ``op://…``) to ``(secrets, warnings)``.
 
-    Raises ``RuntimeError`` only when no ``op`` binary is available. Per-ref
-    failures become warnings and the ref is dropped, so one bad entry never
-    sinks the rest. Only a complete, error-free pull is cached, so a transient
-    auth failure isn't frozen in for the whole TTL window.
+    Raises ``RuntimeError`` only when no ``op`` binary is available; per-ref
+    failures become warnings. Only a complete, error-free pull is cached, so a
+    transient auth failure isn't frozen in for the whole TTL window.
     """
     valid, warnings = _validate_references(references)
     if not valid:
@@ -232,13 +221,9 @@ def apply_onepassword_secrets(
     override_existing: bool = True, cache_ttl_seconds: float = 300, home_path: Optional[Path] = None,
 ) -> FetchResult:
     """Resolve configured ``op://`` references and set them on ``os.environ``
-    (``hermes secrets onepassword sync --apply``).
-
-    Never raises. References already satisfied by the environment (when
-    ``override_existing`` is false) and the token var itself are skipped
-    *before* fetching, so ``op`` is never invoked for a value that would be
-    discarded.
-    """
+    (``hermes secrets onepassword sync --apply``). Never raises. Refs already
+    satisfied by the env (when ``override_existing`` is false) and the token var
+    are skipped *before* fetching, so ``op`` never runs for a discarded value."""
     result = FetchResult()
     if not enabled:
         return result
@@ -282,12 +267,8 @@ def apply_onepassword_secrets(
 
 
 class OnePasswordSource(SecretSource):
-    """1Password as a registered **mapped** source.
-
-    ``fetch()`` only fetches — precedence, overrides and the ``os.environ``
-    writes are the orchestrator's. Mapped: the user explicitly binds each env
-    var to an ``op://`` ref, so its claims outrank bulk sources on contested vars.
-    """
+    """1Password as a registered **mapped** source (explicit per-var bindings, so
+    its claims outrank bulk sources on contested vars)."""
 
     name = "onepassword"
     label = "1Password"
