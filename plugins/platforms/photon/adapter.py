@@ -131,15 +131,14 @@ def _sidecar_pid_alive(pid: Any) -> bool:
         return bool(_pid_exists(pid_int))
     except Exception:
         pass
-    if os.name == "posix":
-        try:
-            os.kill(pid_int, 0)  # windows-footgun: ok — inside os.name == "posix" guard
-        except PermissionError:
-            return True
-        except OSError:  # incl. ProcessLookupError
-            return False
+    if os.name != "posix":  # os.kill(pid, 0) is destructive on Windows — assume alive; the HTTP send arbitrates
         return True
-    # Windows without psutil: os.kill(pid, 0) is destructive — assume alive; the HTTP send arbitrates.
+    try:
+        os.kill(pid_int, 0)  # windows-footgun: ok — inside os.name == "posix" guard
+    except PermissionError:
+        return True
+    except OSError:  # incl. ProcessLookupError
+        return False
     return True
 
 
@@ -173,11 +172,9 @@ class PhotonSidecarError(RuntimeError):
 def _sidecar_error_from_response(path: str, status_code: int, text: str,
                                  data: Optional[Dict[str, Any]] = None) -> PhotonSidecarError:
     if data is None:
-        try:
-            parsed = json.loads(text)
-        except Exception:
-            parsed = {}
-        data = parsed if isinstance(parsed, dict) else {}
+        with contextlib.suppress(Exception):
+            data = json.loads(text)
+        data = data if isinstance(data, dict) else {}
     error = str(data.get("error") or text[:200] or "sidecar error")
     error_class = str(data.get("error_class") or "sidecar_error")
     retryable = bool(data.get("retryable"))
@@ -201,8 +198,7 @@ def _is_timeout_error(exc: BaseException) -> bool:
     """True when *exc* indicates the request timed out (call hung)."""
     if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
         return True
-    timeout_exc = getattr(httpx, "TimeoutException", None) if HTTPX_AVAILABLE else None
-    if timeout_exc is not None and isinstance(exc, timeout_exc):
+    if HTTPX_AVAILABLE and isinstance(exc, httpx.TimeoutException):
         return True
     return "timeout" in type(exc).__name__.lower()
 
@@ -259,21 +255,19 @@ def _reinstall_sidecar_deps() -> None:
     except subprocess.TimeoutExpired:  # retried on the next reconnect tick
         logger.error("[photon] sidecar dependency reinstall timed out after %ss", _NPM_REINSTALL_TIMEOUT)
         return
-    if result.returncode != 0:
-        logger.error("[photon] sidecar dependency reinstall failed: %s",
-                     (result.stderr or result.stdout or "").strip())
-    else:
+    if result.returncode == 0:
         logger.info("[photon] sidecar dependencies reinstalled from lockfile")
+    else:
+        logger.error("[photon] sidecar dependency reinstall failed: %s", (result.stderr or result.stdout or "").strip())
 
 
 def validate_config(cfg: PlatformConfig) -> bool:
     extra = cfg.extra or {}
-    project_id = extra.get("project_id") or _get_scoped_secret("PHOTON_PROJECT_ID")
-    project_secret = extra.get("project_secret") or _get_scoped_secret("PHOTON_PROJECT_SECRET")
-    if not project_id or not project_secret:
-        stored_id, stored_sec = load_project_credentials()  # auth.json fallback
-        return bool(stored_id and stored_sec)
-    return True
+    if (extra.get("project_id") or _get_scoped_secret("PHOTON_PROJECT_ID")) and (
+            extra.get("project_secret") or _get_scoped_secret("PHOTON_PROJECT_SECRET")):
+        return True
+    stored_id, stored_sec = load_project_credentials()  # auth.json fallback
+    return bool(stored_id and stored_sec)
 
 
 def is_connected(cfg: PlatformConfig) -> bool:
@@ -306,9 +300,7 @@ def _url_only_candidate(text: str) -> Optional[str]:
         parsed = urlparse(candidate)
     except ValueError:
         return None
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.netloc:
-        return None
-    return candidate
+    return candidate if parsed.scheme.lower() in {"http", "https"} and parsed.netloc else None
 
 
 def _richlink_candidate(text: str) -> Optional[str]:
@@ -331,15 +323,10 @@ def _group_item_contents(content: Dict[str, Any]) -> List[Dict[str, Any]]:
 
 def _richlink_url_from_content(content: Dict[str, Any]) -> Optional[str]:
     ctype = content.get("type")
-    if ctype == "text":
-        return _url_only_candidate(content.get("text") or "")
-    if ctype == "richlink":
-        return _url_only_candidate(content.get("url") or "")
+    if ctype in ("text", "richlink"):
+        return _url_only_candidate(content.get("text" if ctype == "text" else "url") or "")
     if ctype == "group":
-        for item_content in _group_item_contents(content):
-            url = _richlink_url_from_content(item_content)
-            if url:
-                return url
+        return next((u for u in map(_richlink_url_from_content, _group_item_contents(content)) if u), None)
     return None
 
 
@@ -351,11 +338,12 @@ def _is_richlink_preview_attachment(payload: Dict[str, Any]) -> bool:
 
 
 def _richlink_preview_label(content: Dict[str, Any]) -> str:
+    def _label(c: Dict[str, Any]) -> str:
+        return str(c.get("name") or c.get("id") or "(unnamed)")
     if content.get("type") == "attachment":
-        return str(content.get("name") or content.get("id") or "(unnamed)")
+        return _label(content)
     if content.get("type") == "group":
-        labels = [str(c.get("name") or c.get("id") or "(unnamed)") for c in _group_item_contents(content)]
-        return ", ".join(labels) or "(group)"
+        return ", ".join(_label(c) for c in _group_item_contents(content)) or "(group)"
     return "(unknown)"
 
 
@@ -405,12 +393,7 @@ def _normalize_group_content(content: Dict[str, Any]) -> _Normalized:
     media_types: List[str] = []
     for item_content in _group_item_contents(content):
         item_type = item_content.get("type")
-        if item_type == "text":
-            if item_content.get("text"):
-                text_parts.append(item_content["text"])
-        elif item_type == "richlink":
-            text_parts.append(_format_richlink_content(item_content))
-        elif item_type in {"attachment", "voice"}:
+        if item_type in {"attachment", "voice"}:
             marker, item_mtype, item_urls, item_types = _normalize_binary_payload(item_content)
             if mtype == MessageType.TEXT:
                 mtype = item_mtype
@@ -418,14 +401,16 @@ def _normalize_group_content(content: Dict[str, Any]) -> _Normalized:
             media_types.extend(item_types)
             if not item_urls:
                 text_parts.append(marker)
+        elif item_type == "text":
+            text_parts.append(item_content.get("text") or "")
+        elif item_type == "richlink":
+            text_parts.append(_format_richlink_content(item_content))
         elif item_type:
             text_parts.append(f"[Photon content type not handled: {item_type}]")
     if media_urls and mtype == MessageType.TEXT:
         mtype = MessageType.DOCUMENT
     text = "\n".join(part for part in text_parts if part).strip()
-    if not text:
-        text = "(attachment)" if media_urls else "[Photon empty group received]"
-    return text, mtype, media_urls, media_types
+    return text or ("(attachment)" if media_urls else "[Photon empty group received]"), mtype, media_urls, media_types
 
 
 _CONTENT_NORMALIZERS: Dict[Any, Callable[[Dict[str, Any]], _Normalized]] = {
@@ -449,7 +434,8 @@ def _attachment_body(space_id: str, safe_path: str, *, kind: str, name: Optional
                      mime_type: Optional[str] = None, caption: Optional[str] = None) -> Dict[str, Any]:
     """``/send-attachment`` body; spectrum-ts infers name/mimeType from the extension,
     so optional keys are only sent when Hermes supplied them."""
-    body: Dict[str, Any] = {"spaceId": space_id, "path": safe_path, "kind": kind}
+    body: Dict[str, Any] = {
+        "spaceId": space_id, "path": safe_path, "kind": "voice" if kind == "voice" else "attachment"}
     body.update({k: v for k, v in (("name", name), ("mimeType", mime_type), ("caption", caption)) if v})
     return body
 
@@ -534,10 +520,10 @@ class PhotonAdapter(BasePlatformAdapter):
         self._typing_last_sent: Dict[str, float] = {}
         self._pending_fffc: Dict[str, tuple[float, Any]] = {}  # chat_key → (timestamp, asyncio.Task)
         # Group-chat mention gating (parity with BlueBubbles); DMs are never gated.
-        _require_mention = extra.get("require_mention")
-        if _require_mention is None:
-            _require_mention = _get_scoped_secret("PHOTON_REQUIRE_MENTION")
-        self.require_mention = str(_require_mention).strip().lower() in {"true", "1", "yes", "on"}
+        require_mention = extra.get("require_mention")
+        if require_mention is None:
+            require_mention = _get_scoped_secret("PHOTON_REQUIRE_MENTION")
+        self.require_mention = str(require_mention).strip().lower() in {"true", "1", "yes", "on"}
         self._mention_patterns = self._compile_mention_patterns(
             extra["mention_patterns"] if "mention_patterns" in extra
             else _get_scoped_secret("PHOTON_MENTION_PATTERNS"))
@@ -555,13 +541,9 @@ class PhotonAdapter(BasePlatformAdapter):
 
     def _clean_mention_text(self, text: str) -> str:
         """Strip a leading wake word only (patterns are regexes; never touch later words)."""
-        if not text:
-            return text
-        for pattern in self._mention_patterns:
-            match = pattern.match(text.lstrip())
-            if match:
-                cleaned = text.lstrip()[match.end():].lstrip(" ,:-")
-                return cleaned or text
+        stripped = text.lstrip() if text else ""
+        for match in filter(None, (pattern.match(stripped) for pattern in self._mention_patterns)):
+            return stripped[match.end():].lstrip(" ,:-") or text
         return text
 
     # -- Sidecar HTTP plumbing ------------------------------------------------------
@@ -747,10 +729,10 @@ class PhotonAdapter(BasePlatformAdapter):
     def _cancel_pending_fffc(self, chat_key: str) -> bool:
         """Pop and cancel a pending U+FFFC timeout; True when a live task was cancelled."""
         prev = self._pending_fffc.pop(chat_key, None)
-        if prev and prev[1] and not prev[1].done():
+        live = bool(prev and prev[1] and not prev[1].done())
+        if live:
             prev[1].cancel()
-            return True
-        return False
+        return live
 
     async def _dispatch_inbound(self, event: Dict[str, Any]) -> None:
         """Normalize a sidecar inbound event ``{messageId, space: {id, type: dm|group, phone},
@@ -838,11 +820,11 @@ class PhotonAdapter(BasePlatformAdapter):
     def _quick_stdout(cmd: List[str]) -> Optional[str]:
         """stdout of a short shell-out, or None if it failed to run."""
         try:
-            out = subprocess.run(  # noqa: S603, S607
-                cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5.0, check=False)
+            return subprocess.run(  # noqa: S603, S607
+                cmd, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5.0,
+                check=False).stdout
         except (OSError, subprocess.TimeoutExpired):
             return None
-        return out.stdout
 
     @classmethod
     def _find_listener_pids(cls, port: int) -> List[int]:
@@ -860,9 +842,9 @@ class PhotonAdapter(BasePlatformAdapter):
     def _pid_alive(pid: int) -> bool:
         try:
             os.kill(pid, 0)  # windows-footgun: ok — only called from _reap_stale_sidecar which win32-guards early
-            return True
         except OSError:
             return False
+        return True
 
     async def _reap_stale_sidecar(self) -> None:
         """Kill an orphaned sidecar squatting our port (a SIGKILLed gateway leaves one whose
@@ -1306,10 +1288,8 @@ class PhotonAdapter(BasePlatformAdapter):
     def _is_retryable_error(error: Optional[str]) -> bool:
         if BasePlatformAdapter._is_retryable_error(error):
             return True
-        if not error:
-            return False
-        lowered = error.lower()
-        if "retryable=false" in lowered or "auth_or_config" in lowered:
+        lowered = (error or "").lower()
+        if not lowered or "retryable=false" in lowered or "auth_or_config" in lowered:
             return False
         return any(pat in lowered for pat in _PHOTON_RETRYABLE_PATTERNS)
 
@@ -1371,10 +1351,10 @@ class PhotonAdapter(BasePlatformAdapter):
         try:
             data = await self._sidecar_call(path, body)
         except PhotonSidecarError as e:
-            if not structured:
-                return SendResult(success=False, error=str(e))
-            return SendResult(success=False, error=str(e), retryable=e.retryable,
-                              raw_response={"error_class": e.error_class, "retryable": e.retryable})
+            if structured:
+                return SendResult(success=False, error=str(e), retryable=e.retryable,
+                                  raw_response={"error_class": e.error_class, "retryable": e.retryable})
+            return SendResult(success=False, error=str(e))
         except Exception as e:
             return SendResult(success=False, error=str(e))
         self._record_sent_message(data.get("messageId"))
@@ -1416,8 +1396,7 @@ class PhotonAdapter(BasePlatformAdapter):
         if not safe_path:
             return SendResult(success=False, error=f"unsafe or missing attachment path: {path}")
         body = _attachment_body(
-            space_id, safe_path, kind="voice" if kind == "voice" else "attachment",
-            name=name, mime_type=mime_type or _guess_mime(safe_path), caption=caption)
+            space_id, safe_path, kind=kind, name=name, mime_type=mime_type or _guess_mime(safe_path), caption=caption)
         return await self._post_send("/send-attachment", body, structured=True)
 
     async def _sidecar_call(self, path: str, body: Dict[str, Any]) -> Dict[str, Any]:
@@ -1490,12 +1469,10 @@ def _cache_inbound_attachment(content: Dict[str, Any], name: str, mime: str, *,
 def _standalone_error(resp: Any) -> Dict[str, Any]:
     """Structured error dict for a failed standalone call (mirrors
     ``_sidecar_error_from_response``, incl. the canonical target_not_allowed text)."""
-    try:
+    data: Any = {}
+    with contextlib.suppress(Exception):
         data = resp.json() or {}
-    except Exception:
-        data = {}
-    if not isinstance(data, dict):
-        data = {}
+    data = data if isinstance(data, dict) else {}
     error_class = str(data.get("error_class") or "sidecar_error")
     retryable = bool(data.get("retryable"))
     if error_class == "target_not_allowed":
@@ -1553,20 +1530,17 @@ async def _standalone_send(
                 return resp, (data if data.get("ok") else None)
             if message:  # 1. text body first, so it leads the conversation
                 rich_url = _richlink_candidate(message)
+                data = None
                 if rich_url:
                     _resp, data = await _post("/send-richlink", {"spaceId": chat_id, "url": rich_url})
-                    if data:
-                        last_message_id = data.get("messageId")
-                    else:
-                        rich_url = None
-                if not rich_url:
+                if not data:  # no URL-only message, or the rich-link send failed: plain text
                     send_body: Dict[str, Any] = {"spaceId": chat_id, "text": message[:_MAX_MESSAGE_LENGTH]}
-                    if _markdown_enabled() and not _richlink_candidate(message):
+                    if _markdown_enabled() and not rich_url:
                         send_body["format"] = "markdown"
                     resp, data = await _post("/send", send_body)
                     if not data:
                         return _standalone_error(resp)
-                    last_message_id = data.get("messageId")
+                last_message_id = data.get("messageId")
             # 2. Each attachment as a separate /send-attachment call; media_files is
             #    List[Tuple[path, is_voice]] (filter_media_delivery_paths).
             for media_path, is_voice in media_files or []:

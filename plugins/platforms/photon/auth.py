@@ -64,8 +64,7 @@ def _load_auth() -> Dict[str, Any]:
     if not path.exists():
         return {}
     try:
-        with path.open("r", encoding="utf-8") as fh:
-            return json.load(fh) or {}
+        return json.loads(path.read_text(encoding="utf-8")) or {}
     except (OSError, json.JSONDecodeError) as e:
         logger.warning("photon: could not read %s: %s", path, e)
         return {}
@@ -116,13 +115,10 @@ def _store_pool_record(key: str, record: Dict[str, Any]) -> None:
 def load_photon_token() -> Optional[str]:
     """Return the device-flow bearer token stored by ``login()`` or ``None``."""
     auth = _load_auth()
-    entry = _pool_first(auth, "photon")
-    if entry is not None:
-        token = entry.get("access_token") or entry.get("token")
-        if token:
-            return str(token)
+    entry = _pool_first(auth, "photon") or {}
     legacy = auth.get("providers", {}).get("photon", {})  # backwards-compat shape
-    return str(legacy["access_token"]) if legacy.get("access_token") else None
+    token = entry.get("access_token") or entry.get("token") or legacy.get("access_token")
+    return str(token) if token else None
 
 
 def store_photon_token(token: str) -> None:
@@ -154,7 +150,7 @@ def check_photon_token_valid(token: str) -> bool:
     except PhotonDashboardAuthError:
         return False
     except Exception:
-        return True
+        pass
     return True
 
 
@@ -166,10 +162,10 @@ def load_project_credentials() -> Tuple[Optional[str], Optional[str]]:
     if env_id and env_sec:
         return env_id, env_sec
     entry = _pool_first(_load_auth(), "photon_project")
-    if entry is not None:  # back-compat: old records used "project_id" for the spectrum id
-        sid = entry.get("spectrum_project_id") or entry.get("project_id")
-        return (env_id or sid, env_sec or entry.get("project_secret"))
-    return env_id, env_sec
+    if entry is None:
+        return env_id, env_sec
+    # back-compat: old records used "project_id" for the spectrum id
+    return env_id or entry.get("spectrum_project_id") or entry.get("project_id"), env_sec or entry.get("project_secret")
 
 
 def load_dashboard_project_id() -> Optional[str]:
@@ -178,10 +174,8 @@ def load_dashboard_project_id() -> Optional[str]:
     env_id = _get_scoped_secret("PHOTON_DASHBOARD_PROJECT_ID")
     if env_id:
         return env_id
-    entry = _pool_first(_load_auth(), "photon_project")
-    if entry is not None:
-        return entry.get("spectrum_project_id") or entry.get("dashboard_project_id") or entry.get("project_id")
-    return None
+    entry = _pool_first(_load_auth(), "photon_project") or {}
+    return entry.get("spectrum_project_id") or entry.get("dashboard_project_id") or entry.get("project_id")
 
 
 def store_project_credentials(
@@ -261,10 +255,9 @@ def _dashboard_post(path: str, body: Dict[str, Any], token: str, *, what: str = 
 
 
 def _response_error_detail(resp: Any) -> str:
-    try:
+    data = None
+    with contextlib.suppress(Exception):
         data = resp.json()
-    except Exception:
-        data = None
     if isinstance(data, dict):
         for key in ("error", "message", "detail"):
             if data.get(key):
@@ -276,9 +269,8 @@ def _response_error_detail(resp: Any) -> str:
 
 def _raise_for_status(resp: Any, action: str) -> None:
     status = getattr(resp, "status_code", 200)
-    if status < 400:
-        return
-    raise RuntimeError(f"Photon {action} failed: HTTP {status}: {_response_error_detail(resp)}")
+    if status >= 400:
+        raise RuntimeError(f"Photon {action} failed: HTTP {status}: {_response_error_detail(resp)}")
 
 
 def _safe(fn: Callable[[], None]) -> None:
@@ -347,12 +339,10 @@ def poll_for_token(
             logger.warning("photon: device-token poll failed: %s", e)
             continue
         if resp.status_code == 200:
-            body: Dict[str, Any] = {}
-            try:
-                decoded = resp.json() or {}
-                body = decoded if isinstance(decoded, dict) else {}
-            except (TypeError, ValueError, json.JSONDecodeError):
-                body = {}
+            body: Any = {}
+            with contextlib.suppress(TypeError, ValueError):  # json.JSONDecodeError is a ValueError
+                body = resp.json() or {}
+            body = body if isinstance(body, dict) else {}
             candidates = _device_response_token_candidates(body, headers=getattr(resp, "headers", {}))
             if not candidates:
                 raise RuntimeError(
@@ -369,7 +359,8 @@ def poll_for_token(
                 body = resp.json() or {}
             err = body.get("error") or body.get("message") or ""
             if err in ("authorization_pending", "slow_down"):
-                sleep += 5 if err == "slow_down" else 0
+                if err == "slow_down":
+                    sleep += 5
                 _pending()
                 continue
             if err in ("expired_token", "access_denied"):
@@ -404,9 +395,7 @@ def _clean_bearer_token(value: Any) -> Optional[str]:
     if not isinstance(value, str):
         return None
     token = value.strip()
-    if token.lower().startswith("bearer "):
-        token = token[7:].strip()
-    return token or None
+    return (token[7:].strip() if token.lower().startswith("bearer ") else token) or None
 
 
 def _header_value(headers: Optional[Any], name: str) -> Optional[str]:
@@ -427,20 +416,19 @@ def validate_photon_token(token: str) -> Dict[str, Any]:
     """Verify a device-flow token against ``/api/auth/get-session`` AND ``/api/projects/`` —
     the device flow can mint tokens that pass the session lookup but are rejected by the
     project APIs setup depends on."""
-    resp = _dashboard_get("/api/auth/get-session", token)
-    if resp.status_code in (401, 403):
-        raise PhotonDashboardAuthError("Photon issued a device token, but the dashboard session lookup rejected it.")
-    resp.raise_for_status()
-    data = resp.json()
+    def _get(path: str, rejected: str) -> Any:
+        resp = _dashboard_get(path, token)
+        if resp.status_code in (401, 403):
+            raise PhotonDashboardAuthError(rejected)
+        resp.raise_for_status()
+        return resp
+    data = _get("/api/auth/get-session",
+                "Photon issued a device token, but the dashboard session lookup rejected it.").json()
     user = data.get("user") if isinstance(data, dict) else None
     if not isinstance(user, dict) or not user:
         raise PhotonDashboardAuthError(
             "Photon issued a device token, but the dashboard session lookup did not recognize it.")
-    projects_resp = _dashboard_get("/api/projects/", token)
-    if projects_resp.status_code in (401, 403):
-        raise PhotonDashboardAuthError(
-            "Photon device token was accepted for the session lookup but rejected by the project API.")
-    projects_resp.raise_for_status()
+    _get("/api/projects/", "Photon device token was accepted for the session lookup but rejected by the project API.")
     return user
 
 
@@ -454,11 +442,10 @@ def _validated_dashboard_token(candidates: list) -> str:
         try:
             validate_photon_token(candidate.token)
             return candidate.token
-        except PhotonDashboardAuthError as exc:
-            dashboard_error = exc
-            last_error = exc
         except Exception as exc:
             last_error = exc
+            if isinstance(exc, PhotonDashboardAuthError):
+                dashboard_error = exc
     if dashboard_error is not None:
         sources = ", ".join(c.source for c in candidates) or "none"
         raise PhotonDashboardAuthError(
@@ -498,10 +485,10 @@ def _unwrap_list(data: Any) -> List[Dict[str, Any]]:
             if isinstance(inner, list):
                 return inner
             if isinstance(inner, dict):
-                for nested_key in ("projects", "users", "lines", "items"):
-                    nested = inner.get(nested_key)
-                    if isinstance(nested, list):
-                        return nested
+                nested = next((inner[k] for k in ("projects", "users", "lines", "items")
+                               if isinstance(inner.get(k), list)), None)
+                if nested is not None:
+                    return nested
     return []
 
 
@@ -541,8 +528,7 @@ def create_project(
     _raise_on_error_key(data, "create-project")
     if data.get("succeed") is False:
         raise RuntimeError(f"Photon create-project failed: {data.get('message') or data}")
-    project_candidate = data.get("data")
-    project: Dict[str, Any] = project_candidate if isinstance(project_candidate, dict) else data
+    project: Dict[str, Any] = data["data"] if isinstance(data.get("data"), dict) else data
     if not project.get("id"):
         raise RuntimeError("Photon create-project did not return a project id")
     return project
@@ -601,9 +587,9 @@ def create_user(
     data = resp.json() or {}
     _raise_on_error_key(data, "create-user")
     user = data.get("user") or data.get("data") or data
-    if isinstance(user, dict):
-        return user
-    raise RuntimeError("Photon create-user returned an unexpected response")
+    if not isinstance(user, dict):
+        raise RuntimeError("Photon create-user returned an unexpected response")
+    return user
 
 
 def register_user_if_absent(
@@ -614,9 +600,8 @@ def register_user_if_absent(
     existing = find_user_by_phone(project_id, project_secret, phone_number)
     if existing is not None:
         return existing, False
-    user = create_user(project_id, project_secret, phone_number=phone_number, first_name=first_name,
-                       last_name=last_name, email=email)
-    return user, True
+    return create_user(project_id, project_secret, phone_number=phone_number, first_name=first_name,
+                       last_name=last_name, email=email), True
 
 
 def user_assigned_line(user: Optional[Dict[str, Any]]) -> Optional[str]:
@@ -629,25 +614,21 @@ def user_assigned_line(user: Optional[Dict[str, Any]]) -> Optional[str]:
 def load_user_numbers() -> Tuple[Optional[str], Optional[str]]:
     """``(operator_phone_number, assigned_phone_number)`` for status."""
     entry = _pool_first(_load_auth(), "photon_user")
-    if isinstance(entry, dict):
-        phone = entry.get("phone_number") or entry.get("phoneNumber")
-        assigned = entry.get("assigned_phone_number") or entry.get("assignedPhoneNumber")
-        if phone or assigned:
-            return (str(phone) if phone else _configured_operator_phone(), str(assigned) if assigned else None)
-    return _configured_operator_phone(), None
+    entry = entry if isinstance(entry, dict) else {}
+    phone = entry.get("phone_number") or entry.get("phoneNumber")
+    assigned = entry.get("assigned_phone_number") or entry.get("assignedPhoneNumber")
+    return (str(phone) if phone else _configured_operator_phone(), str(assigned) if assigned else None)
 
 
 def refresh_user_numbers(project_id: str, project_secret: str) -> Tuple[Optional[str], Optional[str]]:
     """Refresh cached user numbers from Photon without provisioning anything."""
-    phone, cached_assigned = load_user_numbers()
-    user: Optional[Dict[str, Any]] = None
+    phone, assigned = load_user_numbers()
     if phone:
         user = find_user_by_phone(project_id, project_secret, phone)
     else:
         users = list_users(project_id, project_secret)
         user = users[0] if len(users) == 1 else None
     user_id = None
-    assigned: Optional[str] = cached_assigned
     if user:
         user_id = user.get("id")
         dashboard_phone = _normalize_phone(str(user.get("phoneNumber") or ""))
@@ -659,11 +640,10 @@ def refresh_user_numbers(project_id: str, project_secret: str) -> Tuple[Optional
     if dashboard_token and dashboard_id:
         try:
             line = get_imessage_line(dashboard_token, dashboard_id, create_if_missing=False)
-        except Exception as e:
-            logger.debug("photon: could not refresh iMessage line for status: %s", e)
-        else:
             if line and line.get("phoneNumber"):
                 assigned = str(line["phoneNumber"])
+        except Exception as e:
+            logger.debug("photon: could not refresh iMessage line for status: %s", e)
     store_user_numbers(phone_number=phone, assigned_phone_number=assigned,
                        user_id=str(user_id) if user_id else None, dashboard_project_id=dashboard_id)
     return phone, assigned
@@ -674,10 +654,8 @@ def _configured_operator_phone() -> Optional[str]:
     home = _normalize_phone(_get_config_env_value("PHOTON_HOME_CHANNEL") or "")
     if home and E164_RE.match(home):
         return home
-    allowed = _get_config_env_value("PHOTON_ALLOWED_USERS")
-    if not allowed:
-        return None
-    candidates = [n for n in (_normalize_phone(part) for part in re.split(r"[,\s]+", allowed)) if E164_RE.match(n)]
+    allowed = _get_config_env_value("PHOTON_ALLOWED_USERS") or ""
+    candidates = [n for n in map(_normalize_phone, re.split(r"[,\s]+", allowed)) if E164_RE.match(n)]
     return candidates[0] if len(candidates) == 1 else None
 
 
@@ -707,11 +685,9 @@ def get_imessage_line(
     token: str, project_id: str, *, create_if_missing: bool = True) -> Optional[Dict[str, Any]]:
     """The project's iMessage line, provisioning one if absent and ``create_if_missing``;
     None if there is none and provisioning failed."""
-    for line in list_lines(token, project_id):
-        if (line.get("platform") or "").lower() == "imessage":
-            return line
-    if not create_if_missing:
-        return None
+    line = next((ln for ln in list_lines(token, project_id) if (ln.get("platform") or "").lower() == "imessage"), None)
+    if line is not None or not create_if_missing:
+        return line
     try:
         return add_line(token, project_id, platform="imessage")
     except Exception as e:
