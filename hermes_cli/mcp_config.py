@@ -94,7 +94,9 @@ def _validate_or_warn(name: str, server_config: dict) -> bool:
     return not issues
 
 
-def _lookup_server(name: str, servers: Dict[str, dict], available_label: str = "Available servers") -> Optional[dict]:
+def _lookup_server(
+    name: str, servers: Dict[str, dict], available_label: str = "Available servers"
+) -> Optional[dict]:
     """Return the named server config, or print the not-found hint and return None."""
     if name in servers:
         return servers[name]
