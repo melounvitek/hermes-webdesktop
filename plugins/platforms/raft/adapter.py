@@ -157,8 +157,7 @@ def _make_activity_event(
 _OPTIONAL_FIELD_RULES = (  # checked in this order; first failure wins
     (("toolName", "errorClass"), _safe_scalar, "a safe string"),
     (("durationMs",), lambda v: _duration_ms(v) is not None, "a non-negative number"),
-    (("truncated", "toolInputTruncated", "toolOutputTruncated"), lambda v: isinstance(v, bool), "a boolean"),
-)
+    (("truncated", "toolInputTruncated", "toolOutputTruncated"), lambda v: isinstance(v, bool), "a boolean"))
 
 
 def _validate_activity_event(value: Any) -> Dict[str, Any]:
