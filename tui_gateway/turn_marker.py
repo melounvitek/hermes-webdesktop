@@ -96,10 +96,7 @@ def record_turn_start(home: Path | str, session_key: str, prompt: str, *, attemp
 def clear_turn_marker(home: Path | str, session_key: str) -> None:
     """Remove the marker once its turn concluded (any outcome the client saw)."""
     if session_key:
-        _update(
-            home, session_key,
-            lambda e: {k: v for k, v in e.items() if k != session_key} if session_key in e else None, "clear",
-        )
+        _update(home, session_key, lambda e: {k: v for k, v in e.items() if k != session_key} if session_key in e else None, "clear")
 
 
 def read_turn_marker(home: Path | str, session_key: str) -> dict[str, Any] | None:
