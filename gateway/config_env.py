@@ -61,12 +61,8 @@ _ENV_ENABLE_CREDENTIALS: dict = {
 
 
 def _warn_explicit_disable_beats_env(platform: Platform) -> None:
-    """One-time WARNING: ``platforms.<x>.enabled: false`` wins over env creds.
-
-    Credential presence used to force-enable platforms regardless of an explicit
-    ``enabled: false``; users relying on "creds in .env = platform on" must be
-    told why it went dark.
-    """
+    """One-time WARNING: ``platforms.<x>.enabled: false`` wins over env creds (which
+    used to force-enable), so users relying on "creds in .env = on" learn why it went dark."""
     if platform in _EXPLICIT_DISABLE_WARNED:
         return
     _EXPLICIT_DISABLE_WARNED.add(platform)
@@ -101,6 +97,10 @@ def _int_or(default: int) -> Callable[[str], int]:
 
 def _strip_slash(value: str) -> str:
     return value.rstrip("/")
+
+
+def _strip_lower(value: str) -> str:
+    return value.strip().lower()
 
 
 def _truthy_token(value: str) -> bool:
@@ -152,10 +152,8 @@ def _env_home_channel(config: GatewayConfig, platform: Platform, env_base: str, 
         chat_id = chat_id.strip()
     if chat_id and platform in config.platforms:
         config.platforms[platform].home_channel = HomeChannel(
-            platform=platform,
-            chat_id=chat_id,
-            name=getenv(f"{env_base}_NAME", "Home"),
-            thread_id=getenv(f"{env_base}_THREAD_ID") or None,
+            platform=platform, chat_id=chat_id,
+            name=getenv(f"{env_base}_NAME", "Home"), thread_id=getenv(f"{env_base}_THREAD_ID") or None,
         )
 
 
@@ -166,11 +164,8 @@ def _env_reply_mode(config: GatewayConfig, platform: Platform, env: str) -> None
 
 
 def _enable_from_env(config: GatewayConfig, platform: Platform) -> PlatformConfig:
-    """Enable *platform* because its env credentials are present — unless config.yaml explicitly disabled it.
-
-    READS (does not pop) the ``_enabled_explicit`` marker: the registry-driven
-    plugin-enable pass also needs it; ``_scrub_explicit_markers`` removes it last.
-    """
+    """Enable *platform* on env credentials unless config.yaml explicitly disabled it.
+    READS (does not pop) ``_enabled_explicit``: the plugin-enable pass also needs it."""
     if platform not in config.platforms:
         config.platforms[platform] = PlatformConfig(enabled=True)
         return config.platforms[platform]
@@ -184,12 +179,11 @@ def _enable_from_env(config: GatewayConfig, platform: Platform) -> PlatformConfi
 
 
 def _enable_port_bound_from_env(config: GatewayConfig, platform: Platform) -> PlatformConfig:
-    """Enable a port-binding platform (api_server/webhook) unless config.yaml explicitly disabled it.
+    """Enable a port-binding platform unless config.yaml explicitly disabled it.
 
-    In multiplex mode a secondary profile pins ``platforms.<x>.enabled: false`` so
-    it shares the default profile's listener yet still inherits the process env;
-    without this guard env presence would force-enable the listener and trip
-    MultiplexConfigError. POPs the marker: these branches are terminal.
+    A multiplex secondary profile pins ``enabled: false`` to share the default profile's
+    listener yet inherits the process env; without this guard env presence would
+    force-enable it and trip MultiplexConfigError. POPs the marker (terminal branch).
     """
     platform_config = config.platforms.setdefault(platform, PlatformConfig())
     explicit = platform_config.extra.pop("_enabled_explicit", False)
@@ -202,14 +196,12 @@ def _enable_port_bound_from_env(config: GatewayConfig, platform: Platform) -> Pl
 class _Cred:
     """Credential-gated platform enable, applied as ``step(config)``.
 
-    ``creds``: env names that must ALL be truthy; an inner tuple lists alternatives (ANY).
-    ``token``: env whose truthy value becomes ``PlatformConfig.token`` (stored even when
-    yaml disables the adapter, so sending skills can use it).
-    ``fixed``: ``(extra_key, env[, default[, fn]])`` always written once enabled (``env`` may
-    be a tuple of alternatives). ``optional`` / ``optional_stripped``: ``_env_extras`` specs.
-    ``warn_missing``: ``(env, msg)`` logged BEFORE enabling when *env* is blank.
-    ``then``: unique tail ``fn(config, platform_config)``. ``home``: ``_env_home_channel`` env
-    base applied only when the gate passed.
+    ``creds``: env names that must ALL be truthy (inner tuple = ANY of). ``token``: env
+    stored as ``PlatformConfig.token`` even when yaml disables the adapter (sending skills
+    use it). ``fixed``: ``(extra_key, env[, default[, fn]])`` always written once enabled.
+    ``optional*``: ``_env_extras`` specs. ``warn_missing``: ``(env, msg)`` logged BEFORE
+    enabling when blank. ``then``: tail ``fn(config, platform_config)``. ``home``:
+    ``_env_home_channel`` env base applied only when the gate passed.
     """
     platform: Platform
     creds: tuple
@@ -285,10 +277,8 @@ def _slack_home(config: GatewayConfig) -> None:
     existing_home = slack_config.home_channel
     same_home = existing_home is not None and existing_home.chat_id == slack_home
     slack_config.home_channel = HomeChannel(
-        platform=Platform.SLACK,
-        chat_id=slack_home,
-        name=getenv("SLACK_HOME_CHANNEL_NAME"),
-        thread_id=getenv("SLACK_HOME_CHANNEL_THREAD_ID") or None,
+        platform=Platform.SLACK, chat_id=slack_home,
+        name=getenv("SLACK_HOME_CHANNEL_NAME"), thread_id=getenv("SLACK_HOME_CHANNEL_THREAD_ID") or None,
         user_id=existing_home.user_id if same_home else None,
         scope_id=existing_home.scope_id if same_home else None,
     )
@@ -310,8 +300,7 @@ def _sms_api_key(config: GatewayConfig, sms_config: PlatformConfig) -> None:
 
 
 def _api_server(config: GatewayConfig) -> None:
-    """Require a usable key: API_SERVER_ENABLED alone would load an unauthenticated
-    platform whose adapter refuses to start, leaving the reconnect watcher spinning."""
+    """Require a usable key: an unauthenticated adapter refuses to start and the reconnect watcher would spin."""
     key = getenv("API_SERVER_KEY")
     if not _has_usable_api_server_key(key):
         return
@@ -334,18 +323,11 @@ def _msgraph_webhook(config: GatewayConfig) -> None:
     client_state = getenv("MSGRAPH_WEBHOOK_CLIENT_STATE")
     resources = getenv("MSGRAPH_WEBHOOK_ACCEPTED_RESOURCES")
     allowed_cidrs = getenv("MSGRAPH_WEBHOOK_ALLOWED_SOURCE_CIDRS")
-    if not (
-        enabled
-        or Platform.MSGRAPH_WEBHOOK in config.platforms
-        or getenv("MSGRAPH_WEBHOOK_PORT")
-        or client_state
-        or resources
-        or allowed_cidrs
-    ):
+    if not (enabled or Platform.MSGRAPH_WEBHOOK in config.platforms or getenv("MSGRAPH_WEBHOOK_PORT")
+            or client_state or resources or allowed_cidrs):
         return
     msgraph_cfg = config.platforms.setdefault(Platform.MSGRAPH_WEBHOOK, PlatformConfig())
-    # Same explicit-disable guard as webhook, but READ (don't pop) the marker: the
-    # relay-exclusive pass still consults it; the end scrub removes it.
+    # Same guard as webhook, but READ (don't pop) the marker: the relay pass still consults it.
     if enabled and (not msgraph_cfg.extra.get("_enabled_explicit", False) or msgraph_cfg.enabled):
         msgraph_cfg.enabled = True
     _env_extras(msgraph_cfg.extra, (("port", "MSGRAPH_WEBHOOK_PORT", _INT),))
@@ -371,8 +353,7 @@ def _qq_home(config: GatewayConfig, qq_config: PlatformConfig) -> None:
             )
     if qq_home:
         qq_config.home_channel = HomeChannel(
-            platform=Platform.QQBOT,
-            chat_id=qq_home,
+            platform=Platform.QQBOT, chat_id=qq_home,
             name=getenv("QQBOT_HOME_CHANNEL_NAME") or getenv(name_env, "Home"),
             thread_id=getenv("QQBOT_HOME_CHANNEL_THREAD_ID") or getenv("QQ_HOME_CHANNEL_THREAD_ID") or None,
         )
@@ -387,14 +368,12 @@ def _session_settings(config: GatewayConfig) -> None:
 
 
 def _enable_plugin_platforms_from_env(config: GatewayConfig) -> None:
-    """Registry-driven enable for plugin platforms (built-ins have explicit rows in ``_ENV_STEPS``).
+    """Registry-driven enable for plugin platforms (built-ins have rows in ``_ENV_STEPS``).
 
-    A plugin platform is enabled when its credentials are configured (``is_connected``)
-    and its deps are present (passive ``check_fn``) or installable on demand
-    (``ensure_deps_fn`` — run later by ``create_adapter()``, never here: an active
-    installer in this sweep pip-installed SDKs on every load and boot-looped the
-    desktop app). ``is_connected`` MUST gate enablement: ``check_fn`` alone would
-    enable unconfigured platforms that then retry-connect forever with no token.
+    Enabled when credentials are configured (``is_connected`` MUST gate: ``check_fn``
+    alone would enable unconfigured platforms that retry-connect forever) and deps are
+    present (``check_fn``) or installable later by ``create_adapter()`` — never here:
+    installing in this sweep pip-installed SDKs on every load and boot-looped the app.
     """
     try:
         from hermes_cli.plugins import discover_plugins
@@ -412,8 +391,7 @@ def _enable_plugin_platforms_from_env(config: GatewayConfig) -> None:
             # Never re-enable a platform the user explicitly disabled (marker set by the YAML loader).
             if existing_cfg is not None and not already_enabled and existing_extra.get("_enabled_explicit", False):
                 continue
-            # Seed candidate extras so plugins whose ``is_connected`` reads ``config.extra``
-            # (Google Chat) see the same state they will after enablement.
+            # Seed extras so ``is_connected`` implementations reading ``config.extra`` see post-enable state.
             seed_for_probe = None
             if entry.env_enablement_fn is not None:
                 try:
@@ -425,8 +403,7 @@ def _enable_plugin_platforms_from_env(config: GatewayConfig) -> None:
             # Only consult is_connected for platforms not already enabled by YAML/env.
             if not already_enabled and entry.is_connected is not None:
                 try:
-                    # Probe a transient ``enabled=True`` view (some ``is_connected``
-                    # short-circuit on ``config.enabled``); never mutate ``existing_cfg``.
+                    # Probe a transient ``enabled=True`` view; never mutate ``existing_cfg``.
                     if has_seed:
                         for k, v in seed_for_probe.items():
                             if k != "home_channel":
@@ -459,9 +436,7 @@ def _enable_plugin_platforms_from_env(config: GatewayConfig) -> None:
                 platform_config.extra.update(seed)
                 if isinstance(home, dict) and home.get("chat_id"):
                     platform_config.home_channel = HomeChannel(
-                        platform=platform,
-                        chat_id=str(home["chat_id"]),
-                        name=str(home.get("name") or "Home"),
+                        platform=platform, chat_id=str(home["chat_id"]), name=str(home.get("name") or "Home"),
                         thread_id=str(home["thread_id"]) if home.get("thread_id") else None,
                     )
     except Exception as e:
@@ -469,18 +444,16 @@ def _enable_plugin_platforms_from_env(config: GatewayConfig) -> None:
 
 
 def _relay(config: GatewayConfig) -> None:
-    """Relay (connector-fronted platform, EXPERIMENTAL): enabled by GATEWAY_RELAY_URL or
-    gateway.relay_url. The adapter dials OUT (no inbound port); the connected-checker
-    keys on extra["relay_url"], so the URL is mirrored into extra.
+    """Relay (connector-fronted, EXPERIMENTAL): enabled by GATEWAY_RELAY_URL or
+    gateway.relay_url; the URL is mirrored into extra["relay_url"] for the connected-checker.
 
-    Relay-exclusive: the GATEWAY_RELAY_URL env stamp marks a deployment where the
-    connector owns every platform connection; a directly-connected adapter in the same
-    process would be a second unmanaged ingress (duplicate deliveries, split sessions,
-    a socket that disarms scale-to-zero). So the env stamp disables all other messaging
-    platforms — even ones explicitly enabled in config.yaml. Non-messaging surfaces
-    (local, api_server, webhook — same set as the scale-to-zero arm gate) are untouched;
-    relay via gateway.relay_url only keeps the old additive behavior. Opt out with
-    GATEWAY_RELAY_ALLOW_DIRECT_PLATFORMS=true (also read through the scoped getenv).
+    Relay-exclusive: the GATEWAY_RELAY_URL env stamp means the connector owns every
+    platform connection; a directly-connected adapter would be a second unmanaged ingress
+    (duplicate deliveries, split sessions, a socket disarming scale-to-zero). So the env
+    stamp disables all other messaging platforms — even ones explicitly enabled — except
+    non-messaging surfaces (local, api_server, webhook; same set as the scale-to-zero arm
+    gate). relay_url from YAML only keeps the additive behavior. Opt out with
+    GATEWAY_RELAY_ALLOW_DIRECT_PLATFORMS=true.
     """
     relay_url_env = getenv("GATEWAY_RELAY_URL").strip()
     existing_relay = config.platforms.get(Platform.RELAY)
@@ -519,10 +492,9 @@ def _scrub_explicit_markers(config: GatewayConfig) -> None:
         platform_config.extra.pop("_enabled_explicit", None)
 
 
-# Application order is significant: e.g. Telegram's reply mode may create the (disabled)
-# platform entry BEFORE its home channel is read, while Discord reads home first; a home
-# channel is only attached to a platform that already exists. Relay-exclusive disabling
-# runs after the plugin pass and before the marker scrub, which must be last.
+# Order is significant: a home channel only attaches to a platform that already exists
+# (Telegram's reply mode may create the entry first; Discord reads home first). Relay
+# disabling runs after the plugin pass; the marker scrub must be last.
 _ENV_STEPS: tuple = (
     _Cred(Platform.TELEGRAM, ("TELEGRAM_BOT_TOKEN",), token="TELEGRAM_BOT_TOKEN"),
     _ReplyMode(Platform.TELEGRAM, "TELEGRAM_REPLY_TO_MODE"),
@@ -539,14 +511,10 @@ _ENV_STEPS: tuple = (
         Platform.WHATSAPP_CLOUD, ("WHATSAPP_CLOUD_PHONE_NUMBER_ID", "WHATSAPP_CLOUD_ACCESS_TOKEN"),
         fixed=(("phone_number_id", "WHATSAPP_CLOUD_PHONE_NUMBER_ID"), ("access_token", "WHATSAPP_CLOUD_ACCESS_TOKEN")),
         optional=(
-            ("app_id", "WHATSAPP_CLOUD_APP_ID"),
-            ("app_secret", "WHATSAPP_CLOUD_APP_SECRET"),
-            ("waba_id", "WHATSAPP_CLOUD_WABA_ID"),
-            ("verify_token", "WHATSAPP_CLOUD_VERIFY_TOKEN"),  # Meta hub.verify_token shared secret
-            ("webhook_host", "WHATSAPP_CLOUD_WEBHOOK_HOST"),
-            ("webhook_port", "WHATSAPP_CLOUD_WEBHOOK_PORT", _INT),
-            ("webhook_path", "WHATSAPP_CLOUD_WEBHOOK_PATH"),
-            ("api_version", "WHATSAPP_CLOUD_API_VERSION"),
+            ("app_id", "WHATSAPP_CLOUD_APP_ID"), ("app_secret", "WHATSAPP_CLOUD_APP_SECRET"),
+            ("waba_id", "WHATSAPP_CLOUD_WABA_ID"), ("verify_token", "WHATSAPP_CLOUD_VERIFY_TOKEN"),
+            ("webhook_host", "WHATSAPP_CLOUD_WEBHOOK_HOST"), ("webhook_port", "WHATSAPP_CLOUD_WEBHOOK_PORT", _INT),
+            ("webhook_path", "WHATSAPP_CLOUD_WEBHOOK_PATH"), ("api_version", "WHATSAPP_CLOUD_API_VERSION"),
         ),
     ),
     _Home(Platform.WHATSAPP_CLOUD, "WHATSAPP_CLOUD_HOME_CHANNEL"),
@@ -555,8 +523,7 @@ _ENV_STEPS: tuple = (
     _Cred(
         Platform.SIGNAL, ("SIGNAL_HTTP_URL", "SIGNAL_ACCOUNT"),
         fixed=(
-            ("http_url", "SIGNAL_HTTP_URL"),
-            ("account", "SIGNAL_ACCOUNT"),
+            ("http_url", "SIGNAL_HTTP_URL"), ("account", "SIGNAL_ACCOUNT"),
             ("ignore_stories", "SIGNAL_IGNORE_STORIES", "true", is_truthy_value),
         ),
     ),
@@ -594,10 +561,8 @@ _ENV_STEPS: tuple = (
     _Cred(
         Platform.FEISHU, ("FEISHU_APP_ID", "FEISHU_APP_SECRET"),
         fixed=(
-            ("app_id", "FEISHU_APP_ID"),
-            ("app_secret", "FEISHU_APP_SECRET"),
-            ("domain", "FEISHU_DOMAIN", "feishu"),
-            ("connection_mode", "FEISHU_CONNECTION_MODE", "websocket"),
+            ("app_id", "FEISHU_APP_ID"), ("app_secret", "FEISHU_APP_SECRET"),
+            ("domain", "FEISHU_DOMAIN", "feishu"), ("connection_mode", "FEISHU_CONNECTION_MODE", "websocket"),
         ),
         optional=(("encrypt_key", "FEISHU_ENCRYPT_KEY"), ("verification_token", "FEISHU_VERIFICATION_TOKEN")),
         home="FEISHU_HOME_CHANNEL",
@@ -611,15 +576,12 @@ _ENV_STEPS: tuple = (
     _Cred(
         Platform.WECOM_CALLBACK, ("WECOM_CALLBACK_CORP_ID", "WECOM_CALLBACK_CORP_SECRET"),
         fixed=(
-            ("corp_id", "WECOM_CALLBACK_CORP_ID"),
-            ("corp_secret", "WECOM_CALLBACK_CORP_SECRET"),
-            ("agent_id", "WECOM_CALLBACK_AGENT_ID"),
-            ("token", "WECOM_CALLBACK_TOKEN"),
+            ("corp_id", "WECOM_CALLBACK_CORP_ID"), ("corp_secret", "WECOM_CALLBACK_CORP_SECRET"),
+            ("agent_id", "WECOM_CALLBACK_AGENT_ID"), ("token", "WECOM_CALLBACK_TOKEN"),
             ("encoding_aes_key", "WECOM_CALLBACK_ENCODING_AES_KEY"),
-            # No default: an unset WECOM_CALLBACK_HOST leaves extra.host falsy so the adapter's
-            # dual-stack DEFAULT_HOST=None applies (binds IPv4 + IPv6; "0.0.0.0" was IPv4-only).
-            ("host", "WECOM_CALLBACK_HOST"),
-            ("port", "WECOM_CALLBACK_PORT", "", _int_or(8645)),
+            # No host default: a falsy extra.host lets the adapter's dual-stack DEFAULT_HOST=None
+            # apply (binds IPv4 + IPv6; "0.0.0.0" was IPv4-only).
+            ("host", "WECOM_CALLBACK_HOST"), ("port", "WECOM_CALLBACK_PORT", "", _int_or(8645)),
         ),
     ),
     # Weixin (personal WeChat via iLink Bot API)
@@ -627,12 +589,9 @@ _ENV_STEPS: tuple = (
         Platform.WEIXIN, (("WEIXIN_TOKEN", "WEIXIN_ACCOUNT_ID"),), token="WEIXIN_TOKEN",
         optional=(("account_id", "WEIXIN_ACCOUNT_ID"),),
         optional_stripped=(
-            ("base_url", "WEIXIN_BASE_URL", _strip_slash),
-            ("cdn_base_url", "WEIXIN_CDN_BASE_URL", _strip_slash),
-            ("dm_policy", "WEIXIN_DM_POLICY", str.lower),
-            ("group_policy", "WEIXIN_GROUP_POLICY", str.lower),
-            ("allow_from", "WEIXIN_ALLOWED_USERS"),
-            ("group_allow_from", "WEIXIN_GROUP_ALLOWED_USERS"),
+            ("base_url", "WEIXIN_BASE_URL", _strip_slash), ("cdn_base_url", "WEIXIN_CDN_BASE_URL", _strip_slash),
+            ("dm_policy", "WEIXIN_DM_POLICY", str.lower), ("group_policy", "WEIXIN_GROUP_POLICY", str.lower),
+            ("allow_from", "WEIXIN_ALLOWED_USERS"), ("group_allow_from", "WEIXIN_GROUP_ALLOWED_USERS"),
             ("split_multiline_messages", "WEIXIN_SPLIT_MULTILINE_MESSAGES"),
         ),
         home="WEIXIN_HOME_CHANNEL", home_strip=True,
@@ -641,8 +600,7 @@ _ENV_STEPS: tuple = (
     _Cred(
         Platform.BLUEBUBBLES, ("BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_PASSWORD"),
         fixed=(
-            ("server_url", "BLUEBUBBLES_SERVER_URL", "", _strip_slash),
-            ("password", "BLUEBUBBLES_PASSWORD"),
+            ("server_url", "BLUEBUBBLES_SERVER_URL", "", _strip_slash), ("password", "BLUEBUBBLES_PASSWORD"),
             ("webhook_host", "BLUEBUBBLES_WEBHOOK_HOST", "127.0.0.1"),
             ("webhook_port", "BLUEBUBBLES_WEBHOOK_PORT", "", _int_or(8645)),
             ("webhook_path", "BLUEBUBBLES_WEBHOOK_PATH", "/bluebubbles-webhook"),
@@ -664,14 +622,10 @@ _ENV_STEPS: tuple = (
         Platform.YUANBAO, (("YUANBAO_APP_ID", "YUANBAO_APP_KEY"), "YUANBAO_APP_SECRET"),
         fixed=(("app_id", ("YUANBAO_APP_ID", "YUANBAO_APP_KEY")), ("app_secret", "YUANBAO_APP_SECRET")),
         optional=(
-            ("bot_id", "YUANBAO_BOT_ID"),
-            ("ws_url", "YUANBAO_WS_URL"),
-            ("api_domain", "YUANBAO_API_DOMAIN"),
-            ("route_env", "YUANBAO_ROUTE_ENV"),
-            ("dm_policy", "YUANBAO_DM_POLICY", lambda v: v.strip().lower()),
-            ("dm_allow_from", "YUANBAO_DM_ALLOW_FROM"),
-            ("group_policy", "YUANBAO_GROUP_POLICY", lambda v: v.strip().lower()),
-            ("group_allow_from", "YUANBAO_GROUP_ALLOW_FROM"),
+            ("bot_id", "YUANBAO_BOT_ID"), ("ws_url", "YUANBAO_WS_URL"),
+            ("api_domain", "YUANBAO_API_DOMAIN"), ("route_env", "YUANBAO_ROUTE_ENV"),
+            ("dm_policy", "YUANBAO_DM_POLICY", _strip_lower), ("dm_allow_from", "YUANBAO_DM_ALLOW_FROM"),
+            ("group_policy", "YUANBAO_GROUP_POLICY", _strip_lower), ("group_allow_from", "YUANBAO_GROUP_ALLOW_FROM"),
         ),
         home="YUANBAO_HOME_CHANNEL",
     ),
