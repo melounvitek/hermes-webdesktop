@@ -41,10 +41,9 @@ def _env_bool(key: str, default: bool) -> bool:
 
 
 def _env_int(key: str, default: int) -> int:
-    val = os.getenv(key)
     try:
-        return default if val is None else int(val)
-    except ValueError:
+        return int(os.environ[key])
+    except (KeyError, ValueError):
         return default
 
 
@@ -186,8 +185,7 @@ def _disk_marker_blocks_install() -> bool:
 
 def _hermes_bin_dir() -> str:
     """$HERMES_HOME/bin, created if needed."""
-    d = os.path.join(str(get_hermes_home()), "bin")
-    os.makedirs(d, exist_ok=True)
+    os.makedirs(d := os.path.join(str(get_hermes_home()), "bin"), exist_ok=True)
     return d
 
 
@@ -210,10 +208,9 @@ def is_platform_supported() -> bool:
 
 
 def _download_file(url: str, dest: str, timeout: int = 10):
-    req = urllib.request.Request(url)
     from agent.secret_scope import get_secret
-    token = get_secret("GITHUB_TOKEN")
-    if token:
+    req = urllib.request.Request(url)
+    if token := get_secret("GITHUB_TOKEN"):
         req.add_header("Authorization", f"token {token}")
     with urllib.request.urlopen(req, timeout=timeout) as resp, open(dest, "wb") as f:
         shutil.copyfileobj(resp, f)
@@ -222,8 +219,7 @@ def _download_file(url: str, dest: str, timeout: int = 10):
 def _verify_cosign(checksums_path: str, sig_path: str, cert_path: str) -> bool | None:
     """Verify cosign provenance on checksums.txt: True verified, False rejected,
     None when cosign is not on PATH / failed to execute."""
-    cosign = shutil.which("cosign")
-    if not cosign:
+    if not (cosign := shutil.which("cosign")):
         logger.info("cosign not found on PATH")
         return None
     try:
@@ -288,14 +284,12 @@ def _verify_checksum(archive_path: str, checksums_path: str, archive_name: str) 
 def _extract_tirith_binary(tar: tarfile.TarFile, dest_dir: str, log) -> tuple[str | None, str]:
     """Extract the tirith binary from a release archive into dest_dir -> ``(path, reason)``."""
     for member in tar.getmembers():
-        is_tirith = member.name == "tirith" or member.name.endswith("/tirith")
-        if not is_tirith or ".." in member.name:
+        if member.name.rsplit("/", 1)[-1] != "tirith" or ".." in member.name:
             continue
         if not member.isfile():
             log("tirith archive member is not a regular file: %s", member.name)
             return None, "binary_not_regular_file"
-        src_file = tar.extractfile(member)
-        if src_file is None:
+        if (src_file := tar.extractfile(member)) is None:
             log("tirith binary could not be read from archive")
             return None, "binary_extract_failed"
         dest_path = os.path.join(dest_dir, "tirith")
@@ -310,8 +304,7 @@ def _install_tirith(*, log_failures: bool = True) -> tuple[str | None, str]:
     """Download and install tirith to $HERMES_HOME/bin/tirith -> ``(installed_path,
     failure_reason)``; the reason ("" on success) is the disk marker's retryability tag."""
     log = logger.warning if log_failures else logger.debug
-    target = _detect_target()
-    if not target:
+    if not (target := _detect_target()):
         logger.info("tirith auto-install: unsupported platform %s/%s", platform.system(), platform.machine())
         return None, "unsupported_platform"
     archive_name = f"tirith-{target}.tar.gz"
@@ -368,11 +361,8 @@ def _is_executable(path: str) -> bool:
 
 def _find_local_tirith() -> str | None:
     """Cheap local lookup for the default "tirith": PATH, then $HERMES_HOME/bin."""
-    found = shutil.which("tirith")
-    if found:
-        return found
     hermes_bin = os.path.join(_hermes_bin_dir(), "tirith")
-    return hermes_bin if _is_executable(hermes_bin) else None
+    return shutil.which("tirith") or (hermes_bin if _is_executable(hermes_bin) else None)
 
 
 def _resolve_locally(configured_path: str, *, warn_missing: bool) -> tuple[str | None, bool]:
@@ -423,8 +413,7 @@ def _resolve_tirith_path(configured_path: str) -> str:
     Default "tirith": PATH → $HERMES_HOME/bin/tirith → auto-install; failed installs are
     cached for the process (and on disk for 24h). On any miss the expanded configured path
     is returned so the spawn fails open via the dedupe'd OSError handler."""
-    cached = _cached_path()
-    if cached:
+    if cached := _cached_path():
         return cached
     expanded = os.path.expanduser(configured_path)
     # No tirith build for this platform: cache the verdict; the spawn fails open once, then
@@ -463,8 +452,7 @@ def ensure_installed(*, log_failures: bool = True):
     cfg = _load_security_config()
     if not cfg["tirith_enabled"]:
         return None
-    cached = _cached_path()
-    if cached:
+    if cached := _cached_path():
         return cached if _is_executable(cached) else None
     # No tirith build here (e.g. Windows): stay silent -- no PATH probe, no download thread,
     # no disk marker. Pattern-matching guards still run.
@@ -513,8 +501,7 @@ def check_command_security(command: str) -> dict:
     if not is_platform_supported():
         return _verdict("allow")
     tirith_path = _resolve_tirith_path(cfg["tirith_path"])
-    timeout = cfg["tirith_timeout"]
-    fail_open = cfg["tirith_fail_open"]
+    timeout, fail_open = cfg["tirith_timeout"], cfg["tirith_fail_open"]
     if tirith_path is None:
         _warn_once("tirith_path_none", "tirith path resolved to None; scanning disabled")
         return _fail(fail_open, "tirith path unavailable", "tirith path unavailable (fail-closed)")
@@ -536,8 +523,7 @@ def check_command_security(command: str) -> dict:
         return _fail(fail_open, f"tirith timed out ({timeout}s)", "tirith timed out (fail-closed)")
 
     exit_code = result.returncode
-    action = _EXIT_ACTIONS.get(exit_code)
-    if action is None:
+    if (action := _EXIT_ACTIONS.get(exit_code)) is None:
         # Unknown exit code (includes signal-killed, e.g. -11): respect fail_open.
         logger.warning("tirith returned unexpected exit code %d", exit_code)
         _record_tirith_crash()
@@ -546,8 +532,7 @@ def check_command_security(command: str) -> dict:
     if action == "allow":
         _crash_count = 0  # successful execution resets the circuit breaker
     # JSON enriches findings/summary; a parse failure never changes the verdict.
-    findings = []
-    summary = ""
+    findings, summary = [], ""
     try:
         data = json.loads(result.stdout) if result.stdout.strip() else {}
         findings = data.get("findings", [])[:_MAX_FINDINGS]
