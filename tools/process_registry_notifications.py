@@ -7,6 +7,7 @@ conversation by the CLI drain loop, the gateway, and the TUI.
 """
 
 import time
+from contextlib import suppress
 
 
 def _format_age(seconds: float) -> str:
@@ -19,9 +20,9 @@ def _format_age(seconds: float) -> str:
         return f"{s}s"
     m, s = divmod(s, 60)
     if m < 60:
-        return f"{m}m" if s == 0 else f"{m}m{s}s"
+        return f"{m}m" + (f"{s}s" if s else "")
     h, m = divmod(m, 60)
-    return f"{h}h" if m == 0 else f"{h}h{m}m"
+    return f"{h}h" + (f"{m}m" if m else "")
 
 
 def _model_not_found_patterns() -> "list[str]":
@@ -55,15 +56,12 @@ def _delegation_model_not_found(results, config) -> bool:
     name in the same error/summary text, so a stale task failing on a
     different (removed) model is not mis-attributed to the config.
     """
-    model = (config or {}).get("model")
+    model = str((config or {}).get("model") or "").lower()
     if not model:
         return False
-    model = str(model).lower()
-    for r in results or []:
-        text = " ".join(str(part) for part in (r.get("error"), r.get("summary")) if part).lower()
-        if text and model in text and any(p in text for p in _model_not_found_patterns()):
-            return True
-    return False
+    patterns = _model_not_found_patterns()
+    texts = (" ".join(str(x) for x in (r.get("error"), r.get("summary")) if x).lower() for r in results or [])
+    return any(model in text and any(p in text for p in patterns) for text in texts)
 
 
 def _delegation_model_not_found_notice(results) -> "list[str] | None":
@@ -80,13 +78,11 @@ def _delegation_model_not_found_notice(results) -> "list[str] | None":
         "Every task in this batch failed for this reason before doing any work.",
         "Check Settings → Advanced → Subagent Model (or: hermes config get delegation.model).",
     ]
-    try:
+    with suppress(Exception):
         from hermes_cli.fallback_config import get_fallback_chain
 
         if not get_fallback_chain(config):
             lines.append("No fallback chain is configured, so no failover was attempted.")
-    except Exception:
-        pass
     return lines
 
 
@@ -241,12 +237,11 @@ def _delegation_attribution_line(evt: dict) -> "str | None":
     task_id = str(evt.get("owner_task_id") or evt.get("task_id") or "")
     if not task_id.startswith("sa-"):
         return None
-    try:
+    info = None
+    with suppress(Exception):
         from tools.delegate_tool import get_subagent_attribution
 
         info = get_subagent_attribution(task_id)
-    except Exception:
-        info = None
     if not info:
         # Registry entry aged out — still attribute generically, not anonymously.
         return f"Started by subagent {task_id} (delegate_task)."
