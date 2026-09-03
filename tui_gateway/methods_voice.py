@@ -716,21 +716,19 @@ def _(rid, params: dict) -> dict:
             _resume_voice_wake()
             return _ok(rid, {"status": "stopped"})
         from hermes_cli.voice import start_continuous
-        # Busy probe holds the no-speech counter during long agent turns.
-        # Safe to re-register every start; older wrappers lack the setter.
+        # Busy probe holds the no-speech counter during long agent turns; safe to re-register every
+        # start (older wrappers lack the setter).
         with contextlib.suppress(Exception):
             from hermes_cli.voice import set_voice_busy_probe
             set_voice_busy_probe(_any_session_running)
-        # Shape-safe: malformed voice YAML falls back to documented defaults.
-        # max_recording_seconds: explicit numeric <= 0 disables the cap (0.0).
+        # Shape-safe: malformed voice YAML falls back to documented defaults; an explicit numeric
+        # max_recording_seconds <= 0 disables the cap (0.0).
         voice_cfg = _voice_cfg_dict()
         max_rec = _voice_cfg_number(voice_cfg.get("max_recording_seconds"), 120.0)
         # Hand the mic to STT if the wake detector holds it; a terminal capture event resumes it.
-        try:
+        with contextlib.suppress(Exception):
             from tools.wake_word import pause_listening
             wake_paused = pause_listening(owner=transport)
-        except Exception:
-            wake_paused = False
         if wake_paused:
             with _voice_sid_lock:
                 _voice_wake_owner = transport
@@ -743,8 +741,7 @@ def _(rid, params: dict) -> dict:
             on_stop_phrase=_vr_on_stop_phrase)
         if started is False:
             _resume_voice_wake()
-            return _ok(rid, {"status": "busy"})
-        return _ok(rid, {"status": "recording"})
+        return _ok(rid, {"status": "busy" if started is False else "recording"})
     except Exception as e:
         if wake_paused or action == "stop":
             _resume_voice_wake()

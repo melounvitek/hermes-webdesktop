@@ -162,21 +162,18 @@ def _latest_profile_session_rows(db):
     try:
         human = worker = None
         for s in db.list_sessions_rich(source=None, limit=20, order_by_last_active=True, compact_rows=True):
-            title = s.get("title") or ""
-            last_active = s.get("last_active") or s.get("started_at") or 0
+            title, last_active = s.get("title") or "", s.get("last_active") or s.get("started_at") or 0
             if _denied_source(s):
                 if worker is None:
-                    src = (s.get("source") or "").strip().lower()
-                    worker = {"id": s["id"], "source": src, "title": title, "last_active": last_active}
-            elif human is None:
-                # Rosters want "where the conversation IS": prefer the newest text.
-                human = {
-                    "id": s["id"], "title": title,
-                    "preview": _latest_message_preview(db, s["id"]) or s.get("preview") or "",
-                    "started_at": s.get("started_at") or 0, "last_active": last_active,
-                    "message_count": s.get("message_count") or 0}
-                if worker is not None:
-                    break
+                    worker = {"id": s["id"], "source": (s.get("source") or "").strip().lower(),
+                              "title": title, "last_active": last_active}
+            elif human is None:  # rosters want "where the conversation IS": prefer the newest text
+                human = {"id": s["id"], "title": title,
+                         "preview": _latest_message_preview(db, s["id"]) or s.get("preview") or "",
+                         "started_at": s.get("started_at") or 0, "last_active": last_active,
+                         "message_count": s.get("message_count") or 0}
+            if human is not None and worker is not None:
+                break
         return human, worker
     except Exception:
         return None, None
