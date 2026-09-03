@@ -30,9 +30,7 @@ _SELECT_REPLICA = "SELECT * FROM hosted_room_replicas WHERE room_id=?"
 
 
 class ReplicaError(HostedRoomError): """Base class for invalid or conflicting replica operations."""
-
 class ReplicaGapError(ReplicaError): """A page does not start at the replica's next expected sequence."""
-
 class ReplicaEpochRegressionError(ReplicaError): """A page or demotion carries an older authority epoch than stored."""
 
 
@@ -73,9 +71,16 @@ def _replica_transaction(db_path: DbPath) -> Iterator[sqlite3.Connection]:
 _positive_int = partial(bounded_int, error=ReplicaError, low=1)
 
 
-def _control_event_json(payload: dict[str, Any]) -> tuple[str, str]:
-    """Canonical (actor_json, payload_json) for a system authority-control event."""
-    return _actor_json(_SYSTEM_ACTOR), _payload_json(payload)
+def _control_event(kind: str, epoch: int, payload: dict[str, Any]) -> tuple[str, str, str, str]:
+    """(event_id, kind, actor_json, payload_json) of the system ``authority.<kind>`` control event for ``epoch``."""
+    return f"system:authority-{kind}:{epoch}", f"authority.{kind}", _actor_json(_SYSTEM_ACTOR), _payload_json(payload)
+
+
+def _append_control_event(
+    conn: sqlite3.Connection, room_id: str, seq: int, epoch: int, event: tuple[str, str, str, str], now: float
+) -> None:
+    event_id, kind, actor_json, payload_json = event
+    conn.execute(_INSERT_ROOM_EVENT, (room_id, seq, event_id, kind, actor_json, epoch, payload_json, now))
 
 
 def _event_bytes(event: dict[str, Any]) -> int:
@@ -88,8 +93,7 @@ def _event_bytes(event: dict[str, Any]) -> int:
 def _validate_page(page: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     if not isinstance(page, dict):
         raise ReplicaError("page must be an object")
-    events = page.get("events")
-    authority = page.get("authority")
+    events, authority = page.get("events"), page.get("authority")
     if not isinstance(events, list):
         raise ReplicaError("page.events must be a list")
     if not isinstance(authority, dict):
@@ -164,13 +168,12 @@ def ingest_page(
             size = _event_bytes(event)
             if stored_bytes + added_bytes + size > MAX_REPLICA_EVENT_BYTES:
                 raise ReplicaError("replica event storage exhausted")
-            actor_json = _actor_json(event["actor"])
-            payload_json = _payload_json(event["payload"])
             conn.execute(
                 _INSERT_REPLICA_EVENT,
                 (
-                    room_id, int(event["seq"]), event["event_id"], event["kind"], actor_json,
-                    event.get("authority_epoch"), payload_json, float(event.get("created_at") or now)))
+                    room_id, int(event["seq"]), event["event_id"], event["kind"], _actor_json(event["actor"]),
+                    event.get("authority_epoch"), _payload_json(event["payload"]),
+                    float(event.get("created_at") or now)))
             added_bytes += size
         new_last = int(new_events[-1]["seq"]) if new_events else last_seq
         latest_seq = page.get("latest_seq")
@@ -226,27 +229,21 @@ def promote_replica(
         previous_epoch = int(replica["authority_epoch"])
         target_epoch = previous_epoch + 1
         claim_seq = int(replica["last_seq"]) + 1
-        claim_event_id = f"system:authority-claimed:{target_epoch}"
-        claim_actor_json, claim_payload_json = _control_event_json({
+        claim = _control_event("claimed", target_epoch, {
             "previous_gateway_id": previous_gateway, "authority_gateway_id": local_gateway,
             "authority_epoch": target_epoch, "promoted_from_replica": True, "reason": reason})
-        claim_bytes = utf8_len(claim_event_id, "authority.claimed", claim_actor_json, claim_payload_json)
         conn.execute("""INSERT INTO hosted_rooms
                (room_id, name, members_json, authority_gateway_id, authority_epoch, next_seq, event_bytes,
                 revision, created_at, updated_at, disbanded_at)
                VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, NULL)""",
             (
                 room_id, replica["name"], replica["members_json"], local_gateway, target_epoch, claim_seq + 1,
-                int(replica["event_bytes"]) + claim_bytes, now, now))
+                int(replica["event_bytes"]) + utf8_len(*claim), now, now))
         conn.execute(
             f"""INSERT INTO hosted_room_events {_EVENT_COLUMNS}
                SELECT room_id, seq, event_id, kind, actor_json, authority_epoch, payload_json, created_at
                  FROM hosted_room_replica_events WHERE room_id=?""", (room_id,))
-        conn.execute(
-            _INSERT_ROOM_EVENT,
-            (
-                room_id, claim_seq, claim_event_id, "authority.claimed", claim_actor_json, target_epoch,
-                claim_payload_json, now))
+        _append_control_event(conn, room_id, claim_seq, target_epoch, claim, now)
         conn.execute("DELETE FROM hosted_room_replica_events WHERE room_id=?", (room_id,))
         conn.execute("DELETE FROM hosted_room_replicas WHERE room_id=?", (room_id,))
     return {
@@ -285,14 +282,10 @@ def demote_room(
             raise ReplicaEpochRegressionError("observed epoch does not supersede the stored authority")
         if current_gateway != local_gateway:
             raise ReplicaError("room is not locally authoritative; nothing to demote")
-        lost_actor_json, lost_payload_json = _control_event_json({
+        lost = _control_event("lost", observed_epoch, {
             "previous_gateway_id": current_gateway, "authority_gateway_id": observed_gateway_id,
             "authority_epoch": observed_epoch})
-        conn.execute(
-            _INSERT_ROOM_EVENT,
-            (
-                room_id, int(row["next_seq"]), f"system:authority-lost:{observed_epoch}", "authority.lost",
-                lost_actor_json, observed_epoch, lost_payload_json, now))
+        _append_control_event(conn, room_id, int(row["next_seq"]), observed_epoch, lost, now)
         conn.execute("""UPDATE hosted_rooms
                   SET authority_gateway_id=?, authority_epoch=?, next_seq=next_seq+1, revision=revision+1, updated_at=?
                 WHERE room_id=?""",
