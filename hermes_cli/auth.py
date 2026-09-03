@@ -143,9 +143,7 @@ def normalize_actual_base_url(base_url: str) -> str:
     return url
 
 
-# =============================================================================
-# Provider Registry
-# =============================================================================
+# ── Provider Registry ───────────────────────────────────────────────────────────────────────────────
 
 @dataclass
 class ProviderConfig:
@@ -308,9 +306,7 @@ def get_anthropic_key() -> str:
     return ""
 
 
-# =============================================================================
-# Secret validation
-# =============================================================================
+# ── Secret validation ───────────────────────────────────────────────────────────────────────────────
 
 _PLACEHOLDER_SECRET_VALUES = {
     "*", "**", "***", "changeme", "your_api_key", "your_api_key_here", "your-api-key",
@@ -411,9 +407,7 @@ def _resolve_api_key_provider_secret(provider_id: str, pconfig: ProviderConfig) 
     return "", ""
 
 
-# =============================================================================
-# Error formatting (AuthError itself lives in auth_constants)
-# =============================================================================
+# ── Error formatting (AuthError itself lives in auth_constants) ─────────────────────────────────────
 
 def is_rate_limited_auth_error(error: Exception) -> bool:
     """True when an :class:`AuthError` is upstream rate-limiting / quota: transient, and
@@ -454,9 +448,7 @@ def _nonempty_str(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
-# =============================================================================
-# Auth Store — persistence layer for ~/.hermes/auth.json
-# =============================================================================
+# ── Auth Store — persistence layer for ~/.hermes/auth.json ──────────────────────────────────────────
 
 def _auth_file_path() -> Path:
     path = get_hermes_home() / "auth.json"
@@ -1216,9 +1208,7 @@ def deactivate_provider() -> None:
         _save_auth_store(auth_store)
 
 
-# =============================================================================
-# Provider Resolution — picks which provider to use
-# =============================================================================
+# ── Provider Resolution — picks which provider to use ───────────────────────────────────────────────
 
 
 def _get_config_hint_for_unknown_provider(provider_name: str) -> str:
@@ -1484,9 +1474,7 @@ def resolve_provider(
         code="no_provider_configured")
 
 
-# =============================================================================
-# Timestamp / TTL helpers
-# =============================================================================
+# ── Timestamp / TTL helpers ─────────────────────────────────────────────────────────────────────────
 
 def _utc_now_z() -> str:
     """Current UTC time as an ISO-8601 string with a ``Z`` suffix (last_refresh format)."""
@@ -1657,9 +1645,7 @@ def resolve_nous_access_token(
             return _memo(state["access_token"])
 
 
-# =============================================================================
-# Status helpers
-# =============================================================================
+# ── Status helpers ──────────────────────────────────────────────────────────────────────────────────
 
 # Process-level memo for get_nous_auth_status(): it validates state via
 # resolve_nous_runtime_credentials(), a synchronous refresh POST (~350ms even on failure), and
@@ -2143,9 +2129,7 @@ def resolve_external_process_provider_credentials(provider_id: str) -> Dict[str,
         "source": "process"}
 
 
-# =============================================================================
-# CLI Commands — login / logout
-# =============================================================================
+# ── CLI Commands — login / logout ───────────────────────────────────────────────────────────────────
 
 def _update_config_for_provider(
     provider_id: str, inference_base_url: str, default_model: Optional[str] = None) -> Path:
