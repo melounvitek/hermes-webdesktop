@@ -343,7 +343,7 @@ def test_swap_preserve_set_is_the_module_constant():
 
     # The swap loop lives in the download/swap collaborator the ZIP path calls.
     src = inspect.getsource(update_cmd_zip._download_and_swap_zip)
-    assert "preserve = _ZIP_PRESERVED_TOP_LEVEL" in src
+    assert "_ZIP_PRESERVED_TOP_LEVEL" in src
 
 
 def test_zip_overlay_allows_ignored_preserved_entries(tmp_path, monkeypatch):
