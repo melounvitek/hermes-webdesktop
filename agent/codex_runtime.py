@@ -96,16 +96,15 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
     agent.session_api_calls += 1
     usage = getattr(turn, "token_usage_last", None)
     compressor = getattr(agent, "context_compressor", None)
+    def billing(**extra):
+        return dict(model=agent.model, billing_provider=agent.provider, billing_base_url=agent.base_url, api_call_count=1, **extra)
     if not isinstance(usage, dict) or not usage:
         if compressor is not None and getattr(compressor, "awaiting_real_usage_after_compression", False):
             # No usage cannot adjudicate the pending compaction; unlatch preflight deferral.
             compressor.update_from_response({})
         _queue_token_counts(
             agent, "Codex app-server api-call persistence failed (session=%s): %s",
-            counts=lambda: dict(
-                model=agent.model, billing_provider=agent.provider, billing_base_url=agent.base_url,
-                billing_mode="subscription_included", api_call_count=1,
-            ),
+            counts=lambda: billing(billing_mode="subscription_included"),
         )
         return {}
     from agent.usage_pricing import CanonicalUsage, estimate_usage_cost
@@ -148,11 +147,8 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
     cost_fields = {"estimated_cost_usd": cost_usd, "cost_status": cost_result.status, "cost_source": cost_result.source}
     _queue_token_counts(
         agent, "Codex app-server token persistence failed (session=%s, tokens=%d): %s", total_tokens,
-        counts=lambda: dict(
-            **token_counts, **cost_fields,
-            billing_provider=agent.provider, billing_base_url=agent.base_url,
-            billing_mode="subscription_included" if cost_result.status == "included" else None,
-            model=agent.model, api_call_count=1,
+        counts=lambda: billing(
+            **token_counts, **cost_fields, billing_mode="subscription_included" if cost_result.status == "included" else None,
         ),
     )
     return {**usage_dict, "last_prompt_tokens": prompt_tokens, **cost_fields}
@@ -770,8 +766,7 @@ class _CodexResponseAssembler:
         self.saw_terminal = True
         resp_obj = _event_field(event, "response")
         if resp_obj is not None:
-            self.terminal_usage = _event_field(resp_obj, "usage")
-            self.terminal_response_id = _event_field(resp_obj, "id")
+            self.terminal_usage, self.terminal_response_id = _event_field(resp_obj, "usage"), _event_field(resp_obj, "id")
             rstatus = _event_field(resp_obj, "status")
             if isinstance(rstatus, str):
                 self.terminal_status = rstatus
@@ -779,8 +774,7 @@ class _CodexResponseAssembler:
                 self.terminal_incomplete_details = _event_field(resp_obj, "incomplete_details")
             elif event_type == "response.failed":
                 self.terminal_error = _event_field(resp_obj, "error")
-        if event_type == "response.completed":
-            self.saw_response_completed = True
+        self.saw_response_completed = self.saw_response_completed or event_type == "response.completed"
         self.terminal_status = self.terminal_status or event_type.removeprefix("response.")
         return True
 
@@ -1003,8 +997,7 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         _log_codex_request_failure(agent, exc, stream_opened=writer_token["value"] is not None)
 
     def _codex_stream_created(_raw_stream: Any) -> None:
-        # Claim the delta sink for THIS physical attempt; a newer attempt
-        # supersedes this token and fences late deltas out of the turn.
+        # Claim the delta sink for THIS attempt; a newer attempt supersedes this token.
         writer_token["value"] = claim_stream_writer(agent)
 
     def _accept_codex_chunk(_chunk: Any) -> bool:

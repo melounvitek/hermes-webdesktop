@@ -118,18 +118,22 @@ def bedrock_openai_base_url(region: str) -> str:
     return f"https://bedrock-mantle.{resolved}.api.aws/openai/v1"
 
 
+def _mantle_url_parts(base_url: str) -> Tuple[Optional[str], str]:
+    """(region or None if not a Mantle host, normalized path) for a base URL."""
+    parsed = urlparse(str(base_url or ""))
+    match = _BEDROCK_OPENAI_HOST_RE.match(parsed.hostname or "")
+    return (match.group(1) if match else None), (parsed.path or "").rstrip("/").lower()
+
+
 def bedrock_openai_region_from_base_url(base_url: str) -> Optional[str]:
     """Extract the AWS region from a Bedrock Mantle OpenAI base URL."""
-    match = _BEDROCK_OPENAI_HOST_RE.match(urlparse(str(base_url or "")).hostname or "")
-    return match.group(1) if match else None
+    return _mantle_url_parts(base_url)[0]
 
 
 def is_bedrock_openai_base_url(base_url: str) -> bool:
     """True for Bedrock Mantle endpoints (bare host or /openai[/v1] path)."""
-    parsed = urlparse(str(base_url or ""))
-    if not _BEDROCK_OPENAI_HOST_RE.match(parsed.hostname or ""):
-        return False
-    return (parsed.path or "").rstrip("/").lower() in {"", "/openai", "/openai/v1"}
+    region, path = _mantle_url_parts(base_url)
+    return region is not None and path in {"", "/openai", "/openai/v1"}
 
 
 def resolve_bedrock_bearer_token(env: Optional[Dict[str, str]] = None) -> str:
@@ -421,13 +425,12 @@ def _without_cache_points(blocks: Any) -> Optional[list]:
 def strip_cache_points(kwargs: Dict[str, Any], placement: str) -> Dict[str, Any]:
     """Copy of Converse kwargs with ``placement``'s cachePoint removed; the SAME object
     back when nothing was stripped (callers use identity to decide a retry cannot help)."""
-    if placement == "system":
-        cleaned = _without_cache_points(kwargs.get("system"))
-        return kwargs if cleaned is None else {**kwargs, "system": cleaned}
-    if placement == "tools":
+    if placement in ("system", "tools"):
         tool_config = kwargs.get("toolConfig")
-        cleaned = _without_cache_points((tool_config or {}).get("tools"))
-        return kwargs if cleaned is None else {**kwargs, "toolConfig": {**tool_config, "tools": cleaned}}
+        cleaned = _without_cache_points(kwargs.get("system") if placement == "system" else (tool_config or {}).get("tools"))
+        if cleaned is None:
+            return kwargs
+        return {**kwargs, "system": cleaned} if placement == "system" else {**kwargs, "toolConfig": {**tool_config, "tools": cleaned}}
     if placement == "messages":
         messages = kwargs.get("messages")
         if not isinstance(messages, list):
@@ -479,15 +482,10 @@ def is_anthropic_bedrock_model(model_id: str) -> bool:
 
 def convert_tools_to_converse(tools: List[Dict]) -> List[Dict]:
     """OpenAI ``{"function": {...}}`` tool defs → Converse ``{"toolSpec": {...}}``."""
-    result = []
-    for t in tools or []:
-        fn = t.get("function", {})
-        result.append({"toolSpec": {
-            "name": fn.get("name", ""),
-            "description": fn.get("description", ""),
-            "inputSchema": {"json": fn.get("parameters", {"type": "object", "properties": {}})},
-        }})
-    return result
+    return [{"toolSpec": {
+        "name": fn.get("name", ""), "description": fn.get("description", ""),
+        "inputSchema": {"json": fn.get("parameters", {"type": "object", "properties": {}})},
+    }} for fn in (t.get("function", {}) for t in tools or [])]
 
 
 # Converse rejects empty OR whitespace-only text blocks, so the placeholder must be non-whitespace.
@@ -513,10 +511,8 @@ def _image_block_from_data_url(url: str) -> Dict:
         raw_bytes = base64.b64decode(data)
     except Exception:
         raw_bytes = data.encode("utf-8")
-    return {"image": {
-        "format": media_type.split("/")[-1] if "/" in media_type else "jpeg",
-        "source": {"bytes": raw_bytes},
-    }}
+    image_format = media_type.split("/")[-1] if "/" in media_type else "jpeg"
+    return {"image": {"format": image_format, "source": {"bytes": raw_bytes}}}
 
 
 def _convert_content_to_converse(content) -> List[Dict]:
@@ -888,9 +884,7 @@ def build_converse_kwargs(
     def cache_here(placement: str) -> bool:
         return cache_enabled and cache_point_allowed(model, placement)
 
-    inference_config: Dict[str, Any] = {}
-    if max_tokens is not None:
-        inference_config["maxTokens"] = max_tokens
+    inference_config: Dict[str, Any] = {} if max_tokens is None else {"maxTokens": max_tokens}
     kwargs: Dict[str, Any] = {"modelId": model, "messages": converse_messages, "inferenceConfig": inference_config}
     if system_prompt:
         kwargs["system"] = system_prompt + [dict(_CACHE_POINT)] if cache_here("system") else system_prompt
@@ -939,9 +933,7 @@ def call_converse(
     """Non-streaming Converse call → OpenAI-compatible response. Retries once without a
     rejected cachePoint placement; evicts the cached client on stale-connection errors."""
     client = _get_bedrock_runtime_client(region)
-    kwargs = build_converse_kwargs(
-        model, messages, tools, max_tokens, temperature, top_p, stop_sequences, guardrail_config,
-    )
+    kwargs = build_converse_kwargs(model, messages, tools, max_tokens, temperature, top_p, stop_sequences, guardrail_config)
     try:
         response = client.converse(**kwargs)
     except Exception as exc:
@@ -1117,9 +1109,7 @@ def probe_bedrock_context_length(model_id: str, region: str) -> Optional[int]:
         oversized = "data " * int(tier_tokens / _WORDS_PER_TOKEN)
         try:
             client.converse(
-                modelId=model_id,
-                messages=[{"role": "user", "content": [{"text": oversized}]}],
-                inferenceConfig={"maxTokens": 8},
+                modelId=model_id, messages=[{"role": "user", "content": [{"text": oversized}]}], inferenceConfig={"maxTokens": 8},
             )
             logger.debug(
                 "Bedrock context probe for %s accepted ~%s-token prompt; "

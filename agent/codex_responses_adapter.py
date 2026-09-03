@@ -434,16 +434,15 @@ def _replay_tool_call_items(msg: Dict[str, Any], *, start_index: int) -> List[Di
         if not isinstance(tc, dict):
             continue
         fn = tc.get("function", {})
-        fn_name = fn.get("name")
+        fn_name, arguments = fn.get("name"), fn.get("arguments", "{}")
         if not _nonblank(fn_name):
             continue
         call_id = _resolve_call_id(
-            tc.get("call_id"), tc.get("id"), fn_name, str(fn.get("arguments", "{}")), start_index + len(replayed),
-            canonicalize_fc=True,
+            tc.get("call_id"), tc.get("id"), fn_name, str(arguments), start_index + len(replayed), canonicalize_fc=True,
         )
         replayed.append({
             "type": "function_call", "call_id": _clamp_responses_call_id(call_id),
-            "name": _sanitize_replayed_fn_name(fn_name), "arguments": _coerce_arguments(fn.get("arguments", "{}")),
+            "name": _sanitize_replayed_fn_name(fn_name), "arguments": _coerce_arguments(arguments),
         })
     return replayed
 
@@ -584,21 +583,15 @@ def estimate_native_responses_preflight_tokens(
     None when native compaction is not proven eligible or conversion fails."""
     if getattr(agent, "api_mode", None) != "codex_responses" or not isinstance(messages, list):
         return None
-    is_codex_backend, is_xai_responses, is_github_responses = classify_responses_route(agent)
+    route = classify_responses_route(agent)._asdict()
     from agent.native_compaction import native_compaction_context_management
-    if not native_compaction_context_management(
-        agent, is_codex_backend=is_codex_backend, is_xai_responses=is_xai_responses,
-        is_github_responses=is_github_responses,
-    ):
+    if not native_compaction_context_management(agent, **route):
         return None
     try:
         items = _chat_messages_to_responses_input(
-            messages, is_xai_responses=is_xai_responses, is_github_responses=is_github_responses,
+            messages, is_xai_responses=route["is_xai_responses"], is_github_responses=route["is_github_responses"],
             replay_encrypted_reasoning=bool(getattr(agent, "_codex_reasoning_replay_enabled", True)),
-            current_issuer_kind=_classify_responses_issuer(
-                is_xai_responses=is_xai_responses, is_github_responses=is_github_responses,
-                is_codex_backend=is_codex_backend, base_url=getattr(agent, "base_url", None),
-            ),
+            current_issuer_kind=_classify_responses_issuer(base_url=getattr(agent, "base_url", None), **route),
             native_compaction_eligible=True,
         )
     except Exception:
@@ -854,9 +847,7 @@ def _preflight_codex_api_kwargs(
         if not isinstance(tools, list):
             raise ValueError("Codex Responses request 'tools' must be a list when provided.")
         normalized_tools = [_preflight_tool(tool, idx) for idx, tool in enumerate(tools)]
-        if sanitize_harmony_tokens:
-            normalized_tools = _neutralize_harmony_structure(normalized_tools)
-        normalized["tools"] = normalized_tools
+        normalized["tools"] = _neutralize_harmony_structure(normalized_tools) if sanitize_harmony_tokens else normalized_tools
     if api_kwargs.get("store", False) is not False:
         raise ValueError("Codex Responses contract requires 'store' to be false.")
     for key, accept, coerce in _PREFLIGHT_OPTIONAL_FIELDS:
@@ -875,16 +866,14 @@ def _preflight_codex_api_kwargs(
     extra_body = _optional_dict(api_kwargs, "extra_body")
     if extra_body:
         normalized["extra_body"] = dict(extra_body)
-    allowed_keys = set(_PREFLIGHT_ALLOWED_KEYS)
-    if allow_stream:
-        stream = api_kwargs.get("stream")
-        if stream is not None and stream is not True:
-            raise ValueError("Codex Responses 'stream' must be true when set.")
-        if stream is True:
-            normalized["stream"] = True
-        allowed_keys.add("stream")
-    elif "stream" in api_kwargs:
+    allowed_keys = _PREFLIGHT_ALLOWED_KEYS | ({"stream"} if allow_stream else set())
+    stream = api_kwargs.get("stream")
+    if not allow_stream and "stream" in api_kwargs:
         raise ValueError("Codex Responses stream flag is only allowed in fallback streaming requests.")
+    if allow_stream and stream is not None and stream is not True:
+        raise ValueError("Codex Responses 'stream' must be true when set.")
+    if allow_stream and stream is True:
+        normalized["stream"] = True
     # Defense-in-depth slash-enum strip for xAI (rejects ``Qwen/Qwen3.5`` enum values);
     # gated on the model name because native Codex accepts slashes.
     is_xai_model = str(api_kwargs.get("model") or "").lower().startswith(("grok-", "x-ai/grok-"))
@@ -1022,23 +1011,22 @@ class _OutputScan:
                 reasoning_text = _extract_responses_reasoning_text(item)
                 if reasoning_text:
                     self.reasoning_parts.append(reasoning_text)
-                raw_item = _capture_reasoning_item(item, issuer_kind)
-                if raw_item is not None:
-                    self.reasoning_items_raw.append(raw_item)
+                self._capture(_capture_reasoning_item(item, issuer_kind))
             elif item_type == "compaction":
                 # Compaction checkpoints ride the codex_reasoning_items sidecar (persistence,
                 # replay, cross-issuer guard and kill switch for free).
                 raw_item = _stamped_encrypted_item(item, "compaction", issuer_kind)
-                if raw_item is not None:
-                    self.reasoning_items_raw.append(raw_item)
-                    logger.info(
-                        "Native Responses compaction item captured (%d chars encrypted).",
-                        len(raw_item["encrypted_content"]),
-                    )
+                if self._capture(raw_item):
+                    logger.info("Native Responses compaction item captured (%d chars encrypted).", len(raw_item["encrypted_content"]))
             elif item_type in {"function_call", "custom_tool_call"}:
                 if item_type == "function_call" and item_status in _INCOMPLETE_STATUSES:
                     continue
                 self.tool_calls.append(_response_tool_call(item, item_type, len(self.tool_calls)))
+
+    def _capture(self, raw_item: Optional[Dict[str, Any]]) -> bool:
+        if raw_item is not None:
+            self.reasoning_items_raw.append(raw_item)
+        return raw_item is not None
 
     def _message(self, item: Any, item_status: Optional[str]) -> None:
         normalized_phase = _lower_or_none(getattr(item, "phase", None))
