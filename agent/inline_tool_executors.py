@@ -4,14 +4,15 @@ These tools need live ``AIAgent`` state (stores, callbacks, session DB) and ther
 bypass the tool registry. Each executor is ``fn(agent, args, ctx) -> result``; the
 table replaces two hand-maintained if/elif chains (``invoke_tool`` and
 ``execute_tool_calls_sequential``) that had drifted apart. Tool modules are imported
-lazily inside the bodies so ``patch("tools.x.y")`` in tests keeps working.
+lazily at call time so ``patch("tools.x.y")`` in tests keeps working.
 """
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional
+from importlib import import_module
+from typing import Any, Callable, Dict, Optional, Tuple
 
 
 def tool_hook_ids(agent, effective_task_id: str, tool_call_id: Optional[str]) -> Dict[str, str]:
@@ -66,27 +67,30 @@ class InlineToolContext:
     messages: Optional[list] = None
 
 
-def _todo_list(agent, args: dict, ctx: InlineToolContext) -> Any:
-    from tools.todo_tool import todo_tool as _todo_tool
+InlineToolExecutor = Callable[[Any, dict, InlineToolContext], Any]
 
-    return _todo_tool(
-        todos=args.get("todos"),
-        merge=args.get("merge", False),
-        store=agent._todo_store,
-    )
+# ``(kwarg, args_key)`` → ``args.get(key)``; ``(kwarg, args_key, default)`` → ``args.get(key, default)``.
+_ArgSpec = Tuple[Any, ...]
 
 
-def _message_agent(agent, args: dict, ctx: InlineToolContext) -> Any:
-    # Bot Mode teammate DM is injected, not registered: only a canonical Bot
-    # Chat session carries the schema, and the tool re-gates on the title.
-    from tools.bot_mode_dm import message_agent_tool as _message_agent_tool
+def _call_tool(module: str, func: str, args: dict, arg_specs: Tuple[_ArgSpec, ...], **fixed: Any) -> Any:
+    """Import ``module.func`` lazily and call it with args mapped per ``arg_specs`` plus ``fixed``."""
+    fn = getattr(import_module(module), func)
+    return fn(**{spec[0]: args.get(*spec[1:]) for spec in arg_specs}, **fixed)
 
-    return _message_agent_tool(
-        target=args.get("target", ""),
-        message=args.get("message", ""),
-        task_id=ctx.effective_task_id,
-        agent=agent,
-    )
+
+def _tool(
+    module: str, func: str, *arg_specs: _ArgSpec, **fixed: Callable[[Any, InlineToolContext], Any],
+) -> InlineToolExecutor:
+    """Executor calling ``module.func`` with mapped args plus ``fixed`` kwargs computed from ``(agent, ctx)``."""
+    def _exec(agent, args: dict, ctx: InlineToolContext) -> Any:
+        return _call_tool(module, func, args, arg_specs, **{k: f(agent, ctx) for k, f in fixed.items()})
+    return _exec
+
+
+def _callback_tool(module: str, func: str, callback_attr: str, *arg_specs: _ArgSpec) -> InlineToolExecutor:
+    """Executor for a GUI-callback tool: mapped args plus ``callback=getattr(agent, callback_attr, None)``."""
+    return _tool(module, func, *arg_specs, callback=lambda agent, ctx: getattr(agent, callback_attr, None))
 
 
 def _session_search(agent, args: dict, ctx: InlineToolContext) -> Any:
@@ -95,31 +99,24 @@ def _session_search(agent, args: dict, ctx: InlineToolContext) -> Any:
         from hermes_state import format_session_db_unavailable
 
         return json.dumps({"success": False, "error": format_session_db_unavailable()})
-    from tools.session_search_tool import session_search as _session_search_tool
-
-    return _session_search_tool(
-        query=args.get("query", ""),
-        role_filter=args.get("role_filter"),
-        limit=args.get("limit", 3),
-        session_id=args.get("session_id"),
-        around_message_id=args.get("around_message_id"),
-        window=args.get("window", 5),
-        sort=args.get("sort"),
-        detail=args.get("detail", "adaptive"),
-        db=session_db,
-        current_session_id=agent.session_id,
+    return _call_tool(
+        "tools.session_search_tool", "session_search", args,
+        (
+            ("query", "query", ""), ("role_filter", "role_filter"), ("limit", "limit", 3),
+            ("session_id", "session_id"), ("around_message_id", "around_message_id"),
+            ("window", "window", 5), ("sort", "sort"), ("detail", "detail", "adaptive"),
+        ),
+        db=session_db, current_session_id=agent.session_id,
     )
 
 
 def _memory(agent, args: dict, ctx: InlineToolContext) -> Any:
-    from tools.memory_tool import memory_tool as _memory_tool
-
-    result = _memory_tool(
-        action=args.get("action"),
-        target=args.get("target", "memory"),
-        content=args.get("content"),
-        old_text=args.get("old_text"),
-        operations=args.get("operations"),
+    result = _call_tool(
+        "tools.memory_tool", "memory_tool", args,
+        (
+            ("action", "action"), ("target", "target", "memory"), ("content", "content"),
+            ("old_text", "old_text"), ("operations", "operations"),
+        ),
         store=agent._memory_store,
     )
     # Mirror built-in memory writes to external providers; gating lives in
@@ -136,129 +133,69 @@ def _memory(agent, args: dict, ctx: InlineToolContext) -> Any:
     return result
 
 
-def _clarify(agent, args: dict, ctx: InlineToolContext) -> Any:
-    from tools.clarify_tool import clarify_tool as _clarify_tool
-
-    return _clarify_tool(
-        question=args.get("question", ""),
-        choices=args.get("choices"),
-        multi_select=args.get("multi_select", False),
-        questions=args.get("questions"),
-        callback=agent.clarify_callback,
-    )
-
-
-def _read_terminal(agent, args: dict, ctx: InlineToolContext) -> Any:
-    from tools.read_terminal_tool import read_terminal_tool as _read_terminal_tool
-
-    return _read_terminal_tool(
-        start_line=args.get("start_line"),
-        count=args.get("count"),
-        callback=getattr(agent, "read_terminal_callback", None),
-    )
+_read_preview = _callback_tool(
+    "tools.read_preview_tool", "read_preview_tool", "read_preview_callback",
+    ("start", "start"), ("count", "count"),
+)
 
 
 def _desktop_preview(agent, args: dict, ctx: InlineToolContext) -> Any:
     # action=read needs the GUI callback (agent-level); open/close go through the
     # registry handler like any other tool.
     if (args.get("action") or "").strip() == "read":
-        from tools.read_preview_tool import read_preview_tool as _read_preview_tool
-
-        return _read_preview_tool(
-            start=args.get("start"),
-            count=args.get("count"),
-            callback=getattr(agent, "read_preview_callback", None),
-        )
+        return _read_preview(agent, args, ctx)
     from tools.preview_tool import _handle_preview
 
     return _handle_preview(args)
 
 
-def _drive_preview(agent, args: dict, ctx: InlineToolContext) -> Any:
-    from tools.drive_preview_tool import drive_preview_tool as _drive_preview_tool
-
-    return _drive_preview_tool(
-        action=args.get("action", ""),
-        ref=args.get("ref"),
-        selector=args.get("selector"),
-        text=args.get("text"),
-        key=args.get("key"),
-        submit=args.get("submit"),
-        amount=args.get("amount"),
-        to=args.get("to"),
-        limit=args.get("max"),
-        callback=getattr(agent, "drive_preview_callback", None),
-    )
-
-
-def _annotate_preview(agent, args: dict, ctx: InlineToolContext) -> Any:
-    from tools.annotate_preview_tool import annotate_preview_tool as _annotate_preview_tool
-
-    return _annotate_preview_tool(
-        action=args.get("action", "add"),
-        ref=args.get("ref"),
-        selector=args.get("selector"),
-        label=args.get("label"),
-        callback=getattr(agent, "drive_preview_callback", None),
-    )
-
-
-def _read_window_below(agent, args: dict, ctx: InlineToolContext) -> Any:
-    from tools.read_window_tool import read_window_below_tool as _read_window_below_tool
-
-    return _read_window_below_tool(
-        callback=getattr(agent, "read_window_below_callback", None),
-    )
-
-
-def _gui_tour(agent, args: dict, ctx: InlineToolContext) -> Any:
-    from tools.tour_tool import tour_tool as _tour_tool
-
-    return _tour_tool(
-        action=args.get("action", ""),
-        surface=args.get("surface"),
-        selector=args.get("selector"),
-        title=args.get("title"),
-        text=args.get("text"),
-        side=args.get("side"),
-        steps=args.get("steps"),
-        step_index=args.get("step_index"),
-        callback=getattr(agent, "tour_callback", None),
-    )
-
-
-def _setup_mcp(agent, args: dict, ctx: InlineToolContext) -> Any:
-    from tools.setup_mcp_tool import setup_mcp_tool as _setup_mcp_tool
-
-    return _setup_mcp_tool(
-        server=args.get("server", ""),
-        action=args.get("action", "install"),
-        reason=args.get("reason", ""),
-        callback=getattr(agent, "setup_mcp_callback", None),
-    )
-
-
-def _delegate_task(agent, args: dict, ctx: InlineToolContext) -> Any:
-    return agent._dispatch_delegate_task(args)
-
-
-InlineToolExecutor = Callable[[Any, dict, InlineToolContext], Any]
-
 # Order is the historical if/elif order of ``execute_tool_calls_sequential``.
 INLINE_TOOL_EXECUTORS: Dict[str, InlineToolExecutor] = {
-    "todo_list": _todo_list,
-    "message_agent": _message_agent,
+    "todo_list": _tool(
+        "tools.todo_tool", "todo_tool", ("todos", "todos"), ("merge", "merge", False),
+        store=lambda agent, ctx: agent._todo_store,
+    ),
+    # Bot Mode teammate DM is injected, not registered: only a canonical Bot
+    # Chat session carries the schema, and the tool re-gates on the title.
+    "message_agent": _tool(
+        "tools.bot_mode_dm", "message_agent_tool", ("target", "target", ""), ("message", "message", ""),
+        task_id=lambda agent, ctx: ctx.effective_task_id, agent=lambda agent, ctx: agent,
+    ),
     "session_search": _session_search,
     "memory": _memory,
-    "clarify": _clarify,
-    "read_terminal": _read_terminal,
+    "clarify": _tool(
+        "tools.clarify_tool", "clarify_tool",
+        ("question", "question", ""), ("choices", "choices"), ("multi_select", "multi_select", False),
+        ("questions", "questions"),
+        callback=lambda agent, ctx: agent.clarify_callback,
+    ),
+    "read_terminal": _callback_tool(
+        "tools.read_terminal_tool", "read_terminal_tool", "read_terminal_callback",
+        ("start_line", "start_line"), ("count", "count"),
+    ),
     "desktop_preview": _desktop_preview,
-    "drive_preview": _drive_preview,
-    "annotate_preview": _annotate_preview,
-    "read_window_below": _read_window_below,
-    "gui_tour": _gui_tour,
-    "setup_mcp": _setup_mcp,
-    "delegate_task": _delegate_task,
+    "drive_preview": _callback_tool(
+        "tools.drive_preview_tool", "drive_preview_tool", "drive_preview_callback",
+        ("action", "action", ""), ("ref", "ref"), ("selector", "selector"), ("text", "text"),
+        ("key", "key"), ("submit", "submit"), ("amount", "amount"), ("to", "to"), ("limit", "max"),
+    ),
+    "annotate_preview": _callback_tool(
+        "tools.annotate_preview_tool", "annotate_preview_tool", "drive_preview_callback",
+        ("action", "action", "add"), ("ref", "ref"), ("selector", "selector"), ("label", "label"),
+    ),
+    "read_window_below": _callback_tool(
+        "tools.read_window_tool", "read_window_below_tool", "read_window_below_callback",
+    ),
+    "gui_tour": _callback_tool(
+        "tools.tour_tool", "tour_tool", "tour_callback",
+        ("action", "action", ""), ("surface", "surface"), ("selector", "selector"), ("title", "title"),
+        ("text", "text"), ("side", "side"), ("steps", "steps"), ("step_index", "step_index"),
+    ),
+    "setup_mcp": _callback_tool(
+        "tools.setup_mcp_tool", "setup_mcp_tool", "setup_mcp_callback",
+        ("server", "server", ""), ("action", "action", "install"), ("reason", "reason", ""),
+    ),
+    "delegate_task": lambda agent, args, ctx: agent._dispatch_delegate_task(args),
 }
 
 # ``invoke_tool`` (concurrent path) consults the memory manager right after these three

@@ -1,10 +1,9 @@
 """Per-agent iteration budget — thread-safe consume/refund counter.
 
-Each ``AIAgent`` (parent or subagent) holds its own :class:`IterationBudget`:
-the parent's cap is ``max_iterations`` (default 500), each subagent's is
-``delegation.max_iterations`` (default 50), so total iterations across parent
-+ subagents can exceed the parent's cap. ``run_agent`` re-exports the class so
-``from run_agent import IterationBudget`` keeps working.
+Each ``AIAgent`` (parent or subagent) holds its own :class:`IterationBudget`: the parent's
+cap is ``max_iterations`` (default 500), each subagent's ``delegation.max_iterations``
+(default 50), so total iterations across parent + subagents can exceed the parent's cap.
+``run_agent`` re-exports the class so ``from run_agent import IterationBudget`` keeps working.
 """
 
 from __future__ import annotations
@@ -13,9 +12,8 @@ import threading
 
 
 class IterationBudget:
-    """Thread-safe iteration counter. ``execute_code`` (programmatic tool
-    calling) iterations are refunded via :meth:`refund` so they don't eat
-    into the budget."""
+    """Thread-safe iteration counter; ``execute_code`` (programmatic tool calling)
+    iterations are refunded via :meth:`refund` so they don't eat into the budget."""
 
     def __init__(self, max_total: int):
         self.max_total = max_total

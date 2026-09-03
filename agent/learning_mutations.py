@@ -1,13 +1,10 @@
 """User-initiated edit/delete for journey nodes (learned skills + memories).
 
-Journey node ids (from ``agent.learning_graph``): skills → the skill name;
-memories → ``memory:<source>:<index>`` where ``source`` is ``memory``
-(``MEMORY.md``) or ``profile`` (``USER.md``) and ``index`` is the position in
-the combined card list (``MEMORY.md`` cards first, then ``USER.md``).
-
-Maps a node id back to its on-disk home and mutates it; shared by the CLI
-(``hermes journey delete|edit``), the TUI ``/journey`` overlay, and the desktop
-GUI. Deleting a skill *archives* it (``hermes curator restore`` recovers it);
+Node ids (from ``agent.learning_graph``): skills → the skill name; memories →
+``memory:<source>:<index>`` (``source`` = ``memory`` for MEMORY.md / ``profile``
+for USER.md; ``index`` = position in the combined card list, MEMORY.md first).
+Shared by CLI ``hermes journey``, the TUI ``/journey`` overlay and the desktop.
+Deleting a skill *archives* it (``hermes curator restore`` recovers it);
 deleting a memory rewrites its file.
 """
 
@@ -35,13 +32,10 @@ def _parse_memory_id(node_id: str) -> tuple[str, int]:
 
 
 def _locate_memory(node_id: str) -> tuple[Path, list[str], int]:
-    """Resolve a memory node id to its file, all §-delimited entries, and local index.
-
-    Entries come from ``MemoryStore._read_file`` — the same parser the memory
-    tool uses — so journey indices stay aligned with what the graph renders.
-    ``_memory_cards`` emits all MEMORY.md cards before USER.md cards, so a
-    profile card's local index is its global index minus the memory count.
-    """
+    """Resolve a memory node id to (file, all §-delimited entries, local index).
+    Entries come from ``MemoryStore._read_file`` — the memory tool's own parser —
+    so journey indices stay aligned with what the graph renders; a profile card's
+    local index is its global index minus the MEMORY.md card count."""
     from hermes_constants import get_hermes_home
     from agent.learning_graph import _memory_cards
     from tools.memory_tool import MemoryStore
@@ -66,14 +60,12 @@ def _write_memory(path: Path, chunks: list[str]) -> None:
     """Atomic temp-file + rename via the memory tool, so a concurrent reader
     never sees a half-written file (and the §-join stays single-sourced)."""
     from tools.memory_tool import MemoryStore
-
     MemoryStore._write_file(path, [c.strip() for c in chunks if c.strip()])
 
 
 def _clear_skill_cache() -> None:
     try:
         from agent.prompt_builder import clear_skills_system_prompt_cache
-
         clear_skills_system_prompt_cache(clear_snapshot=True)
     except Exception:
         pass
@@ -81,14 +73,12 @@ def _clear_skill_cache() -> None:
 
 def _dispatch(node_id: str, memory_fn: Callable, skill_fn: Callable, *args) -> dict[str, Any]:
     try:
-        fn = memory_fn if parse_node_kind(node_id) == "memory" else skill_fn
-        return fn(node_id, *args)
+        return (memory_fn if parse_node_kind(node_id) == "memory" else skill_fn)(node_id, *args)
     except (ValueError, IndexError) as exc:
         return {"ok": False, "message": str(exc)}
 
 
 # ── Inspect (edit prefill) ──────────────────────────────────────────────────
-
 
 def node_detail(node_id: str) -> dict[str, Any]:
     """Current content for an edit prefill. ``content`` is the full SKILL.md
@@ -104,24 +94,16 @@ def _memory_detail(node_id: str) -> dict[str, Any]:
 
 def _skill_detail(node_id: str) -> dict[str, Any]:
     from tools.skill_manager_tool import _find_skill
-
     found = _find_skill(node_id)
     if not found:
         return {"ok": False, "message": f"skill '{node_id}' not found"}
     skill_md = Path(found["path"]) / "SKILL.md"
     if not skill_md.exists():
         return {"ok": False, "message": f"SKILL.md missing for '{node_id}'"}
-    return {
-        "ok": True,
-        "kind": "skill",
-        "id": node_id,
-        "label": node_id,
-        "content": skill_md.read_text(encoding="utf-8"),
-    }
+    return {"ok": True, "kind": "skill", "id": node_id, "label": node_id, "content": skill_md.read_text(encoding="utf-8")}
 
 
 # ── Delete ──────────────────────────────────────────────────────────────────
-
 
 def delete_node(node_id: str) -> dict[str, Any]:
     return _dispatch(node_id, _delete_memory, _delete_skill)
@@ -129,7 +111,6 @@ def delete_node(node_id: str) -> dict[str, Any]:
 
 def _delete_skill(name: str) -> dict[str, Any]:
     from tools import skill_usage
-
     if skill_usage.get_record(name).get("pinned"):
         return {"ok": False, "message": f"'{name}' is pinned — unpin it first (hermes curator unpin {name})"}
     ok, message = skill_usage.archive_skill(name)
@@ -147,14 +128,12 @@ def _delete_memory(node_id: str) -> dict[str, Any]:
 
 # ── Edit ────────────────────────────────────────────────────────────────────
 
-
 def edit_node(node_id: str, content: str) -> dict[str, Any]:
     return _dispatch(node_id, _edit_memory, _edit_skill, content)
 
 
 def _edit_skill(name: str, content: str) -> dict[str, Any]:
     from tools.skill_manager_tool import _edit_skill as _do_edit
-
     result = _do_edit(name, content)
     if result.get("success"):
         _clear_skill_cache()

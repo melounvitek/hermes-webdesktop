@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from contextlib import suppress
 from typing import Optional
 
 
@@ -38,101 +39,79 @@ def _hermes_dirs() -> list[Path]:
     Both are checked so credential stores at <root>/... stay guarded when
     running under a profile (HERMES_HOME = <root>/profiles/<name>).
     """
-    dirs: list[Path] = []
-    for base in (_hermes_home_path(), _hermes_root_path()):
+    return list(dict.fromkeys(_resolve_each((_hermes_home_path(), _hermes_root_path()))))
+
+
+def _resolve_each(paths) -> list[Path]:
+    """``p.resolve()`` for each path, skipping ones that fail to resolve."""
+    out: list[Path] = []
+    for p in paths:
+        with suppress(Exception):
+            out.append(p.resolve())
+    return out
+
+
+def _is_under(resolved: str | Path, base: str | Path) -> bool:
+    """True when ``resolved`` equals ``base`` or lies below it (both already resolved);
+    ``Path`` inputs use ``relative_to`` (platform semantics), ``str`` a realpath prefix test."""
+    if isinstance(resolved, Path):
         try:
-            real = base.resolve()
-        except Exception:
-            continue
-        if real not in dirs:
-            dirs.append(real)
-    return dirs
+            return resolved.relative_to(base) is not None
+        except ValueError:
+            return False
+    return resolved == base or resolved.startswith(str(base) + os.sep)
 
 
-def _is_under(resolved: str, prefix: str) -> bool:
-    return resolved == prefix or resolved.startswith(prefix + os.sep)
-
-
-def _under_any(resolved: Path, base: Path) -> bool:
-    try:
-        resolved.relative_to(base)
-        return True
-    except ValueError:
-        return False
+def _resolve_target(path: str) -> Optional[Path]:
+    """``Path(expanduser(path)).resolve()``, or None when resolution fails."""
+    with suppress(OSError, RuntimeError):
+        return Path(os.path.expanduser(str(path))).resolve()
+    return None
 
 
 def _home_and_resolved(path: str) -> tuple[str, str]:
     """``(realpath(~), realpath(expanduser(path)))`` — the write-guard coordinate pair."""
-    return os.path.realpath(os.path.expanduser("~")), os.path.realpath(os.path.expanduser(str(path)))
+    return tuple(os.path.realpath(os.path.expanduser(p)) for p in ("~", str(path)))
 
 
 def build_write_denied_paths(home: str) -> set[str]:
     """Return exact sensitive paths that must never be written."""
-    hermes_home = _hermes_home_path()
-    hermes_root = _hermes_root_path()
-    return {
-        os.path.realpath(p)
-        for p in [
-            os.path.join(home, ".ssh", "authorized_keys"),
-            os.path.join(home, ".ssh", "id_rsa"),
-            os.path.join(home, ".ssh", "id_ed25519"),
-            # ``~/.ssh/config`` is deliberately NOT hard-denied: no key bytes, and
-            # editing it is routine. It can carry ProxyCommand / Match exec, so it
-            # goes through the approval gate instead (build_write_approval_paths).
-            # Both the active-profile and top-level .env: overwriting the root .env
-            # leaks credentials across every profile that inherits from it.
-            str(hermes_home / ".env"),
-            str(hermes_root / ".env"),
-            # Anthropic PKCE credential stores; the root copy is still read by
-            # default/non-profile sessions when a profile is active.
-            str(hermes_home / ".anthropic_oauth.json"),
-            str(hermes_root / ".anthropic_oauth.json"),
-            # Bitwarden Secrets Manager encrypted disk cache.
-            str(hermes_home / "cache" / "bws_cache.enc.json"),
-            str(hermes_root / "cache" / "bws_cache.enc.json"),
-            os.path.join(home, ".netrc"),
-            os.path.join(home, ".pgpass"),
-            os.path.join(home, ".npmrc"),
-            os.path.join(home, ".pypirc"),
-            os.path.join(home, ".git-credentials"),
-            "/etc/sudoers",
-            "/etc/passwd",
-            "/etc/shadow",
-        ]
-    }
+    # ``~/.ssh/config`` is deliberately NOT hard-denied: no key bytes, and editing
+    # it is routine. It can carry ProxyCommand / Match exec, so it goes through the
+    # approval gate instead (build_write_approval_paths).
+    home_files = (
+        (".ssh", "authorized_keys"), (".ssh", "id_rsa"), (".ssh", "id_ed25519"),
+        (".netrc",), (".pgpass",), (".npmrc",), (".pypirc",), (".git-credentials",),
+    )
+    # Both the active-profile and top-level copies: overwriting the root .env leaks
+    # credentials across every profile that inherits from it; the root Anthropic
+    # PKCE store is still read by default/non-profile sessions when a profile is
+    # active; bws_cache.enc.json is the Bitwarden Secrets Manager encrypted cache.
+    hermes_files = (".env", ".anthropic_oauth.json", os.path.join("cache", "bws_cache.enc.json"))
+    paths = [
+        *(os.path.join(home, *f) for f in home_files),
+        *(str(base / f) for f in hermes_files for base in (_hermes_home_path(), _hermes_root_path())),
+        "/etc/sudoers", "/etc/passwd", "/etc/shadow",
+    ]
+    return {os.path.realpath(p) for p in paths}
 
 
 def build_write_denied_prefixes(home: str) -> list[str]:
     """Return sensitive directory prefixes that must never be written."""
-    return [
-        os.path.realpath(p) + os.sep
-        for p in [
-            os.path.join(home, ".ssh"),
-            os.path.join(home, ".aws"),
-            os.path.join(home, ".gnupg"),
-            os.path.join(home, ".kube"),
-            "/etc/sudoers.d",
-            "/etc/systemd",
-            os.path.join(home, ".docker"),
-            os.path.join(home, ".azure"),
-            os.path.join(home, ".config", "gh"),
-            os.path.join(home, ".config", "gcloud"),
-        ]
+    paths = [
+        *(os.path.join(home, d) for d in (".ssh", ".aws", ".gnupg", ".kube")),
+        "/etc/sudoers.d", "/etc/systemd",
+        *(os.path.join(home, *d) for d in ((".docker",), (".azure",), (".config", "gh"), (".config", "gcloud"))),
     ]
+    return [os.path.realpath(p) + os.sep for p in paths]
 
 
 def get_safe_write_roots() -> set[str]:
     """Resolved HERMES_WRITE_SAFE_ROOT paths (``os.pathsep``-separated list)."""
-    env = os.getenv("HERMES_WRITE_SAFE_ROOT", "")
-    if not env:
-        return set()
     roots: set[str] = set()
-    for path in env.split(os.pathsep):
-        if path:
-            try:
-                roots.add(os.path.realpath(os.path.expanduser(path)))
-            except (OSError, ValueError):
-                continue
+    for path in filter(None, os.getenv("HERMES_WRITE_SAFE_ROOT", "").split(os.pathsep)):
+        with suppress(OSError, ValueError):
+            roots.add(os.path.realpath(os.path.expanduser(path)))
     return roots
 
 
@@ -170,11 +149,9 @@ def _classify_write_denial(path: str) -> Optional[str]:
 
     for base in _hermes_dirs():
         for sub in _HERMES_PROTECTED_SUBPATHS:
-            try:
+            with suppress(Exception):
                 if _is_under(resolved, os.path.realpath(os.path.join(str(base), sub))):
                     return "credential"
-            except Exception:
-                pass
 
     safe_roots = get_safe_write_roots()
     if safe_roots and not any(_is_under(resolved, root) for root in safe_roots):
@@ -191,15 +168,13 @@ def is_write_denied(path: str) -> bool:
 def get_write_denied_error(path: str, *, verb: str = "Write") -> Optional[str]:
     """Return a user/model-facing error when writes to ``path`` are blocked."""
     denial = _classify_write_denial(path)
-    if denial is None:
-        return None
     if denial == "safe_root":
         roots_display = os.pathsep.join(sorted(get_safe_write_roots()))
         return (
             f"{verb} denied: '{path}' is outside HERMES_WRITE_SAFE_ROOT "
             f"({roots_display}). Unset the variable or add this path's directory prefix."
         )
-    return f"{verb} denied: '{path}' is a protected system/credential file."
+    return f"{verb} denied: '{path}' is a protected system/credential file." if denial else None
 
 
 def is_write_approval_required(path: str) -> bool:
@@ -211,13 +186,7 @@ def is_write_approval_required(path: str) -> bool:
 
 # Secret-bearing project-local env file basenames, blocked anywhere on disk.
 _BLOCKED_PROJECT_ENV_BASENAMES: set[str] = {
-    ".env",
-    ".env.local",
-    ".env.development",
-    ".env.production",
-    ".env.test",
-    ".env.staging",
-    ".envrc",
+    ".env", ".env.local", ".env.development", ".env.production", ".env.test", ".env.staging", ".envrc",
 }
 
 _DID_SUFFIX = (
@@ -226,33 +195,22 @@ _DID_SUFFIX = (
 
 # Exact-file credential stores under HERMES_HOME / <root>. The agent never
 # needs these directly — provider tools consume them through internal channels.
+# bws_cache.json is the Bitwarden Secrets Manager disk cache: plaintext secret values.
 _CREDENTIAL_FILE_NAMES = (
-    "auth.json",
-    "auth.lock",
-    ".anthropic_oauth.json",
-    ".env",
-    "webhook_subscriptions.json",
-    os.path.join("auth", "google_oauth.json"),
-    # Bitwarden Secrets Manager disk cache: plaintext secret values.
-    os.path.join("cache", "bws_cache.json"),
+    "auth.json", "auth.lock", ".anthropic_oauth.json", ".env", "webhook_subscriptions.json",
+    os.path.join("auth", "google_oauth.json"), os.path.join("cache", "bws_cache.json"),
 )
 
 # Directory-prefix read denies under HERMES_HOME / <root>: (subdir, message for
 # the directory itself, message for a file inside). browser-profile/ is a copy
 # of the user's Cookies / Login Data — the same credential class as auth.json.
 _READ_DENIED_DIRS = (
-    (
-        "mcp-tokens",
-        "is the Hermes MCP token directory and cannot be read directly.",
-        "is a Hermes MCP token file and cannot be read directly.",
-    ),
-    (
-        "browser-profile",
-        "is the Hermes real-profile browser snapshot directory (copied "
-        "cookies/logins) and cannot be read directly.",
-        "is inside the Hermes real-profile browser snapshot (copied "
-        "cookies/logins) and cannot be read directly.",
-    ),
+    ("mcp-tokens",
+     "is the Hermes MCP token directory and cannot be read directly.",
+     "is a Hermes MCP token file and cannot be read directly."),
+    ("browser-profile",
+     "is the Hermes real-profile browser snapshot directory (copied cookies/logins) and cannot be read directly.",
+     "is inside the Hermes real-profile browser snapshot (copied cookies/logins) and cannot be read directly."),
 )
 
 
@@ -270,47 +228,31 @@ def get_read_block_error(path: str) -> Optional[str]:
     """
     resolved = Path(path).expanduser().resolve()
     hermes_dirs = _hermes_dirs()
-
-    for hd in hermes_dirs:
-        if _under_any(resolved, hd / "skills" / ".hub"):
-            return (
-                f"Access denied: {path} is an internal Hermes cache file "
-                "and cannot be read directly to prevent prompt injection. "
-                "Use the skills_list or skill_view tools instead."
-            )
-
-    for hd in hermes_dirs:
-        for name in _CREDENTIAL_FILE_NAMES:
-            try:
-                blocked = (hd / name).resolve()
-            except Exception:
-                continue
-            if resolved == blocked:
-                return (
-                    f"Access denied: {path} is a Hermes credential store "
-                    "and cannot be read directly. Provider tools consume "
-                    "these credentials through internal channels." + _DID_SUFFIX
-                )
-
-    for subdir, dir_msg, file_msg in _READ_DENIED_DIRS:
-        for hd in hermes_dirs:
-            try:
-                blocked_dir = (hd / subdir).resolve()
-            except Exception:
-                continue
-            if resolved == blocked_dir:
-                return f"Access denied: {path} {dir_msg}{_DID_SUFFIX}"
-            if _under_any(resolved, blocked_dir):
-                return f"Access denied: {path} {file_msg}{_DID_SUFFIX}"
-
-    if resolved.name.lower() in _BLOCKED_PROJECT_ENV_BASENAMES:
-        return (
-            f"Access denied: {path} is a secret-bearing environment file "
-            "and cannot be read to prevent credential leakage. "
-            "If you need to check the file structure, read .env.example instead." + _DID_SUFFIX
+    reason = None
+    if any(_is_under(resolved, hd / "skills" / ".hub") for hd in hermes_dirs):
+        reason = (
+            "is an internal Hermes cache file and cannot be read directly to prevent "
+            "prompt injection. Use the skills_list or skill_view tools instead."
         )
-
-    return None
+    elif any(resolved in _resolve_each(hd / name for hd in hermes_dirs) for name in _CREDENTIAL_FILE_NAMES):
+        reason = (
+            "is a Hermes credential store and cannot be read directly. Provider tools "
+            "consume these credentials through internal channels." + _DID_SUFFIX
+        )
+    else:
+        for subdir, dir_msg, file_msg in _READ_DENIED_DIRS:
+            for blocked_dir in _resolve_each(hd / subdir for hd in hermes_dirs):
+                if _is_under(resolved, blocked_dir):
+                    reason = (dir_msg if resolved == blocked_dir else file_msg) + _DID_SUFFIX
+                    break
+            if reason:
+                break
+        if reason is None and resolved.name.lower() in _BLOCKED_PROJECT_ENV_BASENAMES:
+            reason = (
+                "is a secret-bearing environment file and cannot be read to prevent credential "
+                "leakage. If you need to check the file structure, read .env.example instead." + _DID_SUFFIX
+            )
+    return f"Access denied: {path} {reason}" if reason else None
 
 
 def raise_if_read_blocked(path: str) -> None:
@@ -332,33 +274,18 @@ def _resolve_active_profile_name() -> str:
     """Active profile name from HERMES_HOME: ``~/.hermes`` -> ``"default"``,
     ``~/.hermes/profiles/X`` -> ``"X"``; ``"default"`` on any resolution failure."""
     try:
-        home_real = _hermes_home_path().resolve()
-        root_real = _hermes_root_path().resolve()
-    except (OSError, RuntimeError):
+        parts = _hermes_home_path().resolve().relative_to(_hermes_root_path().resolve() / "profiles").parts
+    except (OSError, RuntimeError, ValueError):
         return "default"
-    try:
-        parts = home_real.relative_to(root_real / "profiles").parts
-        if parts:
-            return parts[0]
-    except ValueError:
-        pass
-    return "default"
-
-
-def get_cross_profile_warning(path: str) -> Optional[str]:
-    """RETIRED: always ``None``. Profiles were never isolated (same OS user), so
-    the guard was ceremony that taught a bypass arg. Stub kept so external
-    callers/plugins fail soft; the system prompt's active-profile hint remains."""
-    return None
+    return parts[0] if parts else "default"
 
 
 # --- Sandbox-mirror write guard ---
 # Non-local terminal backends bind a sandbox-local dir to the container's $HOME:
 #   <HERMES_HOME>/profiles/<name>/sandboxes/<backend>/<task>/home/.hermes/...
-# A host-side write there lands on a mirror the host never reads: silent
-# success, divergent copies. Path-shape-only detection, independent of the
-# active profile. Does NOT cover the inner-container case where the bind mount
-# strips the prefix — that is classify_container_mirror_target below.
+# A host-side write there lands on a mirror the host never reads: silent success,
+# divergent copies. Path-shape-only detection, independent of the active profile;
+# the inner-container case (bind mount strips the prefix) is classify_container_mirror_target.
 
 _SANDBOX_MIRROR_WARNING = (
     "Sandbox-mirror write blocked by soft guard: {target_path} "
@@ -369,50 +296,39 @@ _SANDBOX_MIRROR_WARNING = (
 )
 
 
+def _mirror_info(target: Path, mirror_root: Path, inner_path: str) -> dict:
+    """Common ``classify_*_mirror_target`` result shape."""
+    return {"target_path": str(target), "mirror_root": str(mirror_root), "inner_path": inner_path}
+
+
 def classify_sandbox_mirror_target(path: str) -> Optional[dict]:
-    """Classify a write target as a sandbox-mirror of authoritative Hermes state.
-
-    Returns ``None`` for non-mirror paths, else ``target_path`` (resolved),
-    ``mirror_root`` (the ``…/home/.hermes`` prefix) and ``inner_path`` (what
-    the agent likely meant to address on the host).
-    """
-    try:
-        target = Path(os.path.expanduser(str(path))).resolve()
-    except (OSError, RuntimeError):
-        return None
-
-    parts = target.parts
+    """Classify a write target as a sandbox-mirror of authoritative Hermes state: ``None``
+    for non-mirror paths, else ``target_path`` (resolved), ``mirror_root`` (the
+    ``…/home/.hermes`` prefix) and ``inner_path`` (what the agent meant on the host)."""
+    target = _resolve_target(path)
+    parts = target.parts if target is not None else ()
     # Need at least: sandboxes / <backend> / <task> / home / .hermes / <thing>; inner_idx = the .hermes part.
-    for i, part in enumerate(parts):
-        if part == "sandboxes" and i + 5 < len(parts) and parts[i + 3] == "home" and parts[i + 4] == ".hermes":
-            inner_idx = i + 4
-            break
-    else:
+    inner_idx = next(
+        (i + 4 for i, part in enumerate(parts)
+         if part == "sandboxes" and i + 5 < len(parts) and parts[i + 3] == "home" and parts[i + 4] == ".hermes"),
+        None,
+    )
+    if inner_idx is None:
         return None
-    return {
-        "target_path": str(target),
-        "mirror_root": str(Path(*parts[: inner_idx + 1])),
-        "inner_path": str(Path(*parts[inner_idx + 1 :])) if inner_idx + 1 < len(parts) else "",
-    }
+    inner = str(Path(*parts[inner_idx + 1:])) if inner_idx + 1 < len(parts) else ""
+    return _mirror_info(target, Path(*parts[: inner_idx + 1]), inner)
 
 
 def _mirror_warning(info: Optional[dict], body: str, bypass: str) -> Optional[str]:
     """Render ``_SANDBOX_MIRROR_WARNING`` for a classify_* result (``body`` may use ``{inner_path}``)."""
     if info is None:
         return None
-    return _SANDBOX_MIRROR_WARNING.format(
-        target_path=info["target_path"],
-        mirror_root=info["mirror_root"],
-        body=body.format(inner_path=info["inner_path"]),
-        bypass=bypass,
-    )
+    return _SANDBOX_MIRROR_WARNING.format(**info, body=body.format(inner_path=info["inner_path"]), bypass=bypass)
 
 
 def get_sandbox_mirror_warning(path: str) -> Optional[str]:
-    """Model-facing soft-guard warning when ``path`` lands in a sandbox mirror, else ``None``.
-
-    Caller surfaces it as a tool-result error; ``cross_profile=True`` bypasses.
-    """
+    """Model-facing soft-guard warning when ``path`` lands in a sandbox mirror, else ``None``;
+    the caller surfaces it as a tool-result error and ``cross_profile=True`` bypasses."""
     return _mirror_warning(
         classify_sandbox_mirror_target(path),
         "a per-task mirror created by a non-local terminal backend (docker/daytona/etc.). "
@@ -422,37 +338,18 @@ def get_sandbox_mirror_warning(path: str) -> Optional[str]:
     )
 
 
-def classify_container_mirror_target(
-    path: str,
-    mirror_prefix: str | None = None,
-) -> Optional[dict]:
-    """Classify a write target as a container-side sandbox mirror.
-
-    Inside the container the bind mount strips the ``sandboxes/`` prefix (the
-    agent sees plain ``/root/.hermes/…``), so the caller must supply
-    ``mirror_prefix`` once it knows file tools run in a docker sandbox.
-    Returns ``None`` without a prefix or when the path is outside it, else
-    ``target_path``, ``mirror_root`` and ``inner_path``.
-    """
-    if not mirror_prefix:
+def classify_container_mirror_target(path: str, mirror_prefix: str | None = None) -> Optional[dict]:
+    """Classify a write target as a container-side sandbox mirror. Inside the container
+    the bind mount strips the ``sandboxes/`` prefix (the agent sees plain ``/root/.hermes/…``),
+    so the caller supplies ``mirror_prefix`` once it knows file tools run in a docker sandbox.
+    ``None`` without a prefix or outside it, else ``target_path``/``mirror_root``/``inner_path``."""
+    target, mirror = _resolve_target(path), _resolve_target(mirror_prefix) if mirror_prefix else None
+    if target is None or mirror is None or not _is_under(target, mirror):
         return None
-    try:
-        target = Path(os.path.expanduser(str(path))).resolve()
-        mirror = Path(os.path.expanduser(mirror_prefix)).resolve()
-        inner = target.relative_to(mirror)
-    except (OSError, RuntimeError, ValueError):
-        return None
-    return {
-        "target_path": str(target),
-        "mirror_root": str(mirror),
-        "inner_path": inner.as_posix(),
-    }
+    return _mirror_info(target, mirror, target.relative_to(mirror).as_posix())
 
 
-def get_container_mirror_warning(
-    path: str,
-    mirror_prefix: str | None = None,
-) -> Optional[str]:
+def get_container_mirror_warning(path: str, mirror_prefix: str | None = None) -> Optional[str]:
     """Model-facing soft-guard warning when ``path`` lands in the container's mirror, else ``None``."""
     return _mirror_warning(
         classify_container_mirror_target(path, mirror_prefix),
