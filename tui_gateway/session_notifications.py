@@ -233,11 +233,9 @@ def _kb_completed(task, payload: dict, title: str) -> str:
 
 
 def _kb_timed_out(task, payload: dict, title: str) -> str:
-    try:
-        limit = int(payload.get("limit_seconds") or 0)
-    except (TypeError, ValueError):
-        limit = 0
-    return f" timed out (max_runtime={limit}s); will retry"
+    with contextlib.suppress(TypeError, ValueError):
+        return f" timed out (max_runtime={int(payload.get('limit_seconds') or 0)}s); will retry"
+    return " timed out (max_runtime=0s); will retry"
 
 
 # kind -> (glyph, suffix after "Kanban <id>"); silent kinds (archived/unblocked) are absent → None.
@@ -261,10 +259,9 @@ def _format_kanban_event_text(sub: dict, task, ev, board_slug: str) -> Optional[
     glyph, fmt = entry
     task_id = sub.get("task_id", "")
     title = (getattr(task, "title", None) or task_id)[:120]
-    board_tag = f"[{board_slug}] " if board_slug else ""
     who = getattr(task, "assignee", None) or ""
-    tag = f"@{who} " if who else ""
-    return f"{glyph} {board_tag}{tag}Kanban {task_id}{fmt(task, getattr(ev, 'payload', None) or {}, title)}"
+    prefix = f"{glyph} " + (f"[{board_slug}] " if board_slug else "") + (f"@{who} " if who else "")
+    return f"{prefix}Kanban {task_id}{fmt(task, getattr(ev, 'payload', None) or {}, title)}"
 
 
 def _kb_board_key(_kb, board_meta) -> tuple[str, str]:
@@ -324,8 +321,7 @@ def _collect_kanban_notifications(session: dict) -> list:
             return []
     texts: list = []
     seen_db_paths: set = set()
-    for board_meta in boards:
-        slug, resolved = _kb_board_key(_kb, board_meta)
+    for slug, resolved in (_kb_board_key(_kb, board_meta) for board_meta in boards):
         if resolved in seen_db_paths:
             continue
         seen_db_paths.add(resolved)
