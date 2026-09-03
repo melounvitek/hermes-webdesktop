@@ -51,8 +51,13 @@ class StreamTransportMixin:
     async def _try_seed_frame(self, fail_log: str, *, exc_info: bool = False) -> bool:
         """_send_seed_frame() as a bool; a raise logs ``fail_log`` at DEBUG (with the error
         formatted in, or the traceback when ``exc_info``) and reads as False."""
+        return await self._try_frame(self._send_seed_frame(), fail_log, exc_info=exc_info)
+
+    @staticmethod
+    async def _try_frame(coro, fail_log: str, *, exc_info: bool = False) -> bool:
+        """Await a frame send as a bool; a raise logs ``fail_log`` at DEBUG and reads as False."""
         try:
-            return bool(await self._send_seed_frame())
+            return bool(await coro)
         except Exception as e:
             if exc_info:
                 logger.debug(fail_log, exc_info=True)
@@ -77,10 +82,7 @@ class StreamTransportMixin:
 
     async def _close_empty_native_bubble(self, fail_log: str) -> None:
         """Best-effort empty finalize frame to close an open typing bubble, then mark closed."""
-        try:
-            await self._send_frame("", finalize=True)
-        except Exception as e:
-            logger.debug(fail_log, e)
+        await self._try_frame(self._send_frame("", finalize=True), fail_log)
         self._close_native_state()
         self._reopen_seeded_eagerly = False
 
@@ -326,12 +328,13 @@ class StreamTransportMixin:
         if not visible_stripped:
             # Native streams MUST still get a finalize frame (placeholder) to close
             # the thinking bubble, e.g. for a MEDIA-only response.
-            if finalize and self._use_native_streaming and self._native_stream_opened:
-                try:
-                    if await self._send_frame("✅", finalize=True):
-                        self._mark_final_delivered()
-                except Exception as e:
-                    logger.debug("Finalize empty stream failed: %s", e)
+            if (
+                finalize and self._use_native_streaming and self._native_stream_opened
+                and await self._try_frame(
+                    self._send_frame("✅", finalize=True), "Finalize empty stream failed: %s",
+                )
+            ):
+                self._mark_final_delivered()
             return True  # cursor-only / whitespace-only update
         # Don't open a new message for 1-2 tokens + cursor (rapid tool-calling): if
         # the cursor-strip edit is then rate-limited, "X ▉" stays forever.
@@ -396,12 +399,10 @@ class StreamTransportMixin:
         # stream-final-ack-timeout-duplicate.md).  A definitive failure rolls it back.
         if finalize:
             self._mark_final_delivered(record=text)  # recorded: stale frame can't suppress
-        try:
-            ok = await self._send_frame(text, finalize=finalize)
-        except Exception as e:
-            logger.debug("send_stream_frame raised, disabling native streaming: %s", e)
-            ok = False
-        if ok:
+        if await self._try_frame(
+            self._send_frame(text, finalize=finalize),
+            "send_stream_frame raised, disabling native streaming: %s",
+        ):
             self._already_sent = True
             self._last_sent_text = text
             self._native_last_pushed_len = len(text)
