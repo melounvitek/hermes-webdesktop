@@ -62,7 +62,6 @@ def _doctor_runtime(plugin_path: Path):
 
     from hermes_cli.plugins import PluginManager
     from tools.registry import registry
-
     entries_before = {entry.name: entry for entry in registry._snapshot_entries()}
     policy_before = dict(registry._plugin_override_policy)
     modules_before = {name for name in sys.modules if _is_plugin_module(name)}
@@ -152,8 +151,7 @@ class DoctorReport:
         if self.ok:
             lines.append("  OK: runtime discovery, manifest parsing, import, and registration passed")
         lines.append(
-            f"  registrations: {len(self.registered_tools)} tool(s), "
-            f"{len(self.registered_hooks)} hook(s)"
+            f"  registrations: {len(self.registered_tools)} tool(s), {len(self.registered_hooks)} hook(s)",
         )
         return "\n".join(lines)
 
@@ -231,9 +229,7 @@ def _check_manifest_v2(report: "DoctorReport", manifest: Any) -> None:
     """Manifest v2 checks: versions, deps, pip declarations, config schema."""
     import importlib.metadata
     import re as _re
-
     from hermes_cli.plugins import SUPPORTED_MANIFEST_VERSION
-
     mv = getattr(manifest, "manifest_version", 1)
     if mv > SUPPORTED_MANIFEST_VERSION:
         report.warning(

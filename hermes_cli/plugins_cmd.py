@@ -129,7 +129,6 @@ def _scan_plugin_tree(plugin_dir: Path, identifier: str, *, force: bool, scan_de
     if not _scan_on_install_enabled():
         return None
     from tools.plugin_guard import format_scan_report, scan_plugin, should_allow_plugin_install
-
     result = scan_plugin(plugin_dir, source=identifier)
     allowed, reason = should_allow_plugin_install(result, force=force)
 
@@ -355,15 +354,11 @@ def _print_python_dependencies(manifest: dict, console) -> None:
     if not deps:
         return
     plugin_name = manifest.get("name", "this plugin")
-    console.print(
-        f"\n[bold]{plugin_name}[/bold] declares Python dependencies "
-        "(not installed automatically):"
-    )
+    console.print(f"\n[bold]{plugin_name}[/bold] declares Python dependencies (not installed automatically):")
     for dep in deps:
         console.print(f"  - {dep}")
     console.print(
-        "[dim]Install them yourself if needed: "
-        f"pip install {' '.join(repr(d) for d in deps)}[/dim]\n"
+        f"[dim]Install them yourself if needed: pip install {' '.join(repr(d) for d in deps)}[/dim]\n",
     )
 
 
@@ -374,7 +369,6 @@ def _prompt_plugin_env_vars(manifest: dict, console) -> None:
         return
     from hermes_cli.config import save_env_value
     from hermes_constants import display_hermes_home
-
     plugin_name = manifest.get("name", "this plugin")
     console.print(f"\n[bold]{plugin_name}[/bold] requires the following environment variables:\n")
     for spec in missing:
@@ -404,7 +398,6 @@ def _display_after_install(plugin_dir: Path, identifier: str) -> None:
     """Show after-install.md if it exists, otherwise a default message."""
     from rich.markdown import Markdown
     from rich.panel import Panel
-
     console = _console()
     after_install = plugin_dir / "after-install.md"
     if after_install.exists():
@@ -427,8 +420,7 @@ def _require_installed_plugin(name: str, plugins_dir: Path, console) -> Path:
     if not target.exists():
         installed = ", ".join(d.name for d in plugins_dir.iterdir() if d.is_dir()) or "(none)"
         console.print(
-            f"[red]Error:[/red] Plugin '{name}' not found in {plugins_dir}.\n"
-            f"Installed plugins: {installed}"
+            f"[red]Error:[/red] Plugin '{name}' not found in {plugins_dir}.\nInstalled plugins: {installed}",
         )
         sys.exit(1)
     return target
@@ -561,8 +553,7 @@ def _check_manifest_version(manifest: dict, plugin_name: str) -> None:
         mv_int = int(mv)
     except (ValueError, TypeError):
         raise PluginOperationError(
-            f"Plugin '{plugin_name}' has invalid manifest_version "
-            f"'{mv}' (expected an integer).",
+            f"Plugin '{plugin_name}' has invalid manifest_version '{mv}' (expected an integer).",
         ) from None
     if mv_int > _SUPPORTED_MANIFEST_VERSION:
         from hermes_cli.config import recommended_update_command
@@ -717,7 +708,6 @@ def _resolve_index_name(identifier: str, console) -> tuple[str, Optional[str]]:
     """Resolve a bare plugin name to ``(install_identifier, pinned_ref)``; exit 1 when unknown or
     ambiguous. The ref is only pinned when it is an exact 40-char SHA; tags are advisory output."""
     from hermes_cli.plugin_index import SECURITY_FOOTER, load_index, resolve_name
-
     entries, source = load_index()
     entry, candidates = resolve_name(entries, identifier)
     if entry is None:
@@ -853,7 +843,6 @@ def _pull_plugin_update(target: Path, pinned_msg, not_git_msg, before_pull=None)
 def cmd_update(name: str) -> None:
     """Update an installed plugin by pulling latest from its git remote."""
     from rich.markup import escape
-
     console = _console()
     target = _require_installed_plugin(name, _plugins_dir(), console)
     try:
@@ -1062,7 +1051,6 @@ def cmd_enable(name: str, allow_tool_override: Optional[bool] = None) -> None:
     tri-state: ``True``/``False`` skip the prompt, ``None`` asks. Bundled plugins are trusted.
     """
     from hermes_cli.relay_plugin_cutover import LEGACY_RELAY_PLUGIN_KEYS, RELAY_PLUGINS_CONFIG_ENV
-
     console = _console()
 
     def _refuse_legacy_relay(plugin: str) -> None:
@@ -1096,10 +1084,7 @@ def cmd_enable(name: str, allow_tool_override: Optional[bool] = None) -> None:
             disabled.discard(manifest_name)
         _save_enabled_set(enabled)
         _save_disabled_set(disabled)
-        console.print(
-            f"[green]✓[/green] Plugin [bold]{key}[/bold] enabled. "
-            "Takes effect on next session."
-        )
+        console.print(f"[green]✓[/green] Plugin [bold]{key}[/bold] enabled. Takes effect on next session.")
 
     # Built-in tool override is a privileged grant; bundled plugins are trusted.
     if source == "bundled":
@@ -1164,7 +1149,6 @@ def _run_capability_consent(
     degrade via ``ctx.has_capability()``. Consent + audit, NOT a sandbox.
     """
     from hermes_cli.plugin_capabilities import pending_capabilities, record_consent
-
     pending = pending_capabilities(plugin_id, declared)
     if not pending:
         # Refresh the consent hash so a later declaration change is detected.
@@ -1173,10 +1157,7 @@ def _run_capability_consent(
         return True
 
     verb = "requests" if context == "install" else "now requests"
-    console.print(
-        f"\n  [yellow]Plugin [bold]{plugin_id}[/bold] {verb} the following "
-        "capabilities:[/yellow]"
-    )
+    console.print(f"\n  [yellow]Plugin [bold]{plugin_id}[/bold] {verb} the following capabilities:[/yellow]")
     _print_capability_list(console, pending)
     console.print(
         "  [dim]Granting trusts the plugin author with these host surfaces. "
@@ -1216,7 +1197,6 @@ def cmd_capabilities(name: Optional[str] = None) -> None:
         granted_capabilities,
         plugin_capability_granted,
     )
-
     console = _console()
     rows = []
     for entry in _discover_all_plugins():
@@ -1252,10 +1232,7 @@ def cmd_capabilities(name: Optional[str] = None) -> None:
                 mark = "[yellow]not granted[/yellow]"
             console.print(f"  {cap}: {mark}")
         for cap in sorted(effective - set(declared)):
-            console.print(
-                f"  {cap}: [green]granted[/green] "
-                "[dim](not declared in manifest)[/dim]"
-            )
+            console.print(f"  {cap}: [green]granted[/green] [dim](not declared in manifest)[/dim]")
 
 
 def _resolve_tool_override_grant(
@@ -1306,8 +1283,7 @@ def cmd_disable(name: str) -> None:
     _save_enabled_set(enabled)
     _save_disabled_set(disabled)
     console.print(
-        f"[yellow]\u2298[/yellow] Plugin [bold]{key}[/bold] disabled. "
-        "Takes effect on next session."
+        f"[yellow]\u2298[/yellow] Plugin [bold]{key}[/bold] disabled. Takes effect on next session.",
     )
 
 
@@ -1403,7 +1379,6 @@ def _discover_entrypoint_plugins() -> list[tuple[str, str, str, str]]:
     as Python packages, so they have no plugin directory."""
     from hermes_cli.plugins import ENTRY_POINTS_GROUP
     from hermes_cli.plugins_discovery import _select_entry_point_group
-
     try:
         group_eps = _select_entry_point_group(importlib.metadata.entry_points(), ENTRY_POINTS_GROUP)
     except Exception as exc:
@@ -1453,7 +1428,6 @@ _STATUS_MARKUP = {"disabled": "[red]disabled[/red]", "enabled": "[green]enabled[
 def cmd_list(args: Any | None = None) -> None:
     """List all plugins (bundled + user) with enabled/disabled state."""
     from rich.table import Table
-
     console = _console()
     entries = _discover_all_plugins()
     if not entries:
@@ -1549,7 +1523,6 @@ def _configure_provider_category(
     """Radio picker: the built-in default first, then *choices*; a current value not among
     them is appended as ``(not found)``. Calls *save* and returns True when the choice changed."""
     from hermes_cli.curses_ui import curses_radiolist
-
     names = [default_name] + [name for name, _desc in choices]
     items = [default_label] + [f"{name} \u2014 {desc}" if desc else name for name, desc in choices]
     if current not in names:
@@ -1684,7 +1657,6 @@ def _run_composite_ui(curses, plugin_keys, plugin_labels, plugin_selected,
                       disabled, categories, console):
     """Custom curses screen with checkboxes + category action rows."""
     from hermes_cli.curses_ui import flush_stdin
-
     chosen = set(plugin_selected)
     n_plugins = len(plugin_keys)
     n_categories = len(categories)
@@ -1821,7 +1793,6 @@ def _run_composite_fallback(plugin_keys, plugin_labels, plugin_selected,
                             disabled, categories, console):
     """Text-based fallback for the composite plugins UI."""
     from hermes_cli.colors import Colors, color
-
     print(color("\n  Plugins", Colors.YELLOW))
     if plugin_keys:
         chosen = set(plugin_selected)
@@ -1945,7 +1916,6 @@ def _toggle_plugin_toolset(name: str, *, enable: bool) -> None:
     if not toolset_key:
         return
     from hermes_cli.config import load_config, save_config
-
     config = load_config()
     platform_toolsets = _sub_dict(config, "platform_toolsets")
     changed = False
@@ -2141,7 +2111,6 @@ def dashboard_remove_user_plugin(name: str) -> dict[str, Any]:
 def cmd_plugin_doctor(target: str = ".", *, ci: bool = False) -> None:
     """Validate one plugin through runtime discovery and registration."""
     from hermes_cli.plugin_dev import doctor_plugin
-
     report = doctor_plugin(target)
     _console().print(report.format_text())
     if ci and not report.ok:
@@ -2157,7 +2126,6 @@ def cmd_search(
 ) -> None:
     """Search the community plugin index (fuzzy on name/description/tags)."""
     from hermes_cli.plugin_index import SECURITY_FOOTER, load_index, search_index
-
     console = _console()
     entries, source = load_index(refresh=refresh)
     results = search_index(entries, term, capability=capability)
@@ -2174,14 +2142,10 @@ def cmd_search(
         return
 
     if not results:
-        console.print(
-            f"[yellow]No plugins matched '{term}'[/yellow] "
-            f"[dim](index source: {source})[/dim]"
-        )
+        console.print(f"[yellow]No plugins matched '{term}'[/yellow] [dim](index source: {source})[/dim]")
         return
 
     from rich.table import Table
-
     table = Table(title=f"Community plugins ({len(results)} match{'es' if len(results) != 1 else ''})")
     table.add_column("Name", style="bold")
     table.add_column("Description")

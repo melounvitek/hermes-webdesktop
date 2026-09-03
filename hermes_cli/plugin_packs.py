@@ -106,8 +106,7 @@ def validate_config_seed(plugin_id: str, seed: Any) -> dict[str, Any]:
     reserved consent keys, ``allow_*`` trust gates, and secret-shaped keys."""
     if not isinstance(seed, dict):
         raise PackError(
-            f"Pack config for plugin '{plugin_id}' must be a mapping of "
-            f"plugins.entries.{plugin_id} keys."
+            f"Pack config for plugin '{plugin_id}' must be a mapping of plugins.entries.{plugin_id} keys.",
         )
     for key in seed:
         if not isinstance(key, str) or not key.strip():
@@ -130,7 +129,6 @@ def validate_config_seed(plugin_id: str, seed: Any) -> dict[str, Any]:
 def parse_pack(text: str, *, source: str = "<pack>") -> PluginPack:
     """Parse and validate a pack YAML document."""
     import yaml
-
     try:
         raw = yaml.safe_load(text)
     except yaml.YAMLError as exc:
@@ -269,7 +267,6 @@ def resolve_pack_plugins(pack: PluginPack) -> List[ResolvedPackPlugin]:
 def render_pack_review(console, pack: PluginPack, resolved: List[ResolvedPackPlugin]) -> None:
     """Print the full pack review screen (mandatory before install)."""
     from rich.table import Table
-
     header = f"[bold]{pack.name}[/bold]" + (f" v{pack.version}" if pack.version else "")
     if pack.author:
         header += f" — by {pack.author}"
@@ -322,7 +319,6 @@ class PackInstallResult:
 def _seed_plugin_config(plugin_id: str, seed: dict[str, Any], console) -> None:
     """Seed plugins.entries.<plugin_id> keys that are not already set (user values always win)."""
     from hermes_cli.config import load_config, save_config
-
     seed = validate_config_seed(plugin_id, seed)
     config = load_config()
     entry = config.setdefault("plugins", {}).setdefault("entries", {}).setdefault(plugin_id, {})
@@ -335,10 +331,7 @@ def _seed_plugin_config(plugin_id: str, seed: dict[str, Any], console) -> None:
     wrote = False
     for key, value in seed.items():
         if key in entry:
-            console.print(
-                f"[dim]  plugins.entries.{plugin_id}.{key} already set — keeping "
-                "your value.[/dim]"
-            )
+            console.print(f"[dim]  plugins.entries.{plugin_id}.{key} already set — keeping your value.[/dim]")
             continue
         entry[key] = value
         wrote = True
@@ -371,7 +364,6 @@ def install_pack_plugins(
         _save_disabled_set,
         _save_enabled_set,
     )
-
     results: List[PackInstallResult] = []
 
     def _fail(display: str, error: str) -> None:
@@ -471,9 +463,7 @@ def export_pack(*, enabled_only: bool = False, pack_name: str = "my-hermes-pack"
     """Build pack YAML from the current install; returns ``(yaml_text, warnings)``. Plugins with
     unknown Git provenance (no install metadata) become warnings + YAML comments, never entries."""
     import yaml
-
     from hermes_cli.plugins_cmd import _get_enabled_set, _plugins_dir, _read_install_metadata
-
     metadata = _read_install_metadata()
     enabled = _get_enabled_set()
     installed = sorted(d.name for d in _plugins_dir().iterdir() if d.is_dir() and not d.name.startswith("."))
@@ -536,7 +526,6 @@ def _load_and_review(console, source: str):
 def cmd_pack_show(source: str) -> None:
     """``hermes plugins pack show <path-or-url>`` — dry-run review."""
     from rich.console import Console
-
     console = Console()
     pack, resolved = _load_and_review(console, source)
     unresolved = [rp for rp in resolved if rp.identifier is None]
@@ -552,7 +541,6 @@ def cmd_pack_install(source: str, *, force: bool = False) -> None:
     """``hermes plugins pack install <path-or-url>``: mandatory review screen -> one pack-level
     consent -> pinned fan-out installs -> per-plugin capability consent. Exit 1 if any failed."""
     from rich.console import Console
-
     console = Console()
     pack, resolved = _load_and_review(console, source)
 
@@ -565,8 +553,7 @@ def cmd_pack_install(source: str, *, force: bool = False) -> None:
         sys.exit(1)
     try:
         answer = console.input(
-            f"\nInstall {len(resolved)} plugin(s) from pack "
-            f"'{pack.name}'? [y/N] "
+            f"\nInstall {len(resolved)} plugin(s) from pack '{pack.name}'? [y/N] ",
         ).strip().lower()
     except (EOFError, KeyboardInterrupt):
         answer = ""
@@ -590,7 +577,6 @@ def cmd_pack_install(source: str, *, force: bool = False) -> None:
 def cmd_pack_export(*, enabled_only: bool = False, name: str = "my-hermes-pack") -> None:
     """``hermes plugins pack export [--enabled-only]`` — pack YAML on stdout."""
     from rich.console import Console
-
     console = Console(stderr=True)
     try:
         text, warnings = export_pack(enabled_only=enabled_only, pack_name=name)

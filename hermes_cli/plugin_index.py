@@ -194,7 +194,6 @@ def load_index(*, refresh: bool = False, offline: bool = False) -> tuple[List[Pl
 def _score_entry(entry: PluginIndexEntry, term: str) -> float:
     """Fuzzy relevance score for *entry* against lowercase *term* (0 = no match)."""
     import difflib
-
     name = entry.name.lower()
     tags = [t.lower() for t in entry.tags]
     if term == name:
