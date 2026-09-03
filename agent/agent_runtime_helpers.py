@@ -3111,32 +3111,22 @@ def _classify_tool_call_orphans(messages: List[Dict[str, Any]]):
     return surviving_call_ids, result_call_ids, orphaned_results, missing_tool_calls
 
 
-def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Fix orphaned tool_call / tool_result pairs before every LLM call; runs unconditionally (not gated on the compressor)."""
-    # --- Role allowlist: drop messages with roles the API won't accept ---
+def _drop_invalid_roles(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop messages whose role the API won't accept."""
     filtered = []
     for msg in messages:
         role = msg.get("role")
         if role not in _ra().AIAgent._VALID_API_ROLES:
-            _ra().logger.debug(
-                "Pre-call sanitizer: dropping message with invalid role %r",
-                role,
-            )
+            _ra().logger.debug("Pre-call sanitizer: dropping message with invalid role %r", role)
             continue
         filtered.append(msg)
-    messages = filtered
+    return filtered
 
-    # --- Heal empty-content non-final messages (self-recovery) ---
-    # A dead stream can leave an empty stub mid-transcript that 400s every later request;
-    # repair the per-call copy so the session heals in memory. Done first so the substituted
-    # turn participates in the tool-pair and dedup passes below.
-    messages = repair_empty_non_final_messages(messages)
 
-    # --- Drop empty / malformed tool_calls arrays on assistant messages ---
-    # Strict providers 400 on ``tool_calls: []`` (#58755, #56980). Normalize on the
-    # per-call copy (shallow-copy) so persisted history stays byte-stable.
+def _drop_empty_tool_calls_arrays(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Strict providers 400 on ``tool_calls: []``; normalize on shallow copies so history stays byte-stable."""
     normalized: List[Dict[str, Any]] = []
-    dropped_empty_tool_calls = 0
+    dropped = 0
     for msg in messages:
         if (
             isinstance(msg, dict)
@@ -3145,27 +3135,27 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
             and not (isinstance(msg["tool_calls"], list) and msg["tool_calls"])
         ):
             msg = {k: v for k, v in msg.items() if k != "tool_calls"}
-            dropped_empty_tool_calls += 1
+            dropped += 1
         normalized.append(msg)
-    if dropped_empty_tool_calls:
-        messages = normalized
-        _ra().logger.debug(
-            "Pre-call sanitizer: dropped empty/invalid tool_calls on %d "
-            "assistant message(s)",
-            dropped_empty_tool_calls,
-        )
+    if not dropped:
+        return messages
+    _ra().logger.debug(
+        "Pre-call sanitizer: dropped empty/invalid tool_calls on %d assistant message(s)", dropped
+    )
+    return normalized
 
-    # --- Repair tool_calls whose function.name is empty/missing ---
-    # Rename to a sentinel instead of dropping: the dispatch loop keeps empty-name calls
-    # paired with an anti-priming result (#47967), and Responses adapters drop nameless calls (400).
-    _EMPTY_NAME_SENTINEL = "invalid_tool_call"
+
+def _repair_nameless_tool_calls(messages: List[Dict[str, Any]]) -> None:
+    """Rename empty/missing ``function.name`` to a sentinel (in place).
+
+    Dropping would unpair the anti-priming result the dispatch loop keeps for
+    empty-name calls, and Responses adapters 400 on nameless calls.
+    """
+    sentinel = "invalid_tool_call"
     for msg in messages:
         if msg.get("role") != "assistant":
             continue
-        tcs = msg.get("tool_calls") or []
-        if not tcs:
-            continue
-        for tc in tcs:
+        for tc in msg.get("tool_calls") or []:
             if isinstance(tc, dict):
                 fn = tc.get("function")
                 name = fn.get("name") if isinstance(fn, dict) else getattr(fn, "name", None)
@@ -3175,87 +3165,89 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
             if isinstance(name, str) and name.strip():
                 continue
             _ra().logger.warning(
-                "Pre-call sanitizer: repairing tool_call with empty "
-                "function.name -> %r (id=%s)",
-                _EMPTY_NAME_SENTINEL,
+                "Pre-call sanitizer: repairing tool_call with empty function.name -> %r (id=%s)",
+                sentinel,
                 _ra().AIAgent._get_tool_call_id_static(tc),
             )
             if isinstance(fn, dict):
-                fn["name"] = _EMPTY_NAME_SENTINEL
+                fn["name"] = sentinel
             elif fn is not None and hasattr(fn, "name"):
                 try:
-                    fn.name = _EMPTY_NAME_SENTINEL
+                    fn.name = sentinel
                 except Exception:
                     pass
             elif isinstance(tc, dict):
-                tc["function"] = {"name": _EMPTY_NAME_SENTINEL, "arguments": "{}"}
+                tc["function"] = {"name": sentinel, "arguments": "{}"}
 
-    # --- Drop tool results with a missing/empty tool_call_id ---
-    # Kept explicit (not left to the positional walk) for its own log line and so the
-    # final-chokepoint guarantee holds for callers skipping ``repair_message_sequence`` (#78071).
-    _pre_id_filter_count = len(messages)
-    messages = [
+
+def _drop_results_without_ids(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop tool results with a missing/empty tool_call_id.
+
+    Kept explicit (not left to the positional walk) for its own log line and so the
+    final-chokepoint guarantee holds for callers skipping ``repair_message_sequence``.
+    """
+    kept = [
         m for m in messages
         if not (m.get("role") == "tool" and not (m.get("tool_call_id") or "").strip())
     ]
-    if len(messages) != _pre_id_filter_count:
+    if len(kept) != len(messages):
         _ra().logger.debug(
             "Pre-call sanitizer: dropped %d tool result(s) with missing/empty tool_call_id",
-            _pre_id_filter_count - len(messages),
+            len(messages) - len(kept),
         )
+    return kept
 
-    # --- Positional tool_call <-> tool_result pairing (#94704) ---
-    # Strict providers (DeepSeek v4, Kimi) require results IMMEDIATELY after their call:
-    # drop positional orphans, stub unanswered declared ids; matching is alias-aware (#55626/#63000/#93251).
+
+def _pair_tool_calls_positionally(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Positional tool_call <-> tool_result pairing.
+
+    Strict providers (DeepSeek v4, Kimi) require results IMMEDIATELY after their call:
+    drop positional orphans, stub unanswered declared ids; matching is alias-aware.
+    """
     paired: List[Dict[str, Any]] = []
     declared_calls: Dict[str, tuple] = {}
-    dropped_positional_orphans = 0
-    added_stubs = 0
+    dropped = 0
+    stubs = 0
 
     def _flush_unanswered_stubs() -> None:
-        nonlocal added_stubs
+        nonlocal stubs
         for key in sorted(declared_calls):
             tc, _variants = declared_calls[key]
-            cid = coalesce_tool_call_id(tc) or key
             paired.append({
                 "role": "tool",
                 "name": _ra().AIAgent._get_tool_call_name_static(tc),
                 "content": "[Result unavailable — see context summary above]",
-                "tool_call_id": cid,
+                "tool_call_id": coalesce_tool_call_id(tc) or key,
             })
-            added_stubs += 1
+            stubs += 1
         declared_calls.clear()
 
     for msg in messages:
         role = msg.get("role")
         if role == "assistant":
-            # A new assistant turn closes the previous tool-result run:
-            # anything still pending was never answered positionally.
+            # A new assistant turn closes the previous tool-result run: anything still
+            # pending was never answered positionally.
             _flush_unanswered_stubs()
             declared_calls = {}
             for tc in msg.get("tool_calls") or []:
                 variants = tool_call_id_variants(tc)
                 if variants:
-                    # Key on a stable representative of the alias group so
-                    # a result matching ANY spelling can consume the call.
+                    # Key on a stable representative of the alias group so a result
+                    # matching ANY spelling can consume the call.
                     declared_calls[sorted(variants)[0]] = (tc, variants)
             paired.append(msg)
         elif role == "tool":
             result_variants = tool_result_id_variants(msg.get("tool_call_id"))
             matched = next(
-                (
-                    key
-                    for key, (_tc, variants) in declared_calls.items()
-                    if variants & result_variants
-                ),
+                (key for key, (_tc, variants) in declared_calls.items() if variants & result_variants),
                 None,
             )
-            if matched is not None:
-                paired.append(msg)
-                # Consume so a duplicate result reusing the id is dropped (strict providers reject duplicates).
-                declared_calls.pop(matched, None)
-            else:
-                dropped_positional_orphans += 1
+            if matched is None:
+                dropped += 1
+                continue
+            paired.append(msg)
+            # Consume so a duplicate result reusing the id is dropped (strict providers reject duplicates).
+            declared_calls.pop(matched, None)
         else:
             if role == "user":
                 # A user turn closes the tool-result run; later tool messages are orphans.
@@ -3263,31 +3255,34 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
             paired.append(msg)
     # The transcript may end right after an unanswered assistant turn.
     _flush_unanswered_stubs()
-    if dropped_positional_orphans or added_stubs:
-        messages = paired
-    if dropped_positional_orphans:
+    if dropped:
         _ra().logger.debug(
-            "Pre-call sanitizer: removed %d positionally orphaned tool result(s)",
-            dropped_positional_orphans,
+            "Pre-call sanitizer: removed %d positionally orphaned tool result(s)", dropped
         )
-    if added_stubs:
+    if stubs:
         _ra().logger.debug(
             "Pre-call sanitizer: added %d stub tool result(s) for "
             "positionally unanswered tool call(s)",
-            added_stubs,
+            stubs,
         )
+    return paired if (dropped or stubs) else messages
 
-    # 3. Deduplicate tool_call_ids (strict providers 400 on duplicates, #58327): collapse
-    # duplicates within an assistant message; drop results answering no OUTSTANDING call.
-    # Track outstanding calls (not ids ever seen) because llama.cpp reuses one constant id,
-    # and track the whole variant group so alias-keyed results are not deleted (#93251).
+
+def _dedupe_tool_call_ids(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Deduplicate tool_call_ids (strict providers 400 on duplicates).
+
+    Collapses duplicates within an assistant message and drops results answering
+    no OUTSTANDING call. Tracks outstanding calls (not ids ever seen) because
+    llama.cpp reuses one constant id, and the whole variant group so
+    alias-keyed results are not deleted.
+    """
     seen_assistant_call_ids: set = set()
     outstanding_call_ids: set = set()
     outstanding_groups: Dict[int, frozenset] = {}
     variant_to_group: Dict[str, int] = {}
     next_group_id = 0
     deduped: List[Dict[str, Any]] = []
-    removed_dupes = 0
+    removed = 0
     for msg in messages:
         role = msg.get("role")
         if role == "assistant" and msg.get("tool_calls"):
@@ -3295,7 +3290,7 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
             for tc in msg.get("tool_calls") or []:
                 variants = tool_call_id_variants(tc)
                 if variants and variants & seen_assistant_call_ids:
-                    removed_dupes += 1
+                    removed += 1
                     continue
                 if variants:
                     group_id = next_group_id
@@ -3310,40 +3305,38 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
                 msg = {**msg, "tool_calls": kept_tcs}
             elif len(kept_tcs) != len(msg.get("tool_calls") or []):
                 msg = {k: v for k, v in msg.items() if k != "tool_calls"}
-            deduped.append(msg)
         elif role == "tool":
             result_variants = tool_result_id_variants(msg.get("tool_call_id"))
             candidate_groups = {
                 variant_to_group[variant]
                 for variant in result_variants
-                if variant in variant_to_group
-                and variant in outstanding_call_ids
+                if variant in variant_to_group and variant in outstanding_call_ids
             }
             if result_variants and not candidate_groups:
-                removed_dupes += 1
+                removed += 1
                 continue
             if candidate_groups:
                 # Consume EVERY variant of the matched call; ids are re-armed by the next call reusing them.
                 group_id = min(candidate_groups)
-                group_variants = outstanding_groups.pop(group_id, frozenset())
-                for variant in group_variants:
+                for variant in outstanding_groups.pop(group_id, frozenset()):
                     outstanding_call_ids.discard(variant)
                     seen_assistant_call_ids.discard(variant)
                     if variant_to_group.get(variant) == group_id:
                         variant_to_group.pop(variant, None)
-            deduped.append(msg)
-        else:
-            deduped.append(msg)
-    if removed_dupes:
-        messages = deduped
-        _ra().logger.debug(
-            "Pre-call sanitizer: removed %d duplicate tool_call_id reference(s)",
-            removed_dupes,
-        )
+        deduped.append(msg)
+    if not removed:
+        return messages
+    _ra().logger.debug(
+        "Pre-call sanitizer: removed %d duplicate tool_call_id reference(s)", removed
+    )
+    return deduped
 
-    # 4. Align each tool result's wire ``name`` with its call's function name: Google 400s
-    # on a mismatch, which is routine when tool_search bridges via ``tool_call`` (#72089).
-    # Done here, provider-agnostically, on the per-call copy only.
+
+def _realign_tool_result_names(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Align each tool result's wire ``name`` with its call's function name (per-call copy only).
+
+    Google 400s on a mismatch, which is routine when tool_search bridges via ``tool_call``.
+    """
     call_names: Dict[str, str] = {}
     for msg in messages:
         if msg.get("role") == "assistant":
@@ -3357,23 +3350,38 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
     aligned: List[Dict[str, Any]] = []
     for msg in messages:
         if msg.get("role") == "tool":
-            cid = (msg.get("tool_call_id") or "").strip()
-            expected = call_names.get(cid)
+            expected = call_names.get((msg.get("tool_call_id") or "").strip())
             current = msg.get("name")
             # Only rewrite a present, disagreeing name; clean transcripts must stay byte-identical for prompt caching.
             if expected and current and current != expected:
                 msg = {**msg, "name": expected}
                 realigned.append((current, expected))
         aligned.append(msg)
-    if realigned:
-        messages = aligned
-        _ra().logger.debug(
-            "Pre-call sanitizer: realigned %d tool result name(s) with their "
-            "tool_call function name (%s)",
-            len(realigned),
-            ", ".join(f"{was} -> {now}" for was, now in realigned),
-        )
-    return messages
+    if not realigned:
+        return messages
+    _ra().logger.debug(
+        "Pre-call sanitizer: realigned %d tool result name(s) with their "
+        "tool_call function name (%s)",
+        len(realigned),
+        ", ".join(f"{was} -> {now}" for was, now in realigned),
+    )
+    return aligned
+
+
+def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Fix orphaned tool_call / tool_result pairs before every LLM call; runs unconditionally (not gated on the compressor).
+
+    Order matters: empty non-final messages are healed first so the substituted turn
+    participates in the pairing and dedup passes.
+    """
+    messages = _drop_invalid_roles(messages)
+    messages = repair_empty_non_final_messages(messages)
+    messages = _drop_empty_tool_calls_arrays(messages)
+    _repair_nameless_tool_calls(messages)
+    messages = _drop_results_without_ids(messages)
+    messages = _pair_tool_calls_positionally(messages)
+    messages = _dedupe_tool_call_ids(messages)
+    return _realign_tool_result_names(messages)
 
 
 
