@@ -22,8 +22,7 @@ except ImportError:
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
-    BasePlatformAdapter, MessageEvent, MessageType, SendResult, is_network_accessible,
-)
+    BasePlatformAdapter, MessageEvent, MessageType, SendResult, is_network_accessible)
 
 logger = logging.getLogger(__name__)
 
@@ -46,9 +45,7 @@ def check_msgraph_webhook_requirements() -> bool:
 
 
 def _string_or_none(value: Any) -> Optional[str]:
-    if value is None:
-        return None
-    return str(value).strip() or None
+    return None if value is None else (str(value).strip() or None)
 
 
 def _normalize_path(path: Any) -> str:
@@ -61,8 +58,7 @@ def _parse_allowed_source_cidrs(raw: Any) -> list[ipaddress._BaseNetwork]:
 
     When populated, requests from source IPs outside every listed CIDR are
     rejected with 403 before the body is parsed (restrict to Microsoft
-    Graph's published webhook source ranges in production).
-    """
+    Graph's published webhook source ranges in production)."""
     if isinstance(raw, str):
         candidates = raw.split(",")
     elif isinstance(raw, (list, tuple, set)):
@@ -146,10 +142,8 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
                 "extra.allowed_source_cidrs. Configure the Microsoft Graph "
                 "source CIDRs or bind to loopback (127.0.0.1/::1) behind a "
                 "tunnel or reverse proxy.",
-                self._host,
-            )
+                self._host)
             return False
-
         app = web.Application(client_max_size=self._max_body_bytes)
         app.router.add_get(self._health_path, self._handle_health)
         app.router.add_get(self._webhook_path, self._handle_validation)
@@ -172,8 +166,7 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
 
     async def send(
         self, chat_id: str, content: str, reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> SendResult:
+        metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         logger.info("[msgraph_webhook] Response for %s: %s", chat_id, content[:200])
         return SendResult(success=True)
 
@@ -184,12 +177,8 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         if not self._source_ip_allowed(request):
             return web.Response(status=403)
         return web.json_response({
-            "status": "ok",
-            "platform": self.platform.value,
-            "webhook_path": self._webhook_path,
-            "accepted": self._accepted_count,
-            "duplicates": self._duplicate_count,
-        })
+            "status": "ok", "platform": self.platform.value, "webhook_path": self._webhook_path,
+            "accepted": self._accepted_count, "duplicates": self._duplicate_count})
 
     async def _handle_validation(self, request: "web.Request") -> "web.Response":
         """Graph subscription validation handshake: echo ``validationToken`` verbatim
@@ -201,6 +190,28 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
             return web.Response(status=400)
         return web.Response(text=validation_token, content_type="text/plain")
 
+    def _ingest_notification(self, raw_notification: Any) -> str:
+        """Classify + schedule one notification: 'accepted' | 'duplicate' | 'auth' | 'other'."""
+        if not isinstance(raw_notification, dict):
+            return "other"
+        notification = dict(raw_notification)
+        if not self._resource_accepted(str(notification.get("resource") or "")):
+            return "other"
+        if not self._verify_client_state(notification):
+            # Bad clientState is an auth failure: a fully forged batch gets 403
+            # so the sender stops retrying; legitimate Graph retries carry a
+            # valid clientState and hit the accepted/duplicate paths.
+            return "auth"
+        explicit_id = str(notification.get("id") or "").strip()
+        receipt_key = f"id:{explicit_id}" if explicit_id else None
+        if receipt_key is not None:
+            if receipt_key in self._seen_receipts:
+                return "duplicate"
+            self._remember_receipt(receipt_key)
+        self._accepted_count += 1
+        self._schedule_notification(notification, self._build_message_event(notification, receipt_key))
+        return "accepted"
+
     async def _handle_notification(self, request: "web.Request") -> "web.Response":
         if not self._source_ip_allowed(request):
             return web.Response(status=403)
@@ -208,44 +219,19 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         validation_token = request.query.get("validationToken", "")
         if validation_token:
             return web.Response(text=validation_token, content_type="text/plain")
-
         status, notifications = await self._read_notifications(request)
         if status:
             return web.Response(status=status)
-
-        accepted = duplicates = auth_rejected = other_rejected = 0
+        counts = {"accepted": 0, "duplicate": 0, "auth": 0, "other": 0}
         for raw_notification in notifications:
-            if not isinstance(raw_notification, dict):
-                other_rejected += 1
-                continue
-            notification = dict(raw_notification)
-            if not self._resource_accepted(str(notification.get("resource") or "")):
-                other_rejected += 1
-                continue
-            if not self._verify_client_state(notification):
-                # Bad clientState is an auth failure: a fully forged batch gets 403
-                # so the sender stops retrying; legitimate Graph retries carry a
-                # valid clientState and hit the accepted/duplicate paths.
-                auth_rejected += 1
-                continue
-            explicit_id = str(notification.get("id") or "").strip()
-            receipt_key = f"id:{explicit_id}" if explicit_id else None
-            if receipt_key is not None:
-                if receipt_key in self._seen_receipts:
-                    duplicates += 1
-                    continue
-                self._remember_receipt(receipt_key)
-            accepted += 1
-            self._accepted_count += 1
-            self._schedule_notification(notification, self._build_message_event(notification, receipt_key))
-
-        self._duplicate_count += duplicates
+            counts[self._ingest_notification(raw_notification)] += 1
+        self._duplicate_count += counts["duplicate"]
         # Anything ingested OR deduped → 202 with empty body (Graph acks; no
         # counter leak). Every item failed auth → 403 so forged POSTs get a
         # clear reject. Otherwise (malformed / resource not accepted) → 400.
-        if accepted or duplicates:
+        if counts["accepted"] or counts["duplicate"]:
             return web.Response(status=202)
-        if auth_rejected and not other_rejected:
+        if counts["auth"] and not counts["other"]:
             return web.Response(status=403)
         return web.Response(status=400)
 
@@ -294,9 +280,8 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
             if not pattern:
                 continue
             if pattern.endswith("*"):
-                if _prefix_match(resource, pattern[:-1].rstrip("/")):
-                    return True
-            elif _prefix_match(resource, pattern):
+                pattern = pattern[:-1].rstrip("/")
+            if _prefix_match(resource, pattern):
                 return True
         return False
 
@@ -304,10 +289,8 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         """Timing-safe compare of the Graph-supplied clientState against the
         configured shared secret (``openssl rand -hex 32`` in the setup guide)."""
         expected = self._client_state
-        if expected is None:
-            return False
         provided = _string_or_none(notification.get("clientState"))
-        if provided is None:
+        if expected is None or provided is None:
             return False
         # Compare as bytes: compare_digest raises TypeError on non-ASCII str,
         # and clientState comes from the request body.
@@ -324,23 +307,18 @@ class MSGraphWebhookAdapter(BasePlatformAdapter):
         source = self.build_source(
             chat_id=f"msgraph:{notification.get('subscriptionId', 'unknown')}",
             chat_name="msgraph/webhook", chat_type="webhook",
-            user_id="msgraph", user_name="Microsoft Graph",
-        )
+            user_id="msgraph", user_name="Microsoft Graph")
         return MessageEvent(
             text=self._render_prompt(notification), message_type=MessageType.TEXT, source=source,
-            raw_message=notification, message_id=message_id, internal=True,
-        )
+            raw_message=notification, message_id=message_id, internal=True)
 
     def _render_prompt(self, notification: Dict[str, Any]) -> str:
         template = self.config.extra.get("prompt", "")
         if template:
-            payload = {
-                "notification": notification,
-                "resource": notification.get("resource", ""),
+            return _render_template(template, {
+                "notification": notification, "resource": notification.get("resource", ""),
                 "change_type": notification.get("changeType", ""),
-                "subscription_id": notification.get("subscriptionId", ""),
-            }
-            return _render_template(template, payload)
+                "subscription_id": notification.get("subscriptionId", "")})
         rendered = json.dumps(notification, indent=2, sort_keys=True)[:4000]
         return f"Microsoft Graph change notification:\n\n```json\n{rendered}\n```"
 
