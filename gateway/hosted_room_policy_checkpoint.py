@@ -120,9 +120,7 @@ class HostedRoomPolicyCheckpoint:
             """INSERT OR IGNORE INTO hosted_room_policy_events(
                    room_id, thread_id, discussion_event_id, seq, event_json
                ) VALUES (?, ?, ?, ?, ?)""",
-            (
-                event["room_id"], thread_id, discussion_event_id, int(event["seq"]),
-                compact_json(dict(event))))
+            (event["room_id"], thread_id, discussion_event_id, int(event["seq"]), compact_json(dict(event))))
 
     @staticmethod
     def _store_transcript_event(
