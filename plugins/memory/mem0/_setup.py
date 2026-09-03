@@ -497,7 +497,7 @@ _MODE_PICKER = (_setup_platform, _setup_selfhosted, _setup_oss)
 def post_setup(hermes_home: str, config: dict) -> None:
     """Entry point for `hermes memory setup`: routes on --mode (platform / selfhosted / oss), else shows a picker.
     OSS is non-interactive only when the mode came from the flag."""
-    with suppress(Exception):  # mem0ai must meet the minimum version from plugin.yaml
+    with suppress(ImportError):  # mem0ai must meet the minimum version from plugin.yaml
         import mem0
         installed_ver = getattr(mem0, "__version__", None)
         if installed_ver and tuple(int(x) for x in installed_ver.split(".")[:3]) < (2, 0, 7):
