@@ -431,36 +431,35 @@ def resolve_xai_oauth_runtime_credentials(
     refresh_skew_seconds: Optional[int] = None,
 ) -> Dict[str, Any]:
     from hermes_cli.auth import _auth_store_lock, _is_terminal_xai_oauth_refresh_error, _refresh_xai_oauth_tokens, _xai_oauth_discovery
-    def _view(data: Dict[str, Any]) -> tuple[Dict[str, Any], str, str, str, bool]:
-        tokens = dict(data["tokens"])
-        access_token = _clean(tokens.get("access_token"))
-        token_endpoint = _clean(dict(data.get("discovery") or {}).get("token_endpoint"))
-        redirect_uri = _clean(data.get("redirect_uri"))
-        effective_skew = (
+
+    def _should_refresh(data: Dict[str, Any]) -> bool:
+        access_token = _clean(data["tokens"].get("access_token"))
+        skew = (
             int(refresh_skew_seconds) if refresh_skew_seconds is not None
             else _xai_proactive_refresh_skew_seconds(access_token)
         )
-        should_refresh = bool(force_refresh) or bool(
-            refresh_if_expiring and _xai_access_token_is_expiring(access_token, effective_skew)
+        return bool(force_refresh) or bool(
+            refresh_if_expiring and _xai_access_token_is_expiring(access_token, skew)
         )
-        return tokens, access_token, token_endpoint, redirect_uri, should_refresh
 
     data = _read_xai_oauth_tokens()
+    tokens = dict(data["tokens"])
     refresh_timeout_seconds = env_float("HERMES_XAI_REFRESH_TIMEOUT_SECONDS", 20)
-    tokens, access_token, token_endpoint, redirect_uri, should_refresh = _view(data)
-    if should_refresh:
+    if _should_refresh(data):
         with _auth_store_lock(timeout_seconds=max(float(AUTH_LOCK_TIMEOUT_SECONDS), refresh_timeout_seconds + 5.0)):
+            # Re-read under the lock: a concurrent caller may already have rotated the grant.
             data = _read_xai_oauth_tokens(_lock=False)
-            tokens, access_token, token_endpoint, redirect_uri, should_refresh = _view(data)
-            if should_refresh:
-                if not token_endpoint:
-                    token_endpoint = _xai_oauth_discovery(refresh_timeout_seconds)["token_endpoint"]
+            tokens = dict(data["tokens"])
+            if _should_refresh(data):
+                token_endpoint = (
+                    _clean(dict(data.get("discovery") or {}).get("token_endpoint"))
+                    or _xai_oauth_discovery(refresh_timeout_seconds)["token_endpoint"]
+                )
                 try:
                     tokens = _refresh_xai_oauth_tokens(
-                        tokens, token_endpoint=token_endpoint, redirect_uri=redirect_uri,
+                        tokens, token_endpoint=token_endpoint, redirect_uri=_clean(data.get("redirect_uri")),
                         timeout_seconds=refresh_timeout_seconds,
                     )
-                    access_token = _clean(tokens.get("access_token"))
                 except AuthError as exc:
                     if _is_terminal_xai_oauth_refresh_error(exc):
                         _quarantine_xai_oauth_tokens(exc)
@@ -469,7 +468,7 @@ def resolve_xai_oauth_runtime_credentials(
     return {
         "provider": "xai-oauth",
         "base_url": _xai_oauth_inference_base_url(),
-        "api_key": access_token,
+        "api_key": _clean(tokens.get("access_token")),
         "source": "hermes-auth-store",
         "last_refresh": data.get("last_refresh"),
         # Display/telemetry only. Device-code is the only supported xAI OAuth flow, so report it

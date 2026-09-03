@@ -135,8 +135,7 @@ def _json_or_none(raw):
 def _iter_terminal_calls(con: sqlite3.Connection, since_ts: float) -> Iterator[tuple[str, str]]:
     """Yield ``(tool_call_id, command)`` for every terminal tool call."""
     cur = con.execute(
-        "SELECT tool_calls FROM messages "
-        "WHERE role='assistant' AND tool_calls IS NOT NULL "
+        "SELECT tool_calls FROM messages WHERE role='assistant' AND tool_calls IS NOT NULL "
         "AND tool_calls LIKE '%terminal%' AND timestamp >= ?",
         (since_ts,),
     )
@@ -308,8 +307,7 @@ def _render_text(proposals: list[Proposal], days: int) -> None:
         print(
             f"No allowlist candidates found in approval history ({window}).\n"
             "Either nothing dangerous was approved often enough "
-            "(see --min-count/--days), or the approved classes are "
-            "excluded for safety."
+            "(see --min-count/--days), or the approved classes are excluded for safety."
         )
         return
     print(f"Proposed command_allowlist additions (from approval history, {window}):\n")
