@@ -149,10 +149,10 @@ def _run_on_mcp_loop(coro_or_factory, timeout: float = 30):
         if asyncio.iscoroutine(coro_or_factory):
             coro_or_factory.close()
         raise RuntimeError("MCP event loop is not running")
-    coro = coro_or_factory() if callable(coro_or_factory) else coro_or_factory
     # run_coroutine_threadsafe copies the LOOP thread's context, so a per-request profile scope
     # would vanish here; re-establish it inside the task's own context.
-    coro = _core._wrap_with_dashboard_oauth_flow(_core._wrap_with_home_override(coro))
+    coro = _core._wrap_with_dashboard_oauth_flow(_core._wrap_with_home_override(
+        coro_or_factory() if callable(coro_or_factory) else coro_or_factory))
     future = safe_schedule_threadsafe(coro, loop, logger=logger, log_message="MCP scheduling failed")
     if future is None:
         raise RuntimeError("MCP event loop unavailable (failed to schedule)")

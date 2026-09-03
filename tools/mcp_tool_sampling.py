@@ -282,8 +282,7 @@ class ElicitationHandler:
     async def __call__(self, context, params):
         """SDK elicitation callback (``ElicitationFnT``). Returns ElicitResult or ErrorData."""
         self.metrics["requests"] += 1
-        # URL-mode (OAuth, payment) needs a browser + notifications/elicitation/complete — not implemented.
-        if getattr(params, "mode", "form") == "url":
+        if getattr(params, "mode", "form") == "url":  # OAuth/payment: needs a browser + elicitation/complete; unsupported
             logger.info("MCP server '%s' requested URL-mode elicitation; declining "
                         "(URL-mode elicitation not implemented)", self.server_name)
             return self._result("decline", "declined")
@@ -293,14 +292,12 @@ class ElicitationHandler:
         # access) — read both or the user approves without seeing the fields.
         schema = getattr(params, "requestedSchema", None) or getattr(params, "requested_schema", None) or {}
         logger.info("MCP server '%s' elicitation request: %s", self.server_name, _sanitize_error(message)[:200])
-        # Lazy import avoids import-order coupling with early-bootstrap tools.approval.
-        try:
+        try:  # lazy import inside avoids import-order coupling with early-bootstrap tools.approval
             invoke_consent = self._consent_thunk(message, _format_elicitation_schema_summary(schema, self.server_name))
         except Exception as exc:  # pragma: no cover -- defensive
             logger.error("MCP server '%s' elicitation: approval system unavailable: %s", self.server_name, exc)
             return self._result("decline", "errors")
-        # Off-thread: inline, the sync consent flow would freeze the MCP loop and every RPC on it.
-        try:
+        try:  # off-thread: inline, the sync consent flow would freeze the MCP loop and every RPC on it
             answer = await asyncio.wait_for(
                 asyncio.to_thread(invoke_consent), timeout=self.timeout + self._OUTER_TIMEOUT_GRACE_SECONDS)
         except asyncio.TimeoutError:

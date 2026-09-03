@@ -194,13 +194,12 @@ class MCPServerTransportMixin:
         if not command:
             raise ValueError(f"MCP server '{self.name}' has no 'command' in config")
         command, safe_env = _core._resolve_stdio_command(command, _core._build_safe_env(config.get("env")))
-        args = config.get("args", [])
-        await _osv_malware_preflight(self.name, command, args)
+        await _osv_malware_preflight(self.name, command, config.get("args", []))
         # Parent-death watchdog so kill -9 / crash can't leave the child tree running (POSIX-only).
         # AFTER the OSV preflight so the check inspects the real package.
-        command, args = _wrap_command_with_watchdog(command, args)
+        command, args = _wrap_command_with_watchdog(command, config.get("args", []))
         server_params = _core.StdioServerParameters(
-            command=command, args=args, env=safe_env if safe_env else None, cwd=config.get("cwd"),
+            command=command, args=args, env=safe_env or None, cwd=config.get("cwd"),
             # Windows pipes can split non-UTF-8 bytes at chunk boundaries; substitute, don't raise.
             encoding_error_handler="replace")
         session_kwargs = self._session_kwargs()
@@ -220,8 +219,7 @@ class MCPServerTransportMixin:
                 new_pids = _filter_mcp_children(_core._snapshot_child_pids() - pids_before)
                 if new_pids:
                     self._track_spawned_children(new_pids)
-                # Tracked on the connection so in-flight calls fail fast when the subprocess dies.
-                self._stdio_child_pids = set(new_pids)
+                self._stdio_child_pids = set(new_pids)  # so in-flight calls fail fast when the child dies
                 async with _core.ClientSession(read_stream, write_stream, **session_kwargs) as session:
                     # Bound the handshake here: ``connect_timeout`` only bounds the caller's ``.result()``.
                     # A server that never answers ``initialize`` would otherwise hang forever, skip the
