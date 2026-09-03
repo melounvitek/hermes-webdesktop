@@ -128,9 +128,9 @@ def _is_cron_approval_context() -> bool:
     return is_truthy_value(_session_env("HERMES_CRON_SESSION"))
 
 
-# : Programmatic/unattended platforms: no human can answer a prompt and the : adapter has no ``send_exec_approval`` /
-# ``/approve`` surface. Governed by : ``approvals.unattended_mode`` (default deny), mirroring ``cron_mode`` — : never
-# an interactive round-trip that blocks for the full timeout with : nobody to answer.
+# Programmatic/unattended platforms: no human can answer a prompt and the adapter has no ``send_exec_approval`` /
+# ``/approve`` surface. Governed by ``approvals.unattended_mode`` (default deny), mirroring ``cron_mode`` — never an
+# interactive round-trip that blocks for the full timeout with nobody to answer.
 _UNATTENDED_APPROVAL_PLATFORMS = frozenset({"webhook", "msgraph_webhook", "api_server"})
 
 
