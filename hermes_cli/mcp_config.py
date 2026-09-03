@@ -283,9 +283,9 @@ def _probe_single_server(
                     from tools.mcp_tool import _convert_mcp_schema
 
                     details["schema_chars"] = {
-                        t.name: len(_json.dumps(
-                            _convert_mcp_schema(name, t), separators=(",", ":"), default=str))
-                        for t in server._tools}
+                        t.name: len(_json.dumps(_convert_mcp_schema(name, t), separators=(",", ":"), default=str))
+                        for t in server._tools
+                    }
                 except Exception:  # pragma: no cover — display-only extra
                     pass
                 # Gate capability probes like runtime registration (_select_utility_schemas):
