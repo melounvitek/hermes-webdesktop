@@ -352,6 +352,113 @@ def _refresh_credentials_after_401(
         _print_anthropic_401_diagnostics(agent, agent._anthropic_api_key)
     return False
 
+def _recover_format_errors(
+    agent: Any, api_error: Exception, classified: Any, _retry: TurnRetryState,
+    messages: List[Dict[str, Any]], api_messages: Any,
+) -> bool:
+    """One-shot format-recovery strips: thinking-signature → invalid-encrypted-content
+    replay disable → native-compaction reject → llama.cpp grammar strip. Returns True when
+    the request was repaired and should be retried."""
+    # Upstream mutation invalidates Anthropic's thinking-block signature (400). Strip
+    # ``reasoning_details`` from ``api_messages`` only, never ``messages`` (state.db).
+    if classified.reason == FailoverReason.thinking_signature and not _retry.thinking_sig_retry_attempted:
+        _retry.thinking_sig_retry_attempted = True
+        _api_stripped = 0
+        for _m in api_messages:
+            if isinstance(_m, dict) and "reasoning_details" in _m:
+                _m.pop("reasoning_details", None)
+                _api_stripped += 1
+        _vlines(agent, "⚠️  Thinking block signature invalid, stripped reasoning_details from api_messages for retry...")
+        logger.warning(
+            "%sThinking block signature recovery: stripped "
+            "reasoning_details from %d api_messages "
+            "(canonical messages unchanged)",
+            agent.log_prefix, _api_stripped,
+        )
+        return True
+
+    # 400 ``invalid_encrypted_content`` on a stale ``codex_reasoning_items`` blob:
+    # disable replay for the session, strip cached items, retry once.
+    if (
+        classified.reason == FailoverReason.invalid_encrypted_content
+        and not _retry.invalid_encrypted_content_retry_attempted
+        and agent.api_mode == "codex_responses"
+        and bool(getattr(agent, "_codex_reasoning_replay_enabled", True))
+        and any(
+            isinstance(_m, dict)
+            and _m.get("role") == "assistant"
+            and isinstance(_m.get("codex_reasoning_items"), list)
+            and _m.get("codex_reasoning_items")
+            for _m in messages
+        )
+    ):
+        _retry.invalid_encrypted_content_retry_attempted = True
+        replay_stats = agent._disable_codex_reasoning_replay(messages)
+        _vlines(
+            agent,
+            f"⚠️  Encrypted reasoning replay was rejected by the provider — "
+            f"disabled replay and stripped {replay_stats['items']} item(s) from "
+            f"{replay_stats['messages']} message(s), retrying...",
+        )
+        logger.warning(
+            "%sInvalid encrypted reasoning recovery: disabled replay and stripped %d items from %d messages",
+            agent.log_prefix, replay_stats["items"], replay_stats["messages"],
+        )
+        return True
+
+    # Structured 400 naming ``context_management``: disable native compaction for the
+    # session, retry once; local compression takes over.
+    if (
+        agent.api_mode == "codex_responses"
+        and not _retry.native_compaction_reject_retry_attempted
+        and bool(getattr(agent, "codex_responses_native_compaction", False))
+    ):
+        from agent.native_compaction import is_native_compaction_rejection
+        if is_native_compaction_rejection(api_error, getattr(api_error, "status_code", None)):
+            _retry.native_compaction_reject_retry_attempted = True
+            agent.codex_responses_native_compaction = False
+            _vlines(
+                agent,
+                "⚠️  Provider rejected native compaction (context_management) — disabled for this session, "
+                "local compression stays active. Retrying...",
+            )
+            logger.warning(
+                "%sNative compaction rejection recovery: disabled "
+                "codex_responses_native for this session and retrying",
+                agent.log_prefix,
+            )
+            return True
+
+    # llama.cpp ``json-schema-to-grammar`` rejects regex escapes and most ``format``
+    # values: strip ``pattern``/``format`` from ``agent.tools``, retry once.
+    if classified.reason == FailoverReason.llama_cpp_grammar_pattern and not _retry.llama_cpp_grammar_retry_attempted:
+        _retry.llama_cpp_grammar_retry_attempted = True
+        try:
+            from tools.schema_sanitizer import strip_pattern_and_format
+            _, _stripped = strip_pattern_and_format(agent.tools)
+        except Exception as _strip_exc:  # pragma: no cover — defensive
+            logger.warning(
+                "%sllama.cpp grammar recovery: strip helper failed: %s",
+                agent.log_prefix, _strip_exc,
+            )
+            _stripped = 0
+        if _stripped:
+            _vlines(agent, f"⚠️  llama.cpp rejected tool schema grammar — stripped {_stripped} pattern/format keyword(s), retrying...")
+            logger.warning(
+                "%sllama.cpp grammar recovery: stripped %d "
+                "pattern/format keyword(s) from tool schemas",
+                agent.log_prefix, _stripped,
+            )
+            return True
+        # Nothing to strip — fall through to normal retry rather than loop on the same error.
+        logger.warning(
+            "%sllama.cpp grammar error but no pattern/format "
+            "keywords to strip — falling through to normal retry",
+            agent.log_prefix,
+        )
+    return False
+
+
 def recover_after_classification(
     agent: Any, api_error: Exception, classified: Any, _retry: TurnRetryState, *,
     status_code: Optional[int], error_context: Any, messages: List[Dict[str, Any]],
@@ -447,103 +554,8 @@ def recover_after_classification(
     if _refresh_credentials_after_401(agent, api_error, _retry, status_code):
         return True, recovered_with_pool
 
-    # Upstream mutation invalidates Anthropic's thinking-block signature (400). Strip
-    # ``reasoning_details`` from ``api_messages`` only, never ``messages`` (state.db).
-    if classified.reason == FailoverReason.thinking_signature and not _retry.thinking_sig_retry_attempted:
-        _retry.thinking_sig_retry_attempted = True
-        _api_stripped = 0
-        for _m in api_messages:
-            if isinstance(_m, dict) and "reasoning_details" in _m:
-                _m.pop("reasoning_details", None)
-                _api_stripped += 1
-        _vlines(agent, "⚠️  Thinking block signature invalid, stripped reasoning_details from api_messages for retry...")
-        logger.warning(
-            "%sThinking block signature recovery: stripped "
-            "reasoning_details from %d api_messages "
-            "(canonical messages unchanged)",
-            agent.log_prefix, _api_stripped,
-        )
+    if _recover_format_errors(agent, api_error, classified, _retry, messages, api_messages):
         return True, recovered_with_pool
-
-    # 400 ``invalid_encrypted_content`` on a stale ``codex_reasoning_items`` blob:
-    # disable replay for the session, strip cached items, retry once.
-    if (
-        classified.reason == FailoverReason.invalid_encrypted_content
-        and not _retry.invalid_encrypted_content_retry_attempted
-        and agent.api_mode == "codex_responses"
-        and bool(getattr(agent, "_codex_reasoning_replay_enabled", True))
-        and any(
-            isinstance(_m, dict)
-            and _m.get("role") == "assistant"
-            and isinstance(_m.get("codex_reasoning_items"), list)
-            and _m.get("codex_reasoning_items")
-            for _m in messages
-        )
-    ):
-        _retry.invalid_encrypted_content_retry_attempted = True
-        replay_stats = agent._disable_codex_reasoning_replay(messages)
-        _vlines(
-            agent,
-            f"⚠️  Encrypted reasoning replay was rejected by the provider — "
-            f"disabled replay and stripped {replay_stats['items']} item(s) from "
-            f"{replay_stats['messages']} message(s), retrying...",
-        )
-        logger.warning(
-            "%sInvalid encrypted reasoning recovery: disabled replay and stripped %d items from %d messages",
-            agent.log_prefix, replay_stats["items"], replay_stats["messages"],
-        )
-        return True, recovered_with_pool
-
-    # Structured 400 naming ``context_management``: disable native compaction for the
-    # session, retry once; local compression takes over.
-    if (
-        agent.api_mode == "codex_responses"
-        and not _retry.native_compaction_reject_retry_attempted
-        and bool(getattr(agent, "codex_responses_native_compaction", False))
-    ):
-        from agent.native_compaction import is_native_compaction_rejection
-        if is_native_compaction_rejection(api_error, getattr(api_error, "status_code", None)):
-            _retry.native_compaction_reject_retry_attempted = True
-            agent.codex_responses_native_compaction = False
-            _vlines(
-                agent,
-                "⚠️  Provider rejected native compaction (context_management) — disabled for this session, "
-                "local compression stays active. Retrying...",
-            )
-            logger.warning(
-                "%sNative compaction rejection recovery: disabled "
-                "codex_responses_native for this session and retrying",
-                agent.log_prefix,
-            )
-            return True, recovered_with_pool
-
-    # llama.cpp ``json-schema-to-grammar`` rejects regex escapes and most ``format``
-    # values: strip ``pattern``/``format`` from ``agent.tools``, retry once.
-    if classified.reason == FailoverReason.llama_cpp_grammar_pattern and not _retry.llama_cpp_grammar_retry_attempted:
-        _retry.llama_cpp_grammar_retry_attempted = True
-        try:
-            from tools.schema_sanitizer import strip_pattern_and_format
-            _, _stripped = strip_pattern_and_format(agent.tools)
-        except Exception as _strip_exc:  # pragma: no cover — defensive
-            logger.warning(
-                "%sllama.cpp grammar recovery: strip helper failed: %s",
-                agent.log_prefix, _strip_exc,
-            )
-            _stripped = 0
-        if _stripped:
-            _vlines(agent, f"⚠️  llama.cpp rejected tool schema grammar — stripped {_stripped} pattern/format keyword(s), retrying...")
-            logger.warning(
-                "%sllama.cpp grammar recovery: stripped %d "
-                "pattern/format keyword(s) from tool schemas",
-                agent.log_prefix, _stripped,
-            )
-            return True, recovered_with_pool
-        # Nothing to strip — fall through to normal retry rather than loop on the same error.
-        logger.warning(
-            "%sllama.cpp grammar error but no pattern/format "
-            "keywords to strip — falling through to normal retry",
-            agent.log_prefix,
-        )
     return False, recovered_with_pool
 
 
