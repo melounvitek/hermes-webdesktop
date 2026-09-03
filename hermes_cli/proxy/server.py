@@ -44,9 +44,7 @@ MAX_REQUEST_BYTES = 10_000_000
 
 def _require_aiohttp() -> None:
     if not AIOHTTP_AVAILABLE:
-        raise RuntimeError(
-            "aiohttp is required for `hermes proxy`. Run `hermes setup` to install it."
-        )
+        raise RuntimeError("aiohttp is required for `hermes proxy`. Run `hermes setup` to install it.")
 
 
 def _json_error(status: int, message: str, code: str = "proxy_error") -> "web.Response":
@@ -68,23 +66,14 @@ async def _open_upstream(request: "web.Request", rel_path: str, body: bytes, cre
         upstream_url = f"{upstream_url}?{request.query_string}"
     fwd_headers = _filter_headers(request.headers)
     fwd_headers["Authorization"] = f"{cred.token_type} {cred.bearer}"
-    logger.debug(
-        "proxy: forwarding %s %s -> %s (body=%d bytes)",
-        request.method, rel_path, upstream_url, len(body),
-    )
+    logger.debug("proxy: forwarding %s %s -> %s (body=%d bytes)", request.method, rel_path, upstream_url, len(body))
     try:
-        session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=300)
-        )
+        session = aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=None, sock_connect=15, sock_read=300))
     except Exception as exc:  # pragma: no cover - aiohttp setup issue
         return _json_error(500, f"proxy session init failed: {exc}"), None
     try:
         upstream_resp = await session.request(
-            request.method,
-            upstream_url,
-            data=body if body else None,
-            headers=fwd_headers,
-            allow_redirects=False,
+            request.method, upstream_url, data=body if body else None, headers=fwd_headers, allow_redirects=False
         )
     except RuntimeError as exc:
         await session.close()
@@ -92,9 +81,7 @@ async def _open_upstream(request: "web.Request", rel_path: str, body: bytes, cre
     except aiohttp.ClientError as exc:
         await session.close()
         logger.warning("proxy: upstream connection failed: %s", exc)
-        return _json_error(
-            502, f"upstream connection failed: {exc}", code="upstream_unreachable"
-        ), None
+        return _json_error(502, f"upstream connection failed: {exc}", code="upstream_unreachable"), None
     except asyncio.TimeoutError:
         await session.close()
         return _json_error(504, "upstream request timed out", code="upstream_timeout"), None
@@ -108,8 +95,7 @@ async def _stream_back(request: "web.Request", session, upstream_resp) -> "web.S
     """Relay status + filtered headers, then the body chunk-by-chunk, appending a missing SSE
     ``[DONE]`` only after a clean EOF."""
     resp = web.StreamResponse(
-        status=upstream_resp.status,
-        headers=_filter_headers(upstream_resp.headers, _RESPONSE_DROP_HEADERS),
+        status=upstream_resp.status, headers=_filter_headers(upstream_resp.headers, _RESPONSE_DROP_HEADERS)
     )
     await resp.prepare(request)
     done_tracker: Optional[SseDoneTracker] = None
@@ -153,18 +139,14 @@ def create_app(adapter: UpstreamAdapter) -> "web.Application":
 
     async def handle_health(request: "web.Request") -> "web.Response":
         authenticated = await asyncio.to_thread(adapter.is_authenticated)
-        return web.json_response(
-            {"status": "ok", "upstream": adapter.display_name, "authenticated": authenticated}
-        )
+        return web.json_response({"status": "ok", "upstream": adapter.display_name, "authenticated": authenticated})
 
     async def handle_proxy(request: "web.Request") -> "web.StreamResponse":
         rel_path = "/" + request.match_info.get("tail", "").lstrip("/")
         if rel_path not in adapter.allowed_paths:
             allowed = ", ".join(sorted(adapter.allowed_paths))
             return _json_error(
-                404,
-                f"Path /v1{rel_path} is not forwarded by this proxy. Allowed: {allowed}",
-                code="path_not_allowed",
+                404, f"Path /v1{rel_path} is not forwarded by this proxy. Allowed: {allowed}", code="path_not_allowed"
             )
         try:
             cred = await asyncio.to_thread(adapter.get_credential)
@@ -184,9 +166,7 @@ def create_app(adapter: UpstreamAdapter) -> "web.Application":
             # POST under the auth lock; xAI: pool rotation).
             try:
                 retry_cred = await asyncio.to_thread(
-                    adapter.get_retry_credential,
-                    failed_credential=cred,
-                    status_code=upstream_resp.status,
+                    adapter.get_retry_credential, failed_credential=cred, status_code=upstream_resp.status
                 )
             except Exception as exc:
                 logger.warning("proxy: retry credential resolution failed: %s", exc)
@@ -238,10 +218,4 @@ async def run_server(
         await runner.cleanup()
 
 
-__all__ = [
-    "create_app",
-    "run_server",
-    "DEFAULT_HOST",
-    "DEFAULT_PORT",
-    "AIOHTTP_AVAILABLE",
-]
+__all__ = ["create_app", "run_server", "DEFAULT_HOST", "DEFAULT_PORT", "AIOHTTP_AVAILABLE"]

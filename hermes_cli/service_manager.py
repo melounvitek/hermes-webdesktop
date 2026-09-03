@@ -46,11 +46,7 @@ class ServiceManager(Protocol):
 
     def supports_runtime_registration(self) -> bool: ...
     def register_profile_gateway(
-        self,
-        profile: str,
-        *,
-        extra_env: dict[str, str] | None = None,
-        start_now: bool = True,
+        self, profile: str, *, extra_env: dict[str, str] | None = None, start_now: bool = True
     ) -> None: ...
     def unregister_profile_gateway(self, profile: str) -> None: ...
     def list_profile_gateways(self) -> list[str]: ...
@@ -139,16 +135,11 @@ class _HostServiceManager:
 
     def _unsupported(self, verb: str) -> NotImplementedError:
         return NotImplementedError(
-            f"{type(self).__name__} does not support runtime profile "
-            f"gateway {verb} (container-only feature)"
+            f"{type(self).__name__} does not support runtime profile gateway {verb} (container-only feature)"
         )
 
     def register_profile_gateway(
-        self,
-        profile: str,
-        *,
-        extra_env: dict[str, str] | None = None,
-        start_now: bool = True,
+        self, profile: str, *, extra_env: dict[str, str] | None = None, start_now: bool = True
     ) -> None:
         raise self._unsupported("registration")
 
@@ -202,10 +193,7 @@ class WindowsServiceManager(_HostServiceManager):
         elevated_handoff: bool = False,
     ) -> None:
         self._backend_module().install(
-            force=force,
-            start_now=start_now,
-            start_on_login=start_on_login,
-            elevated_handoff=elevated_handoff,
+            force=force, start_now=start_now, start_on_login=start_on_login, elevated_handoff=elevated_handoff
         )
 
     def is_running(self, name: str) -> bool:
@@ -375,9 +363,7 @@ class S6CommandError(S6Error):
     """An s6 command failed for a reason other than a missing slot (EACCES on the control FIFO,
     unexpected non-zero exit); carries the command's stderr."""
 
-    def __init__(
-        self, *, service: str, action: str, returncode: int, stderr: str,
-    ) -> None:
+    def __init__(self, *, service: str, action: str, returncode: int, stderr: str) -> None:
         self.action = action
         self.returncode = returncode
         self.stderr = stderr
@@ -401,10 +387,7 @@ class S6ServiceManager:
         return self.scandir / f"{S6_SERVICE_PREFIX}{profile}"
 
     @staticmethod
-    def _render_run_script(
-        profile: str,
-        extra_env: dict[str, str],
-    ) -> str:
+    def _render_run_script(profile: str, extra_env: dict[str, str]) -> str:
         """Run script for a profile-gateway s6 service.
 
         Sources HERMES_HOME via with-contenv (run time, not baked in), resets ``HOME`` before the
@@ -511,10 +494,7 @@ class S6ServiceManager:
             _s6_run("s6-svc", action_flag, str(service_dir), check=True)
         except subprocess.CalledProcessError as exc:
             raise S6CommandError(
-                service=name,
-                action=action_label,
-                returncode=exc.returncode,
-                stderr=exc.stderr or "",
+                service=name, action=action_label, returncode=exc.returncode, stderr=exc.stderr or ""
             ) from exc
 
     def start(self, name: str) -> None:
@@ -562,11 +542,7 @@ class S6ServiceManager:
         return True
 
     def register_profile_gateway(
-        self,
-        profile: str,
-        *,
-        extra_env: dict[str, str] | None = None,
-        start_now: bool = True,
+        self, profile: str, *, extra_env: dict[str, str] | None = None, start_now: bool = True
     ) -> None:
         """Create the s6 service directory and ``s6-svscanctl -a`` so it is picked up immediately.
 

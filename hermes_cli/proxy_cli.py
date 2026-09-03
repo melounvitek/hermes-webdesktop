@@ -26,8 +26,7 @@ def register_cli(parent_parser: argparse.ArgumentParser) -> None:
     # ``--help`` order, so keep it stable.
     commands = [
         ("install", f"Download iron-proxy binary (v{ip._IRON_PROXY_VERSION})", cmd_install, [
-            ("--force", dict(action="store_true",
-                             help="Re-download even if a managed copy already exists")),
+            ("--force", dict(action="store_true", help="Re-download even if a managed copy already exists")),
         ]),
         ("setup", "Interactive wizard: install + CA + mint tokens + write config", cmd_setup, [
             ("--tunnel-port", dict(
@@ -119,9 +118,7 @@ def cmd_setup(args: argparse.Namespace) -> int:
         return 1
     _setup_restart_daemon(console, args, proxy_cfg)
     console.print()
-    console.print(
-        "[green]✓ iron-proxy is configured.[/green]  Sandboxes will route outbound traffic through it."
-    )
+    console.print("[green]✓ iron-proxy is configured.[/green]  Sandboxes will route outbound traffic through it.")
     console.print(
         "  Start:   [cyan]hermes egress start[/cyan]\n"
         "  Restart: [cyan]hermes egress restart[/cyan]  (after any re-setup)\n"
@@ -174,10 +171,7 @@ def _setup_mint_tokens(console: Console, args: argparse.Namespace):
         # runs, NOT exported into an interactive shell); backfill so discovery sees them.
         loaded = _load_env_file_into_environ()
         if loaded:
-            console.print(
-                f"  [dim]Loaded {loaded} provider key name(s) from "
-                f"~/.hermes/.env for discovery.[/dim]"
-            )
+            console.print(f"  [dim]Loaded {loaded} provider key name(s) from " f"~/.hermes/.env for discovery.[/dim]")
 
     discovered = ip.discover_provider_mappings(available_env_names=available_env_names or None)
 
@@ -225,9 +219,7 @@ def _setup_mint_tokens(console: Console, args: argparse.Namespace):
     uncovered = ip.discover_uncovered_providers(available_env_names=available_env_names or None)
     if uncovered:
         console.print()
-        console.print(
-            "  [yellow]⚠[/yellow]  Detected provider env vars that the proxy does not yet cover:"
-        )
+        console.print("  [yellow]⚠[/yellow]  Detected provider env vars that the proxy does not yet cover:")
         for name in uncovered:
             console.print(f"    - {name}")
         console.print(
@@ -266,9 +258,7 @@ def _setup_write_config(console: Console, args: argparse.Namespace, mappings, ca
     proxy_cfg["tunnel_port"] = tunnel_port
 
     extra_hosts = list(proxy_cfg.get("extra_allowed_hosts") or [])
-    allowed = list(ip._DEFAULT_ALLOWED_HOSTS) + [
-        h for h in extra_hosts if h not in ip._DEFAULT_ALLOWED_HOSTS
-    ]
+    allowed = list(ip._DEFAULT_ALLOWED_HOSTS) + [h for h in extra_hosts if h not in ip._DEFAULT_ALLOWED_HOSTS]
 
     # Pre-create the audit log 0o600. The pinned v0.39 daemon never writes it (reserved for
     # v0.40+ per-request records), so a pre-create failure is a WARNING, not a setup abort.
@@ -355,16 +345,10 @@ def _setup_restart_daemon(console: Console, args: argparse.Namespace, proxy_cfg:
 
     if do_restart:
         try:
-            new_status = ip.start_proxy(
-                install_if_missing=bool(proxy_cfg.get("auto_install", True)),
-            )
+            new_status = ip.start_proxy(install_if_missing=bool(proxy_cfg.get("auto_install", True)))
         except Exception as exc:  # noqa: BLE001 — user-facing funnel
-            console.print(
-                f"  [yellow]⚠ could not start iron-proxy with the new config: {exc}[/yellow]"
-            )
-            console.print(
-                "  Run [cyan]hermes egress start[/cyan] manually before launching new Docker sandboxes."
-            )
+            console.print(f"  [yellow]⚠ could not start iron-proxy with the new config: {exc}[/yellow]")
+            console.print("  Run [cyan]hermes egress start[/cyan] manually before launching new Docker sandboxes.")
         else:
             listening = "listening" if new_status.listening else "not yet listening"
             verb = "restarted" if was_running else "started"
@@ -392,9 +376,7 @@ def cmd_start(args: argparse.Namespace) -> int:
     # the rotation guarantee distinguishing it from ``env``.
     credential_source = proxy_cfg.get("credential_source", "env")
     bw_cfg = (cfg.get("secrets") or {}).get("bitwarden")
-    refresh_bw = (
-        credential_source == "bitwarden" and bw_cfg is not None and bool(bw_cfg.get("enabled"))
-    )
+    refresh_bw = (credential_source == "bitwarden" and bw_cfg is not None and bool(bw_cfg.get("enabled")))
     # Silent-degrade guard: bitwarden mode chosen but secrets.bitwarden disabled/removed. Refuse
     # (quietly starting on host env is the bug class BW mode exists to defeat) unless the
     # documented escape hatch is set.
@@ -450,12 +432,9 @@ def cmd_start(args: argparse.Namespace) -> int:
     if not status.pid:
         console.print("[red]✗ iron-proxy did not come up cleanly[/red]")
         return 1
-    listening = (
-        "[green]listening[/green]" if status.listening else "[yellow]not yet listening[/yellow]"
-    )
+    listening = ("[green]listening[/green]" if status.listening else "[yellow]not yet listening[/yellow]")
     console.print(
-        f"[green]✓[/green] iron-proxy running  pid={status.pid}  "
-        f"port={status.tunnel_port}  {listening}"
+        f"[green]✓[/green] iron-proxy running  pid={status.pid}  " f"port={status.tunnel_port}  {listening}"
     )
     return 0
 
@@ -489,9 +468,7 @@ def cmd_reload(args: argparse.Namespace) -> int:
     except Exception as exc:  # noqa: BLE001 — top-level user-facing funnel
         console.print(f"[red]✗ reload failed:[/red] {exc}")
         return 1
-    console.print(
-        "[green]✓[/green] iron-proxy ruleset reloaded in-place (no restart, connections preserved)"
-    )
+    console.print("[green]✓[/green] iron-proxy ruleset reloaded in-place (no restart, connections preserved)")
     console.print(
         "[dim]Note: new upstream secrets (rotated keys, new providers) "
         "still need `hermes egress restart` — the daemon reads real "
@@ -509,9 +486,7 @@ def format_status_text(*, show_tokens: bool = False) -> str:
     lines = ["Egress proxy status", ""]
     lines.extend(
         f"{label}: {value}"
-        for label, value in _status_rows(
-            proxy_cfg, status, yn=lambda v: "yes" if v else "no", dim=lambda t: t
-        )
+        for label, value in _status_rows(proxy_cfg, status, yn=lambda v: "yes" if v else "no", dim=lambda t: t)
     )
     lines.append("Scope: Docker backend only in this release")
 
@@ -524,9 +499,7 @@ def format_status_text(*, show_tokens: bool = False) -> str:
 
     uncovered = ip.discover_uncovered_providers()
     if uncovered:
-        lines.extend([
-            "", "Uncovered providers (real credentials still visible inside the sandbox):"
-        ])
+        lines.extend(["", "Uncovered providers (real credentials still visible inside the sandbox):"])
         for name in uncovered:
             lines.append(f"  - {name}")
 
@@ -573,9 +546,7 @@ def cmd_status(args: argparse.Namespace) -> int:
     uncovered = ip.discover_uncovered_providers()
     if uncovered:
         console.print()
-        console.print(
-            "[yellow]Uncovered providers[/yellow] (real credentials still visible inside the sandbox):"
-        )
+        console.print("[yellow]Uncovered providers[/yellow] (real credentials still visible inside the sandbox):")
         for name in uncovered:
             console.print(f"  - {name}")
 
@@ -623,9 +594,7 @@ def _bitwarden_env_names(console: Console) -> Optional[List[str]]:
     cfg = load_config()
     bw_cfg = (cfg.get("secrets") or {}).get("bitwarden") or {}
     if not bw_cfg.get("enabled"):
-        console.print(
-            "  [red]✗ --from-bitwarden requested but secrets.bitwarden.enabled is false.[/red]"
-        )
+        console.print("  [red]✗ --from-bitwarden requested but secrets.bitwarden.enabled is false.[/red]")
         console.print("  Run `hermes secrets bitwarden setup` first, or omit --from-bitwarden.")
         return None
     try:
@@ -639,10 +608,7 @@ def _bitwarden_env_names(console: Console) -> Optional[List[str]]:
             )
             return None
         secrets, _ = bw.fetch_bitwarden_secrets(
-            access_token=access_token,
-            project_id=bw_cfg.get("project_id", ""),
-            cache_ttl_seconds=0,
-            use_cache=False,
+            access_token=access_token, project_id=bw_cfg.get("project_id", ""), cache_ttl_seconds=0, use_cache=False
         )
         names = list(secrets.keys())
         if not names:

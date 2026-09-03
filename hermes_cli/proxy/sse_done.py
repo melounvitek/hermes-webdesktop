@@ -117,6 +117,4 @@ def content_type_is_sse(headers) -> bool:
     return "text/event-stream" in str(value).lower()
 
 
-__all__ = [
-    "DONE_SSE_FRAME", "SseDoneTracker", "content_type_is_sse"
-]
+__all__ = ["DONE_SSE_FRAME", "SseDoneTracker", "content_type_is_sse"]

@@ -87,10 +87,7 @@ def resolve_hermes_bin() -> Optional[str]:
 
 
 def build_relaunch_argv(
-    extra_args: Sequence[str],
-    *,
-    preserve_inherited: bool = True,
-    original_argv: Optional[Sequence[str]] = None,
+    extra_args: Sequence[str], *, preserve_inherited: bool = True, original_argv: Optional[Sequence[str]] = None
 ) -> list[str]:
     """Construct an argv list for replacing the current process with hermes."""
     bin_path = resolve_hermes_bin()
@@ -105,19 +102,14 @@ def build_relaunch_argv(
 
 
 def relaunch(
-    extra_args: Sequence[str],
-    *,
-    preserve_inherited: bool = True,
-    original_argv: Optional[Sequence[str]] = None,
+    extra_args: Sequence[str], *, preserve_inherited: bool = True, original_argv: Optional[Sequence[str]] = None
 ) -> None:
     """Replace the current process with a fresh hermes invocation.
 
     POSIX: ``os.execvp`` in place (same PID, no double-fork). Windows has no real exec — its
     ``execvp`` emulation only works for a real Win32 executable, so spawn + exit instead.
     """
-    new_argv = build_relaunch_argv(
-        extra_args, preserve_inherited=preserve_inherited, original_argv=original_argv
-    )
+    new_argv = build_relaunch_argv(extra_args, preserve_inherited=preserve_inherited, original_argv=original_argv)
     if sys.platform == "win32":
         import subprocess
         try:

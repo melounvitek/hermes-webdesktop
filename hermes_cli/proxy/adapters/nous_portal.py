@@ -51,9 +51,7 @@ class NousPortalAdapter(UpstreamAdapter):
     def is_authenticated(self) -> bool:
         # Usable inference JWT, OR refresh_token + access_token to recover via the refresh helper.
         state = self._read_state() or {}
-        return bool(
-            state.get("agent_key") or (state.get("refresh_token") and state.get("access_token"))
-        )
+        return bool(state.get("agent_key") or (state.get("refresh_token") and state.get("access_token")))
 
     def get_credential(self) -> UpstreamCredential:
         return self._get_credential()
@@ -67,9 +65,7 @@ class NousPortalAdapter(UpstreamAdapter):
         logger.info("proxy: Nous upstream rejected bearer; force-refreshing invoke JWT")
         return self._get_credential(force_refresh=True)
 
-    def _get_credential(
-        self, *, force_refresh: bool = False
-    ) -> UpstreamCredential:
+    def _get_credential(self, *, force_refresh: bool = False) -> UpstreamCredential:
         with self._lock:
             state = self._read_state()
             if state is None:
@@ -80,9 +76,7 @@ class NousPortalAdapter(UpstreamAdapter):
             except Exception as exc:
                 if isinstance(exc, AuthError) and _is_terminal_nous_refresh_error(exc):
                     _quarantine_nous_oauth_state(state, exc, reason="proxy_refresh_failure")
-                    self._save_state(
-                        state, quarantine_error=exc, quarantine_reason="proxy_refresh_failure"
-                    )
+                    self._save_state(state, quarantine_error=exc, quarantine_reason="proxy_refresh_failure")
                 raise RuntimeError(f"Failed to refresh Nous Portal credentials: {exc}") from exc
 
             runtime_key = refreshed.get("api_key")
@@ -102,9 +96,7 @@ class NousPortalAdapter(UpstreamAdapter):
                 or DEFAULT_NOUS_INFERENCE_URL
             ).rstrip("/")
 
-            return UpstreamCredential(
-                bearer=runtime_key, base_url=base_url, expires_at=refreshed.get("expires_at")
-            )
+            return UpstreamCredential(bearer=runtime_key, base_url=base_url, expires_at=refreshed.get("expires_at"))
 
     # auth.json access — kept local so hermes_cli.auth's public surface does not grow.
 

@@ -19,9 +19,7 @@ DEFAULT_NOFILE_SOFT_LIMIT = int(DEFAULT_CONFIG["runtime"]["nofile_soft_limit"])
 _MISSING = object()
 
 
-def configured_nofile_soft_limit(
-    config: Mapping[str, Any] | None = None,
-) -> int | None:
+def configured_nofile_soft_limit(config: Mapping[str, Any] | None = None) -> int | None:
     """``runtime.nofile_soft_limit`` from a loaded config, or ``None`` when disabled/unresolvable.
 
     Missing key → default. Explicit ``0``/``false``/``null`` disable; other non-int or negative
@@ -55,9 +53,7 @@ def configured_nofile_soft_limit(
     return raw_value
 
 
-def apply_nofile_soft_limit(
-    config: Mapping[str, Any] | None = None,
-) -> bool:
+def apply_nofile_soft_limit(config: Mapping[str, Any] | None = None) -> bool:
     """Best-effort raise of this process's ``RLIMIT_NOFILE`` soft limit; ``True`` iff changed.
 
     Target = ``runtime.nofile_soft_limit`` (default :data:`DEFAULT_NOFILE_SOFT_LIMIT`), clamped
@@ -90,6 +86,4 @@ def apply_nofile_soft_limit(
         return False
 
 
-__all__ = [
-    "DEFAULT_NOFILE_SOFT_LIMIT", "apply_nofile_soft_limit", "configured_nofile_soft_limit"
-]
+__all__ = ["DEFAULT_NOFILE_SOFT_LIMIT", "apply_nofile_soft_limit", "configured_nofile_soft_limit"]

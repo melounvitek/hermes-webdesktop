@@ -85,10 +85,7 @@ class XAIGrokAdapter(UpstreamAdapter):
             retry_cred = self._credential_from_entry(refreshed)
             if retry_cred.bearer == failed_credential.bearer:
                 return None
-            logger.info(
-                "proxy: xAI upstream returned %s; retrying with rotated pool credential",
-                status_code,
-            )
+            logger.info("proxy: xAI upstream returned %s; retrying with rotated pool credential", status_code)
             return retry_cred
 
     def _load_pool(self) -> Optional[CredentialPool]:
@@ -111,9 +108,7 @@ class XAIGrokAdapter(UpstreamAdapter):
         ).strip().rstrip("/")
 
         return UpstreamCredential(
-            bearer=bearer,
-            base_url=base_url or DEFAULT_XAI_OAUTH_BASE_URL,
-            expires_at=entry.expires_at,
+            bearer=bearer, base_url=base_url or DEFAULT_XAI_OAUTH_BASE_URL, expires_at=entry.expires_at
         )
 
 

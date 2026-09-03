@@ -33,13 +33,10 @@ def legacy_relay_plugin_keys(values: Any) -> tuple[str, ...]:
     return tuple(sorted({v for v in values if isinstance(v, str) and v in LEGACY_RELAY_PLUGIN_KEYS}))
 
 
-def configured_legacy_relay_env_vars(
-    env: Mapping[str, Any] | None,
-) -> tuple[str, ...]:
+def configured_legacy_relay_env_vars(env: Mapping[str, Any] | None) -> tuple[str, ...]:
     """Return non-empty legacy Relay exporter variables in *env*."""
     if env is None:
         return ()
     return tuple(sorted(
-        name for name in LEGACY_RELAY_EXPORT_ENV_VARS
-        if env.get(name) is not None and str(env[name]).strip()
+        name for name in LEGACY_RELAY_EXPORT_ENV_VARS if env.get(name) is not None and str(env[name]).strip()
     ))
