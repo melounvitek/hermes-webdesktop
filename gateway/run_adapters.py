@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING
 import asyncio
+import contextlib
 import os
 import time
 import weakref as _weakref
@@ -33,20 +34,15 @@ logger = logging.getLogger("gateway.run")
 class GatewayAdapterLifecycleMixin:
     """Adapter connect/disconnect, fatal-error recovery, reconnect watcher and multiplex profile adapter methods for GatewayRunner."""
 
-    async def _await_adapter_cleanup_with_timeout(
-        self, awaitable: Awaitable[Any], timeout: float
-    ) -> bool:
-        """Wait for adapter cleanup without letting cancellation swallowing hang us.
+    @staticmethod
+    async def _wait_or_detach(task: "asyncio.Future", timeout: float) -> bool:
+        """Wait up to ``timeout`` for ``task``; on deadline (or our own cancellation) detach it.
 
-        ``asyncio.wait_for`` cancels an overdue child but then waits for it to exit. An adapter
-        close path that catches ``CancelledError`` can therefore block recovery forever. Keep
-        ownership of the old task through its done callback, but release the runner at the deadline.
+        Deliberately not ``asyncio.wait_for``: that cancels the overdue child and then WAITS for it
+        to exit, so a connect()/close() that swallows ``CancelledError`` blocks recovery forever.
+        Ownership stays with the task's done callback; the runner is released at the deadline.
+        Returns True when the task finished in time.
         """
-        if timeout <= 0:
-            await awaitable
-            return True
-
-        task = asyncio.ensure_future(awaitable)
         try:
             done, _pending = await asyncio.wait({task}, timeout=timeout)
         except asyncio.CancelledError:
@@ -54,11 +50,22 @@ class GatewayAdapterLifecycleMixin:
             task.add_done_callback(consume_detached_task_result)
             raise
         if task in done:
-            await task
             return True
-
         task.cancel()
         task.add_done_callback(consume_detached_task_result)
+        return False
+
+    async def _await_adapter_cleanup_with_timeout(
+        self, awaitable: Awaitable[Any], timeout: float
+    ) -> bool:
+        """Await adapter cleanup with a detach-on-deadline bound; True when it completed."""
+        if timeout <= 0:
+            await awaitable
+            return True
+        task = asyncio.ensure_future(awaitable)
+        if await self._wait_or_detach(task, timeout):
+            await task
+            return True
         return False
 
     async def _safe_adapter_disconnect(self, adapter, platform) -> None:
@@ -130,21 +137,23 @@ class GatewayAdapterLifecycleMixin:
                 platform.value, time.monotonic() - started_at, suffix, e,
             )
 
+    @staticmethod
+    def _env_timeout_override(name: str) -> Optional[float]:
+        """Non-negative float from env var ``name``; None when unset or unparseable (warned)."""
+        raw = os.getenv(name, "").strip()
+        if not raw:
+            return None
+        try:
+            return max(0.0, float(raw))
+        except ValueError:
+            logger.warning("Ignoring invalid %s=%r", name, raw)
+            return None
+
     def _adapter_disconnect_timeout_secs(self) -> float:
         """Return the per-adapter disconnect timeout used during shutdown."""
         from gateway.run import _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT
-        raw = os.getenv("HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT", "").strip()
-        if raw:
-            try:
-                timeout = float(raw)
-            except ValueError:
-                logger.warning(
-                    "Ignoring invalid HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT=%r",
-                    raw,
-                )
-            else:
-                return max(0.0, timeout)
-        return _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT
+        override = self._env_timeout_override("HERMES_GATEWAY_ADAPTER_DISCONNECT_TIMEOUT")
+        return _ADAPTER_DISCONNECT_TIMEOUT_SECS_DEFAULT if override is None else override
 
     def _platform_connect_timeout_secs(self, platform=None, *, initial: bool = False) -> float:
         """Return the per-platform connect timeout used during startup/retry.
@@ -159,17 +168,9 @@ class GatewayAdapterLifecycleMixin:
             _TELEGRAM_CONNECT_TIMEOUT_SECS_DEFAULT,
             _TELEGRAM_INITIAL_CONNECT_TIMEOUT_SECS_DEFAULT,
         )
-        raw = os.getenv("HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT", "").strip()
-        if raw:
-            try:
-                timeout = float(raw)
-            except ValueError:
-                logger.warning(
-                    "Ignoring invalid HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT=%r",
-                    raw,
-                )
-            else:
-                return max(0.0, timeout)
+        override = self._env_timeout_override("HERMES_GATEWAY_PLATFORM_CONNECT_TIMEOUT")
+        if override is not None:
+            return override
         if platform == Platform.TELEGRAM:
             if initial:
                 return _TELEGRAM_INITIAL_CONNECT_TIMEOUT_SECS_DEFAULT
@@ -189,26 +190,10 @@ class GatewayAdapterLifecycleMixin:
         timeout = self._platform_connect_timeout_secs(platform, initial=initial)
         if timeout <= 0:
             return await adapter.connect(is_reconnect=is_reconnect)
-        # Detach-on-timeout rather than plain asyncio.wait_for: wait_for cancels the overdue task but
-        # then waits for it to exit, so a connect() that catches CancelledError blocks recovery
-        # forever (watcher never retries). Keep ownership via its done callback; release at deadline.
-        task = asyncio.ensure_future(
-            adapter.connect(is_reconnect=is_reconnect)
-        )
-        try:
-            done, _pending = await asyncio.wait({task}, timeout=timeout)
-        except asyncio.CancelledError:
-            task.cancel()
-            task.add_done_callback(consume_detached_task_result)
-            raise
-        if task in done:
-            result = await task
-            return bool(result)
-        task.cancel()
-        task.add_done_callback(consume_detached_task_result)
-        raise TimeoutError(
-            f"{platform.value} connect timed out after {timeout:g}s"
-        )
+        task = asyncio.ensure_future(adapter.connect(is_reconnect=is_reconnect))
+        if await self._wait_or_detach(task, timeout):
+            return bool(await task)
+        raise TimeoutError(f"{platform.value} connect timed out after {timeout:g}s")
 
     async def _connect_initial_adapter_with_timeout(self, adapter, platform) -> bool:
         """Connect one cold-start adapter with tightly scoped replace intent.
@@ -330,32 +315,15 @@ class GatewayAdapterLifecycleMixin:
                     )
                     self._queue_retryable_fatal_platform(adapter)
         except asyncio.CancelledError:
-            # Best-effort queue before re-raising: a cancelled fatal handler
-            # must not strand a retryable platform (#80598).
-            try:
-                self._queue_retryable_fatal_platform(adapter)
-            except Exception:
-                logger.debug(
-                    "Failed to queue %s after fatal-handler cancellation",
-                    adapter.platform.value,
-                    exc_info=True,
-                )
+            # A cancelled or raising fatal handler must not strand a retryable platform.
+            self._queue_retryable_best_effort(adapter, "cancellation")
             raise
         except Exception:
             logger.exception(
                 "Fatal-error handling for %s raised unexpectedly",
                 adapter.platform.value,
             )
-            # Best-effort queue so an unexpected raise mid-handler cannot
-            # leave a retryable platform permanently deaf (#80598).
-            try:
-                self._queue_retryable_fatal_platform(adapter)
-            except Exception:
-                logger.debug(
-                    "Failed to queue %s after fatal-handler exception",
-                    adapter.platform.value,
-                    exc_info=True,
-                )
+            self._queue_retryable_best_effort(adapter, "exception")
         finally:
             platform = adapter.platform
             shutdown_event = getattr(self, "_shutdown_event", None)
@@ -376,6 +344,15 @@ class GatewayAdapterLifecycleMixin:
                 )
                 self._exit_with_failure = True
                 await self.stop()
+
+    def _queue_retryable_best_effort(self, adapter: BasePlatformAdapter, why: str) -> None:
+        try:
+            self._queue_retryable_fatal_platform(adapter)
+        except Exception:
+            logger.debug(
+                "Failed to queue %s after fatal-handler %s",
+                adapter.platform.value, why, exc_info=True,
+            )
 
     async def _handle_adapter_fatal_error_impl(self, adapter: BasePlatformAdapter) -> None:
         # Snapshot this platform slot's current owner first: acting on a stale notification would
@@ -447,6 +424,15 @@ class GatewayAdapterLifecycleMixin:
                 len(self._failed_platforms),
             )
 
+    def _retain_background_task(self, task: "asyncio.Task") -> "asyncio.Task":
+        """Register ``task`` in ``_background_tasks`` (created lazily for bare test runners)."""
+        tasks = getattr(self, "_background_tasks", None)
+        if not isinstance(tasks, set):
+            tasks = self._background_tasks = set()
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+        return task
+
     def _request_clean_exit(self, reason: str) -> None:
         self._exit_cleanly = True
         self._exit_reason = reason
@@ -475,11 +461,7 @@ class GatewayAdapterLifecycleMixin:
         (e.g. ``_reconnect_watcher_task``) MUST pass it or a respawn leaves a stale handle and a
         SECOND watcher. ``on_give_up(name)`` fires when the restart budget is spent.
         """
-        if getattr(self, "_background_tasks", None) is None:
-            self._background_tasks = set()
-
-        # Monotonic spawn timestamp captured per spawn: the ``_done`` callback
-        # uses it to distinguish a rapid crash-loop from a healthy-run-then-crash.
+        # Spawn timestamp lets ``_done`` tell a rapid crash-loop from a healthy-run-then-crash.
         _started = time.monotonic()
 
         # Deliberately no kwargs to create_task (some test doubles mock a narrow signature); calling
@@ -489,7 +471,7 @@ class GatewayAdapterLifecycleMixin:
         # must ignore process-lifetime watchers or the gateway counts itself busy forever. Transient
         # tasks added to _background_tasks elsewhere (startup-resume events etc.) stay counted.
         task._hermes_supervised_watcher = True  # type: ignore[attr-defined]
-        self._background_tasks.add(task)
+        self._retain_background_task(task)
         if on_spawn is not None:
             # Record the live handle NOW so an external tracker (e.g. _reconnect_watcher_task)
             # points at the current task, not a dead one left by a prior supervised respawn.
@@ -551,9 +533,7 @@ class GatewayAdapterLifecycleMixin:
 
                 # The done callback retains its registration context, so isolate the backoff task
                 # too; otherwise a restart could reintroduce the original caller's turn scope.
-                respawn_task = Context().run(lambda: asyncio.create_task(_respawn()))
-                self._background_tasks.add(respawn_task)
-                respawn_task.add_done_callback(self._background_tasks.discard)
+                self._retain_background_task(Context().run(lambda: asyncio.create_task(_respawn())))
 
         task.add_done_callback(_done)
         return task
@@ -641,13 +621,15 @@ class GatewayAdapterLifecycleMixin:
 
         # A row still 'running' at startup belongs to a gateway that died mid-dispatch: it can never
         # reach a terminal state, and request_handoff refuses new requests while it sits there.
+        def _scope(profile_home):
+            if profile_home is None:
+                return contextlib.nullcontext()
+            return _async_profile_runtime_scope(profile_home)
+
         for _pname, _phome in _handoff_watch_scopes(self):
             try:
-                if _phome is None:
+                async with _scope(_phome):
                     await _reclaim_stale(self)
-                else:
-                    async with _async_profile_runtime_scope(_phome):
-                        await _reclaim_stale(self)
             except Exception:
                 logger.debug("Stale-handoff reclaim failed", exc_info=True)
 
@@ -655,11 +637,8 @@ class GatewayAdapterLifecycleMixin:
             while self._running:
                 try:
                     for profile_name, profile_home in _handoff_watch_scopes(self):
-                        if profile_home is None:
+                        async with _scope(profile_home):
                             await _tick(profile_name)
-                        else:
-                            async with _async_profile_runtime_scope(profile_home):
-                                await _tick(profile_name)
                 except asyncio.CancelledError:
                     raise
                 except Exception as exc:
@@ -736,11 +715,7 @@ class GatewayAdapterLifecycleMixin:
                 )
             )
 
-        respawn_task = asyncio.create_task(_slow_respawn())
-        if getattr(self, "_background_tasks", None) is None:
-            self._background_tasks = set()
-        self._background_tasks.add(respawn_task)
-        respawn_task.add_done_callback(self._background_tasks.discard)
+        self._retain_background_task(asyncio.create_task(_slow_respawn()))
 
     def _spawn_reconnect_watcher(self, *, on_give_up=None):
         """Single place that knows how to launch the reconnect watcher.
@@ -781,12 +756,6 @@ class GatewayAdapterLifecycleMixin:
         indefinitely so transient outages self-heal, non-retryable (bad auth) drop out immediately.
         The circuit breaker (``/platform pause``) is manual only — auto-pausing left bots dead.
         """
-        from gateway.run import (
-            _dispose_unused_adapter,
-            _platform_has_bot_credential,
-            _reconnect_backoff,
-            _reconnect_needs_attention,
-        )
         await asyncio.sleep(10)  # initial delay — let startup finish
         while self._running:
             if not self._failed_platforms:
@@ -803,201 +772,197 @@ class GatewayAdapterLifecycleMixin:
             for platform in list(self._failed_platforms.keys()):
                 if not self._running:
                     return
-                info = self._failed_platforms.get(platform)
-                if info is None:
-                    # Removed concurrently (/platform resume, reconnect via another path) between
-                    # the snapshot above and this lookup — not an error, nothing to do this pass.
-                    continue
-                # Skip paused platforms entirely — they need explicit
-                # /platform resume to come back.
-                if info.get("paused"):
-                    continue
-                # Long-lived retry escalation: past the attention threshold flag the platform
-                # NEEDS_ATTENTION in runtime status so a dead token/revoked intent doesn't look
-                # like ordinary "retrying" forever. A signal, NOT a circuit breaker — retries continue.
-                if not info.get("attention_flagged") and _reconnect_needs_attention(info, now):
-                    info["attention_flagged"] = True
-                    queued_for = now - info.get("queued_at", now)
-                    retrying_since_iso = (
-                        datetime.now(timezone.utc) - timedelta(seconds=queued_for)
-                    ).isoformat()
-                    logger.warning(
-                        "%s has been failing/reconnecting continuously for "
-                        "%.1f hours (%d attempts) — flagging NEEDS_ATTENTION. "
-                        "Retries continue, but this usually means a permanent "
-                        "problem (revoked credentials, missing intents, broken "
-                        "sidecar). Check `hermes status` / `/platform list`.",
-                        platform.value,
-                        queued_for / 3600.0,
-                        info.get("attempts", 0),
-                    )
-                    self._update_platform_runtime_status(
-                        platform.value,
-                        platform_state="retrying",
-                        needs_attention=True,
-                        retrying_since=retrying_since_iso,
-                    )
-                if now < info["next_retry"]:
-                    continue  # not time yet
-
-                platform_config = info["config"]
-                attempt = info["attempts"] + 1
-                # Empty-token primary configs can never reconnect; drop them so multiplex setups
-                # where a secondary profile owns the bot do not spin forever.
-                if not _platform_has_bot_credential(platform, platform_config):
-                    logger.warning(
-                        "Reconnect %s: no bot credential on queued config, "
-                        "removing from retry queue",
-                        platform.value,
-                    )
-                    del self._failed_platforms[platform]
-                    continue
-                logger.info(
-                    "Reconnecting %s (attempt %d)...",
-                    platform.value, attempt,
-                )
-
-                adapter = None
-                try:
-                    adapter = self._create_adapter(platform, platform_config)
-                    if not adapter:
-                        logger.warning(
-                            "Reconnect %s: adapter creation returned None, removing from retry queue",
-                            platform.value,
-                        )
-                        del self._failed_platforms[platform]
-                        continue
-
-                    adapter.set_message_handler(self._primary_message_handler())
-                    adapter.set_fatal_error_handler(self._handle_adapter_fatal_error)
-                    adapter.set_session_store(self.session_store)
-                    adapter.set_busy_session_handler(self._handle_active_session_busy_message)
-                    _set_reaction = getattr(adapter, "set_reaction_handler", None)
-                    if callable(_set_reaction):
-                        _set_reaction(self._handle_reaction_event)
-                    adapter.set_topic_recovery_fn(self._recover_telegram_topic_thread_id)
-                    adapter.set_authorization_check(self._make_adapter_auth_check(adapter.platform))
-                    adapter.set_platform_event_handler(self._primary_platform_event_handler())
-                    adapter._busy_text_mode = self._busy_text_mode
-
-                    # Reconnect after outage: keep the platform's server-side update queue so
-                    # messages sent while the bot was offline are delivered rather than dropped.
-                    success = await self._connect_adapter_with_timeout(
-                        adapter, platform, is_reconnect=True
-                    )
-                    if success:
-                        self.adapters[platform] = adapter
-                        self._sync_voice_mode_state_to_adapter(adapter)
-                        # Wire voice input callback on reconnect as well (#60623).
-                        self._bind_voice_input_callback(adapter)
-                        self.delivery_router.adapters = self.adapters
-                        del self._failed_platforms[platform]
-                        self._update_platform_runtime_status(
-                            platform.value,
-                            platform_state="connected",
-                            error_code=None,
-                            error_message=None,
-                            needs_attention=False,
-                            retrying_since=None,
-                        )
-                        logger.info("✓ %s reconnected successfully", platform.value)
-
-                        # Final responses rejected while this adapter was down are still owned by
-                        # this live process, so startup recovery cannot claim them. Replay the
-                        # explicitly transient subset now that the platform is usable.
-                        try:
-                            await self._redeliver_failed_obligations_for_platform(
-                                platform
-                            )
-                        except Exception:
-                            logger.debug(
-                                "failed-obligation redelivery after %s reconnect failed",
-                                platform.value,
-                                exc_info=True,
-                            )
-
-                        # Rebuild channel directory with the new adapter
-                        try:
-                            from gateway.channel_directory import build_channel_directory
-                            await build_channel_directory(self.adapters)
-                        except Exception:
-                            pass
-
-                        # A platform that was offline at gateway startup never got its restart-
-                        # interrupted sessions auto-resumed — the startup pass skips sessions whose
-                        # adapter isn't connected yet.
-                        try:
-                            self._schedule_resume_pending_sessions(platform=platform)
-                        except Exception:
-                            logger.debug(
-                                "resume-pending reschedule after %s reconnect failed",
-                                platform.value,
-                                exc_info=True,
-                            )
-                    # Check if the failure is non-retryable
-                    elif adapter.has_fatal_error and not adapter.fatal_error_retryable:
-                        self._update_platform_runtime_status(
-                            platform.value,
-                            platform_state="fatal",
-                            error_code=adapter.fatal_error_code,
-                            error_message=adapter.fatal_error_message,
-                        )
-                        logger.warning(
-                            "Reconnect %s: non-retryable error (%s), removing from retry queue",
-                            platform.value, adapter.fatal_error_message,
-                        )
-                        # The adapter is about to be dropped from the queue without ever being
-                        # installed on self.adapters, so nothing else will call disconnect() on it.
-                        # Dispose here or the resource owners built in __init__ (ResponseStore etc.)
-                        # leak ~2 fds each; at the 300s cap the gateway hits the fd limit in ~12h.
-                        await _dispose_unused_adapter(adapter)
-                        del self._failed_platforms[platform]
-                    else:
-                        self._update_platform_runtime_status(
-                            platform.value,
-                            platform_state="retrying",
-                            error_code=adapter.fatal_error_code,
-                            error_message=adapter.fatal_error_message or "failed to reconnect",
-                        )
-                        backoff = _reconnect_backoff(attempt)
-                        info["attempts"] = attempt
-                        info["next_retry"] = time.monotonic() + backoff
-                        logger.info(
-                            "Reconnect %s failed, next retry in %ds",
-                            platform.value, backoff,
-                        )
-                        # Same fd-leak concern as the non-retryable branch above: the adapter failed
-                        # to connect and is being thrown away.
-                        await _dispose_unused_adapter(adapter)
-                        # Retryable failures (network/DNS blips) retry at the backoff cap forever,
-                        # self-healing when connectivity returns. Never auto-pause them: a transient
-                        # outage must not need `/platform resume`. Everything here is retryable.
-                except Exception as e:
-                    if adapter is not None:
-                        # An exception escaping connect (DNS timeout, aiohttp server.start() crash,
-                        # etc.) leaves the adapter in the same unowned state as the branches above.
-                        await _dispose_unused_adapter(adapter)
-                    self._update_platform_runtime_status(
-                        platform.value,
-                        platform_state="retrying",
-                        error_code=None,
-                        error_message=str(e),
-                    )
-                    backoff = _reconnect_backoff(attempt)
-                    info["attempts"] = attempt
-                    info["next_retry"] = time.monotonic() + backoff
-                    logger.warning(
-                        "Reconnect %s error: %s, next retry in %ds",
-                        platform.value, e, backoff,
-                    )
-                    # A reconnect exception (connect timeout, DNS failure, ...) is transient; keep
-                    # retrying at the backoff cap rather than auto-pausing.
+                await self._reconnect_failed_platform(platform, now)
 
             # Check every 10 seconds for platforms that need reconnection
             for _ in range(10):
                 if not self._running:
                     return
                 await asyncio.sleep(1)
+
+    def _flag_reconnect_needs_attention(self, platform, info: dict, now: float) -> None:
+        """Past the attention threshold flag NEEDS_ATTENTION in runtime status (once).
+
+        A signal, NOT a circuit breaker — retries continue; a dead token/revoked intent must not
+        look like ordinary "retrying" forever.
+        """
+        from gateway.run import _reconnect_needs_attention
+        if info.get("attention_flagged") or not _reconnect_needs_attention(info, now):
+            return
+        info["attention_flagged"] = True
+        queued_for = now - info.get("queued_at", now)
+        retrying_since_iso = (
+            datetime.now(timezone.utc) - timedelta(seconds=queued_for)
+        ).isoformat()
+        logger.warning(
+            "%s has been failing/reconnecting continuously for "
+            "%.1f hours (%d attempts) — flagging NEEDS_ATTENTION. "
+            "Retries continue, but this usually means a permanent "
+            "problem (revoked credentials, missing intents, broken "
+            "sidecar). Check `hermes status` / `/platform list`.",
+            platform.value,
+            queued_for / 3600.0,
+            info.get("attempts", 0),
+        )
+        self._update_platform_runtime_status(
+            platform.value,
+            platform_state="retrying",
+            needs_attention=True,
+            retrying_since=retrying_since_iso,
+        )
+
+    @staticmethod
+    def _bump_reconnect_backoff(info: dict, attempt: int) -> int:
+        """Record a failed attempt in the queue entry; returns the backoff applied."""
+        from gateway.run import _reconnect_backoff
+        backoff = _reconnect_backoff(attempt)
+        info["attempts"] = attempt
+        info["next_retry"] = time.monotonic() + backoff
+        return backoff
+
+    async def _reconnect_failed_platform(self, platform, now: float) -> None:
+        """One watcher pass for a queued platform: gate, attempt, and record the outcome."""
+        from gateway.run import _dispose_unused_adapter, _platform_has_bot_credential
+        info = self._failed_platforms.get(platform)
+        if info is None:
+            # Removed concurrently (/platform resume, reconnect via another path) between the
+            # caller's snapshot and this lookup — not an error, nothing to do this pass.
+            return
+        # Paused platforms need an explicit /platform resume to come back.
+        if info.get("paused"):
+            return
+        self._flag_reconnect_needs_attention(platform, info, now)
+        if now < info["next_retry"]:
+            return  # not time yet
+
+        platform_config = info["config"]
+        attempt = info["attempts"] + 1
+        # Empty-token primary configs can never reconnect; drop them so multiplex setups
+        # where a secondary profile owns the bot do not spin forever.
+        if not _platform_has_bot_credential(platform, platform_config):
+            logger.warning(
+                "Reconnect %s: no bot credential on queued config, "
+                "removing from retry queue",
+                platform.value,
+            )
+            del self._failed_platforms[platform]
+            return
+        logger.info("Reconnecting %s (attempt %d)...", platform.value, attempt)
+
+        adapter = None
+        try:
+            adapter = self._create_adapter(platform, platform_config)
+            if not adapter:
+                logger.warning(
+                    "Reconnect %s: adapter creation returned None, removing from retry queue",
+                    platform.value,
+                )
+                del self._failed_platforms[platform]
+                return
+
+            self._wire_adapter_handlers(adapter)
+            # Reconnect after outage: keep the platform's server-side update queue so
+            # messages sent while the bot was offline are delivered rather than dropped.
+            success = await self._connect_adapter_with_timeout(
+                adapter, platform, is_reconnect=True
+            )
+            if success:
+                await self._install_reconnected_adapter(platform, adapter)
+            elif adapter.has_fatal_error and not adapter.fatal_error_retryable:
+                self._update_platform_runtime_status(
+                    platform.value,
+                    platform_state="fatal",
+                    error_code=adapter.fatal_error_code,
+                    error_message=adapter.fatal_error_message,
+                )
+                logger.warning(
+                    "Reconnect %s: non-retryable error (%s), removing from retry queue",
+                    platform.value, adapter.fatal_error_message,
+                )
+                # Dropped from the queue without ever being installed on self.adapters, so nothing
+                # else will call disconnect() on it. Dispose here or the resource owners built in
+                # __init__ (ResponseStore etc.) leak ~2 fds each — fd limit in ~12h at the 300s cap.
+                await _dispose_unused_adapter(adapter)
+                del self._failed_platforms[platform]
+            else:
+                self._update_platform_runtime_status(
+                    platform.value,
+                    platform_state="retrying",
+                    error_code=adapter.fatal_error_code,
+                    error_message=adapter.fatal_error_message or "failed to reconnect",
+                )
+                backoff = self._bump_reconnect_backoff(info, attempt)
+                logger.info(
+                    "Reconnect %s failed, next retry in %ds",
+                    platform.value, backoff,
+                )
+                # Same fd-leak concern as the non-retryable branch: the adapter is thrown away.
+                # Retryable failures (network/DNS blips) retry at the backoff cap forever; never
+                # auto-pause them — a transient outage must not need `/platform resume`.
+                await _dispose_unused_adapter(adapter)
+        except Exception as e:
+            if adapter is not None:
+                # An exception escaping connect (DNS timeout, aiohttp server.start() crash, ...)
+                # leaves the adapter in the same unowned state as the branches above.
+                await _dispose_unused_adapter(adapter)
+            self._update_platform_runtime_status(
+                platform.value,
+                platform_state="retrying",
+                error_code=None,
+                error_message=str(e),
+            )
+            backoff = self._bump_reconnect_backoff(info, attempt)
+            # A reconnect exception is transient; keep retrying at the cap rather than auto-pausing.
+            logger.warning(
+                "Reconnect %s error: %s, next retry in %ds",
+                platform.value, e, backoff,
+            )
+
+    async def _install_reconnected_adapter(self, platform, adapter) -> None:
+        """Publish a freshly reconnected primary adapter and replay what it missed while down."""
+        self.adapters[platform] = adapter
+        self._sync_voice_mode_state_to_adapter(adapter)
+        self._bind_voice_input_callback(adapter)
+        self.delivery_router.adapters = self.adapters
+        del self._failed_platforms[platform]
+        self._update_platform_runtime_status(
+            platform.value,
+            platform_state="connected",
+            error_code=None,
+            error_message=None,
+            needs_attention=False,
+            retrying_since=None,
+        )
+        logger.info("✓ %s reconnected successfully", platform.value)
+
+        # Final responses rejected while this adapter was down are still owned by this live
+        # process, so startup recovery cannot claim them. Replay the transient subset now.
+        try:
+            await self._redeliver_failed_obligations_for_platform(platform)
+        except Exception:
+            logger.debug(
+                "failed-obligation redelivery after %s reconnect failed",
+                platform.value,
+                exc_info=True,
+            )
+
+        # Rebuild channel directory with the new adapter
+        try:
+            from gateway.channel_directory import build_channel_directory
+            await build_channel_directory(self.adapters)
+        except Exception:
+            pass
+
+        # A platform offline at gateway startup never got its restart-interrupted sessions
+        # auto-resumed — the startup pass skips sessions whose adapter isn't connected yet.
+        try:
+            self._schedule_resume_pending_sessions(platform=platform)
+        except Exception:
+            logger.debug(
+                "resume-pending reschedule after %s reconnect failed",
+                platform.value,
+                exc_info=True,
+            )
 
     async def _cancel_secondary_profile_reconnect_tasks(self) -> None:
         """Cancel profile-scoped reconnects before tearing down their registry.
@@ -1335,6 +1300,42 @@ class GatewayAdapterLifecycleMixin:
                 )
         return connected
 
+    def _wire_adapter_handlers(
+        self,
+        adapter: BasePlatformAdapter,
+        *,
+        message_handler=None,
+        fatal_error_handler=None,
+        busy_session_handler=None,
+        authorization_check=None,
+        platform_event_handler=None,
+        busy_text_mode: Optional[str] = None,
+    ) -> None:
+        """Install the runner callbacks every adapter needs, in the shared order.
+
+        Defaults are the primary-adapter handlers; secondary-profile wiring passes its
+        profile-scoped variants. ``set_reaction_handler`` is optional on plugin adapters.
+        """
+        adapter.set_message_handler(message_handler or self._primary_message_handler())
+        adapter.set_fatal_error_handler(fatal_error_handler or self._handle_adapter_fatal_error)
+        adapter.set_session_store(self.session_store)
+        adapter.set_busy_session_handler(
+            busy_session_handler or self._handle_active_session_busy_message
+        )
+        _set_reaction = getattr(adapter, "set_reaction_handler", None)
+        if callable(_set_reaction):
+            _set_reaction(self._handle_reaction_event)
+        adapter.set_topic_recovery_fn(self._recover_telegram_topic_thread_id)
+        adapter.set_authorization_check(
+            authorization_check or self._make_adapter_auth_check(adapter.platform)
+        )
+        adapter.set_platform_event_handler(
+            platform_event_handler or self._primary_platform_event_handler()
+        )
+        adapter._busy_text_mode = (
+            self._busy_text_mode if busy_text_mode is None else busy_text_mode
+        )
+
     def _configure_profile_adapter(
         self,
         adapter: BasePlatformAdapter,
@@ -1345,11 +1346,6 @@ class GatewayAdapterLifecycleMixin:
         # Runtime status is process-scoped while message/config work is profile-scoped. Keep both
         # dimensions in the key so dashboard/NAS health aggregation sees which secondary failed.
         adapter._runtime_status_platform_key = f"{profile_name}:{platform.value}"
-        adapter.set_message_handler(self._make_profile_message_handler(profile_name))
-        adapter.set_fatal_error_handler(
-            self._make_profile_fatal_error_handler(profile_name, platform)
-        )
-        adapter.set_session_store(self.session_store)
         # Declare credential ownership BEFORE any inbound event can be handled: adapter-level
         # session keys (batching, _active_sessions, busy guard) are derived at ingress, before the
         # handler stamps source.profile — without this every secondary bot would key into the
@@ -1357,30 +1353,25 @@ class GatewayAdapterLifecycleMixin:
         _set_owner = getattr(adapter, "set_owner_profile", None)
         if callable(_set_owner):
             _set_owner(profile_name)
-        adapter.set_busy_session_handler(
-            self._make_profile_busy_session_handler(profile_name)
-        )
-        _set_reaction = getattr(adapter, "set_reaction_handler", None)
-        if callable(_set_reaction):
-            _set_reaction(self._handle_reaction_event)
-        adapter.set_topic_recovery_fn(self._recover_telegram_topic_thread_id)
-        adapter.set_authorization_check(
-            self._make_adapter_auth_check(platform, profile_name=profile_name)
-        )
-        adapter.set_platform_event_handler(
-            self._make_profile_platform_event_handler(profile_name)
-        )
-        # Voice transcripts from this bot's channels dispatch through THIS
-        # adapter (primary wiring lives at connect time; see #75198).
-        self._bind_voice_input_callback(adapter)
         text_modes = getattr(self, "_busy_text_modes_by_profile", None)
-        adapter._busy_text_mode = (
-            text_modes.get(profile_name, self._busy_text_mode)
-            if isinstance(text_modes, dict)
-            else self._busy_text_mode
+        self._wire_adapter_handlers(
+            adapter,
+            message_handler=self._make_profile_message_handler(profile_name),
+            fatal_error_handler=self._make_profile_fatal_error_handler(profile_name, platform),
+            busy_session_handler=self._make_profile_busy_session_handler(profile_name),
+            authorization_check=self._make_adapter_auth_check(platform, profile_name=profile_name),
+            platform_event_handler=self._make_profile_platform_event_handler(profile_name),
+            busy_text_mode=(
+                text_modes.get(profile_name, self._busy_text_mode)
+                if isinstance(text_modes, dict)
+                else self._busy_text_mode
+            ),
         )
-        # Secondary adapters always carry the profile they serve so prune
-        # paths namespace topic bindings correctly under multiplex (#76423).
+        # Voice transcripts from this bot's channels dispatch through THIS adapter (primary
+        # wiring lives at connect time).
+        self._bind_voice_input_callback(adapter)
+        # Secondary adapters always carry the profile they serve so prune paths namespace topic
+        # bindings correctly under multiplex.
         adapter._hermes_profile_name = profile_name
 
     async def _run_secondary_profile_reconnect(
@@ -1532,51 +1523,33 @@ class GatewayAdapterLifecycleMixin:
             )
             return
 
+        def _handoff() -> None:
+            try:
+                self._schedule_secondary_profile_reconnect(profile_name, platform, adapter)
+            except Exception:
+                # The handoff touches live registries; if it raises, the parked task dies as an
+                # unretrieved-task exception logged only at GC. Surface it where operators look.
+                logger.exception(
+                    "secondary-startup-reconnect handoff failed (profile=%s platform=%s)",
+                    profile_name,
+                    platform.value,
+                )
+
         async def _await_running_then_schedule() -> None:
             if self._running:
-                try:
-                    self._schedule_secondary_profile_reconnect(
-                        profile_name, platform, adapter
-                    )
-                except Exception:
-                    # Same GC-time-exception hazard as the post-poll handoff
-                    # below; surface it in gateway.log instead.
-                    logger.exception(
-                        "secondary-startup-reconnect handoff failed "
-                        "(profile=%s platform=%s)",
-                        profile_name,
-                        platform.value,
-                    )
+                _handoff()
                 return
             # Modest poll: startup completion has no dedicated event, and the reconnect runner's own
             # backoff makes sub-100ms precision irrelevant. Bounded so a wedged startup cannot spin.
             while not self._running and not self._shutdown_event.is_set():
                 await asyncio.sleep(0.1)
             if self._running and not self._shutdown_event.is_set():
-                try:
-                    self._schedule_secondary_profile_reconnect(
-                        profile_name, platform, adapter
-                    )
-                except Exception:
-                    # The handoff touches live registries; if it raises, the parked task dies as an
-                    # unretrieved-task exception logged only at GC. Surface it where operators look.
-                    logger.exception(
-                        "secondary-startup-reconnect handoff failed "
-                        "(profile=%s platform=%s)",
-                        profile_name,
-                        platform.value,
-                    )
+                _handoff()
 
-        task = asyncio.create_task(
+        self._retain_background_task(asyncio.create_task(
             _await_running_then_schedule(),
             name=f"secondary-startup-reconnect:{profile_name}:{platform.value}",
-        )
-        background_tasks = getattr(self, "_background_tasks", None)
-        if not isinstance(background_tasks, set):
-            background_tasks = set()
-            self._background_tasks = background_tasks
-        background_tasks.add(task)
-        task.add_done_callback(background_tasks.discard)
+        ))
 
     def _schedule_secondary_profile_reconnect(
         self, profile_name: str, platform: Platform, adapter: BasePlatformAdapter
@@ -1591,17 +1564,10 @@ class GatewayAdapterLifecycleMixin:
         profile_pending = pending.setdefault(profile_name, {})
         if platform in profile_pending:
             return
-        task = asyncio.create_task(
+        profile_pending[platform] = self._retain_background_task(asyncio.create_task(
             self._run_secondary_profile_reconnect(profile_name, platform),
             name=f"secondary-reconnect:{profile_name}:{platform.value}",
-        )
-        profile_pending[platform] = task
-        background_tasks = getattr(self, "_background_tasks", None)
-        if not isinstance(background_tasks, set):
-            background_tasks = set()
-            self._background_tasks = background_tasks
-        background_tasks.add(task)
-        task.add_done_callback(background_tasks.discard)
+        ))
 
     def _make_profile_fatal_error_handler(
         self, profile_name: str, platform: Platform
