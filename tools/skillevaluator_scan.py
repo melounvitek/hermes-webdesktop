@@ -77,9 +77,7 @@ def tier1_advisory_enabled() -> bool:
     try:
         from hermes_cli.config import load_config
         skills_cfg = load_config().get("skills") or {}
-        if not isinstance(skills_cfg, dict):
-            return True
-        value = skills_cfg.get("tier1_advisory", True)
+        value = skills_cfg.get("tier1_advisory", True) if isinstance(skills_cfg, dict) else True
         if isinstance(value, str):
             return value.strip().lower() not in ("false", "0", "no", "off")
         return bool(value)

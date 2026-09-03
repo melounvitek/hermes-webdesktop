@@ -335,10 +335,7 @@ class XAIStreamer(StreamingTTSProvider):
         return asyncio.run(self._drain_async(text))
 
     async def _drain_async(self, text: str) -> List[bytes]:
-        frames: List[bytes] = []
-        async for frame in self._async_frames(text):
-            frames.append(frame)
-        return frames
+        return [frame async for frame in self._async_frames(text)]
 
     async def _async_frames(self, text: str):
         import json as _json

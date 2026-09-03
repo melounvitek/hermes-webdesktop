@@ -71,14 +71,10 @@ def _positive_int(value: Any) -> Optional[int]:
 
 
 def _resolve_max_text_length(provider: Optional[str], tts_config: Optional[Dict[str, Any]] = None) -> int:
-    """Return the input-character cap for *provider*.
-
-    Order: ``tts.<provider>.max_text_length`` > ElevenLabs model table >
-    ``PROVIDER_MAX_TEXT_LENGTH`` > command provider's own ``max_text_length``
-    (else ``DEFAULT_COMMAND_TTS_MAX_TEXT_LENGTH``) > ``FALLBACK_MAX_TEXT_LENGTH``.
-    Non-positive / non-int overrides fall through so a broken config can't
-    disable truncation.
-    """
+    """Input-character cap for *provider*: ``tts.<provider>.max_text_length`` > ElevenLabs model
+    table > ``PROVIDER_MAX_TEXT_LENGTH`` > command provider's own ``max_text_length`` (else
+    ``DEFAULT_COMMAND_TTS_MAX_TEXT_LENGTH``) > ``FALLBACK_MAX_TEXT_LENGTH``. Non-positive /
+    non-int overrides fall through so a broken config can't disable truncation."""
     if not provider:
         return FALLBACK_MAX_TEXT_LENGTH
     key = provider.lower().strip()
@@ -118,9 +114,7 @@ _OPUS_VOICE_ARGS = [
 ]
 
 
-# ---------------------------------------------------------------------------
-# Text chunking and delivery profiles
-# ---------------------------------------------------------------------------
+# --- Text chunking and delivery profiles ---
 
 @dataclass(frozen=True)
 class AudioDeliveryProfile:
@@ -161,11 +155,21 @@ def _resolve_audio_delivery_profile(
     return AudioDeliveryProfile(platform=key, max_file_bytes=max_file_bytes, safety_ratio=float(safety_ratio))
 
 
-def _pack_under_cap(pieces: List[str], max_chars: int) -> List[str]:
-    """Greedily join *pieces* with single spaces, starting a new chunk past *max_chars*."""
+def _pack_under_cap(pieces: List[str], max_chars: int, *, slice_oversized: bool = False) -> List[str]:
+    """Greedily join *pieces* with single spaces, starting a new chunk past *max_chars*.
+
+    With ``slice_oversized`` an over-long piece flushes the running chunk and emits its hard
+    slices as their own chunks (the tail slice is not merged with following pieces).
+    """
     chunks: List[str] = []
     current = ""
     for piece in pieces:
+        if slice_oversized and len(piece) > max_chars:
+            if current:
+                chunks.append(current)
+                current = ""
+            chunks.extend(piece[i:i + max_chars] for i in range(0, len(piece), max_chars))
+            continue
         candidate = f"{current} {piece}".strip()
         if current and len(candidate) > max_chars:
             chunks.append(current)
@@ -178,29 +182,8 @@ def _pack_under_cap(pieces: List[str], max_chars: int) -> List[str]:
 
 
 def _split_oversized_sentence(sentence: str, max_chars: int) -> List[str]:
-    """Split one over-limit sentence on word boundaries, then hard boundaries.
-
-    An over-long word flushes the running chunk and emits its slices as their
-    own chunks (the tail slice is not merged with following words).
-    """
-    chunks: List[str] = []
-    current = ""
-    for word in sentence.split():
-        if len(word) > max_chars:
-            if current:
-                chunks.append(current)
-                current = ""
-            chunks.extend(word[i:i + max_chars] for i in range(0, len(word), max_chars))
-            continue
-        candidate = f"{current} {word}".strip()
-        if current and len(candidate) > max_chars:
-            chunks.append(current)
-            current = word
-        else:
-            current = candidate
-    if current:
-        chunks.append(current)
-    return chunks
+    """Split one over-limit sentence on word boundaries, then hard boundaries."""
+    return _pack_under_cap(sentence.split(), max_chars, slice_oversized=True)
 
 
 def _split_text_for_tts(text: str, max_chars: int) -> List[str]:
@@ -226,10 +209,7 @@ def _split_text_for_tts(text: str, max_chars: int) -> List[str]:
 
 
 def _pack_audio_files_for_delivery(audio_paths: List[str], profile: AudioDeliveryProfile) -> List[List[str]]:
-    """Group already-final-encoded chunks under the conservative size target.
-
-    A group never mixes container suffixes (they can't be concat-copied).
-    """
+    """Group final-encoded chunks under the size target; never mixes suffixes (can't concat-copy)."""
     groups: List[List[str]] = []
     current: List[str] = []
     current_size = 0
@@ -248,9 +228,7 @@ def _pack_audio_files_for_delivery(audio_paths: List[str], profile: AudioDeliver
     return groups
 
 
-# ---------------------------------------------------------------------------
-# ffmpeg encoding helpers
-# ---------------------------------------------------------------------------
+# --- ffmpeg encoding helpers ---
 
 def _ffmpeg_run(
     ffmpeg: str, args: List[str], *, timeout: int = 30, check: bool = False, capture: bool = True,
@@ -277,11 +255,8 @@ def _wav_sidecar_path(output_path: str) -> str:
 
 
 def _finalize_wav_output(wav_path: str, output_path: str) -> str:
-    """Move a WAV-native engine's output (NeuTTS / Piper / KittenTTS) into the requested container.
-
-    ffmpeg-convert when available, otherwise rename the WAV to the expected path so the
-    tool stays usable (the extension is then misleading but the audio plays).
-    """
+    """Move a WAV-native engine's output into the requested container: ffmpeg-convert when
+    available, else rename so the tool stays usable (misleading extension, audio plays)."""
     if wav_path == output_path:
         return output_path
     ffmpeg = shutil.which("ffmpeg")
@@ -315,11 +290,9 @@ def _wrap_pcm_as_wav(
 def _write_wav_bytes_as(wav_bytes: bytes, output_path: str) -> str:
     """Write in-memory WAV to *output_path*, ffmpeg-converting to its container.
 
-    ``.wav`` is written directly; ``.ogg`` is forced to Opus (ffmpeg's .ogg default is
-    Vorbis, which voice bubbles reject); anything else is a plain ffmpeg conversion. A
-    failed conversion raises RuntimeError. Without ffmpeg the raw WAV is written under
-    the requested name (misleading extension, but the audio still plays).
-    """
+    ``.ogg`` is forced to Opus (ffmpeg's .ogg default is Vorbis, which voice bubbles reject).
+    A failed conversion raises RuntimeError; without ffmpeg the raw WAV is written under
+    the requested name (misleading extension, but the audio still plays)."""
     if output_path.lower().endswith(".wav"):
         with open(output_path, "wb") as f:
             f.write(wav_bytes)
@@ -350,11 +323,7 @@ def _convert_to_opus(mp3_path: str) -> Optional[str]:
 
 
 def _ffmpeg_transcode_to_opus(input_path: str, ogg_path: str) -> Optional[str]:
-    """Transcode *input_path* to real Ogg/Opus at *ogg_path* via ffmpeg.
-
-    Safe when ``input_path == ogg_path`` (writes to a temp file, then replaces).
-    Returns the output path on success, None on failure.
-    """
+    """Transcode *input_path* to real Ogg/Opus at *ogg_path* (in-place safe via temp file); None on failure."""
     if shutil.which("ffmpeg") is None:
         return None
 
@@ -382,9 +351,7 @@ def _ffmpeg_transcode_to_opus(input_path: str, ogg_path: str) -> Optional[str]:
     return None
 
 
-# ---------------------------------------------------------------------------
-# Container sniffing / repair
-# ---------------------------------------------------------------------------
+# --- Container sniffing / repair ---
 # Several backends silently ignore the requested opus format (Edge only emits MP3, Piper
 # writes WAV, xAI writes MP3, some OpenAI-compatible servers ignore response_format="opus"),
 # which breaks native voice bubbles. Sniff the magic bytes once after synthesis and repair
@@ -403,12 +370,8 @@ def _sniff_audio_container(path: str) -> str:
 
 
 def _repair_ogg_container(file_str: str) -> str:
-    """Ensure a path claiming ``.ogg`` actually contains an Ogg container.
-
-    MP3/WAV/FLAC bytes are transcoded in place to real Ogg/Opus. On failure the file is
-    renamed to its sniffed real extension so platforms get an honest file instead of a
-    0-second voice bubble.
-    """
+    """Ensure a ``.ogg`` path really holds Ogg: transcode in place, else rename to the sniffed
+    real extension so platforms get an honest file instead of a 0-second voice bubble."""
     if not file_str.endswith(".ogg"):
         return file_str
     container = _sniff_audio_container(file_str)
@@ -432,18 +395,13 @@ def _repair_ogg_container(file_str: str) -> str:
         return file_str
 
 
-# ---------------------------------------------------------------------------
-# Long-form audio combination and delivery packing
-# ---------------------------------------------------------------------------
+# --- Long-form audio combination and delivery packing ---
 
 def _concat_audio_files(audio_paths: List[str], output_path: str, *, voice_compatible: bool = False) -> Optional[str]:
-    """Combine independently encoded chunks with ffmpeg.
+    """Combine independently encoded chunks with ffmpeg (never byte-joined).
 
-    OGG/Opus is always decoded and re-encoded (even without voice opt-in); matching MP3
-    chunks keep their encoded frames (``-c:a copy``). Structured containers are never
-    byte-joined. Returns ``None`` when ffmpeg is missing or fails so callers keep the
-    individually valid files.
-    """
+    OGG/Opus is always re-encoded (even without voice opt-in); matching MP3 chunks keep their
+    frames (``-c:a copy``). None when ffmpeg is missing/fails so callers keep the valid parts."""
     if not audio_paths:
         raise ValueError("No audio chunks to combine")
     if len(audio_paths) == 1:
@@ -489,13 +447,11 @@ def _concat_audio_files(audio_paths: List[str], output_path: str, *, voice_compa
 def _build_audio_delivery_files(
     audio_paths: List[str], output_path: str, profile: AudioDeliveryProfile, *, voice_compatible: bool = False,
 ) -> Tuple[List[str], bool]:
-    """Pack final-encoded chunks and enforce the hard upload limit.
+    """Pack final-encoded chunks and enforce the hard upload limit; returns ``(final_paths, combined_any)``.
 
-    Groups are packed against the conservative target, then every combined artifact is
-    checked at its real post-encoding size; an over-limit group is split in half and
-    retried. A failed combine returns the constituent files separately. A single chunk
-    above the hard limit fails closed. Returns ``(final_paths, combined_any)``.
-    """
+    Groups are packed against the conservative target, then each combined artifact is checked
+    at its real size; an over-limit group is split in half and retried. A failed combine
+    returns the constituent files separately. A single chunk above the hard limit fails closed."""
     if not audio_paths:
         raise ValueError("No final-encoded TTS audio chunks")
     for path in audio_paths:

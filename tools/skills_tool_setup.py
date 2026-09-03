@@ -82,8 +82,7 @@ def _normalize_setup_metadata(frontmatter: Dict[str, Any]) -> Dict[str, Any]:
             "env_var": env_var,
             "prompt": str(item.get("prompt") or f"Enter value for {env_var}").strip(),
             "secret": bool(item.get("secret", True))}
-        provider_url = str(item.get("provider_url") or item.get("url") or "").strip()
-        if provider_url:
+        if provider_url := str(item.get("provider_url") or item.get("url") or "").strip():
             entry["provider_url"] = provider_url
         collect_secrets.append(entry)
     return {"help": _clean_str(setup.get("help")), "collect_secrets": collect_secrets}
@@ -104,12 +103,10 @@ def _get_required_environment_variables(
         normalized: Dict[str, Any] = {
             "name": env_name,
             "prompt": str(entry.get("prompt") or f"Enter value for {env_name}").strip()}
-        help_text = _clean_str(
-            entry.get("help") or entry.get("provider_url") or entry.get("url") or setup.get("help"))
-        if help_text:
+        if help_text := _clean_str(
+                entry.get("help") or entry.get("provider_url") or entry.get("url") or setup.get("help")):
             normalized["help"] = help_text
-        required_for = _clean_str(entry.get("required_for"))
-        if required_for:
+        if required_for := _clean_str(entry.get("required_for")):
             normalized["required_for"] = required_for
         if entry.get("optional"):
             normalized["optional"] = True
@@ -158,10 +155,7 @@ def _capture_required_environment_variables(
     setup_skipped = False
     remaining_names: List[str] = []
     for entry in missing_entries:
-        metadata = {"skill_name": skill_name}
-        for k in ("help", "required_for"):
-            if entry.get(k):
-                metadata[k] = entry[k]
+        metadata = {"skill_name": skill_name, **{k: entry[k] for k in ("help", "required_for") if entry.get(k)}}
         try:
             callback_result = callback(entry["name"], entry["prompt"], metadata)
         except Exception:

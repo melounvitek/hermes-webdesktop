@@ -67,8 +67,7 @@ def _available_skill_files(skill_dir: Path) -> Dict[str, List[str]]:
 
 def _serve_skill_file(
     skill_root: Path, file_path: str, label: str, *, hint: str | None = None,
-    list_available: bool = False, read_error_prefix: bool = False, mark_read: bool = False,
-) -> str:
+    list_available: bool = False, read_error_prefix: bool = False, mark_read: bool = False) -> str:
     """Serve one linked file from a skill directory as a skill_view JSON result.
 
     ``hint`` decorates traversal/containment errors and ``list_available`` adds the
@@ -130,8 +129,7 @@ def _preprocess_skill(content: str, skill_dir, session_id, debug_msg: str, *args
 
 def _serve_plugin_skill(
     skill_md: Path, namespace: str, bare: str, file_path: str | None = None, *,
-    preprocess: bool = True, session_id: str | None = None,
-) -> str:
+    preprocess: bool = True, session_id: str | None = None) -> str:
     """Read a plugin-provided skill, apply guards, return JSON."""
     from hermes_cli.plugins import _get_disabled_plugins, get_plugin_manager
     from tools import skills_tool as _st

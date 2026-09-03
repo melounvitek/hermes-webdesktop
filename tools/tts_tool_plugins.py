@@ -22,12 +22,9 @@ logger = logging.getLogger("tools.tts_tool")
 
 
 def _lookup_plugin_provider(key: str, *, discover: bool = True, retry: bool = False):
-    """The registered ``TTSProvider`` named *key*, or None.
-
-    ``discover`` runs plugin discovery first; ``retry`` re-discovers with ``force=True`` on
-    a miss (long-lived sessions may have discovered plugins before this one was
-    installed/enabled). Raises on registry/discovery failure — callers decide if fatal.
-    """
+    """The registered ``TTSProvider`` named *key*, or None. ``discover`` runs plugin discovery first;
+    ``retry`` re-discovers with ``force=True`` on a miss (a long-lived session may predate the
+    plugin's install). Raises on registry/discovery failure — callers decide if fatal."""
     from agent.tts_registry import get_provider
 
     if discover:
@@ -44,12 +41,9 @@ def _lookup_plugin_provider(key: str, *, discover: bool = True, retry: bool = Fa
 def _dispatch_to_plugin_provider(text: str, output_path: str, provider: str, tts_config: Dict[str, Any]) -> Optional[str]:
     """Route to a plugin-registered TTS provider; None means "fall through".
 
-    Invariants enforced here even though the caller checks them too, so a caller refactor
-    can't silently break them: built-in names never reach the plugin registry; a same-named
-    ``type: command`` provider wins over a plugin; dispatch fires only for a registered
-    :class:`TTSProvider` whose name equals the configured value (unknown names -> None).
-    Plugin exceptions propagate — ``text_to_speech_tool`` converts them to the error envelope.
-    """
+    Invariants re-checked here so a caller refactor can't break them: built-in names never reach
+    the registry; a same-named ``type: command`` provider wins; only an exact registered name
+    dispatches. Plugin exceptions propagate to ``text_to_speech_tool``'s error envelope."""
     if not provider:
         return None
     key = provider.lower().strip()

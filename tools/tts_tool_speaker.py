@@ -37,8 +37,8 @@ def _unlink_quietly(path: Optional[str]) -> None:
             pass
 
 
-def _align_int16_chunks(chunks: Iterable[bytes], stop_evt: threading.Event) -> Iterator[bytes]:
-    """Yield int16-aligned byte chunks; a dangling odd byte is padded at the end."""
+def _align_int16_chunks(chunks: Iterable[bytes], stop_evt: threading.Event, *, pad_tail: bool = True) -> Iterator[bytes]:
+    """Yield int16-aligned byte chunks; a dangling odd byte is padded at the end (or dropped)."""
     leftover = b""
     for chunk in chunks:
         if stop_evt.is_set():
@@ -48,7 +48,7 @@ def _align_int16_chunks(chunks: Iterable[bytes], stop_evt: threading.Event) -> I
         if aligned_len >= 2:
             yield buf[:aligned_len]
         leftover = buf[aligned_len:] if aligned_len < len(buf) else b""
-    if leftover:
+    if leftover and pad_tail:
         yield b"\x00"
 
 
@@ -95,13 +95,10 @@ def _drain_chunks(chunk_queue: "queue.Queue[Optional[bytes]]") -> List[bytes]:
 class _SyncSentencePipeline:
     """Overlap per-sentence synthesis with playback for non-streaming providers.
 
-    Serial synthesize-then-play added a full synthesis-time of dead air per sentence. One
-    single-thread synthesis executor (sentences FIFO; providers never see concurrent calls)
-    feeds one playback worker through a small bounded queue: while sentence n plays, n+1 is
-    already synthesizing. The bound keeps lookahead/temp files small and gives the caller
-    backpressure. ``text_to_speech_tool`` / ``play_audio_file`` are resolved late so tests
-    that monkeypatch them keep working.
-    """
+    One single-thread synthesis executor (FIFO; providers never see concurrent calls) feeds one
+    playback worker through a small bounded queue, so sentence n+1 synthesizes while n plays;
+    the bound keeps lookahead/temp files small and gives the caller backpressure.
+    ``text_to_speech_tool`` / ``play_audio_file`` are resolved late so test patches apply."""
 
     def __init__(self, stop_event: threading.Event, *, lookahead: int = 2):
         self._stop = stop_event
@@ -157,13 +154,11 @@ class _SyncSentencePipeline:
 class _StreamerPlayback:
     """Prefetch + FIFO playback for a chunked :class:`StreamingTTSProvider`.
 
-    ``speak(text)`` calls ``streamer.stream()`` right away and hands the iterator to a
-    prefetch thread (at most 3 in flight) that buffers chunks into a bounded per-sentence
-    queue; the single playback worker plays those queues in order, so sentence N+1 is
-    already arriving while N plays. Output goes to a PortAudio stream when one could be
-    opened, otherwise via temp WAV files. A failing PortAudio write is retried on a
-    reinitialized stream up to ``_MAX_REINIT`` times before falling back to temp files.
-    """
+    ``speak(text)`` starts ``streamer.stream()`` immediately on a prefetch thread (at most 3 in
+    flight) buffering into a bounded per-sentence queue; one playback worker drains those in
+    order, so sentence N+1 arrives while N plays. Output is a PortAudio stream when one opened,
+    else temp WAV files; a failing write is retried on a reinitialized stream up to
+    ``_MAX_REINIT`` times before falling back to temp files."""
 
     _MAX_REINIT = 3
     _CHUNK_QUEUE_MAX = 64
@@ -284,25 +279,17 @@ class _StreamerPlayback:
         if self._current_stream is None:
             self._play_sentence_via_tempfile(chunk_queue)
             return
-        pcm_leftover = b""
-        while True:
-            chunk = chunk_queue.get()
-            if chunk is None or self.stop_event.is_set():
-                return
-            buf = pcm_leftover + chunk
-            aligned_len = len(buf) - (len(buf) % 2)
-            if aligned_len >= 2:
+        for aligned in _align_int16_chunks(iter(chunk_queue.get, None), self.stop_event, pad_tail=False):
+            try:
+                self._write_pcm(aligned)
+            except Exception as write_exc:
+                logger.warning("PortAudio write failed, attempting stream reinit: %s", write_exc)
+                if not self._recover_stream():
+                    return
                 try:
-                    self._write_pcm(buf[:aligned_len])
-                except Exception as write_exc:
-                    logger.warning("PortAudio write failed, attempting stream reinit: %s", write_exc)
-                    if not self._recover_stream():
-                        return
-                    try:
-                        self._write_pcm(buf[:aligned_len])
-                    except Exception:
-                        pass
-            pcm_leftover = buf[aligned_len:] if aligned_len < len(buf) else b""
+                    self._write_pcm(aligned)
+                except Exception:
+                    pass
 
     def _playback_worker(self) -> None:
         """Single consumer: play audio segments from the queue in order."""
@@ -337,24 +324,15 @@ class _StreamerPlayback:
 
 
 def stream_tts_to_speaker(
-    text_queue: queue.Queue,
-    stop_event: threading.Event,
-    tts_done_event: threading.Event,
-    display_callback: Optional[Callable[[str], None]] = None,
-    provider: Optional[str] = None,
+    text_queue: queue.Queue, stop_event: threading.Event, tts_done_event: threading.Event,
+    display_callback: Optional[Callable[[str], None]] = None, provider: Optional[str] = None,
 ):
-    """Consume text deltas from *text_queue*, cut them into sentences, and speak each one
-    the moment it's ready — the conversational path.
+    """Consume text deltas from *text_queue*, cut into sentences, speak each the moment it's ready.
 
-    A registered streaming provider plays chunked PCM for the lowest latency; every other
-    provider (edge, the default) is spoken per-sentence via the sync ``text_to_speech_tool``
-    path, so audio still starts on sentence one.
-
-    Protocol: the producer puts ``str`` deltas onto *text_queue*; a ``None`` sentinel
-    signals end-of-text (flush remaining buffer); *stop_event* aborts early (barge-in);
-    *tts_done_event* is **set** in the ``finally`` block so callers waiting on it
-    (continuous voice mode) know playback is finished.
-    """
+    A registered streaming provider plays chunked PCM; every other provider is spoken
+    per-sentence via ``text_to_speech_tool``, so audio still starts on sentence one. Protocol:
+    ``str`` deltas, a ``None`` sentinel = end-of-text (flush), *stop_event* aborts (barge-in),
+    *tts_done_event* is **set** in ``finally`` so continuous voice mode knows playback finished."""
     tts_done_event.clear()
     origin = _origin()
     sync_pipeline: Optional[_SyncSentencePipeline] = None

@@ -100,9 +100,15 @@ def _section(tts_config: Dict[str, Any], key: str) -> Dict[str, Any]:
     return section if isinstance(section, dict) else {}
 
 
-# ---------------------------------------------------------------------------
-# Bounded upstream response reading
-# ---------------------------------------------------------------------------
+def _require_key(env_var: str, provider_id: str, hint: str) -> str:
+    """Resolve *env_var* via the origin key resolver; ValueError ``"<ENV> not set. <hint>"`` when absent."""
+    api_key = _origin()._resolve_provider_key(env_var, provider_id) or ""
+    if not api_key:
+        raise ValueError(f"{env_var} not set. {hint}")
+    return api_key
+
+
+# --- Bounded upstream response reading ---
 
 def _response_has_explicit_stream(response: Any) -> bool:
     """True for real ``requests`` responses (or doubles defining ``iter_content`` themselves)."""
@@ -182,9 +188,7 @@ def _post_json(url: str, payload: Dict[str, Any], headers: Dict[str, str], **ext
     return requests.post(url, headers=headers, json=payload, timeout=60, stream=True, **extra)
 
 
-# ---------------------------------------------------------------------------
-# Auxiliary-model speech-tag rewrites
-# ---------------------------------------------------------------------------
+# --- Auxiliary-model speech-tag rewrites ---
 
 def _extract_auxiliary_message_content(response: Any) -> str:
     try:
@@ -232,9 +236,7 @@ def _rewrite_with_auxiliary_model(
         return fallback
 
 
-# ---------------------------------------------------------------------------
-# Edge TTS (free default)
-# ---------------------------------------------------------------------------
+# --- Edge TTS (free default) ---
 
 async def _generate_edge_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
     _edge_tts = _origin()._import_edge_tts()
@@ -247,16 +249,11 @@ async def _generate_edge_tts(text: str, output_path: str, tts_config: Dict[str, 
     return output_path
 
 
-# ---------------------------------------------------------------------------
-# ElevenLabs
-# ---------------------------------------------------------------------------
+# --- ElevenLabs ---
 
 def _elevenlabs_environment_kwargs(el_config: Dict[str, Any]) -> Dict[str, Any]:
-    """Client kwargs redirecting the SDK to ``tts.elevenlabs.base_url``/``wss_url``.
-
-    Empty when no base_url is set (SDK default environment); ``wss_url`` defaults
-    to the base_url host with a ``ws(s)://`` scheme.
-    """
+    """SDK client kwargs for ``tts.elevenlabs.base_url``/``wss_url``; empty (SDK default environment)
+    without a base_url. ``wss_url`` defaults to the base_url host with a ``ws(s)://`` scheme."""
     base_url = (el_config.get("base_url") or "").rstrip("/")
     if not base_url:
         return {}
@@ -266,13 +263,9 @@ def _elevenlabs_environment_kwargs(el_config: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _generate_elevenlabs(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
-    origin = _origin()
-    api_key = origin._resolve_provider_key("ELEVENLABS_API_KEY", "elevenlabs") or ""
-    if not api_key:
-        raise ValueError("ELEVENLABS_API_KEY not set. Get one at https://elevenlabs.io/")
-
+    api_key = _require_key("ELEVENLABS_API_KEY", "elevenlabs", "Get one at https://elevenlabs.io/")
     el_config = tts_config.get("elevenlabs") or {}
-    client = origin._import_elevenlabs()(api_key=api_key, **_elevenlabs_environment_kwargs(el_config))
+    client = _origin()._import_elevenlabs()(api_key=api_key, **_elevenlabs_environment_kwargs(el_config))
     audio_generator = client.text_to_speech.convert(
         text=text,
         voice_id=el_config.get("voice_id", DEFAULT_ELEVENLABS_VOICE_ID),
@@ -285,9 +278,7 @@ def _generate_elevenlabs(text: str, output_path: str, tts_config: Dict[str, Any]
     return output_path
 
 
-# ---------------------------------------------------------------------------
-# xAI TTS (dedicated /v1/tts endpoint, not the OpenAI audio shape)
-# ---------------------------------------------------------------------------
+# --- xAI TTS (dedicated /v1/tts endpoint, not the OpenAI audio shape) ---
 _XAI_INLINE_SPEECH_TAGS = (
     "pause", "long-pause", "hum-tune", "laugh", "chuckle", "giggle", "cry", "tsk",
     "tongue-click", "lip-smack", "breath", "inhale", "exhale", "sigh",
@@ -304,13 +295,9 @@ _XAI_FIRST_SENTENCE_RE = re.compile(r"^(.{12,120}?[.!?…])\s+(?=\S)", flags=re.
 
 
 def _apply_xai_auto_speech_tags(text: str) -> str:
-    """Add xAI speech tags for more natural voice-mode replies.
-
-    Local conservative pass first ([pause] between paragraphs and after the first
-    sentence). If the text carried no explicit speech tags already, the auxiliary
-    model then rewrites it with the richer xAI tag set; any failure falls back to
-    the locally tagged text.
-    """
+    """Add xAI speech tags: a conservative local pass ([pause] between paragraphs / after the first
+    sentence), then — only when the text carried no explicit tags — an auxiliary-model rewrite
+    with the richer xAI tag set, falling back to the locally tagged text on any failure."""
     clean = text.strip()
     if not clean:
         return text
@@ -343,11 +330,8 @@ def _apply_xai_auto_speech_tags(text: str) -> str:
 
 
 def _clamped_number(raw: Any, cast, lo, hi):
-    """Parse an optional numeric knob and clamp into [lo, hi]; ``None``/unparseable -> None.
-
-    An empty string is deliberately passed to the clamp unconverted (the resulting
-    TypeError is reported by the caller's generic handler as a TTS failure).
-    """
+    """Parse an optional numeric knob and clamp into [lo, hi]; ``None``/unparseable -> None. An empty
+    string is deliberately clamped unconverted (its TypeError surfaces as a generic TTS failure)."""
     if raw is None:
         return None
     if raw != "":
@@ -425,9 +409,7 @@ def _generate_xai_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -
     return output_path
 
 
-# ---------------------------------------------------------------------------
-# MiniMax TTS
-# ---------------------------------------------------------------------------
+# --- MiniMax TTS ---
 
 @dataclass(frozen=True)
 class _MiniMaxTTSRuntime:
@@ -447,12 +429,8 @@ _MINIMAX_OFFICIAL_HOSTS = {
 
 
 def _resolve_minimax_tts_runtime(tts_config: Dict[str, Any]) -> _MiniMaxTTSRuntime:
-    """Select MiniMax TTS region, endpoint, and credential atomically.
-
-    An explicit ``tts.minimax.region`` wins. Without one, the legacy global
-    credential wins when present; a China credential is selected only when it
-    is the sole configured MiniMax credential.
-    """
+    """Select MiniMax region, endpoint and credential atomically: explicit ``tts.minimax.region`` wins,
+    else the legacy global credential; ``cn`` only when it is the sole configured credential."""
     mm_config = _section(tts_config, "minimax")
     resolve_key = _origin()._resolve_provider_key
     credentials = {
@@ -489,12 +467,8 @@ def _raise_minimax_api_error(result: Dict[str, Any]) -> None:
 
 
 def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
-    """Generate audio via MiniMax.
-
-    Two endpoints, detected from the URL: ``t2a_v2`` (nested payload, JSON reply
-    with hex-encoded audio) and legacy ``text_to_speech`` (flat payload, raw
-    ``audio/*`` body).
-    """
+    """Generate audio via MiniMax: ``t2a_v2`` (nested payload, JSON reply with hex audio) or the legacy
+    ``text_to_speech`` endpoint (flat payload, raw ``audio/*`` body), detected from the URL."""
     runtime = _resolve_minimax_tts_runtime(tts_config)
     mm_config = _section(tts_config, "minimax")
     model = mm_config.get("model", DEFAULT_MINIMAX_MODEL)
@@ -564,21 +538,15 @@ def _generate_minimax_tts(text: str, output_path: str, tts_config: Dict[str, Any
     raise RuntimeError("MiniMax TTS returned no audio data")
 
 
-# ---------------------------------------------------------------------------
-# Mistral (Voxtral TTS) — base64 audio, native Opus for voice bubbles
-# ---------------------------------------------------------------------------
+# --- Mistral (Voxtral TTS) — base64 audio, native Opus for voice bubbles ---
 
 def _generate_mistral_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
-    origin = _origin()
-    api_key = origin._resolve_provider_key("MISTRAL_API_KEY", "mistral") or ""
-    if not api_key:
-        raise ValueError("MISTRAL_API_KEY not set. Get one at https://console.mistral.ai/")
-
+    api_key = _require_key("MISTRAL_API_KEY", "mistral", "Get one at https://console.mistral.ai/")
     mi_config = tts_config.get("mistral") or {}
     client_kwargs: Dict[str, Any] = {"api_key": api_key}
     if mi_config.get("base_url"):
         client_kwargs["server_url"] = mi_config["base_url"]  # the Mistral SDK calls it server_url
-    Mistral = origin._import_mistral_client()
+    Mistral = _origin()._import_mistral_client()
     try:
         with Mistral(**client_kwargs) as client:
             response = client.audio.speech.complete(
@@ -596,9 +564,7 @@ def _generate_mistral_tts(text: str, output_path: str, tts_config: Dict[str, Any
     return _write_bytes(output_path, audio_bytes)
 
 
-# ---------------------------------------------------------------------------
-# Google Gemini TTS
-# ---------------------------------------------------------------------------
+# --- Google Gemini TTS ---
 
 def _read_gemini_persona_prompt(gemini_config: Dict[str, Any]) -> str:
     """Read ``tts.gemini.persona_prompt_file`` (relative -> under HERMES_HOME), failing soft."""
@@ -664,11 +630,8 @@ def _rewrite_gemini_tts_audio_tags(text: str, persona_prompt: str = "") -> str:
 
 
 def _compose_gemini_tts_prompt(text: str, gemini_config: Dict[str, Any], persona_prompt: Optional[str] = None) -> str:
-    """Build the Gemini prompt from persona direction plus the live transcript.
-
-    A ``{transcript}`` / ``{{transcript}}`` placeholder in the persona prompt is
-    substituted in place; otherwise the transcript is appended under a heading.
-    """
+    """Gemini prompt = persona direction + transcript; a ``{transcript}`` / ``{{transcript}}``
+    placeholder is substituted in place, otherwise the transcript is appended under a heading."""
     transcript = text.strip()
     if persona_prompt is None:
         persona_prompt = _read_gemini_persona_prompt(gemini_config)
@@ -703,12 +666,8 @@ def _gemini_error_detail(response: Any) -> str:
 
 
 def _generate_gemini_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
-    """Generate audio via Gemini ``generateContent`` with ``responseModalities=["AUDIO"]``.
-
-    The API returns raw 24kHz mono 16-bit PCM as base64; it is wrapped as WAV and
-    ffmpeg-converted to MP3/Opus when the caller asked for those (no ffmpeg -> the
-    WAV is written under the requested name, same as NeuTTS).
-    """
+    """Generate audio via Gemini ``generateContent`` (``responseModalities=["AUDIO"]``). The reply is
+    base64 24kHz mono 16-bit PCM, wrapped as WAV and ffmpeg-converted to the requested container."""
     origin = _origin()
     api_key = (
         origin._resolve_provider_key("GEMINI_API_KEY", "gemini")

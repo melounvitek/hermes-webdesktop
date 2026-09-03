@@ -52,15 +52,10 @@ def _openai_section(tts_config: Any, key: str) -> Dict[str, Any]:
 
 
 def _resolve_openai_audio_client_config() -> tuple[str, str, bool]:
-    """Return ``(api_key, base_url, is_managed)`` for the OpenAI audio client.
-
-    ``is_managed`` marks the Nous managed audio gateway (a restricted proxy) so callers can
-    coerce the request to what it supports. Strict selection semantics on the stored
-    ``tts`` provider: ``"nous"`` → managed gateway ONLY (unentitled/unreachable is an
-    error); any other stored provider → direct credentials ONLY (``tts.openai.api_key``
-    then ``VOICE_TOOLS_OPENAI_KEY``/``OPENAI_API_KEY``), no silent managed fallback;
-    never-configured tts section → legacy ladder: config key → env key → managed.
-    """
+    """``(api_key, base_url, is_managed)`` for the OpenAI audio client (``is_managed`` = the restricted
+    Nous proxy, so callers coerce the request). Strict on the stored ``tts`` selection: ``"nous"``
+    → managed ONLY (error if unavailable); any other → direct credentials ONLY (``tts.openai.api_key``
+    then ``VOICE_TOOLS_OPENAI_KEY``/``OPENAI_API_KEY``); unset → config key → env key → managed."""
     origin = _origin()
     openai_cfg = _openai_section(origin._load_tts_config(), "openai")
     direct_base = openai_cfg.get("base_url") or DEFAULT_OPENAI_BASE_URL
@@ -115,14 +110,10 @@ def _generate_openai_tts(
     instructions: Optional[str] = None) -> str:
     """Generate audio via the OpenAI ``audio.speech.create`` SDK shape.
 
-    Explicit kwargs let OpenAI-compatible backends (DeepInfra) pass their own
-    credentials/model/voice and skip ``_resolve_openai_audio_client_config`` (the
-    managed-gateway path). When None: ``api_key`` comes from the OpenAI auth chain,
-    ``base_url`` from ``tts.openai.base_url`` then the auth-chain fallback then the OpenAI
-    default, model/voice/speed from ``tts.openai`` (speed falling back to global
-    ``tts.speed``). ``instructions`` is forwarded only when truthy so ``tts-1`` and strict
-    OpenAI-compatible servers that reject unknown kwargs are unaffected.
-    """
+    Explicit kwargs let OpenAI-compatible backends (DeepInfra) supply credentials/model/voice
+    and skip the managed-gateway resolution; otherwise the OpenAI auth chain and ``tts.openai``
+    (speed falling back to ``tts.speed``) apply. ``instructions`` is forwarded only when truthy
+    so ``tts-1`` and strict OpenAI-compatible servers that reject unknown kwargs are unaffected."""
     fallback_base: Optional[str] = None
     is_managed = False
     explicit_base_url = base_url is not None
@@ -181,12 +172,8 @@ def _generate_openai_tts(
 
 
 def _generate_deepinfra_tts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
-    """Resolve DeepInfra credentials/model, then delegate to the OpenAI handler.
-
-    DeepInfra's audio endpoint is OpenAI-compatible. Model ids come live from the shared
-    ``hermes_cli.models`` catalog helpers (no hardcoded ids, so retired models disappear
-    without a patch).
-    """
+    """Resolve DeepInfra credentials/model (live ``hermes_cli.models`` catalog, no hardcoded ids), then
+    delegate to the OpenAI-compatible handler."""
     api_key = _origin()._resolve_provider_key("DEEPINFRA_API_KEY", "deepinfra")
     if not api_key:
         raise ValueError("DEEPINFRA_API_KEY not set. Run `hermes setup` to configure, or set the env var directly.")

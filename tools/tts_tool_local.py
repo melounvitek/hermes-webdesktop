@@ -31,9 +31,7 @@ def _origin():
     return tts_tool
 
 
-# ---------------------------------------------------------------------------
-# Bounded model caches
-# ---------------------------------------------------------------------------
+# --- Bounded model caches ---
 # Each cached entry is a whole loaded model (tens of MB); an unbounded dict would pin one
 # per distinct voice for the process lifetime. Most sessions use one or two voices and a
 # cold reload is cheap.
@@ -48,12 +46,8 @@ _LOCAL_TTS_MODEL_CACHES: Dict[str, Dict[str, Any]] = {"piper": _piper_voice_cach
 
 
 def _tts_cache_get_or_load(cache: Dict[str, Any], key: str, load: Callable[[], Any]) -> Any:
-    """Get ``key`` from ``cache`` or load it, keeping the cache LRU-bounded.
-
-    A hit refreshes recency (pop + reinsert on the insertion-ordered dict); a miss loads
-    then evicts LRU entries beyond ``_TTS_MODEL_CACHE_MAX``. Callers holding an evicted
-    reference keep it alive; only the slot is released.
-    """
+    """Get ``key`` from ``cache`` or load it, LRU-bounded at ``_TTS_MODEL_CACHE_MAX`` (a hit refreshes
+    recency via pop + reinsert; eviction only releases the slot, not live references)."""
     if key in cache:
         cache[key] = cache.pop(key)
         return cache[key]
@@ -74,9 +68,7 @@ def _run_helper(cmd: list, timeout: int) -> subprocess.CompletedProcess:
     )
 
 
-# ---------------------------------------------------------------------------
-# NeuTTS (subprocess via tools/neutts_synth.py so the ~500MB model exits after use)
-# ---------------------------------------------------------------------------
+# --- NeuTTS (subprocess via tools/neutts_synth.py so the ~500MB model exits after use) ---
 
 def _generate_neutts(text: str, output_path: str, tts_config: Dict[str, Any]) -> str:
     neutts_config = tts_config.get("neutts") or {}
@@ -98,9 +90,7 @@ def _generate_neutts(text: str, output_path: str, tts_config: Dict[str, Any]) ->
     return _finalize_wav_output(wav_path, output_path)
 
 
-# ---------------------------------------------------------------------------
-# Piper (local neural VITS, 44 languages)
-# ---------------------------------------------------------------------------
+# --- Piper (local neural VITS, 44 languages) ---
 
 def _get_piper_voices_dir() -> Path:
     """``<HERMES_HOME>/cache/piper-voices/`` so voice downloads follow profile boundaries."""
@@ -111,12 +101,8 @@ def _get_piper_voices_dir() -> Path:
 
 
 def _resolve_piper_voice_path(voice: str, download_dir: Path) -> str:
-    """Resolve *voice* (an .onnx path or a voice name) to a concrete .onnx file.
-
-    Names like ``en_US-lessac-medium`` are downloaded into *download_dir* on first use via
-    ``python -m piper.download_voices``. Raises RuntimeError when the model can't be
-    located or downloaded.
-    """
+    """Resolve *voice* (an .onnx path or a name like ``en_US-lessac-medium``, downloaded into
+    *download_dir* on first use) to a concrete .onnx file; RuntimeError when it can't be."""
     voice = voice or DEFAULT_PIPER_VOICE
     candidate = Path(voice).expanduser()
     if candidate.suffix.lower() == ".onnx" and candidate.exists():
@@ -146,11 +132,8 @@ def _resolve_piper_voice_path(voice: str, download_dir: Path) -> str:
 
 
 def _load_piper_voice_for_config(tts_config: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
-    """Resolve + load (or fetch from cache) the Piper voice ``tts_config`` selects.
-
-    Shared by synthesis and ``warm_tts_provider`` so a warm-up fills exactly the cache
-    slot the next synthesis hits. Returns ``(voice, piper_config)``.
-    """
+    """Resolve + load (or fetch from cache) the selected Piper voice -> ``(voice, piper_config)``.
+    Shared by synthesis and ``warm_tts_provider`` so a warm-up fills exactly the slot synthesis hits."""
     PiperVoice = _origin()._import_piper()
     piper_config = _section(tts_config, "piper")
     voice_name = piper_config.get("voice") or DEFAULT_PIPER_VOICE
@@ -211,9 +194,7 @@ def _generate_piper_tts(text: str, output_path: str, tts_config: Dict[str, Any])
     return _finalize_wav_output(wav_path, output_path)
 
 
-# ---------------------------------------------------------------------------
-# KittenTTS (local ONNX, 25-80MB models, CPU only)
-# ---------------------------------------------------------------------------
+# --- KittenTTS (local ONNX, 25-80MB models, CPU only) ---
 
 def _load_kittentts_model_for_config(tts_config: Dict[str, Any]) -> Tuple[Any, Dict[str, Any]]:
     """Load (or fetch from cache) the KittenTTS model; returns ``(model, kittentts_config)``."""

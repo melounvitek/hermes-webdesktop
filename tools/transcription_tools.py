@@ -673,9 +673,7 @@ def transcribe_audio(
             shutil.rmtree(cleanup_dir, ignore_errors=True)
 
 
-def transcribe_audio_local_fallback(
-    file_path: str, model: Optional[str] = None
-) -> Dict[str, Any]:
+def transcribe_audio_local_fallback(file_path: str, model: Optional[str] = None) -> Dict[str, Any]:
     """Try an already-installed local STT backend without changing config.
 
     Passive inbound-media recovery after the configured provider failed: never
