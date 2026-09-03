@@ -16,9 +16,8 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, List, Optional
 
 from tools.skills_sync_client_wire import (
-    DEFAULT_MAX_OBJECT_BYTES, ObjectSet, SyncClient, SyncConflict, SyncError, _check_version,
-    assemble_root_from_skill_trees, build_commit, build_tree, materialize_tree, read_ref_hash,
-    root_tree_of_commit, skill_trees_of_root)
+    ObjectSet, SyncClient, SyncConflict, SyncError, assemble_root_from_skill_trees, build_commit, build_tree,
+    checked_capabilities, materialize_tree, read_ref_hash, root_tree_of_commit, skill_trees_of_root)
 
 logger = logging.getLogger("tools.skills_sync_client")
 
@@ -54,7 +53,7 @@ def resolve_org_identity() -> Dict[str, Any]:
 
 
 def _org_client(identity: Optional[Dict[str, Any]], client: Optional[SyncClient]):
-    """(identity, client, caps) for an org operation; SyncInertError when the base URL is
+    """(identity, client, max_object_bytes) for an org operation; SyncInertError when the base URL is
     missing or the server lacks the ``org`` feature."""
     ssc = _ssc()
     identity = identity or resolve_org_identity()
@@ -63,11 +62,10 @@ def _org_client(identity: Optional[Dict[str, Any]], client: Optional[SyncClient]
         if not base_url:
             raise ssc.SyncInertError("no sync base URL configured")
         client = SyncClient(base_url, identity["api_key"])
-    caps = client.capabilities()
-    _check_version(caps)
+    caps, max_bytes = checked_capabilities(client)
     if "org" not in (caps.get("features") or []):
         raise ssc.SyncInertError("this server does not support org-shared skills")
-    return identity, client, caps
+    return identity, client, max_bytes
 
 
 def _read_org_head(client: SyncClient, org_id: str) -> Optional[str]:
@@ -196,9 +194,8 @@ def pull_org_skills(client: Optional[SyncClient] = None, *, identity: Optional[D
     identity = identity or resolve_org_identity()
     if "org_id" not in identity:
         raise _ssc().SyncInertError("no organisation context available")
-    identity, client, _caps = _org_client(identity, client)
+    identity, client, _ = _org_client(identity, client)
     org_id = identity["org_id"]
-
     head = _read_org_head(client, org_id)
     # Marker written HERE: only after the token's org_id + org_role were verified, so a stale mirror
     # from a previous org stops resolving on a pull under another org.
@@ -209,8 +206,7 @@ def pull_org_skills(client: Optional[SyncClient] = None, *, identity: Optional[D
     head_commit = client.get_commit_json(head, org_scope=True)
     skill_trees = skill_trees_of_root(client, head_commit["tree"], org_scope=True)
     dest_root = _mirror_root(org_id)
-    updated: List[str] = []
-    conflicted: List[str] = []
+    updated, conflicted = [], []
     baseline = _read_org_baseline(org_id)
     for rel_path, tree_hash in sorted(skill_trees.items()):
         dest = dest_root / PurePosixPath(rel_path)
@@ -249,9 +245,8 @@ def propose_skill(skill_name: str, client: Optional[SyncClient] = None, *,
     proposal_pending: True, proposal_id, ref}`` (never presented as live). If HEAD moves before the
     CAS the skill is re-spliced onto the NEW head (replaying the old root would drop others' skills)."""
     ssc = _ssc()
-    identity, client, caps = _org_client(identity, client)
+    identity, client, max_bytes = _org_client(identity, client)
     org_id = identity["org_id"]
-    max_bytes = int(caps.get("max_object_bytes") or DEFAULT_MAX_OBJECT_BYTES)
 
     rel = ssc._skill_rel_path(skill_name)
     if rel is None:

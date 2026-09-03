@@ -208,6 +208,13 @@ def _body(r) -> Dict[str, Any]:
     return r.json() if r.content else {}
 
 
+def checked_capabilities(client: "SyncClient") -> Tuple[Dict[str, Any], int]:
+    """Version-checked ``(caps, max_object_bytes)`` for a sync session."""
+    caps = client.capabilities()
+    _check_version(caps)
+    return caps, int(caps.get("max_object_bytes") or DEFAULT_MAX_OBJECT_BYTES)
+
+
 class SyncClient:
     """Sync client bound to a base URL + Nous bearer. Org refs/objects live behind SEPARATE ``org/``
     routes: the personal routes are hard-scoped to the token's owner and would silently answer an

@@ -20,9 +20,9 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from tools.skills_sync_client_wire import (  # noqa: F401  (re-exports)
     DEFAULT_MAX_OBJECT_BYTES, KIND_BLOB, KIND_COMMIT, KIND_TREE, MODE_EXEC, MODE_FILE, ObjectSet,
     SyncClient, SyncConflict, SyncError, _check_version, assemble_root_from_skill_trees, build_commit,
-    build_root_tree, build_sync_manifest_bytes, build_tree, canonical_json_bytes, materialize_tree,
-    merge_skill, nest_skill_tree, parse_sync_manifest, read_manifest_of_root, read_ref_hash,
-    root_tree_of_commit, skill_trees_of_root, wire_address)
+    build_root_tree, build_sync_manifest_bytes, build_tree, canonical_json_bytes, checked_capabilities,
+    materialize_tree, merge_skill, nest_skill_tree, parse_sync_manifest, read_manifest_of_root,
+    read_ref_hash, root_tree_of_commit, skill_trees_of_root, wire_address)
 
 logger = logging.getLogger(__name__)
 
@@ -375,9 +375,7 @@ def push_skills(client: Optional[SyncClient] = None, *, skill_names: Optional[Li
     if not skill_names:
         return {"ok": True, "reason": "no skills opted into sync", "noop": True}
 
-    caps = client.capabilities()
-    _check_version(caps)
-    max_bytes = int(caps.get("max_object_bytes") or DEFAULT_MAX_OBJECT_BYTES)
+    _caps, max_bytes = checked_capabilities(client)
     objects, root_hash, _ = snapshot_profile(skill_names, max_object_bytes=max_bytes)
     state = read_sync_state()
     base_head = state.get("head")
@@ -385,9 +383,8 @@ def push_skills(client: Optional[SyncClient] = None, *, skill_names: Optional[Li
     if base_head and state.get("root") == root_hash:
         return {"ok": True, "head": base_head, "reason": "unchanged", "noop": True}
 
-    commit_hash = build_commit(
-        root_hash, [base_head] if base_head else [], owner=owner, device=stable_device_id(),
-        message=message, objects=objects)
+    commit_hash = build_commit(root_hash, [base_head] if base_head else [], owner=owner,
+                               device=stable_device_id(), message=message, objects=objects)
     client.put_objects(objects.objects)
     ref = user_head_ref(owner)
     result = {"ok": True, "head": commit_hash, "pushed_objects": len(objects)}
@@ -395,9 +392,8 @@ def push_skills(client: Optional[SyncClient] = None, *, skill_names: Optional[Li
         client.cas_ref(ref, base_head, commit_hash)
     except SyncConflict as conflict:
         if conflict.actual:
-            return _resolve_push_conflict(
-                client, identity, conflict.actual, root_hash, commit_hash, objects, message, base_head
-            )
+            return _resolve_push_conflict(client, identity, conflict.actual, root_hash, commit_hash,
+                                          objects, message, base_head)
         client.cas_ref(ref, None, commit_hash)
         result["recovered_stale_head"] = True
     _record_head(state, commit_hash, root_hash)
@@ -442,9 +438,8 @@ def _resolve_push_conflict(client: SyncClient, identity: Dict[str, Any], actual_
     merge_objects = ObjectSet()
     merge_objects.objects.update(objects.objects)
     merged_root = assemble_root_from_skill_trees(merged, merge_objects)
-    merge_commit = build_commit(
-        merged_root, [actual_head, our_commit], owner=owner, device=stable_device_id(),
-        message=f"merge: {message}", objects=merge_objects)
+    merge_commit = build_commit(merged_root, [actual_head, our_commit], owner=owner,
+                                device=stable_device_id(), message=f"merge: {message}", objects=merge_objects)
     client.put_objects(merge_objects.objects)
     try:
         client.cas_ref(user_head_ref(owner), actual_head, merge_commit)
@@ -474,7 +469,7 @@ def pull_skills(client: Optional[SyncClient] = None, *, identity: Optional[Dict[
     if client is None:
         return dict(_NO_BASE_URL)
     owner = identity["owner"]
-    _check_version(client.capabilities())
+    checked_capabilities(client)
     head = read_ref_hash(client, user_head_ref(owner))
     if not head:
         return {"ok": True, "reason": "no remote HEAD yet", "noop": True}
@@ -539,10 +534,9 @@ def sync_status() -> Dict[str, Any]:
         pass
     try:
         org_identity = resolve_org_identity()
-        status.update(
-            org_available=True, org_id=org_identity.get("org_id"), org_role=org_identity.get("org_role"),
-            org_skills=list_org_skill_names(),
-            org_skills_modified=list_locally_modified_org_skills(org_identity.get("org_id")))
+        status.update(org_available=True, org_id=org_identity.get("org_id"), org_role=org_identity.get("org_role"),
+                      org_skills=list_org_skill_names(),
+                      org_skills_modified=list_locally_modified_org_skills(org_identity.get("org_id")))
     except SyncInertError:
         pass
     except Exception as e:
