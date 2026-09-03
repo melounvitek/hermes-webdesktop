@@ -265,9 +265,10 @@ def _compress_live_with_feedback(sid: str, session: dict, agent, arg: str, *, sn
         history_version = int(session.get("history_version", 0))
     sys_prompt = getattr(agent, "_cached_system_prompt", "") or ""
     tools = getattr(agent, "tools", None) or None
-    before_tokens = (
-        estimate_request_tokens_rough(before_messages, system_prompt=sys_prompt, tools=tools) if before_messages else 0
-    )
+
+    def estimate(messages, prompt, tool_defs) -> int:
+        return estimate_request_tokens_rough(messages, system_prompt=prompt, tools=tool_defs) if messages else 0
+    before_tokens = estimate(before_messages, sys_prompt, tools)
     try:
         if snapshot_kwargs:
             _compress_session_history(
@@ -280,11 +281,8 @@ def _compress_live_with_feedback(sid: str, session: dict, agent, arg: str, *, sn
     _sync_session_key_after_compress(sid, session)
     with session["history_lock"]:
         after_messages = list(session.get("history", []))
-    after_tokens = (
-        estimate_request_tokens_rough(
-            after_messages, system_prompt=getattr(agent, "_cached_system_prompt", "") or sys_prompt,
-            tools=getattr(agent, "tools", None) or tools)
-        if after_messages else 0)
+    after_tokens = estimate(
+        after_messages, getattr(agent, "_cached_system_prompt", "") or sys_prompt, getattr(agent, "tools", None) or tools)
     _emit("session.info", sid, _session_info(agent, session))
     fb = summarize_manual_compression(
         before_messages, after_messages, before_tokens, after_tokens,

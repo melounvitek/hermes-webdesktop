@@ -85,15 +85,13 @@ def _fuzzy_basename_rank(name: str, query: str) -> tuple[int, int] | None:
     · 3 substring · 4 subsequence (query chars appear in order)."""
     if not query:
         return (3, len(name))
-    nl = name.lower()
-    ql = query.lower()
+    nl, ql = name.lower(), query.lower()
     if nl == ql:
         return (0, len(name))
     if nl.startswith(ql):
         return (1, len(name))
-
-    # Split on -_. and camelCase (`appChrome` → ["app","Chrome"]); cheap approximation,
-    # falls through to substring/subsequence if it misses.
+    # Word boundaries: split on -_. and camelCase (`appChrome` → ["app","Chrome"]); cheap
+    # approximation, falls through to substring/subsequence if it misses.
     parts: list[str] = []
     buf = ""
     for ch in name:
@@ -105,17 +103,13 @@ def _fuzzy_basename_rank(name: str, query: str) -> tuple[int, int] | None:
             buf += ch
     if buf:
         parts.append(buf)
-    for p in parts:
-        if p.lower().startswith(ql):
-            return (2, len(name))
+    if any(p.lower().startswith(ql) for p in parts):
+        return (2, len(name))
     if ql in nl:
         return (3, len(name))
-    i = 0
-    for ch in nl:
-        if ch == ql[i]:
-            i += 1
-            if i == len(ql):
-                return (4, len(name))
+    it = iter(nl)
+    if all(any(c == q for c in it) for q in ql):
+        return (4, len(name))
     return None
 
 
