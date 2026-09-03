@@ -337,10 +337,9 @@ def _load_interim_assistant_messages() -> bool:
 def _shutdown_sessions() -> None:
     # Durable-first: flush every un-flushed transcript (bounded budget) BEFORE the slow
     # per-session teardown, so a supervisor SIGKILL mid-shutdown can no longer lose them.
-    with contextlib.suppress(Exception):
-        _flush_sessions_before_exit()
-    with contextlib.suppress(Exception):
-        _release_gateway_wake_owner()
+    for step in (_flush_sessions_before_exit, _release_gateway_wake_owner):
+        with contextlib.suppress(Exception):
+            step()
     with _sessions_lock:
         sids = list(_sessions)
     for sid in sids:
@@ -809,8 +808,7 @@ def _wait_agent(session: dict, rid: str, timeout: float = 30.0) -> dict | None:
     ready = session.get("agent_ready")
     if ready is not None and not ready.wait(timeout=timeout):
         return _err(rid, 5032, "agent initialization timed out")
-    err = session.get("agent_error")
-    return _err(rid, 5032, err) if err else None
+    return _err(rid, 5032, err) if (err := session.get("agent_error")) else None
 
 
 # The deferred prompt path waits in short slices so a cancel is honored promptly and a slow
@@ -871,8 +869,7 @@ def _wait_agent_for_prompt(session: dict, rid: str, sid: str) -> dict | None:
             })
     if notified_slow:
         _emit("notification.clear", sid, {"key": _AGENT_BUILD_SLOW_NOTICE_KEY})
-    err = session.get("agent_error")
-    return _err(rid, 5032, err) if err else None
+    return _err(rid, 5032, err) if (err := session.get("agent_error")) else None
 
 
 def _bind_build_profile_scopes(profile_home: str) -> "_TurnScopes":
@@ -1047,9 +1044,7 @@ def _start_agent_build(sid: str, session: dict) -> None:
         if current is None:
             ready.set()
             return
-        notify_registered = False
-        scopes = None
-        session_db = None
+        notify_registered, scopes, session_db = False, None, None
         profile_home = current.get("profile_home")
         try:
             if not _await_resume_history(sid, current):
@@ -1111,11 +1106,10 @@ def _sess(params, rid):
 
 
 def _sess_building(params, rid):
-    """Resolve a session and warm its agent build WITHOUT waiting for it.
-    For the attach RPCs (image/file/pdf attach, clipboard.paste, image.detach), which only touch
-    record fields populated at creation. They run inline on the socket reader thread, so waiting on
-    a cold build there stalled the paste AND every RPC behind it ("text is instant, images hang").
-    """
+    """Resolve a session and warm its agent build WITHOUT waiting for it — for the attach RPCs
+    (image/file/pdf attach, clipboard.paste, image.detach), which only touch record fields populated
+    at creation and run inline on the socket reader thread, where waiting on a cold build stalled the
+    paste AND every RPC behind it ("text is instant, images hang")."""
     s, err = _sess_nowait(params, rid)
     if err:
         return (None, err)
@@ -1143,17 +1137,14 @@ def _load_dashboard_process_isolation_config(cfg: dict | None = None) -> dict[st
     """Dashboard process-isolation config with read-site defaults: ``_load_cfg()`` does not
     deep-merge DEFAULT_CONFIG, so the Phase-0 defaults live here to stay in step with the REST editor."""
     root = _load_cfg() if cfg is None else cfg
-    dashboard = root.get("dashboard") if isinstance(root, dict) else {}
-    if not isinstance(dashboard, dict):
-        dashboard = {}
+    dash = root.get("dashboard") if isinstance(root, dict) else {}
+    dash = dash if isinstance(dash, dict) else {}
     return {
-        "turn_isolation": is_truthy_value(dashboard.get("turn_isolation"), default=_DASHBOARD_TURN_ISOLATION_DEFAULT),
+        "turn_isolation": is_truthy_value(dash.get("turn_isolation"), default=_DASHBOARD_TURN_ISOLATION_DEFAULT),
         "compute_host_heartbeat_secs": _coerce_int_config_value(
-            dashboard.get("compute_host_heartbeat_secs"), _DASHBOARD_COMPUTE_HOST_HEARTBEAT_SECS_DEFAULT, min_value=1,
-        ),
+            dash.get("compute_host_heartbeat_secs"), _DASHBOARD_COMPUTE_HOST_HEARTBEAT_SECS_DEFAULT, min_value=1),
         "compute_host_respawn_max": _coerce_int_config_value(
-            dashboard.get("compute_host_respawn_max"), _DASHBOARD_COMPUTE_HOST_RESPAWN_MAX_DEFAULT, min_value=0,
-        ),
+            dash.get("compute_host_respawn_max"), _DASHBOARD_COMPUTE_HOST_RESPAWN_MAX_DEFAULT, min_value=0),
     }
 
 
@@ -1182,9 +1173,7 @@ def _load_cfg_raw() -> dict:
         else:
             data = {}
         with _cfg_lock:  # cache the RAW config: _save_cfg writes _cfg_cache back to disk
-            _cfg_cache = copy.deepcopy(data)
-            _cfg_mtime = mtime
-            _cfg_path = p
+            _cfg_cache, _cfg_mtime, _cfg_path = copy.deepcopy(data), mtime, p
         return data
     except Exception:
         return {}
@@ -1276,18 +1265,15 @@ def _set_session_context(session_key: str, cwd: str | None = None, *, ui_session
 
 
 def _clear_session_context(tokens: list) -> None:
-    if not tokens:
-        return
-    with contextlib.suppress(Exception):
-        from gateway.session_context import clear_session_vars
-        clear_session_vars(tokens)
+    if tokens:
+        with contextlib.suppress(Exception):
+            from gateway.session_context import clear_session_vars
+            clear_session_vars(tokens)
 
 
 def _enable_gateway_prompts() -> None:
     """Route approvals through gateway callbacks instead of CLI input()."""
-    os.environ["HERMES_GATEWAY_SESSION"] = "1"
-    os.environ["HERMES_EXEC_ASK"] = "1"
-    os.environ["HERMES_INTERACTIVE"] = "1"
+    os.environ.update(HERMES_GATEWAY_SESSION="1", HERMES_EXEC_ASK="1", HERMES_INTERACTIVE="1")
 
 
 # ── Blocking prompt factory ──────────────────────────────────────────
@@ -1370,11 +1356,9 @@ def _clarify_block(sid: str, q, c, multi_select=False, questions=None) -> str:
     if questions:
         wire = [
             {"qid": e["qid"], "question": e["question"], "choices": e["choices"], "multi_select": bool(e["multi_select"])}
-            for e in questions
-        ]
-        return _block(
-            "clarify.request", sid, {"questions": wire}, timeout=_clarify_timeout_seconds(),
-            batch_qids=[entry["qid"] for entry in questions])
+            for e in questions]
+        return _block("clarify.request", sid, {"questions": wire}, timeout=_clarify_timeout_seconds(),
+                      batch_qids=[e["qid"] for e in questions])
     payload = {"question": q, "choices": c, "multi_select": True} if multi_select else {"question": q, "choices": c}
     return _block("clarify.request", sid, payload, timeout=_clarify_timeout_seconds())
 
@@ -1489,8 +1473,7 @@ def _resolve_startup_runtime() -> tuple[str, str | None]:
     model = _resolve_model()
     if explicit_provider := os.environ.get("HERMES_TUI_PROVIDER", "").strip():
         return model, explicit_provider
-    explicit_model = _env_model_seed()
-    if not explicit_model:
+    if not (explicit_model := _env_model_seed()):
         return model, None
     with contextlib.suppress(Exception):
         from hermes_cli.models import detect_static_provider_for_model
@@ -1564,18 +1547,17 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
         or _row_title == "Bot Chat"):
         return {}
     overrides: dict = {}
+    field = lambda k: str(model_config.get(k) or "").strip()
     model = str(row.get("model") or model_config.get("model") or "").strip()
     # ``billing_provider`` is only the billing bucket — for a custom endpoint the bare class
     # "custom", which agent_init treats as non-routable ("No LLM provider configured" on resume).
     # Only restore an explicit provider; otherwise resume falls back to the configured default.
-    provider = str(model_config.get("provider") or "").strip()
+    provider = field("provider")
     billing_provider = str(model_config.get("billing_provider") or row.get("billing_provider") or "").strip()
     if not provider and billing_provider.lower() not in _BARE_BILLING_PROVIDERS:
         provider = billing_provider
-    base_url = str(model_config.get("base_url") or "").strip()
-    api_mode = str(model_config.get("api_mode") or "").strip()
+    base_url, api_mode, service_tier = field("base_url"), field("api_mode"), field("service_tier")
     reasoning_config = model_config.get("reasoning_config")
-    service_tier = str(model_config.get("service_tier") or "").strip()
     # Heal a stale provider name persisted by an older build (renamed/removed custom provider →
     # "Unknown provider"): recover the durable ``custom:<name>`` key from the stored base_url, then
     # from the entry serving the stored model; when nothing names a real entry, drop the provider.
@@ -1617,9 +1599,8 @@ def _runtime_model_config(agent, existing: dict | None = None) -> dict:
     resume reads provider/endpoint from this JSON — a stale provider would silently route the
     resumed chat to the wrong endpoint while the model column claimed the new one."""
     config = dict(existing or {})
-    model = str(getattr(agent, "model", "") or "").strip()
-    provider = str(getattr(agent, "provider", "") or "").strip()
-    base_url = str(getattr(agent, "base_url", "") or "").strip()
+    attr = lambda k: str(getattr(agent, k, "") or "").strip()
+    model, provider, base_url = attr("model"), attr("provider"), attr("base_url")
     if provider.lower() == "custom":
         # ``agent.provider`` resolves every named custom entry to the literal "custom", losing the
         # entry identity (api_key is never persisted, so resume couldn't re-resolve credentials).
@@ -1631,8 +1612,7 @@ def _runtime_model_config(agent, existing: dict | None = None) -> dict:
             logger.debug("custom provider identity lookup failed", exc_info=True)
     reasoning_config = getattr(agent, "reasoning_config", None)
     live = {
-        "model": model, "provider": provider, "base_url": base_url,
-        "api_mode": str(getattr(agent, "api_mode", "") or "").strip(),
+        "model": model, "provider": provider, "base_url": base_url, "api_mode": attr("api_mode"),
         # An empty dict is still a real (present) reasoning config.
         "reasoning_config": reasoning_config if isinstance(reasoning_config, dict) else None,
         "service_tier": getattr(agent, "service_tier", None),
@@ -1647,23 +1627,17 @@ def _runtime_model_config(agent, existing: dict | None = None) -> dict:
 
 def _persist_live_session_runtime(session: dict | None) -> None:
     """Persist active session runtime so future resumes restore the same footer."""
-    if not session:
+    live = _live_session_agent_db(session)
+    if live is None:
         return
-    agent = session.get("agent")
-    session_key = str(session.get("session_key") or "").strip()
-    if agent is None or not session_key:
-        return
-    db = getattr(agent, "_session_db", None) or _get_db()
-    if db is None:
-        return
+    agent, session_key, db = live
     try:
         row = db.get_session(session_key) or {}
         model_config = _runtime_model_config(agent, _parse_model_config(row.get("model_config")))
-        create_service_tier_override = session.get("create_service_tier_override")
-        if create_service_tier_override is not None:
+        if (tier_override := session.get("create_service_tier_override")) is not None:
             # _runtime_model_config sees agent.service_tier=None for explicit normal and would
             # otherwise erase the distinction on every live metadata persist.
-            model_config["service_tier"] = create_service_tier_override or "normal"
+            model_config["service_tier"] = tier_override or "normal"
         model = str(getattr(agent, "model", "") or "").strip()
         if hasattr(db, "update_session_meta"):
             db.update_session_meta(session_key, json.dumps(model_config), model or None)
@@ -1673,16 +1647,25 @@ def _persist_live_session_runtime(session: dict | None) -> None:
         logger.debug("failed to persist live session runtime", exc_info=True)
 
 
-def _persist_live_session_system_prompt(session: dict | None) -> None:
-    """Refresh the stored system prompt after a live runtime identity change."""
+def _live_session_agent_db(session: dict | None):
+    """(agent, session_key, db) for a live record, or None when any of them is missing."""
     if not session:
-        return
+        return None
     agent = session.get("agent")
     session_key = str(session.get("session_key") or "").strip()
-    if agent is None or not session_key or not hasattr(agent, "_build_system_prompt"):
-        return
+    if agent is None or not session_key:
+        return None
     db = getattr(agent, "_session_db", None) or _get_db()
-    if db is None or not hasattr(db, "update_system_prompt"):
+    return None if db is None else (agent, session_key, db)
+
+
+def _persist_live_session_system_prompt(session: dict | None) -> None:
+    """Refresh the stored system prompt after a live runtime identity change."""
+    live = _live_session_agent_db(session)
+    if live is None:
+        return
+    agent, session_key, db = live
+    if not hasattr(agent, "_build_system_prompt") or not hasattr(db, "update_system_prompt"):
         return
 
     # Re-bind HERMES_HOME to the session's profile (the build's finally reset it; the rebuilt
@@ -1692,13 +1675,10 @@ def _persist_live_session_system_prompt(session: dict | None) -> None:
     home_token = set_hermes_home_override(profile_home) if profile_home else None
     session_tokens = _set_session_context(session_key, cwd=_session_cwd(session))
     try:
-        prompt = agent._build_system_prompt(None)
-        agent._cached_system_prompt = prompt
+        prompt = agent._cached_system_prompt = agent._build_system_prompt(None)
         db.update_system_prompt(getattr(agent, "session_id", None) or session_key, prompt)
     except Exception:
-        logger.warning(
-            "failed to persist live session system prompt for session %s", session_key,
-            exc_info=True)
+        logger.warning("failed to persist live session system prompt for session %s", session_key, exc_info=True)
     finally:
         _clear_session_context(session_tokens)
         if home_token is not None:
@@ -2005,9 +1985,8 @@ def _restart_slash_worker(sid: str, session: dict):
     with contextlib.suppress(Exception):
         worker.close()
     try:
-        new_worker = _SlashWorker(
-            session["session_key"], getattr(session.get("agent"), "model", _resolve_model()),
-            profile_home=session.get("profile_home"))
+        new_worker = _SlashWorker(session["session_key"], getattr(session.get("agent"), "model", _resolve_model()),
+                                  profile_home=session.get("profile_home"))
     except Exception:
         session["slash_worker"] = None
         return
@@ -2035,9 +2014,9 @@ def _get_usage(agent) -> dict:
         last_prompt = max(0, getattr(comp, "last_prompt_tokens", 0) or 0)
         ctx_max = getattr(comp, "context_length", 0) or 0
         if ctx_max and last_prompt:
-            usage["context_used"] = last_prompt
-            usage["context_max"] = ctx_max
-            usage["context_percent"] = max(0, min(100, round(last_prompt / ctx_max * 100)))
+            usage.update(
+                context_used=last_prompt, context_max=ctx_max,
+                context_percent=max(0, min(100, round(last_prompt / ctx_max * 100))))
         usage["compressions"] = getattr(comp, "compression_count", 0) or 0
     # Cache-hit ratio + rolling latency/tps (CLI status-bar parity): hit = cache_read / prompt_tokens;
     # latency/tps read the per-call deque history. Omitted, not fabricated, when there is no data
@@ -2050,12 +2029,10 @@ def _get_usage(agent) -> dict:
     with contextlib.suppress(Exception):  # a status-bar readout must never break usage reporting
         _lhist = list(getattr(agent, "_api_latency_history", []) or [])
         _ohist = list(getattr(agent, "_api_output_history", []) or [])
-        _n = min(len(_lhist), len(_ohist))
-        if _n:
-            _lhist = _lhist[-_n:]
-            _ohist = _ohist[-_n:]
-            _avg_lat = sum(_lhist) / _n
+        if _n := min(len(_lhist), len(_ohist)):
+            _lhist, _ohist = _lhist[-_n:], _ohist[-_n:]
             _total_lat = sum(_lhist)
+            _avg_lat = _total_lat / _n
             _avg_vel = (sum(_ohist) / _total_lat) if _total_lat > 0 else None
             # Guard NaN/negative/absurd values from odd provider timings.
             if _avg_lat == _avg_lat and 0 < _avg_lat < 1e6:
@@ -2240,15 +2217,13 @@ def _session_info(agent, session: dict | None = None) -> dict:
         with contextlib.suppress(Exception):
             from hermes_cli.banner import get_available_skills
             info["skills"] = get_available_skills()
-    try:
+    info["mcp_servers"] = []
+    with contextlib.suppress(Exception):
         from tools.mcp_tool import get_mcp_status
         info["mcp_servers"] = get_mcp_status()
-    except Exception:
-        info["mcp_servers"] = []
     with contextlib.suppress(Exception):
         info["system_prompt"] = (
-            mirror.get("system_prompt") if "system_prompt" in mirror else getattr(agent, "_cached_system_prompt", "") or ""
-        )
+            mirror.get("system_prompt") if "system_prompt" in mirror else getattr(agent, "_cached_system_prompt", "") or "")
     with contextlib.suppress(Exception):
         from hermes_cli.banner import get_update_result
         from hermes_cli.config import recommended_update_command
@@ -2499,9 +2474,10 @@ def _make_agent(
 def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | None) -> None:
     """Adopt the stored row's cwd, or persist the fresh session's cwd (+ schedule git meta) when the row has none."""
     owns_db = False
-    if session_db is not None:
-        db = session_db
-    elif profile_home:
+    db = session_db
+    if db is None and not profile_home:
+        db = _get_db()
+    elif db is None:
         try:
             db = _open_profile_session_db(profile_home)
             owns_db = True
@@ -2513,9 +2489,6 @@ def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | Non
                 "profile session store unavailable for %s — skipping cwd "
                 "hydration instead of touching the launch state.db",
                 profile_home, exc_info=True)
-            db = None
-    else:
-        db = _get_db()
     try:
         if db is not None:
             row = db.get_session(key) if hasattr(db, "get_session") else None
@@ -2525,9 +2498,8 @@ def _hydrate_session_cwd(sid: str, key: str, session_db, profile_home: str | Non
                         _sessions[sid]["cwd"] = row["cwd"]
             else:
                 try:
-                    _cwd = _sessions[sid]["cwd"]
                     if hasattr(db, "update_session_cwd"):
-                        _persist_session_cwd_and_schedule_git_meta(_sessions[sid], _cwd, db=db)
+                        _persist_session_cwd_and_schedule_git_meta(_sessions[sid], _sessions[sid]["cwd"], db=db)
                 except Exception:
                     logger.debug("failed to persist resumed session cwd", exc_info=True)
     finally:
@@ -2594,8 +2566,7 @@ def _lazy_resume_info(cwd: str, *, model: str = "", provider: str = "", profile:
     info = {
         "cwd": cwd, "branch": _git_branch_for_cwd(cwd), "project": _project_info_for_cwd(cwd),
         "model": model or _resolve_model(), "tools": {}, "skills": {}, "lazy": True,
-        "desktop_contract": DESKTOP_BACKEND_CONTRACT,
-        "profile_name": _response_profile_name(profile),
+        "desktop_contract": DESKTOP_BACKEND_CONTRACT, "profile_name": _response_profile_name(profile),
     }
     if provider:
         info["provider"] = provider
@@ -2682,8 +2653,7 @@ def _claim_parked_runtimes(session_key: str, *, keep_sid: str, profile_home=_ANY
         ]
     for old_sid, _old in candidates:
         _cancel_ws_orphan_reap(old_sid)
-        popped = _pop_session_by_id(old_sid)
-        if popped is not None:
+        if (popped := _pop_session_by_id(old_sid)) is not None:
             stale.append((old_sid, popped))
     return stale
 
@@ -2704,8 +2674,7 @@ def _schedule_agent_build(sid: str, delay: float = 0.05) -> None:
     """Pre-warm a deferred session's agent off the response path (session.create + cold resume; _sess() also builds on demand)."""
 
     def _run():
-        session = _sessions.get(sid)
-        if session is not None:
+        if (session := _sessions.get(sid)) is not None:
             _start_agent_build(sid, session)
     timer = threading.Timer(delay, _run)
     timer.daemon = True
@@ -2779,8 +2748,7 @@ def _schedule_resume_hydration(sid: str, stored_id: str, db, *, close_db: bool =
             _emit("error", sid, {"message": message})
             with _sessions_lock:
                 discarded = _sessions.pop(sid, None) if _sessions.get(sid) is session else None
-            lease = (discarded or {}).get("active_session_lease")
-            if lease is not None:
+            if (lease := (discarded or {}).get("active_session_lease")) is not None:
                 lease.release()
         finally:
             if close_db and hasattr(db, "close"):
@@ -2811,18 +2779,16 @@ def _session_live_status(sid: str, session: dict) -> str:
 
 def _message_preview(history: list) -> str:
     for msg in reversed(history or []):
-        text = _content_display_text(msg.get("content", msg.get("text", ""))).strip()
-        if text:
+        if text := _content_display_text(msg.get("content", msg.get("text", ""))).strip():
             return " ".join(text.split())[:160]
     return ""
 
 
 def _session_live_title(session: dict, key: str) -> str:
     title = str(session.get("pending_title") or "").strip()
-    with contextlib.suppress(Exception):
-        with _session_db(session) as db:
-            if db is not None:
-                title = str(db.get_session_title(key) or title or "").strip()
+    with contextlib.suppress(Exception), _session_db(session) as db:
+        if db is not None:
+            title = str(db.get_session_title(key) or title or "").strip()
     return title
 
 
@@ -2850,8 +2816,7 @@ def _session_live_item(sid: str, session: dict, current_sid: str = "") -> dict:
 
 
 def _session_lookup_key(session: dict, *, fallback: str = "") -> str:
-    agent = session.get("agent")
-    return str(getattr(agent, "session_id", None) or session.get("session_key") or fallback or "")
+    return str(getattr(session.get("agent"), "session_id", None) or session.get("session_key") or fallback or "")
 
 
 def _find_live_session_by_key(session_key: str, profile_home=_ANY_PROFILE) -> tuple[str, dict] | None:
@@ -3082,8 +3047,7 @@ def _pet_sprite_payload(pet, *, scale: float) -> dict:
         if cached is not None:
             return _clone_pet_payload(cached)
     raw = pet.spritesheet.read_bytes()
-    suffix = pet.spritesheet.suffix.lower()
-    mime = "image/png" if suffix == ".png" else "image/webp"
+    mime = "image/png" if pet.spritesheet.suffix.lower() == ".png" else "image/webp"
     payload = {
         "slug": pet.slug, "displayName": pet.display_name, "mime": mime,
         "spritesheetBase64": base64.standard_b64encode(raw).decode("ascii"),
@@ -3179,8 +3143,7 @@ def _pet_reference_images_from_data_url(ref_raw: str, stage) -> list:
     if ext is None:
         raise ValueError("unsupported reference image type")
     payload = "".join(match.group(2).split())
-    approx = (len(payload) * 3) // 4
-    if approx > _PET_REFERENCE_MAX_BYTES:
+    if (len(payload) * 3) // 4 > _PET_REFERENCE_MAX_BYTES:
         raise ValueError("reference image too large")
     try:
         raw = base64.b64decode(payload, validate=True)
@@ -3309,9 +3272,7 @@ def _respond(rid, params, key, *, allow_expired=False):
     with _prompt_lock:
         entry = _pending.get(r)
         if not entry:
-            if allow_expired and r:
-                return _ok(rid, {"status": "expired"})
-            return _err(rid, 4009, f"no pending {key} request")
+            return _ok(rid, {"status": "expired"}) if allow_expired and r else _err(rid, 4009, f"no pending {key} request")
         _, ev = entry
         batch = _batch_clarify.get(r)
         if batch is not None and question_id:
@@ -3380,8 +3341,8 @@ def _finish_reload(rid, params: dict, *, coalesced: bool) -> dict:
     """Shared tail for both reload paths: honor ``always`` (persist the confirm opt-out) and return the ok payload."""
     if bool(params.get("always", False)):
         try:
-            from cli import save_config_value as _save_cfg
-            _save_cfg("approvals.mcp_reload_confirm", False)
+            from cli import save_config_value
+            save_config_value("approvals.mcp_reload_confirm", False)
         except Exception as _exc:
             logger.warning("Failed to persist mcp_reload_confirm=false: %s", _exc)
     payload = {"status": "reloaded", "loaded_rev": _mcp_reload_loaded_rev}
