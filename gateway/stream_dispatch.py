@@ -1,14 +1,9 @@
-"""Adapter-driven dispatch of structured stream events to a delivery sink.
+"""Adapter-driven dispatch of structured stream events (gateway/stream_events.py).
 
-``GatewayEventDispatcher`` holds an adapter, the stream consumer (sink) and the
-resolved per-channel presentation settings, and routes each typed event
-(gateway/stream_events.py) through the adapter's render hooks. Message events
-flow into the consumer; tool events are formatted by the adapter — which may
-return None to *eat* them on platforms without tool chrome — and enqueued onto
-the same tool-progress queue the gateway drains, so the two paths never race.
-
-No platform knowledge and no asyncio: a thin synchronous router callable from
-the agent's worker thread, exactly like the callbacks it replaced.
+Message events flow into the consumer; tool events are formatted by the adapter (None
+= eat it on platforms without tool chrome) and enqueued onto the same tool-progress
+queue the gateway drains, so the two paths never race.  Synchronous: callable from
+the agent's worker thread.
 """
 
 from __future__ import annotations
@@ -26,16 +21,11 @@ logger = logging.getLogger("gateway.stream_events")
 class GatewayEventDispatcher:
     """Route typed stream events through an adapter onto a delivery sink.
 
-    adapter: provides ``render_message_event`` / ``format_tool_event``
-        (BasePlatformAdapter defaults reproduce legacy behavior).
-    sink: the GatewayStreamConsumer; None when streaming is disabled (message
-        events are dropped — the final response still goes out normally).
-    enqueue_tool_line: puts a rendered tool-progress line on the gateway's
-        progress queue; None when tool progress is disabled for the channel.
-    tool_mode: "all" / "new" / "verbose" / "off".
-    preview_max_len: resolved ``tool_preview_length`` (0 = no cap in verbose).
-    on_long_tool / on_notice: optional hooks so the gateway owns the
-        "should I surface this here?" decision.
+    sink: the GatewayStreamConsumer, or None when streaming is disabled (message
+    events dropped; the final still goes out normally).  enqueue_tool_line: None
+    when tool progress is disabled.  tool_mode: "all"/"new"/"verbose"/"off";
+    preview_max_len: ``tool_preview_length`` (0 = no cap in verbose).
+    on_long_tool / on_notice: the gateway owns the "surface this here?" decision.
     """
 
     def __init__(
@@ -66,6 +56,8 @@ class GatewayEventDispatcher:
             logger.debug("stream-event dispatch error", exc_info=True)
 
     def _dispatch(self, event: StreamEvent) -> None:
+        # ToolCallFinished: no chrome on completion (only "started" is rendered);
+        # completion only drives onboarding hints (LongToolHint).
         if isinstance(event, (MessageChunk, MessageStop, Commentary)):
             if self.sink is not None:
                 self.adapter.render_message_event(event, self.sink)
@@ -75,8 +67,6 @@ class GatewayEventDispatcher:
             self._on_long_tool(event)
         elif isinstance(event, GatewayNotice) and self._on_notice is not None:
             self._on_notice(event)
-        # ToolCallFinished: no chrome on completion (only "started" is rendered);
-        # completion only drives onboarding hints (LongToolHint).
 
     def _dispatch_tool_call(self, event: ToolCallChunk) -> None:
         if self.tool_mode == "off" or self._enqueue_tool_line is None:
