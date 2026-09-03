@@ -387,7 +387,6 @@ class ProcessRegistry:
         self.on_close = None
 
     @staticmethod
-
     def _clean_shell_noise(text: str) -> str:
         """Strip shell startup warnings from the beginning of output."""
         lines = text.split("\n")
@@ -495,7 +494,6 @@ class ProcessRegistry:
         })
 
     @staticmethod
-
     def _watch_event_base(session: ProcessSession) -> dict:
         """Session identity + watcher routing fields shared by every watch event."""
         return {
@@ -508,7 +506,6 @@ class ProcessRegistry:
         }
 
     @staticmethod
-
     def _global_watch_event(type_: str, message: str, **extra) -> dict:
         """Unaddressed (all-sessions) watch breaker event."""
         return {
@@ -566,7 +563,6 @@ class ProcessRegistry:
         return admit
 
     @staticmethod
-
     def _is_host_pid_alive(pid: Optional[int]) -> bool:
         """Best-effort liveness check for host-visible PIDs."""
         if not pid:
@@ -577,7 +573,6 @@ class ProcessRegistry:
         return _pid_exists(pid)
 
     @staticmethod
-
     def _safe_host_start_time(pid: Optional[int]) -> Optional[int]:
         """Kernel start ticks for a host PID, or None when unavailable."""
         if not pid:
@@ -589,7 +584,6 @@ class ProcessRegistry:
             return None
 
     @classmethod
-
     def _host_pid_is_ours(cls, pid: Optional[int], expected_start: Optional[int]) -> bool:
         """True only if ``pid`` is alive AND still the process we spawned.
 
@@ -620,7 +614,6 @@ class ProcessRegistry:
         return session
 
     @staticmethod
-
     def _proc_alive(proc) -> bool:
         """True if a psutil.Process is running and not a zombie (already dead, just unreaped)."""
         try:
@@ -632,7 +625,6 @@ class ProcessRegistry:
             return False
 
     @staticmethod
-
     def _config_value(section: str, key: str, fallback):
         """``config.yaml`` value for ``section.key``, else the DEFAULT_CONFIG value.
 
@@ -645,7 +637,6 @@ class ProcessRegistry:
         return DEFAULT_CONFIG[section][key] if val is None else val
 
     @staticmethod
-
     def _daemon_term_grace_seconds() -> float:
         """Grace (s) between SIGTERM and escalated SIGKILL, floored at 0 (0 disables
         escalation): ``terminal.daemon_term_grace_seconds``; 2.0 if config is unreadable."""
@@ -655,7 +646,6 @@ class ProcessRegistry:
             return 2.0
 
     @classmethod
-
     def _terminate_host_pid(cls, pid: int, expected_start: Optional[int] = None) -> None:
         """Terminate a host-visible PID and its descendants.
 
@@ -724,7 +714,6 @@ class ProcessRegistry:
     # ----- Spawn -----
 
     @staticmethod
-
     def _new_session(command, task_id, owner_task_id, session_key, cwd, **extra) -> ProcessSession:
         return ProcessSession(
             id=f"proc_{uuid.uuid4().hex[:12]}", command=command, task_id=task_id,
@@ -732,7 +721,6 @@ class ProcessRegistry:
             started_at=time.time(), **extra)
 
     @staticmethod
-
     def _env_temp_dir(env: Any) -> str:
         """Return the writable sandbox temp dir for env-backed background tasks."""
         get_temp_dir = getattr(env, "get_temp_dir", None)
@@ -764,7 +752,6 @@ class ProcessRegistry:
         return argv
 
     @staticmethod
-
     def _spawn_env(env_vars: dict) -> dict:
         """Sanitized child env; PYTHONUNBUFFERED so tqdm/datasets-style buffering
         doesn't hide progress from process(action="poll")."""
@@ -1193,7 +1180,6 @@ class ProcessRegistry:
         return result
 
     @staticmethod
-
     def _oneshot_completion_wait_seconds() -> float:
         """Linger (s) for one-shot exits with pending notify_on_complete processes:
         ``terminal.oneshot_completion_wait_seconds`` (0 disables), 600 if unreadable."""
@@ -1209,7 +1195,6 @@ class ProcessRegistry:
         return session_id in self._completion_consumed or (skip_poll_observed and session_id in self._poll_observed)
 
     @staticmethod
-
     def _surface_child_process_notifications() -> bool:
         """``delegation.surface_child_process_notifications``; False on any config
         error — never crash the drain loop."""
@@ -1219,7 +1204,6 @@ class ProcessRegistry:
             return False
 
     @staticmethod
-
     def _owns_event(evt: dict, session_key: str, owns_event, is_async_delegation: bool) -> bool:
         """Routing verdict for one drained event (see drain_notifications); False = requeue."""
         evt_session_key = str(evt.get("session_key") or "")
@@ -1372,7 +1356,6 @@ class ProcessRegistry:
         self._move_to_finished(session)
 
     @staticmethod
-
     def _status_head(session: ProcessSession) -> dict:
         return {
             "session_id": session.id,
@@ -1508,7 +1491,6 @@ class ProcessRegistry:
         return result
 
     @staticmethod
-
     def _exit_snapshot(session: ProcessSession, status: str) -> dict:
         """Result dict for an exited session: exit metadata + last 2000 chars of output."""
         return {
