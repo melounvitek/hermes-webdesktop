@@ -105,22 +105,23 @@ class StreamDeliveryMixin:
         for item in items:
             if not isinstance(item, dict) or item.get("type") != "message":
                 continue
-            phase = item.get("phase")
-            if not isinstance(phase, str) or phase.strip().lower() != "commentary":
-                continue
-            content_parts = item.get("content")
-            if not isinstance(content_parts, list):
+            phase, content_parts = item.get("phase"), item.get("content")
+            if not isinstance(phase, str) or phase.strip().lower() != "commentary" or not isinstance(content_parts, list):
                 continue
             visible = "".join(
                 part["text"] for part in content_parts
                 if isinstance(part, dict) and part.get("type") == "output_text"
                 and isinstance(part.get("text"), str) and part["text"].strip()
             ).strip()
-            if visible:
-                visible = redact_sensitive_text(self._strip_think_blocks(visible).strip())
+            visible = self._visible_commentary(visible)
             if visible:
                 messages.append(visible)
         return messages
+
+    def _visible_commentary(self, text: str) -> str:
+        """Think-stripped, redacted commentary text ("" when nothing visible remains)."""
+        visible = self._strip_think_blocks(text).strip()
+        return redact_sensitive_text(visible) if visible else visible
 
     def _extract_codex_interim_visible_text(self, assistant_msg: Dict[str, Any]) -> str:
         """All visible Codex commentary joined, for comparison/fallback."""
@@ -142,11 +143,9 @@ class StreamDeliveryMixin:
     def _record_delivered_interim_text(self, text: str) -> None:
         normalized = self._normalize_interim_visible_text(text)
         if normalized:
-            delivered = getattr(self, "_delivered_interim_texts", None)
-            if not isinstance(delivered, set):
-                delivered = set()
-                self._delivered_interim_texts = delivered
-            delivered.add(normalized)
+            if not isinstance(getattr(self, "_delivered_interim_texts", None), set):
+                self._delivered_interim_texts = set()
+            self._delivered_interim_texts.add(normalized)
 
     def _deliver_interim(self, visible: str, *, already_streamed: bool, record: List[str]) -> None:
         """Hand ``visible`` to ``interim_assistant_callback`` and mark ``record`` delivered; swallows callback errors."""
@@ -164,9 +163,7 @@ class StreamDeliveryMixin:
         """Deliver a completed live Codex commentary message immediately."""
         if getattr(self, "interim_assistant_callback", None) is None or not isinstance(text, str):
             return
-        visible = self._strip_think_blocks(text).strip()
-        if visible:
-            visible = redact_sensitive_text(visible)
+        visible = self._visible_commentary(text)
         if not visible or visible == "(empty)" or self._interim_text_was_delivered(visible):
             return
         self._deliver_interim(visible, already_streamed=False, record=[visible])
