@@ -35,21 +35,27 @@ from hermes_cli.middleware import VALID_MIDDLEWARE
 from hermes_cli.plugin_capabilities import plugin_capability_granted
 from hermes_cli.relay_plugin_cutover import RELAY_PLUGINS_CONFIG_ENV, legacy_relay_plugin_keys
 # Sibling modules' names are re-exported here (origin) so plugins and tests keep one import path.
-from hermes_cli.plugins_manifest import PluginManifest, manifest_key, resolve_plugin_load_order
-from hermes_cli.plugins_discovery import (
-    _get_disabled_plugins, _get_enabled_plugins, collect_directory_manifests, discover_entrypoint_manifests,
-    gate_manifest, scan_directory
+from hermes_cli.plugins_manifest import (  # noqa: F401 — re-exported
+    _CONFIG_SCHEMA_TYPES, SUPPORTED_MANIFEST_VERSION, PluginManifest, _portable_skill_namespace,
+    manifest_key, parse_manifest_file, resolve_module_origin, resolve_plugin_load_order,
+    validate_config_schema,
+)
+from hermes_cli.plugins_discovery import (  # noqa: F401 — re-exported
+    ENTRY_POINTS_GROUP, _get_disabled_plugins, _get_enabled_plugins, collect_directory_manifests,
+    discover_entrypoint_manifests, gate_manifest, scan_directory,
 )
 from hermes_cli.plugins_loader import (
     PluginLoaderMixin, _BARE_MODULE_SCOPE, _MODULE_NAMESPACE_LOCK, _NS_PARENT, _evict_modules,
     _plugin_home_scope, _serialized_replacement,
 )
-from hermes_cli.plugins_dispatch import (
+from hermes_cli.plugins_dispatch import (  # noqa: F401 — re-exported
     DEFAULT_SYSTEM_PROMPT_SECTION_MAX_CHARS, HERMES_EVENT_NAMESPACE, MAX_SYSTEM_PROMPT_SECTION_CHARS,
-    SYSTEM_PROMPT_SECTION_POSITIONS, _EVENT_PENDING_CAP, _HOOK_CALLBACK_TIMEOUT_SECS,
-    _HOOK_TIMEOUT_SUPPRESSION_SECONDS, _MAX_HOOK_CALLBACK_TIMEOUT_SECS, PluginDispatchMixin,
-    PluginSystemPromptSection, RenderedPluginSystemPromptSection, _EventSubscription,
-    is_valid_system_prompt_section_id
+    MAX_SYSTEM_PROMPT_SECTIONS_TOTAL_CHARS, PLUGIN_SECTIONS_END, PLUGIN_SECTIONS_START,
+    SYSTEM_PROMPT_SECTION_POSITIONS, _EVENT_EMIT_DEPTH_CAP, _EVENT_PENDING_CAP,
+    _HOOK_CALLBACK_TIMEOUT_SECS, _HOOK_TIMEOUT_SUPPRESSION_SECONDS, _MAX_HOOK_CALLBACK_TIMEOUT_SECS,
+    _PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE, PluginDispatchMixin, PluginSystemPromptSection,
+    RenderedPluginSystemPromptSection, _EventSubscription, format_system_prompt_sections,
+    is_valid_system_prompt_section_id,
 )
 from hermes_cli.plugins_ledger import PluginLedgerMixin, PluginRegistration
 from hermes_cli.plugins_state import (
@@ -1400,6 +1406,10 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         adapter)`` at connect (see :meth:`PluginContext.register_platform_handler`)."""
         return list(self._platform_handler_factories.get((platform or "").strip().lower(), []))
 
+    def get_telegram_handler_factories(self) -> List[tuple]:
+        """Back-compat alias for ``get_platform_handler_factories("telegram")``."""
+        return self.get_platform_handler_factories("telegram")
+
     def list_plugins(self) -> List[Dict[str, Any]]:
         """Return a list of info dicts for all discovered plugins."""
         return [
@@ -1786,6 +1796,23 @@ def _get_pre_tool_call_directive_details(
         rule_key = (rule_key.strip() or None) if isinstance(rule_key, str) else None
         return _PreToolCallDirective(action=action, message=message, rule_key=rule_key, modified_args=modified_args)
     return _PreToolCallDirective(modified_args=modified_args)
+
+
+def get_pre_tool_call_directive(
+    tool_name: str, args: Optional[Dict[str, Any]], **hook_kwargs: Any
+) -> tuple[Optional[str], Optional[str]]:
+    """Back-compat: ``(directive, message)`` with directive ``"block"`` / ``"approve"`` / ``None``.
+    ``hook_kwargs`` are the observability ids of :func:`_get_pre_tool_call_directive_details`."""
+    details = _get_pre_tool_call_directive_details(tool_name, args, **hook_kwargs)
+    return (details.action, details.message)
+
+
+def get_pre_tool_call_block_message(
+    tool_name: str, args: Optional[Dict[str, Any]], **hook_kwargs: Any
+) -> Optional[str]:
+    """Deprecated shim: only the ``block`` message (or ``None``); ``approve`` is invisible here."""
+    directive, message = get_pre_tool_call_directive(tool_name, args, **hook_kwargs)
+    return message if directive == "block" else None
 
 
 def resolve_pre_tool_block(

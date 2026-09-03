@@ -357,7 +357,7 @@ class TestCustomProviderOpenAIWireCapability:
             pytest.fail("unrelated built-in route performed custom capability lookup")
 
         monkeypatch.setattr(
-            "hermes_cli.config_providers.get_custom_provider_model_capability",
+            "hermes_cli.config.get_custom_provider_model_capability",
             unexpected_lookup,
         )
 

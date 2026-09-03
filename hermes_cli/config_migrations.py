@@ -109,7 +109,7 @@ def _lower_is(word: str) -> Callable[[Any], bool]:
 
 def _migrate_to_12(results: Dict[str, Any], quiet: bool) -> None:
     # 11 → 12: custom_providers list → providers dict.
-    from hermes_cli.config_providers import _custom_provider_entry_to_provider_config
+    _custom_provider_entry_to_provider_config = _cfg()._custom_provider_entry_to_provider_config
 
     config = read_raw_config()
     custom_list = config.get("custom_providers")

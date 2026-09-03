@@ -27,8 +27,6 @@ single branch cannot silently revert #32243.
 from __future__ import annotations
 
 from hermes_cli import runtime_provider as rp
-from hermes_cli import runtime_provider_custom
-from agent import credential_pool
 
 
 class TestExplicitRuntimeForAnthropic:
@@ -148,10 +146,10 @@ class TestCustomProviderUrlFallback:
             def select(self):
                 return _Entry()
 
-        monkeypatch.setattr(credential_pool, "custom_provider_pool_key_candidates", lambda *a, **k: ["custom:my-claude"])
+        monkeypatch.setattr(rp, "custom_provider_pool_key_candidates", lambda *a, **k: ["custom:my-claude"])
         monkeypatch.setattr(rp, "load_pool", lambda key: _Pool())
 
-        resolved = runtime_provider_custom._try_resolve_from_custom_pool(
+        resolved = rp._try_resolve_from_custom_pool(
             "https://api.anthropic.com",
             "custom",
         )

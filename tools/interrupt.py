@@ -84,26 +84,5 @@ def clear_current_thread_interrupt() -> None:
     slate right before it spawns its child, so a stale bit that landed during the blocking
     approval-wait cannot SIGINT the just-approved run. A *genuine* interrupt arriving after
     this call re-sets the bit and is still observed by the executor's poll loop. Call
-    directly, never via the _interrupt_event proxy (its .clear() binds to whatever thread
-    runs it)."""
+    directly on the executing thread."""
     set_interrupt(False)
-
-
-class _ThreadAwareEventProxy:
-    """Backward-compatible ``_interrupt_event``: legacy .is_set()/.set()/.clear()/.wait()
-    call sites mapped onto the per-thread API (``wait`` returns the current state at once)."""
-
-    def is_set(self) -> bool:
-        return is_interrupted()
-
-    def set(self) -> None:  # noqa: A003
-        set_interrupt(True)
-
-    def clear(self) -> None:
-        set_interrupt(False)
-
-    def wait(self, timeout: float | None = None) -> bool:
-        return self.is_set()
-
-
-_interrupt_event = _ThreadAwareEventProxy()

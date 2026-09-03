@@ -130,8 +130,7 @@ def _resolve_aux_verify(base_url: Optional[str]) -> Any:
     ``ssl_verify``, ``HERMES_CA_BUNDLE`` / ``SSL_CERT_FILE``); any failure → httpx default (``True``)."""
     try:
         from agent.ssl_verify import resolve_httpx_verify
-        from hermes_cli.config import load_config_readonly
-        from hermes_cli.config_providers import get_custom_provider_tls_settings
+        from hermes_cli.config import get_custom_provider_tls_settings, load_config_readonly
         tls = get_custom_provider_tls_settings(str(base_url or ""), config=load_config_readonly())
         return resolve_httpx_verify(
             ca_bundle=tls.get("ssl_ca_cert"), ssl_verify=tls.get("ssl_verify"), base_url=str(base_url or ""))
@@ -4080,7 +4079,7 @@ def _try_main_provider_route(
         # Named custom provider (custom_providers / providers dict entry).
         _has_named_entry = False
         with contextlib.suppress(ImportError):
-            from hermes_cli.runtime_provider_custom import _get_named_custom_provider
+            from hermes_cli.runtime_provider import _get_named_custom_provider
             _has_named_entry = _get_named_custom_provider(main_provider) is not None
         if _has_named_entry:
             # KEEP the full ``custom:<name>`` so the named arm honours the entry's api_mode
@@ -4546,7 +4545,7 @@ def _named_custom_openai_wire_client(custom_base: str, custom_key: Any):
 
 def _resolve_named_custom_branch(req: _ResolveRequest) -> Optional[_ResolveResult]:
     """Named custom provider (config.yaml providers dict / custom_providers list); None if no entry matches."""
-    from hermes_cli.runtime_provider_custom import _get_named_custom_provider
+    from hermes_cli.runtime_provider import _get_named_custom_provider
     provider = req.provider
     # If the raw name is an alias (``kimi`` → ``kimi-coding``) and a custom_providers entry exists
     # under it, the custom entry wins over alias rewriting. Only for aliases, so entries matching a

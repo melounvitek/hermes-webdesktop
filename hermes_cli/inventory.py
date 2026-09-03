@@ -38,9 +38,8 @@ class ConfigContext:
 
 def load_picker_context() -> ConfigContext:
     """Load the disk-config snapshot every consumer needs."""
-    from hermes_cli.config import load_config
-    from hermes_cli.config_providers import (
-        coerce_provider_id, get_compatible_custom_providers, stringify_provider_map
+    from hermes_cli.config import (
+        coerce_provider_id, get_compatible_custom_providers, load_config, stringify_provider_map,
     )
     cfg = load_config()
     model_cfg = cfg.get("model", {})

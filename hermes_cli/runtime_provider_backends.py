@@ -157,8 +157,7 @@ def _resolve_openrouter_runtime(
         return rp._runtime("openrouter", cfg_api_mode or rp._detect_api_mode_for_url(base_url) or "chat_completions", base_url,
                            api_key, source=source)
     if base_url:
-        from hermes_cli.runtime_provider_custom import _try_resolve_from_custom_pool
-        pool_result = _try_resolve_from_custom_pool(base_url, "custom", cfg_api_mode, provider_name=None)
+        pool_result = rp._try_resolve_from_custom_pool(base_url, "custom", cfg_api_mode, provider_name=None)
         if pool_result:
             return pool_result
     # Local no-auth servers get a placeholder key — the OpenAI SDK requires a non-empty string.
@@ -249,8 +248,7 @@ def _is_external_process_provider(provider: str) -> bool:
 
 def _resolve_external_process_runtime(provider: str, requested_provider: str) -> Dict[str, Any]:
     rp = _rp()
-    from hermes_cli.auth import resolve_external_process_provider_credentials
-    creds = resolve_external_process_provider_credentials(provider)
+    creds = rp.resolve_external_process_provider_credentials(provider)
     return rp._runtime(provider, "chat_completions", creds.get("base_url", "").rstrip("/"), creds.get("api_key", ""),
                        command=creds.get("command", ""), args=list(creds.get("args") or []),
                        source=creds.get("source", "process"), requested_provider=requested_provider)

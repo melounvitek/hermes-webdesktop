@@ -14,7 +14,6 @@ import pytest
 
 from hermes_cli import onepassword_secrets_cli as op_cli
 from hermes_cli import secrets_cli as bw_cli
-from agent.secret_sources import bitwarden as bw_backend
 
 
 # ---------------------------------------------------------------------------
@@ -46,7 +45,7 @@ def bw_env(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(bw_cli, "get_env_path", lambda: tmp_path / ".env")
     monkeypatch.setattr(
-        bw_backend, "find_bws",
+        bw_cli.bw, "find_bws",
         lambda install_if_missing=True: Path("/fake/bws"),
     )
     return saved
@@ -57,7 +56,7 @@ def bw_env(monkeypatch, tmp_path):
 def test_bw_token_no_verify_skips_probe(bw_env, monkeypatch):
     probe = mock.Mock()
     monkeypatch.setattr(bw_cli, "_list_projects", probe)
-    monkeypatch.setattr(bw_backend, "clear_caches", lambda *a, **kw: None)
+    monkeypatch.setattr(bw_cli.bw, "clear_caches", lambda *a, **kw: None)
     rc = bw_cli.cmd_token(_bw_args(access_token="0.x", no_verify=True))
     assert rc == 0
     probe.assert_not_called()

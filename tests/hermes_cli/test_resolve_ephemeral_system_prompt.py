@@ -1,6 +1,9 @@
-"""Unit tests for resolve_ephemeral_system_prompt."""
+"""Unit tests for resolve_ephemeral_system_prompt_from_config."""
 
-from hermes_cli.personality import render_personality_prompt, resolve_ephemeral_system_prompt
+from hermes_cli.config import (
+    render_personality_prompt,
+    resolve_ephemeral_system_prompt_from_config,
+)
 
 
 def test_resolve_uses_named_personality_when_set():
@@ -11,7 +14,7 @@ def test_resolve_uses_named_personality_when_set():
             "personalities": {"helpful": "You are helpful."},
         },
     }
-    assert resolve_ephemeral_system_prompt(cfg) == "You are helpful."
+    assert resolve_ephemeral_system_prompt_from_config(cfg) == "You are helpful."
 
 
 def test_resolve_falls_back_to_manual_system_prompt():
@@ -22,7 +25,7 @@ def test_resolve_falls_back_to_manual_system_prompt():
             "personalities": {"helpful": "You are helpful."},
         },
     }
-    assert resolve_ephemeral_system_prompt(cfg) == "manual forever"
+    assert resolve_ephemeral_system_prompt_from_config(cfg) == "manual forever"
 
 
 def test_resolve_ignores_unknown_personality_name():
@@ -33,7 +36,7 @@ def test_resolve_ignores_unknown_personality_name():
             "personalities": {"helpful": "You are helpful."},
         },
     }
-    assert resolve_ephemeral_system_prompt(cfg) == "manual forever"
+    assert resolve_ephemeral_system_prompt_from_config(cfg) == "manual forever"
 
 
 def test_resolve_renders_dict_personality():
@@ -50,7 +53,7 @@ def test_resolve_renders_dict_personality():
             },
         },
     }
-    resolved = resolve_ephemeral_system_prompt(cfg)
+    resolved = resolve_ephemeral_system_prompt_from_config(cfg)
     assert "You are an expert programmer." in resolved
     assert "Tone: technical" in resolved
     assert "Style: concise" in resolved

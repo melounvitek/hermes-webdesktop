@@ -28,7 +28,7 @@ class TestCmdSetupNonTtyGuard:
         """Non-TTY with server-url and project-id but no token → reports --access-token."""
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)
         monkeypatch.setattr(
-            "agent.secret_sources.bitwarden.find_bws", lambda install_if_missing=False: "/usr/bin/bws"
+            "hermes_cli.secrets_cli.bw.find_bws", lambda install_if_missing=False: "/usr/bin/bws"
         )
         monkeypatch.setattr(
             "hermes_cli.secrets_cli._bws_version", lambda _: "2.0.0"
@@ -57,7 +57,7 @@ class TestCmdSetupNonTtyGuard:
         monkeypatch.setattr("sys.stdin.isatty", lambda: False)
         monkeypatch.setenv("BWS_SERVER_URL", "https://vault.bitwarden.com")
         monkeypatch.setattr(
-            "agent.secret_sources.bitwarden.find_bws", lambda install_if_missing=False: "/usr/bin/bws"
+            "hermes_cli.secrets_cli.bw.find_bws", lambda install_if_missing=False: "/usr/bin/bws"
         )
         monkeypatch.setattr(
             "hermes_cli.secrets_cli._bws_version", lambda _: "2.0.0"
@@ -66,7 +66,7 @@ class TestCmdSetupNonTtyGuard:
         monkeypatch.setattr("hermes_cli.secrets_cli.save_env_value", lambda *a: None)
         monkeypatch.setattr("hermes_cli.secrets_cli.get_env_path", lambda: "/tmp/.env")
         monkeypatch.setattr(
-            "agent.secret_sources.bitwarden.fetch_bitwarden_secrets",
+            "hermes_cli.secrets_cli.bw.fetch_bitwarden_secrets",
             lambda **kw: ({"KEY": "val"}, []),
         )
 

@@ -450,7 +450,7 @@ def _iter_custom_providers(config: Optional[dict] = None):
     if config is None:
         return
     try:
-        from hermes_cli.config_providers import get_compatible_custom_providers
+        from hermes_cli.config import get_compatible_custom_providers
 
         custom_providers = get_compatible_custom_providers(config)
     except Exception:

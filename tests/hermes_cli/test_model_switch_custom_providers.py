@@ -18,7 +18,6 @@ import yaml
 from hermes_cli.model_switch import list_authenticated_providers, switch_model
 from hermes_cli.model_switch_providers import _fetch_picker_live_models, _save_discovered_models_to_config
 from hermes_cli.providers import resolve_provider_full
-from hermes_cli import config_providers
 
 
 _MOCK_VALIDATION = {
@@ -2190,7 +2189,7 @@ def test_legacy_sentinel_catalog_still_resolves_and_migrates(tmp_path, monkeypat
 
     # (b) sentinels never surface as model IDs.
     assert _declared_model_ids(legacy_entry["models"]) == _LOCAL_CATALOG
-    normalized = config_providers._normalize_custom_provider_entry(dict(legacy_entry))
+    normalized = config_mod._normalize_custom_provider_entry(dict(legacy_entry))
     assert normalized is not None
     assert normalized["models_discovered"] is True
     assert list(normalized["models"]) == _LOCAL_CATALOG

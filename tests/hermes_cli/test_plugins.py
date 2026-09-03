@@ -12,12 +12,20 @@ import pytest
 import yaml
 
 from hermes_cli.plugins import (
-    VALID_HOOKS, PluginContext, PluginManager, PluginManifest, _dispatch_pre_tool_call_hooks,
-    get_plugin_command_handler, get_plugin_commands, _get_pre_tool_call_directive_details,
-    get_pre_verify_continue_message, has_middleware, resolve_plugin_command_result
+    ENTRY_POINTS_GROUP,
+    VALID_HOOKS,
+    PluginContext,
+    PluginManager,
+    PluginManifest,
+    _dispatch_pre_tool_call_hooks,
+    get_plugin_command_handler,
+    get_plugin_commands,
+    get_pre_tool_call_block_message,
+    get_pre_verify_continue_message,
+    has_middleware,
+    resolve_plugin_command_result,
+    _portable_skill_namespace,
 )
-from hermes_cli.plugins_discovery import ENTRY_POINTS_GROUP
-from hermes_cli.plugins_manifest import _portable_skill_namespace
 from hermes_cli.relay_plugin_cutover import RELAY_PLUGINS_CONFIG_ENV
 from hermes_cli.middleware import (
     VALID_MIDDLEWARE,
@@ -1140,8 +1148,10 @@ class TestForceReloadSymmetry:
         """Timed-out pre_tool_call must return a block directive, not allow."""
         import time
 
-        from hermes_cli.plugins import resolve_pre_tool_block
-        from hermes_cli.plugins_dispatch import _PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE
+        from hermes_cli.plugins import (
+            _PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE,
+            resolve_pre_tool_block,
+        )
 
         monkeypatch.setattr(
             "hermes_cli.plugins._resolve_hook_callback_timeout", lambda: 0.1
@@ -1176,7 +1186,7 @@ class TestForceReloadSymmetry:
         """E2E: timed-out pre_tool_call blocks handle_function_call before dispatch."""
         import json
 
-        from hermes_cli.plugins_dispatch import _PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE
+        from hermes_cli.plugins import _PRE_TOOL_CALL_TIMEOUT_BLOCK_MESSAGE
 
         monkeypatch.setattr(
             "hermes_cli.plugins._resolve_hook_callback_timeout", lambda: 0.1
@@ -1271,8 +1281,7 @@ class TestPreToolCallBlocking:
             "hermes_cli.plugins.invoke_hook",
             lambda hook_name, **kwargs: [{"action": "block", "message": "blocked by plugin"}],
         )
-        details = _get_pre_tool_call_directive_details("todo", {}, task_id="t1")
-        assert (details.action, details.message) == ("block", "blocked by plugin")
+        assert get_pre_tool_call_block_message("todo", {}, task_id="t1") == "blocked by plugin"
 
 
 class TestPreToolCallDirective:
@@ -1280,7 +1289,7 @@ class TestPreToolCallDirective:
 
     def test_first_party_observer_receives_pre_tool_call(self, monkeypatch):
         from hermes_cli import observability
-        from hermes_cli.plugins import _get_pre_tool_call_directive_details
+        from hermes_cli.plugins import get_pre_tool_call_directive
 
         observed = []
         monkeypatch.setattr(
@@ -1293,14 +1302,13 @@ class TestPreToolCallDirective:
             lambda hook_name, **kwargs: [],
         )
 
-        details = _get_pre_tool_call_directive_details(
+        assert get_pre_tool_call_directive(
             "write_file",
             {"path": "README.md"},
             task_id="task-1",
             session_id="session-1",
             tool_call_id="call-1",
-        )
-        assert (details.action, details.message) == (None, None)
+        ) == (None, None)
         assert observed == [
             (
                 "pre_tool_call",
@@ -1318,25 +1326,24 @@ class TestPreToolCallDirective:
         ]
 
     def test_approve_directive_returned(self, monkeypatch):
-        from hermes_cli.plugins import _get_pre_tool_call_directive_details
+        from hermes_cli.plugins import get_pre_tool_call_directive
         monkeypatch.setattr(
             "hermes_cli.plugins.invoke_hook",
             lambda hook_name, **kwargs: [
                 {"action": "approve", "message": "needs human ok"}
             ],
         )
-        details = _get_pre_tool_call_directive_details("write_file", {})
-        assert (details.action, details.message) == ("approve", "needs human ok")
+        assert get_pre_tool_call_directive("write_file", {}) == (
+            "approve", "needs human ok")
 
     def test_approve_without_message_is_valid(self, monkeypatch):
         """approve may omit a message (block may not)."""
-        from hermes_cli.plugins import _get_pre_tool_call_directive_details
+        from hermes_cli.plugins import get_pre_tool_call_directive
         monkeypatch.setattr(
             "hermes_cli.plugins.invoke_hook",
             lambda hook_name, **kwargs: [{"action": "approve"}],
         )
-        details = _get_pre_tool_call_directive_details("write_file", {})
-        assert (details.action, details.message) == ("approve", None)
+        assert get_pre_tool_call_directive("write_file", {}) == ("approve", None)
 
 
 class TestResolvePreToolBlock:
@@ -1570,7 +1577,7 @@ class TestThreadToolWhitelist:
         )
         set_thread_tool_whitelist({"memory", "skill_manage"})
         try:
-            assert _get_pre_tool_call_directive_details("memory", {}).action != "block"
+            assert get_pre_tool_call_block_message("memory", {}) is None
         finally:
             clear_thread_tool_whitelist()
 
@@ -1589,7 +1596,7 @@ class TestThreadToolWhitelist:
         clear_thread_tool_whitelist()
         # After clearing, any tool should pass through to plugin hooks (which
         # return [] here, so result is None).
-        assert _get_pre_tool_call_directive_details("terminal", {}).action != "block"
+        assert get_pre_tool_call_block_message("terminal", {}) is None
 
     def test_whitelist_is_thread_local(self, monkeypatch):
         """Setting a whitelist in one thread must NOT leak into another."""
@@ -1608,18 +1615,18 @@ class TestThreadToolWhitelist:
         # Main thread: install a restrictive whitelist.
         set_thread_tool_whitelist({"memory"})
         try:
-            assert _get_pre_tool_call_directive_details("terminal", {}).action == "block"
+            assert get_pre_tool_call_block_message("terminal", {}) is not None
 
             # Worker thread: should NOT inherit main thread's whitelist.
             result = {}
 
             def worker():
-                result["msg"] = _get_pre_tool_call_directive_details("terminal", {}).action
+                result["msg"] = get_pre_tool_call_block_message("terminal", {})
 
             t = threading.Thread(target=worker)
             t.start()
             t.join()
-            assert result["msg"] != "block", (
+            assert result["msg"] is None, (
                 "thread-local whitelist leaked across threads"
             )
         finally:

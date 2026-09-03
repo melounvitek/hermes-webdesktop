@@ -826,7 +826,7 @@ def _lap_user_provider_rows(b: _PickerBuild, user_providers: dict) -> None:
     one row (two Palantir Claude entries -> one "Palantir Claude" row); a different
     key_env/api_mode/headers keeps distinct rows since the wire protocol or tenant differs."""
     from hermes_cli.model_switch import _extra_headers_from_config, _scoped_key_env
-    from hermes_cli.config_providers import coerce_provider_id, is_provider_enabled
+    from hermes_cli.config import coerce_provider_id, is_provider_enabled
     ep_groups: dict[tuple, dict] = {}
     for ep_name, ep_cfg in user_providers.items():
         if not isinstance(ep_cfg, dict) or not is_provider_enabled(ep_cfg) or ep_name.lower() in b.seen_slugs:
@@ -912,7 +912,7 @@ def _lap_custom_provider_rows(b: _PickerBuild, custom_providers: list) -> None:
     entries on one host become one "Ollama" row; distinct prefixes sharing a proxy URL keep
     their own rows."""
     from hermes_cli.model_switch import _extra_headers_from_config, _scoped_key_env
-    from hermes_cli.config_providers import coerce_provider_id
+    from hermes_cli.config import coerce_provider_id
     groups: dict[tuple, dict] = {}
     for entry in custom_providers:
         if not isinstance(entry, dict):
@@ -1034,7 +1034,7 @@ def list_authenticated_providers(
     ``probe_custom_providers`` enables live ``/models`` discovery for saved custom endpoints (CLI
     true, GUI false); ``probe_current_custom_provider`` probes only the selected custom endpoint."""
     from agent.models_dev import fetch_models_dev
-    from hermes_cli.config_providers import coerce_provider_id, stringify_provider_map
+    from hermes_cli.config import coerce_provider_id, stringify_provider_map
 
     # Explicit refresh: drop every cached list so the calls below re-fetch live. A stale cache
     # can fall back to the curated static list when its live fetch fails, silently dropping
@@ -1089,7 +1089,7 @@ def _finalize_picker_rows(results: list, user_providers, current_model: str) -> 
     # The enabled post-filter covers built-in rows (sections 1-2) that bypass the per-section
     # gate; matched by slug and ``provider_id``.
     try:
-        from hermes_cli.config_providers import is_provider_enabled
+        from hermes_cli.config import is_provider_enabled
         if isinstance(user_providers, dict):
             disabled = {
                 str(name).strip().lower() for name, cfg in user_providers.items()

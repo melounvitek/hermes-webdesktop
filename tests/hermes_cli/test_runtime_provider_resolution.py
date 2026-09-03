@@ -6,8 +6,6 @@ from types import SimpleNamespace
 import pytest
 
 from hermes_cli import runtime_provider as rp
-from hermes_cli import runtime_provider_custom
-from agent import credential_pool
 
 
 def test_configured_api_key_provider_without_key_fails_closed(monkeypatch):
@@ -117,19 +115,19 @@ class TestCustomProviderPoolLoopbackNoKeyExemption:
         ('123') for a local Ollama endpoint must resolve to the same
         "no-key-required" placeholder every other local no-auth path uses,
         not the raw unusable value."""
-        monkeypatch.setattr(credential_pool, "custom_provider_pool_key_candidates", lambda base_url, provider_name=None: ["custom:local-ollama"])
+        monkeypatch.setattr(rp, "custom_provider_pool_key_candidates", lambda base_url, provider_name=None: ["custom:local-ollama"])
         monkeypatch.setattr(rp, "load_pool", lambda pool_key: self._pool_with("123"))
 
-        result = runtime_provider_custom._try_resolve_from_custom_pool("http://localhost:11434/v1", "custom", None)
+        result = rp._try_resolve_from_custom_pool("http://localhost:11434/v1", "custom", None)
 
         assert result is not None
         assert result["api_key"] == "no-key-required"
 
     def test_single_char_placeholder_key_also_exempted(self, monkeypatch):
-        monkeypatch.setattr(credential_pool, "custom_provider_pool_key_candidates", lambda base_url, provider_name=None: ["custom:local"])
+        monkeypatch.setattr(rp, "custom_provider_pool_key_candidates", lambda base_url, provider_name=None: ["custom:local"])
         monkeypatch.setattr(rp, "load_pool", lambda pool_key: self._pool_with("m"))
 
-        result = runtime_provider_custom._try_resolve_from_custom_pool("http://127.0.0.1:11434/v1", "custom", None)
+        result = rp._try_resolve_from_custom_pool("http://127.0.0.1:11434/v1", "custom", None)
 
         assert result["api_key"] == "no-key-required"
 
@@ -138,10 +136,10 @@ class TestCustomProviderPoolLoopbackNoKeyExemption:
         remote endpoint with a genuinely-too-short key must NOT get a
         free pass. The short value passes through unchanged, so the
         downstream has_usable_secret() gate still catches it."""
-        monkeypatch.setattr(credential_pool, "custom_provider_pool_key_candidates", lambda base_url, provider_name=None: ["custom:remote"])
+        monkeypatch.setattr(rp, "custom_provider_pool_key_candidates", lambda base_url, provider_name=None: ["custom:remote"])
         monkeypatch.setattr(rp, "load_pool", lambda pool_key: self._pool_with("xy"))
 
-        result = runtime_provider_custom._try_resolve_from_custom_pool("https://api.remote-vendor.example/v1", "custom", None)
+        result = rp._try_resolve_from_custom_pool("https://api.remote-vendor.example/v1", "custom", None)
 
         assert result["api_key"] == "xy"
 
@@ -149,10 +147,10 @@ class TestCustomProviderPoolLoopbackNoKeyExemption:
         """Sanity: a genuinely usable key for a loopback endpoint (a real
         API key happens to be configured for a local proxy, say) must not
         be silently overwritten."""
-        monkeypatch.setattr(credential_pool, "custom_provider_pool_key_candidates", lambda base_url, provider_name=None: ["custom:local"])
+        monkeypatch.setattr(rp, "custom_provider_pool_key_candidates", lambda base_url, provider_name=None: ["custom:local"])
         monkeypatch.setattr(rp, "load_pool", lambda pool_key: self._pool_with("sk-genuinely-long-real-key-12345"))
 
-        result = runtime_provider_custom._try_resolve_from_custom_pool("http://localhost:11434/v1", "custom", None)
+        result = rp._try_resolve_from_custom_pool("http://localhost:11434/v1", "custom", None)
 
         assert result["api_key"] == "sk-genuinely-long-real-key-12345"
 
@@ -689,7 +687,7 @@ def test_named_custom_provider_filters_capabilities_at_lookup_boundary(monkeypat
         ),
     )
 
-    provider = runtime_provider_custom._get_named_custom_provider("local")
+    provider = rp._get_named_custom_provider("local")
 
     assert provider["capabilities"] == {"openai_native_compaction": True}
 
@@ -844,7 +842,7 @@ def test_named_custom_provider_wins_over_builtin_alias(monkeypatch):
         },
     )
 
-    entry = runtime_provider_custom._get_named_custom_provider("kimi")
+    entry = rp._get_named_custom_provider("kimi")
 
     assert entry is not None
     assert entry["base_url"] == "https://my-custom-kimi.example.com/v1"
@@ -1002,7 +1000,7 @@ class TestOllamaUrlSubstringLeak:
             "http://127.0.0.1:9000/ollama.com/v1"
         ))
         monkeypatch.setattr(rp, "load_pool", lambda provider: None)
-        monkeypatch.setattr(runtime_provider_custom, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+        monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
 
         resolved = rp.resolve_runtime_provider(requested="custom")
 
@@ -1023,7 +1021,7 @@ class TestOllamaUrlSubstringLeak:
             "http://ollama.com.attacker.test:9000/v1"
         ))
         monkeypatch.setattr(rp, "load_pool", lambda provider: None)
-        monkeypatch.setattr(runtime_provider_custom, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+        monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
 
         resolved = rp.resolve_runtime_provider(requested="custom")
 
@@ -1041,7 +1039,7 @@ class TestOllamaUrlSubstringLeak:
             "https://ollama.com/v1"
         ))
         monkeypatch.setattr(rp, "load_pool", lambda provider: None)
-        monkeypatch.setattr(runtime_provider_custom, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+        monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
 
         resolved = rp.resolve_runtime_provider(requested="custom")
 
@@ -1217,7 +1215,7 @@ class TestProviderEntryApiKeyEnvAlias:
     use `api_key_env`) resolve correctly."""
 
     def test_snake_case_api_key_env_normalizes_to_key_env(self):
-        from hermes_cli.config_providers import _normalize_custom_provider_entry
+        from hermes_cli.config import _normalize_custom_provider_entry
         entry = {
             "name": "vendor",
             "base_url": "https://api.vendor.example.com/v1",
@@ -1235,8 +1233,10 @@ class TestProviderEntryApiKeyEnvAlias:
         assert "key_env" in _VALID_CUSTOM_PROVIDER_FIELDS
 
     def test_extra_body_is_supported_schema(self):
-        from hermes_cli.config import _VALID_CUSTOM_PROVIDER_FIELDS
-        from hermes_cli.config_providers import _normalize_custom_provider_entry
+        from hermes_cli.config import (
+            _VALID_CUSTOM_PROVIDER_FIELDS,
+            _normalize_custom_provider_entry,
+        )
         entry = {
             "name": "vendor",
             "base_url": "https://api.vendor.example.com/v1",
@@ -1630,9 +1630,9 @@ def test_resolve_named_custom_runtime_pool_result_includes_extra_headers(monkeyp
         "source": "pool:lmstudio-pool",
         "credential_pool": "fake-pool",
     }
-    monkeypatch.setattr(runtime_provider_custom, "_try_resolve_from_custom_pool", lambda *a, **k: pool_return_value)
+    monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: pool_return_value)
     monkeypatch.setattr(
-        runtime_provider_custom,
+        rp,
         "_get_named_custom_provider",
         lambda p: {
             "name": "lmstudio",
@@ -1720,7 +1720,7 @@ def test_custom_provider_explicit_target_model_wins(monkeypatch):
     provider's configured default model (regression: auxiliary slots such as
     background-review resolve a concrete model and got default_model instead)."""
     monkeypatch.setattr(
-        runtime_provider_custom,
+        rp,
         "_get_named_custom_provider",
         lambda p: {
             "name": "myproxy",
@@ -1741,7 +1741,7 @@ def test_custom_provider_explicit_target_model_wins(monkeypatch):
 def test_custom_provider_without_target_model_keeps_default(monkeypatch):
     """No target_model -> the provider's configured model is preserved."""
     monkeypatch.setattr(
-        runtime_provider_custom,
+        rp,
         "_get_named_custom_provider",
         lambda p: {
             "name": "myproxy",
@@ -1760,7 +1760,7 @@ def test_custom_provider_without_target_model_keeps_default(monkeypatch):
 def test_custom_provider_pool_target_model_wins(monkeypatch):
     """Pooled-credentials path also honors target_model over the default."""
     monkeypatch.setattr(
-        runtime_provider_custom,
+        rp,
         "_try_resolve_from_custom_pool",
         lambda *a, **k: {
             "provider": "custom",
@@ -1769,7 +1769,7 @@ def test_custom_provider_pool_target_model_wins(monkeypatch):
         },
     )
     monkeypatch.setattr(
-        runtime_provider_custom,
+        rp,
         "_get_named_custom_provider",
         lambda p: {
             "name": "myproxy",

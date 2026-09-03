@@ -127,7 +127,7 @@ def _entry_point_package_dir(entry_point) -> Optional[Path]:
     if entry_point is None:
         return None
     try:
-        from hermes_cli.plugins_manifest import resolve_module_origin
+        from hermes_cli.plugins import resolve_module_origin
 
         module_name = (entry_point.value or "").split(":")[0].strip()
         origin = resolve_module_origin(module_name)

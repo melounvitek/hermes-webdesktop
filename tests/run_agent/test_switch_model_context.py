@@ -298,8 +298,8 @@ def test_lmstudio_switch_uses_destination_context_and_verified_runtime(monkeypat
     monkeypatch.setattr("hermes_cli.config.load_config", fake_load_config)
 
     monkeypatch.setattr("hermes_cli.config.load_config_readonly", fake_load_config)
-    monkeypatch.setattr("hermes_cli.config_providers.get_compatible_custom_providers", fake_compatible)
-    monkeypatch.setattr("hermes_cli.config_providers.get_custom_provider_context_length", fake_provider_context)
+    monkeypatch.setattr("hermes_cli.config.get_compatible_custom_providers", fake_compatible)
+    monkeypatch.setattr("hermes_cli.config.get_custom_provider_context_length", fake_provider_context)
     monkeypatch.setattr(AIAgent, "_ensure_lmstudio_runtime_loaded", fake_lmstudio_load)
 
     with patch("agent.model_metadata.get_model_context_length", return_value=100_000) as mock_ctx_len:

@@ -25,8 +25,7 @@ def _named_custom_provider_catalogs() -> list[tuple[str, str, list[tuple[str, st
     discovery (some endpoints have no ``/models`` route). Slugs use the ``custom:<name>`` shape
     ``parse_model_input``/``resolve_runtime_provider`` resolve, so choice ids round-trip."""
     try:
-        from hermes_cli.config import load_config
-        from hermes_cli.config_providers import get_compatible_custom_providers, is_provider_enabled
+        from hermes_cli.config import (get_compatible_custom_providers, is_provider_enabled, load_config)
         from hermes_cli.model_switch import _declared_model_ids, _entry_models_discovered, _models_config_is_allowlist
         from hermes_cli.model_switch_providers import _NativePickerModelList, _fetch_picker_live_models
         from hermes_cli.model_switch_providers import _discover_flag

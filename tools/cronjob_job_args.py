@@ -249,8 +249,10 @@ def _validate_cron_base_url(
             "base_url override requires an explicit provider. Set provider to a "
             "configured custom provider to use a custom endpoint.")
     try:
-        from hermes_cli.runtime_provider import resolve_requested_provider
-        from hermes_cli.runtime_provider_custom import has_named_custom_provider, _get_named_custom_provider
+        from hermes_cli.runtime_provider import (
+            has_named_custom_provider,
+            resolve_requested_provider,
+            _get_named_custom_provider)
         from hermes_cli.auth import PROVIDER_REGISTRY
         from utils import base_url_host_matches, base_url_hostname
     except Exception:

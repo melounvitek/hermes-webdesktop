@@ -124,7 +124,7 @@ def _custom_provider_ssl_context(base_url: str):
     if not base_url:
         return None
     try:
-        from hermes_cli.config_providers import get_custom_provider_tls_settings
+        from hermes_cli.config import get_custom_provider_tls_settings
 
         tls = get_custom_provider_tls_settings(base_url)
         if not tls:
@@ -2138,7 +2138,7 @@ def probe_api_models(
         headers.update(copilot_default_headers())
     if isinstance(request_headers, dict):
         # Per-provider custom headers can contain secrets: merge last so endpoint config wins; never log.
-        from hermes_cli.config_providers import normalize_extra_headers
+        from hermes_cli.config import normalize_extra_headers
 
         headers.update(normalize_extra_headers(request_headers))
 

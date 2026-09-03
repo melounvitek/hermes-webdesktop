@@ -11527,7 +11527,7 @@ def test_plugins_list_surfaces_loader_error(monkeypatch):
 
 def test_complete_slash_surfaces_completer_error(monkeypatch):
     with patch(
-        "hermes_cli.commands_completion.SlashCommandCompleter",
+        "hermes_cli.commands.SlashCommandCompleter",
         side_effect=Exception("no completer"),
     ):
         resp = server.handle_request(
@@ -16276,7 +16276,7 @@ def test_model_options_preserves_canonical_custom_row_after_agent_init(monkeypat
     )
     canonical = Mock(return_value="custom:local-ollama")
     monkeypatch.setattr(
-        "hermes_cli.runtime_provider_custom.canonical_custom_identity",
+        "hermes_cli.runtime_provider.canonical_custom_identity",
         canonical,
     )
     monkeypatch.setattr(

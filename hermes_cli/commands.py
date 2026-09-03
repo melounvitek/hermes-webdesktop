@@ -467,3 +467,26 @@ def _iter_plugin_command_entries() -> list[tuple[str, str, str]]:
     return [(name, str(meta.get("description") or f"Run /{name}"),
              str(meta.get("args_hint") or "").strip())
             for name, meta in commands.items() if isinstance(name, str) and isinstance(meta, dict)]
+
+
+# Lazy re-exports (PEP 562): platform derivations and the prompt_toolkit completer live in
+# sibling modules; their names stay importable here (``from hermes_cli.commands import X``,
+# ``patch("hermes_cli.commands.X")``) while this module stays import-light for the gateway.
+_LAZY_EXPORTS: dict[str, str] = {name: "hermes_cli.commands_platforms" for name in (
+    "_CMD_NAME_LIMIT", "_DEFAULT_TELEGRAM_MENU_MAX_COMMANDS", "_SLACK_RESERVED_COMMANDS",
+    "_SLACK_VIA_HERMES_ONLY", "_TELEGRAM_MENU_PRIORITY", "_clamp_command_names",
+    "_collect_gateway_skill_entries", "_iter_gateway_skills", "_prioritize_telegram_menu_candidates",
+    "_requires_argument", "_sanitize_slack_name", "_sanitize_telegram_name",
+    "_telegram_command_menu_config", "_truncate_desc", "discord_skill_commands_by_category",
+    "slack_app_manifest", "slack_native_slashes", "slack_subcommand_map", "telegram_bot_commands",
+    "telegram_menu_commands", "telegram_menu_max_commands")}
+_LAZY_EXPORTS.update({name: "hermes_cli.commands_completion" for name in (
+    "SlashCommandCompleter", "SlashCommandAutoSuggest", "_file_size_label", "_short_desc")})
+
+
+def __getattr__(name: str):
+    module = _LAZY_EXPORTS.get(name)
+    if module is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+    return getattr(importlib.import_module(module), name)

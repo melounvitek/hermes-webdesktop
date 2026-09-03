@@ -66,7 +66,7 @@ def test_get_named_custom_provider_exposes_provider_key_and_key_env(
     )
     monkeypatch.setenv("B_AI_API_KEY", "sk-from-env-not-the-pool")
 
-    from hermes_cli.runtime_provider_custom import _get_named_custom_provider
+    from hermes_cli.runtime_provider import _get_named_custom_provider
 
     entry = _get_named_custom_provider("b-ai")
     assert entry is not None

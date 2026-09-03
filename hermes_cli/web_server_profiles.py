@@ -16,8 +16,7 @@ from contextlib import contextmanager
 from fastapi import HTTPException
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
-from hermes_cli.config import DEFAULT_CONFIG
-from hermes_constants import get_process_hermes_home
+from hermes_cli.config import DEFAULT_CONFIG, get_process_hermes_home
 from hermes_cli.web_models import MCPServerCreate
 from hermes_cli.web_server_gateway import _ACTION_LOG_FILES
 from hermes_cli.web_server_mcp import _normalize_mcp_server_create

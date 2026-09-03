@@ -9,12 +9,29 @@ import pytest
 import yaml
 
 from hermes_cli.config import (
-    DEFAULT_CONFIG, InvalidUserConfigError, check_config_version, get_hermes_home, ensure_hermes_home,
-    _explicit_config_paths, _normalize_max_turns_config, load_config, load_env, migrate_config, read_raw_config,
-    remove_env_value, save_config, save_env_value, save_env_value_secure, sanitize_env_file, set_config_value,
-    unset_config_value, write_platform_config_field, _sanitize_env_lines
+    DEFAULT_CONFIG,
+    InvalidUserConfigError,
+    check_config_version,
+    get_hermes_home,
+    ensure_hermes_home,
+    get_compatible_custom_providers,
+    _explicit_config_paths,
+    _normalize_max_turns_config,
+    is_provider_enabled,
+    load_config,
+    load_env,
+    migrate_config,
+    read_raw_config,
+    remove_env_value,
+    save_config,
+    save_env_value,
+    save_env_value_secure,
+    sanitize_env_file,
+    set_config_value,
+    unset_config_value,
+    write_platform_config_field,
+    _sanitize_env_lines,
 )
-from hermes_cli.config_providers import get_compatible_custom_providers, is_provider_enabled
 
 
 class TestGetHermesHome:

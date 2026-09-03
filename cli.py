@@ -2693,7 +2693,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         # Explicit `-m` still wins. See #86978.
         if not model and provider:
             try:
-                from hermes_cli.runtime_provider_custom import _get_named_custom_provider
+                from hermes_cli.runtime_provider import _get_named_custom_provider
 
                 _named_custom = _get_named_custom_provider(provider)
             except Exception as exc:

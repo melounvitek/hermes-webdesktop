@@ -1426,7 +1426,7 @@ from hermes_state import _BARE_BILLING_PROVIDERS
 
 def _is_routable_provider(provider: str) -> bool:
     with contextlib.suppress(Exception):
-        from hermes_cli.runtime_provider_custom import is_routable_provider
+        from hermes_cli.runtime_provider import is_routable_provider
         return is_routable_provider(provider)
     return False
 
@@ -1484,7 +1484,7 @@ def _stored_session_runtime_overrides(row: dict | None) -> dict:
     if provider and not _is_routable_provider(provider):
         healed = None
         try:
-            from hermes_cli.runtime_provider_custom import canonical_custom_identity
+            from hermes_cli.runtime_provider import canonical_custom_identity
             healed = canonical_custom_identity(base_url=base_url or None, model=model or None)
         except Exception:
             logger.debug("custom provider identity recovery failed", exc_info=True)
@@ -1519,7 +1519,7 @@ def _runtime_model_config(agent, existing: dict | None = None) -> dict:
         # ``agent.provider`` resolves every named custom entry to the literal "custom", losing the entry
         # identity (api_key is never persisted): recover ``custom:<name>`` from the endpoint URL.
         try:
-            from hermes_cli.runtime_provider_custom import canonical_custom_identity
+            from hermes_cli.runtime_provider import canonical_custom_identity
             provider = canonical_custom_identity(base_url=base_url, model=model or None) or provider
         except Exception:
             logger.debug("custom provider identity lookup failed", exc_info=True)
@@ -2210,7 +2210,7 @@ def _resolve_agent_model_runtime(model_override, provider_override) -> tuple[str
         override_base_url = model_override.get("base_url")
         resolve_kwargs = {}
         if str(requested_provider or "").strip().lower() == "custom":
-            from hermes_cli.runtime_provider_custom import canonical_custom_identity
+            from hermes_cli.runtime_provider import canonical_custom_identity
             if recovered := canonical_custom_identity(base_url=override_base_url or None, model=model or None):
                 requested_provider = recovered
             if override_base_url:
@@ -2238,8 +2238,8 @@ def _resolve_agent_model_runtime(model_override, provider_override) -> tuple[str
 def _startup_system_prompt(cfg: dict, task_id: str) -> str:
     """Config ephemeral system prompt + HERMES_TUI_SKILLS preload block. Hard-fails only when EVERY requested
     skill is missing (cli.py parity): a typo'd name must not auto-block the Kanban task."""
-    from hermes_cli.personality import resolve_ephemeral_system_prompt
-    system_prompt = resolve_ephemeral_system_prompt(cfg)
+    from hermes_cli.config import resolve_ephemeral_system_prompt_from_config
+    system_prompt = resolve_ephemeral_system_prompt_from_config(cfg)
     startup_skills = _parse_tui_skills_env()
     if not startup_skills:
         return system_prompt

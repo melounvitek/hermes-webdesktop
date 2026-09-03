@@ -1521,7 +1521,7 @@ def anthropic_prompt_cache_policy(
         or _route_may_be_custom(agent, eff_provider, provider_lower, eff_base_url)
     ):
         try:
-            from hermes_cli.config_providers import get_custom_provider_model_capability
+            from hermes_cli.config import get_custom_provider_model_capability
             custom_prompt_caching = get_custom_provider_model_capability(
                 model=eff_model, base_url=eff_base_url, capability="prompt_caching",
                 custom_providers=getattr(agent, "_custom_providers", None),
@@ -1768,8 +1768,7 @@ def _apply_switched_provider_request_overrides(agent, new_provider):
     custom_providers = getattr(agent, "_custom_providers", None)
     if custom_providers is None:
         try:
-            from hermes_cli.config import load_config
-            from hermes_cli.config_providers import get_compatible_custom_providers
+            from hermes_cli.config import load_config, get_compatible_custom_providers
             custom_providers = get_compatible_custom_providers(load_config())
         except Exception:
             custom_providers = []
@@ -1892,9 +1891,9 @@ def _build_switched_client(agent, new_provider, api_key, base_url, api_mode, new
     effective_base = base_url or agent.base_url
     agent._client_kwargs = {"api_key": api_key or agent.api_key, "base_url": effective_base}
     try:
-        from hermes_cli.config import load_config_readonly
-        from hermes_cli.config_providers import (
-            apply_custom_provider_tls_to_client_kwargs, get_compatible_custom_providers
+        from hermes_cli.config import (
+            apply_custom_provider_tls_to_client_kwargs, get_compatible_custom_providers,
+            load_config_readonly,
         )
         # Read live config, not agent._custom_providers, so mid-session ssl_ca_cert / ssl_verify
         # edits are honored.
@@ -1963,8 +1962,9 @@ def _resolve_switch_context_length(agent, snapshot):
     """Resolve the destination context length (LM Studio preload first); returns ``(custom_providers, effective_len)``."""
     custom_providers = None
     try:
-        from hermes_cli.config import load_config
-        from hermes_cli.config_providers import get_compatible_custom_providers, get_custom_provider_context_length
+        from hermes_cli.config import (
+            get_compatible_custom_providers, get_custom_provider_context_length, load_config
+        )
         custom_providers = get_compatible_custom_providers(load_config())
         intent = get_custom_provider_context_length(
             model=agent.model, base_url=agent.base_url, custom_providers=custom_providers
@@ -1996,8 +1996,7 @@ def _update_switch_compressor(agent, custom_providers, effective_context_length,
     from agent.model_metadata import get_model_context_length
     if custom_providers is None:
         try:
-            from hermes_cli.config import load_config
-            from hermes_cli.config_providers import get_compatible_custom_providers
+            from hermes_cli.config import get_compatible_custom_providers, load_config
             custom_providers = get_compatible_custom_providers(load_config())
         except Exception:
             custom_providers = None

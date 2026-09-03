@@ -129,7 +129,7 @@ class _ModelSwitchContext:
                 self.current_base_url = model_cfg.get("base_url", "")
             self.user_provs = cfg.get("providers")
             try:
-                from hermes_cli.config_providers import get_compatible_custom_providers
+                from hermes_cli.config import get_compatible_custom_providers
                 self.custom_provs = get_compatible_custom_providers(cfg)
             except Exception:
                 self.custom_provs = cfg.get("custom_providers")

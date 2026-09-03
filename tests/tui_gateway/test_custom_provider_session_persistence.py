@@ -29,7 +29,6 @@ from unittest.mock import MagicMock, patch
 
 import hermes_cli.runtime_provider as rp
 from hermes_state import SessionDB
-from hermes_cli import runtime_provider_custom
 
 MIMO_URL = "https://token-plan-cn.xiaomimimo.com/v1"
 MIMO_KEY = "sk-mimo-entry-key"
@@ -111,7 +110,7 @@ def _make_agent_with_override(override, monkeypatch, config, model_cfg=None):
     monkeypatch.setattr(rp, "load_config", lambda: config)
     monkeypatch.setattr(rp, "_get_model_config", lambda: model_cfg or {})
     # Keep credential-pool resolution off the developer's real HERMES home.
-    monkeypatch.setattr(runtime_provider_custom, "_try_resolve_from_custom_pool", lambda *a, **k: None)
+    monkeypatch.setattr(rp, "_try_resolve_from_custom_pool", lambda *a, **k: None)
 
     fake_cfg = {"agent": {"system_prompt": ""}, "model": {"default": "unused"}}
     with (
@@ -209,7 +208,7 @@ class TestBareCustomNoBaseUrlHealsFromConfig:
 
         # No base_url to reverse-lookup → must fall back to config.model.provider.
         assert (
-            runtime_provider_custom.canonical_custom_identity(base_url=None)
+            rp.canonical_custom_identity(base_url=None)
             == "custom:mimo-v2.5-pro"
         )
 
@@ -340,7 +339,7 @@ class TestModelNameRecoversEntryIdentity:
         monkeypatch.setattr(rp, "load_config", lambda: ULTRA_CONFIG)
 
         assert (
-            runtime_provider_custom.find_custom_provider_identity_by_model("hermes-ultra-sft")
+            rp.find_custom_provider_identity_by_model("hermes-ultra-sft")
             == "custom:hermes-ultra"
         )
 

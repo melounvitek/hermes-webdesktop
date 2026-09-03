@@ -29,7 +29,7 @@ from hermes_cli import managed_scope
 from hermes_cli.default_soul import DEFAULT_SOUL_MD, is_legacy_template_soul
 from hermes_cli.secret_prompt import masked_secret_prompt
 # Re-export from hermes_constants — canonical definition lives there.
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, get_process_hermes_home  # noqa: F401
 from utils import atomic_replace, atomic_yaml_write, fast_safe_load
 
 logger = logging.getLogger(__name__)
@@ -686,7 +686,23 @@ def ensure_hermes_home():
 # ---- Config loading/saving ----
 
 from hermes_cli.config_defaults import DEFAULT_CONFIG, OPTIONAL_ENV_VARS  # noqa: E402,F401
+from hermes_cli.config_providers import (  # noqa: E402,F401  (re-exported; callers/tests use hermes_cli.config.<name>)
+    _API_MODE_ALIASES, _CAMEL_ALIASES, _KNOWN_PROVIDER_KEYS, _PROVIDER_NORMALIZE_WARNED,
+    _canonical_api_mode, _coerce_ssl_verify, _custom_provider_entry_to_provider_config,
+    _entries_for_route, _normalize_custom_provider_entry, _normalize_provider_models,
+    _pick_provider_base_url, _route_model_cfg, _warn_once_per_provider,
+    apply_custom_provider_extra_headers_to_client_kwargs,
+    apply_custom_provider_tls_to_client_kwargs, coerce_provider_id, find_provider_entry,
+    get_compatible_custom_providers, get_custom_provider_context_length,
+    get_custom_provider_extra_headers, get_custom_provider_model_capability,
+    get_custom_provider_tls_settings, is_provider_enabled, normalize_extra_headers,
+    providers_dict_to_custom_providers, stringify_provider_map)
 # Back-compat re-exports — :mod:`hermes_cli.personality` owns personality/overlay semantics.
+from hermes_cli.personality import (  # noqa: E402,F401
+    NEUTRAL_PERSONALITY_NAMES as _NEUTRAL_PERSONALITY_NAMES,
+    prompt_text as _prompt_text,
+    render_personality_prompt,
+    resolve_ephemeral_system_prompt as resolve_ephemeral_system_prompt_from_config)
 
 # ---- Config Migration System ----
 

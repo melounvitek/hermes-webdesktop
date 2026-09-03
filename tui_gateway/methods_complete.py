@@ -226,7 +226,7 @@ def _(rid, params: dict) -> dict:
     text = params.get("text", "")
     if not text.startswith("/"):
         return _ok(rid, {"items": []})
-    from hermes_cli.commands_completion import SlashCommandCompleter
+    from hermes_cli.commands import SlashCommandCompleter
     from prompt_toolkit.document import Document
     from prompt_toolkit.formatted_text import to_plain_text
     from agent.skill_commands import get_skill_commands

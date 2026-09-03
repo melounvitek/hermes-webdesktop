@@ -956,7 +956,7 @@ def _config_declares_model(
     when the remote /v1/models does not list it (cloud/aliased models). Custom entries match by
     slug alias or by base_url."""
     if user_providers:
-        from hermes_cli.config_providers import is_provider_enabled
+        from hermes_cli.config import is_provider_enabled
         cfg = user_providers.get(target_provider)
         if cfg is not None and is_provider_enabled(cfg) and new_model in _declared_model_ids(cfg.get("models", {})):
             return True
@@ -1436,7 +1436,7 @@ def _build_switch_result(st: _Switch) -> ModelSwitchResult:
     # chat_template_kwargs) so the gateway applies them like the default-provider path does.
     request_overrides = None
     try:
-        from hermes_cli.runtime_provider_custom import _get_named_custom_provider, _custom_provider_request_overrides
+        from hermes_cli.runtime_provider import _get_named_custom_provider, _custom_provider_request_overrides
         cp_for_ro = _get_named_custom_provider(st.target_provider)
         request_overrides = _custom_provider_request_overrides(cp_for_ro) or None if cp_for_ro else None
     except Exception:
@@ -1477,7 +1477,7 @@ def switch_model(
 def _extra_headers_from_config(entry: Any) -> dict[str, str]:
     if not isinstance(entry, dict):
         return {}
-    from hermes_cli.config_providers import normalize_extra_headers
+    from hermes_cli.config import normalize_extra_headers
     return normalize_extra_headers(entry.get("extra_headers"))
 
 

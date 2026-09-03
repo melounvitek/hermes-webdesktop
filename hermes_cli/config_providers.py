@@ -357,6 +357,7 @@ def _entries_for_route(
 
     None *custom_providers* → ``get_compatible_custom_providers(config)`` (failure → none).
     """
+    from hermes_cli.config import get_compatible_custom_providers
     if custom_providers is None:
         try:
             custom_providers = get_compatible_custom_providers(config)
@@ -486,6 +487,7 @@ def get_custom_provider_context_length(
     Before this helper existed, the lookup was duplicated in ``run_agent.py``'s startup path only; every
     other path (notably ``/model`` switch) fell back to the 128K default. See #15779.
     """
+    from hermes_cli.config import get_compatible_custom_providers
     if not model or not base_url:
         return None
     if custom_providers is None:
@@ -518,7 +520,7 @@ def get_custom_provider_model_capability(
     config: Optional[Dict[str, Any]] = None) -> Optional[bool]:
     """Explicit boolean capability for one custom-provider model, or ``None``. Scoped to the
     normalized route + exact runtime model id so aliases can declare capabilities."""
-    from hermes_cli.config import load_config_readonly
+    from hermes_cli.config import get_compatible_custom_providers, load_config_readonly
     if not model or not base_url or not capability:
         return None
     if custom_providers is None:

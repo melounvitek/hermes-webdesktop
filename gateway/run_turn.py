@@ -586,9 +586,9 @@ class GatewayTurnMixin:
             if hs.config_context_length is None and hs.base_url:
                 with suppress(TypeError, ValueError):
                     try:
-                        from hermes_cli.config_providers import (
+                        from hermes_cli.config import (
                             get_compatible_custom_providers as _gw_gcp,
-                            get_custom_provider_context_length as _gw_gccl
+                            get_custom_provider_context_length as _gw_gccl,
                         )
                         _hyg_custom_providers = _gw_gcp(hs.data)
                     except Exception:

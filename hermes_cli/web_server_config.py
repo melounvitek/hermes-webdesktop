@@ -10,10 +10,14 @@ import os
 from fastapi import HTTPException
 from typing import Any, Dict, List, Optional, Tuple
 from hermes_cli.config import (
-    DEFAULT_CONFIG, build_cron_model_impact, cfg_get, clear_model_endpoint_credentials, read_raw_config,
-    resolve_cron_model_drift_defaults
+    DEFAULT_CONFIG,
+    build_cron_model_impact,
+    cfg_get,
+    clear_model_endpoint_credentials,
+    find_provider_entry,
+    read_raw_config,
+    resolve_cron_model_drift_defaults,
 )
-from hermes_cli.config_providers import find_provider_entry
 from hermes_cli.web_server_memory import _normalize_memory_provider_name
 
 # Same logger the code used before extraction (record parity).
@@ -390,7 +394,7 @@ def _normalize_main_model_assignment(provider: str, model: str) -> tuple[str, st
        ``normalize_model_for_provider`` (custom/user providers keep the model verbatim).
     """
     from hermes_cli.config import load_config
-    from hermes_cli.config_providers import get_compatible_custom_providers
+    from hermes_cli.config import get_compatible_custom_providers
     from hermes_cli.models import _AGGREGATOR_PROVIDERS, _KNOWN_PROVIDER_NAMES, normalize_provider
     from hermes_cli.model_normalize import normalize_model_for_provider
     from hermes_cli.providers import resolve_custom_provider, resolve_user_provider

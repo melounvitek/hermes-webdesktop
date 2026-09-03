@@ -25,7 +25,6 @@ from agent.command_token_source import (
     _mint,
     build_command_token_provider,
 )
-from hermes_cli import runtime_provider_custom
 
 
 class TestMinting:
@@ -312,7 +311,7 @@ class TestAuxiliaryResolverHonoursKeyCmd:
         from hermes_cli import runtime_provider as rp
 
         monkeypatch.setattr(
-            runtime_provider_custom, "_get_named_custom_provider",
+            rp, "_get_named_custom_provider",
             lambda name: dict(entry, name="dbx") if name == "dbx" else None,
         )
         seen = {}

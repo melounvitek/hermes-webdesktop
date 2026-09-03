@@ -8,7 +8,6 @@ from tools.cronjob_tools import (
     check_cronjob_requirements,
     cronjob,
 )
-from hermes_cli import runtime_provider_custom
 
 
 # =========================================================================
@@ -323,9 +322,9 @@ class TestUnifiedCronjobTool:
     @staticmethod
     def _patch_named_legit(monkeypatch):
         import hermes_cli.runtime_provider as rp
-        monkeypatch.setattr(runtime_provider_custom, "has_named_custom_provider", lambda n: True)
+        monkeypatch.setattr(rp, "has_named_custom_provider", lambda n: True)
         monkeypatch.setattr(
-            runtime_provider_custom, "_get_named_custom_provider",
+            rp, "_get_named_custom_provider",
             lambda n: {"name": "legit", "base_url": "https://legit.example/v1",
                        "api_key": "sk-legit"},
         )
@@ -659,9 +658,9 @@ class TestValidateCronBaseUrl:
     @staticmethod
     def _patch_named_legit(monkeypatch):
         import hermes_cli.runtime_provider as rp
-        monkeypatch.setattr(runtime_provider_custom, "has_named_custom_provider", lambda n: True)
+        monkeypatch.setattr(rp, "has_named_custom_provider", lambda n: True)
         monkeypatch.setattr(
-            runtime_provider_custom, "_get_named_custom_provider",
+            rp, "_get_named_custom_provider",
             lambda n: {"name": "legit", "base_url": "https://legit.example/v1", "api_key": "sk-legit"},
         )
 

@@ -829,7 +829,7 @@ def _telegramize_command_mentions(text: str, platform: Any) -> str:
     if platform_value != "telegram":
         return text
 
-    from hermes_cli.commands_platforms import _sanitize_telegram_name
+    from hermes_cli.commands import _sanitize_telegram_name
 
     def _replace(match: re.Match[str]) -> str:
         sanitized = _sanitize_telegram_name(match.group(1))
@@ -2227,7 +2227,7 @@ def _resolve_gateway_model_context(model: Optional[str] = None) -> _GatewayModel
             configured_provider = provider = model_cfg.get("provider") or None
             configured_base_url = base_url = model_cfg.get("base_url") or None
         try:
-            from hermes_cli.config_providers import get_compatible_custom_providers
+            from hermes_cli.config import get_compatible_custom_providers
             custom_providers = get_compatible_custom_providers(data)
         except Exception:
             custom_providers = data.get("custom_providers")
@@ -2246,7 +2246,7 @@ def _resolve_gateway_model_context(model: Optional[str] = None) -> _GatewayModel
             configured_model, resolved_model, configured_base_url, base_url, configured_provider, provider)
 
     def _custom_ctx() -> Optional[int]:
-        from hermes_cli.config_providers import get_custom_provider_context_length
+        from hermes_cli.config import get_custom_provider_context_length
         return get_custom_provider_context_length(
             model=resolved_model, base_url=base_url, custom_providers=custom_providers)
 

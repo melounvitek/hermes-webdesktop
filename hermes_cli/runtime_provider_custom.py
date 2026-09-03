@@ -119,7 +119,7 @@ def _shadowed_by_builtin(requested_norm: str) -> bool:
 
 def _match_new_style_provider(requested_norm: str, providers: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Scan ``providers:`` (new-style, keyed) for ``requested_norm``."""
-    from hermes_cli.config_providers import is_provider_enabled
+    from hermes_cli.config import is_provider_enabled
     rp = _rp()
     for ep_name, entry in providers.items():
         # ``providers.<name>.enabled: false`` entries stay in config but are invisible here.
@@ -192,7 +192,7 @@ def has_named_custom_provider(requested_provider: str) -> bool:
     """True when config defines a ``providers:`` / ``custom_providers:`` entry matching the request
     (public wrapper so e.g. the cronjob tool need not reach into a private helper)."""
     try:
-        return _get_named_custom_provider(requested_provider) is not None
+        return _rp()._get_named_custom_provider(requested_provider) is not None
     except Exception:
         return False
 
@@ -291,7 +291,7 @@ def canonical_custom_identity(*, base_url: Optional[str] = None, config_provider
     # keyed ``providers:`` entry — re-resolve via its endpoint so every path returns the same
     # config-key slug.
     try:
-        entry = _get_named_custom_provider(candidate)
+        entry = rp._get_named_custom_provider(candidate)
     except Exception:
         return None
     if entry is None:
@@ -331,9 +331,8 @@ def _try_resolve_from_custom_pool(
 ) -> Optional[Dict[str, Any]]:
     """Runtime dict from the first credential pool that owns this custom endpoint, else None."""
     rp = _rp()
-    from agent.credential_pool import custom_provider_pool_key_candidates
     try:
-        raw_keys = list(custom_provider_pool_key_candidates(base_url, provider_name))
+        raw_keys = list(rp.custom_provider_pool_key_candidates(base_url, provider_name))
     except Exception:
         raw_keys = []
     # Order-preserving dedupe of normalized keys.
@@ -427,7 +426,7 @@ def _resolve_direct_alias_runtime(requested_provider: str, explicit_api_key: Opt
     base_url = explicit_base_url.strip().rstrip("/")
     # Pool first — mirrors the named-custom path so bare `provider: custom` with a configured
     # custom_providers entry gets its api_key from the pool instead of env fallbacks.
-    pool_result = _try_resolve_from_custom_pool(base_url, "custom", None)
+    pool_result = rp._try_resolve_from_custom_pool(base_url, "custom", None)
     if pool_result:
         pool_result["source"] = "direct-alias"
         return pool_result
@@ -476,13 +475,13 @@ def _resolve_named_custom_runtime(*, requested_provider: str, explicit_api_key: 
         requested_norm = "custom"
     if requested_norm == "custom" and explicit_base_url:
         return _resolve_direct_alias_runtime(requested_provider, explicit_api_key, explicit_base_url)
-    custom_provider = _get_named_custom_provider(requested_provider)
+    custom_provider = rp._get_named_custom_provider(requested_provider)
     if not custom_provider:
         return None
     base_url = ((explicit_base_url or "").strip() or custom_provider.get("base_url", "")).rstrip("/")
     if not base_url:
         return None
-    pool_result = _try_resolve_from_custom_pool(
+    pool_result = rp._try_resolve_from_custom_pool(
         base_url, "custom", custom_provider.get("api_mode"),
         provider_name=custom_provider.get("provider_key") or custom_provider.get("name"),
     )
