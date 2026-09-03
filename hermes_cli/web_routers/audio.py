@@ -119,8 +119,7 @@ async def transcribe_audio_upload(
     try:
         with http_failure("Desktop voice transcription failed", 500, "Transcription failed"):
             with tempfile.NamedTemporaryFile(
-                prefix="hermes-desktop-voice-",
-                suffix=_audio_extension_for_mime(mime_type),
+                prefix="hermes-desktop-voice-", suffix=_audio_extension_for_mime(mime_type),
                 delete=False,
             ) as tmp:
                 tmp.write(audio_bytes)
@@ -296,8 +295,7 @@ async def speak_text(payload: TTSSpeakRequest, profile: Optional[str] = None):
 
     if not result.get("success"):
         raise HTTPException(
-            status_code=400,
-            detail=result.get("error") or "Speech synthesis failed",
+            status_code=400, detail=result.get("error") or "Speech synthesis failed",
         )
 
     file_path = result.get("file_path")

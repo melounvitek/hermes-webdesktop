@@ -210,20 +210,15 @@ def _catalog_provider_env_metadata() -> dict:
             for aws_var in ("AWS_REGION", "AWS_PROFILE"):
                 existing = meta.get(aws_var, {})
                 meta[aws_var] = _provider_card(
-                    d,
-                    existing.get("description") or f"{d.label} ({aws_var})",
-                    existing.get("url"),
-                    is_password=False,
-                    advanced=existing.get("advanced", True),
+                    d, existing.get("description") or f"{d.label} ({aws_var})", existing.get("url"),
+                    is_password=False, advanced=existing.get("advanced", True),
                 )
         if d.auth_type == "vertex":
             existing = meta.get("VERTEX_CREDENTIALS_PATH", {})
             meta["VERTEX_CREDENTIALS_PATH"] = _provider_card(
                 d,
                 existing.get("description") or f"{d.label} — service account JSON path (or use ADC)",
-                existing.get("url"),
-                is_password=False,
-                advanced=existing.get("advanced", True),
+                existing.get("url"), is_password=False, advanced=existing.get("advanced", True),
             )
     return meta
 

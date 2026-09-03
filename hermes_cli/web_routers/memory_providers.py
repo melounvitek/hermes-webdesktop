@@ -294,13 +294,8 @@ def _write_provider_honcho(provider: ProviderConfigSchema, values: Dict[str, str
 
 
 def _command_result(
-    *,
-    kind: str,
-    name: str,
-    status: str,
-    command: str = "",
-    completed: Optional[subprocess.CompletedProcess] = None,
-    error: Optional[str] = None,
+    *, kind: str, name: str, status: str, command: str = "",
+    completed: Optional[subprocess.CompletedProcess] = None, error: Optional[str] = None,
 ) -> Dict[str, Any]:
     return {
         "kind": kind,
@@ -428,9 +423,7 @@ def _install_memory_provider_pip_dependencies(dependencies: List[str]) -> List[D
             status="installed" if outcome.ok else "failed",
             command=outcome.command,
             completed=subprocess.CompletedProcess(
-                args=outcome.command,
-                returncode=0 if outcome.ok else 1,
-                stdout=outcome.stdout,
+                args=outcome.command, returncode=0 if outcome.ok else 1, stdout=outcome.stdout,
                 stderr=outcome.stderr,
             ),
         )
@@ -472,11 +465,9 @@ def _install_memory_provider_external_dependencies(
 
             results.append(
                 _command_result(
-                    kind="external_install",
-                    name=name,
+                    kind="external_install", name=name,
                     status="installed" if install.returncode == 0 else "failed",
-                    command=install_cmd,
-                    completed=install,
+                    command=install_cmd, completed=install,
                 )
             )
 
@@ -605,9 +596,7 @@ def _save_memory_provider_native_config(name: str, provider: Any, values: Dict[s
 
 
 def _write_memory_provider_config_values(
-    name: str,
-    provider: Any,
-    values: Dict[str, Any],
+    name: str, provider: Any, values: Dict[str, Any],
 ) -> None:
     existing = _read_memory_provider_existing_values(name)
     fields = _normalize_memory_provider_schema(name, provider)

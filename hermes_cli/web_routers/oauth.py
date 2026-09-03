@@ -84,9 +84,7 @@ def _codex_device_code_start_error(resp: Any) -> str:
 
 
 def _new_oauth_session(
-    provider_id: str,
-    flow: str,
-    profile: Optional[str] = None,
+    provider_id: str, flow: str, profile: Optional[str] = None,
 ) -> tuple[str, Dict[str, Any]]:
     """Create + register a new OAuth session, return (session_id, session_dict)."""
     sid = secrets.token_urlsafe(16)
@@ -368,12 +366,9 @@ async def _start_nous_device_code(profile: Optional[str]) -> Dict[str, Any]:
     device_data, effective_scope = await asyncio.get_running_loop().run_in_executor(None, _do_nous_device_request)
     sid, sess = _new_oauth_session("nous", "device_code", profile=profile)
     sess.update(
-        device_code=str(device_data["device_code"]),
-        interval=int(device_data["interval"]),
-        expires_at=time.time() + int(device_data["expires_in"]),
-        portal_base_url=portal_base_url,
-        client_id=client_id,
-        scope=effective_scope,
+        device_code=str(device_data["device_code"]), interval=int(device_data["interval"]),
+        expires_at=time.time() + int(device_data["expires_in"]), portal_base_url=portal_base_url,
+        client_id=client_id, scope=effective_scope,
     )
     _start_poller(_nous_poller, sid)
     return {
@@ -440,12 +435,8 @@ async def _start_minimax_device_code(profile: Optional[str]) -> Dict[str, Any]:
     interval_raw = device_data.get("interval")
     sess.update(
         interval_ms=int(interval_raw) if interval_raw is not None else None,
-        user_code=str(device_data["user_code"]),
-        code_verifier=verifier,
-        state=state,
-        portal_base_url=portal_base_url,
-        client_id=MINIMAX_OAUTH_CLIENT_ID,
-        region="global",
+        user_code=str(device_data["user_code"]), code_verifier=verifier, state=state,
+        portal_base_url=portal_base_url, client_id=MINIMAX_OAUTH_CLIENT_ID, region="global",
     )
     # `expired_in` is overloaded — a unix-ms timestamp OR seconds-from-now.
     # Mirror the heuristic in _minimax_poll_token; keep the raw value for the
@@ -481,8 +472,7 @@ async def _start_xai_device_code(profile: Optional[str]) -> Dict[str, Any]:
     device_data = await asyncio.get_running_loop().run_in_executor(None, _do_xai_device_request)
     sid, sess = _new_oauth_session("xai-oauth", "device_code", profile=profile)
     sess.update(
-        device_code=str(device_data["device_code"]),
-        interval=int(device_data["interval"]),
+        device_code=str(device_data["device_code"]), interval=int(device_data["interval"]),
         expires_at=time.time() + int(device_data["expires_in"]),
     )
     _start_poller(_xai_device_poller, sid)
@@ -505,8 +495,7 @@ _DEVICE_CODE_STARTERS = {
 
 
 async def _start_device_code_flow(
-    provider_id: str,
-    profile: Optional[str] = None,
+    provider_id: str, profile: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Initiate a device-code flow (Nous, OpenAI Codex, MiniMax, or xAI).
 
@@ -640,9 +629,7 @@ def _reject_if_not_disconnectable(provider: Dict[str, Any], status: Dict[str, An
 
 @router.delete("/api/providers/oauth/{provider_id}")
 async def disconnect_oauth_provider(
-    provider_id: str,
-    request: Request,
-    profile: Optional[str] = None,
+    provider_id: str, request: Request, profile: Optional[str] = None,
 ):
     """Disconnect an OAuth provider. Token-protected (matches /env/reveal)."""
     _require_token(request)
@@ -732,9 +719,7 @@ def _validate_oauth_profile(profile: Optional[str]) -> None:
 
 @router.post("/api/providers/oauth/{provider_id}/start")
 async def start_oauth_login(
-    provider_id: str,
-    request: Request,
-    profile: Optional[str] = None,
+    provider_id: str, request: Request, profile: Optional[str] = None,
 ):
     """Initiate an OAuth login flow. Token-protected."""
     _require_token(request)
@@ -761,10 +746,7 @@ async def start_oauth_login(
 
 @router.post("/api/providers/oauth/{provider_id}/submit")
 async def submit_oauth_code(
-    provider_id: str,
-    body: OAuthSubmitBody,
-    request: Request,
-    profile: Optional[str] = None,
+    provider_id: str, body: OAuthSubmitBody, request: Request, profile: Optional[str] = None,
 ):
     """Submit the auth code for PKCE flows. Token-protected."""
     _require_token(request)
@@ -773,9 +755,7 @@ async def submit_oauth_code(
 
 @router.get("/api/providers/oauth/{provider_id}/poll/{session_id}")
 async def poll_oauth_session(
-    provider_id: str,
-    session_id: str,
-    profile: Optional[str] = None,
+    provider_id: str, session_id: str, profile: Optional[str] = None,
 ):
     """Poll a session's status (no auth — read-only state). One endpoint serves
     every device-code flow: all report progress via the worker-updated ``status``."""
@@ -799,9 +779,7 @@ async def poll_oauth_session(
 
 @router.delete("/api/providers/oauth/sessions/{session_id}")
 async def cancel_oauth_session(
-    session_id: str,
-    request: Request,
-    profile: Optional[str] = None,
+    session_id: str, request: Request, profile: Optional[str] = None,
 ):
     """Cancel a pending OAuth session. Token-protected.
 

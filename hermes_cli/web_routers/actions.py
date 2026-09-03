@@ -184,9 +184,7 @@ async def gateway_drain(request: Request):
     force-override is ``POST /api/gateway/restart``, which supersedes a drain.
     """
     from gateway.drain_control import (
-        clear_drain_request,
-        drain_requested,
-        write_drain_request,
+        clear_drain_request, drain_requested, write_drain_request,
     )
 
     try:
@@ -263,8 +261,7 @@ async def update_hermes():
     # Shared admission gate: marker-first, then the docker/nix/apt heuristics —
     # one decision with the CLI paths.
     from hermes_cli.update_contract import (
-        evaluate_update_admission,
-        record_refusal_receipt,
+        evaluate_update_admission, record_refusal_receipt,
     )
 
     refusal = evaluate_update_admission(_project_root())
@@ -552,7 +549,6 @@ async def get_update_receipt():
     receipt = _read_latest_receipt()
     if not receipt:
         raise HTTPException(
-            status_code=404,
-            detail="No update receipt found (no `hermes update` run recorded).",
+            status_code=404, detail="No update receipt found (no `hermes update` run recorded).",
         )
     return {"receipt": receipt, "summary": _latest_update_receipt_summary()}
