@@ -1,18 +1,12 @@
-"""
-Cross-platform Computer Use readiness + macOS permission helpers.
+"""Cross-platform Computer Use readiness + macOS permission helpers.
 
-"Ready to drive" differs per platform:
-  * macOS — explicit TCC grants (Accessibility + Screen Recording), reported /
-    requested via cua-driver ``permissions status`` / ``permissions grant``. The
-    grants attach to cua-driver's OWN identity (``com.trycua.driver``), not
-    Hermes, so ``grant`` launches CuaDriver via LaunchServices for correct
-    dialog attribution.
-  * Windows / Linux — no TCC toggles; readiness == driver health.
-
-``cua-driver doctor --json`` is the universal signal; ``computer_use_status``
-folds it with the macOS permission detail into one payload for the desktop
-card, the ``hermes computer-use permissions`` CLI, and
-``/api/tools/computer-use/status``.
+"Ready to drive" differs per platform: macOS needs explicit TCC grants (Accessibility +
+Screen Recording) via cua-driver ``permissions status`` / ``permissions grant``;
+Windows/Linux have no TCC toggles, so readiness == driver health. The grants attach to
+cua-driver's OWN identity (``com.trycua.driver``), not Hermes, so ``grant`` launches
+CuaDriver via LaunchServices for correct dialog attribution. ``cua-driver doctor --json``
+is the universal signal; ``computer_use_status`` folds it with the macOS detail into one
+payload for the desktop card, the ``permissions`` CLI and ``/api/tools/computer-use/status``.
 """
 
 from __future__ import annotations
@@ -21,7 +15,7 @@ import json
 import os
 import subprocess
 import sys
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 from hermes_cli._subprocess_compat import windows_hide_flags
 
@@ -29,58 +23,41 @@ from hermes_cli._subprocess_compat import windows_hide_flags
 _RUNTIME_PLATFORMS = frozenset({"darwin", "win32", "linux"})
 _BOOLS = ("accessibility", "screen_recording", "screen_recording_capturable")
 
-
 def _resolve_driver_cmd(override: Optional[str]) -> Optional[str]:
     """Use the runtime resolver for UI status and permission commands too."""
     from tools.computer_use.cua_backend import resolve_cua_driver_cmd
-
     return resolve_cua_driver_cmd(override)
-
 
 def _child_env() -> Dict[str, str]:
     """cua-driver child env (telemetry policy + provider secrets stripped);
     degrades to ``os.environ`` on import error so probes never break."""
     try:
         from tools.computer_use.cua_backend import sanitized_cua_driver_env
-
         return sanitized_cua_driver_env()
     except Exception:
         return dict(os.environ)
 
-
 def _run(binary: str, *args: str, timeout: float) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        [binary, *args],
-        capture_output=True,
-        text=True, encoding='utf-8', errors='replace',
-        timeout=timeout,
-        env=_child_env(),
-        stdin=subprocess.DEVNULL,
-        creationflags=windows_hide_flags(),
-    )
-
+    return subprocess.run([binary, *args], capture_output=True, text=True, encoding='utf-8',
+                          errors='replace', timeout=timeout, env=_child_env(),
+                          stdin=subprocess.DEVNULL, creationflags=windows_hide_flags())
 
 def _json_out(binary: str, *args: str, timeout: float) -> Any:
     """Run ``binary args`` and parse stdout as JSON (``None`` on empty output)."""
     raw = (_run(binary, *args, timeout=timeout).stdout or "").strip()
     return json.loads(raw) if raw else None
 
-
 def _doctor(binary: str) -> Optional[Dict[str, Any]]:
     """``cua-driver doctor --json`` → ``{ok, checks:[{label,status,message}]}``."""
     try:
         data = _json_out(binary, "doctor", "--json", timeout=12)
     except Exception:
-        return None
+        data = None
     if not isinstance(data, dict):
         return None
-    checks: List[Dict[str, str]] = [
-        {k: str(p.get(k, "")) for k in ("label", "status", "message")}
-        for p in data.get("probes", [])
-        if isinstance(p, dict)
-    ]
+    checks = [{k: str(p.get(k, "")) for k in ("label", "status", "message")}
+              for p in data.get("probes", []) if isinstance(p, dict)]
     return {"ok": bool(data.get("ok")), "checks": checks}
-
 
 def _mac_permissions(binary: str, out: Dict[str, Any]) -> None:
     """Fold ``cua-driver permissions status --json`` booleans into ``out``."""
@@ -96,7 +73,6 @@ def _mac_permissions(binary: str, out: Dict[str, Any]) -> None:
         out.update({k: data[k] for k in _BOOLS if isinstance(data.get(k), bool)})
         if isinstance(data.get("source"), dict):
             out["source"] = data["source"]
-
 
 def computer_use_status(driver_cmd: Optional[str] = None) -> Dict[str, Any]:
     """Unified, OS-aware Computer Use readiness for the desktop card.
@@ -115,16 +91,13 @@ def computer_use_status(driver_cmd: Optional[str] = None) -> Dict[str, Any]:
     }
     if not binary:
         return out
-
     try:
         out["version"] = (_run(binary, "--version", timeout=5).stdout or "").strip() or None
     except Exception:
         pass
-
     doctor = _doctor(binary)
     if doctor is not None:
         out["checks"] = doctor["checks"]
-
     if plat == "darwin":
         _mac_permissions(binary, out)
         if out["error"] is None:
@@ -132,7 +105,6 @@ def computer_use_status(driver_cmd: Optional[str] = None) -> Dict[str, Any]:
     elif doctor is not None:
         out["ready"] = doctor["ok"]  # no TCC model off macOS
     return out
-
 
 def request_permissions_grant(driver_cmd: Optional[str] = None) -> int:
     """Run ``cua-driver permissions grant`` (macOS); stream its output.
@@ -143,17 +115,13 @@ def request_permissions_grant(driver_cmd: Optional[str] = None) -> int:
     if sys.platform != "darwin":
         print("Computer Use permissions are a macOS concept; nothing to grant here.")
         return 64
-
     binary = _resolve_driver_cmd(driver_cmd)
     if not binary:
         print("cua-driver: not installed. Run: hermes computer-use install")
         return 2
-
-    print(
-        "Requesting Accessibility + Screen Recording for CuaDriver.\n"
-        "macOS will show a dialog attributed to CuaDriver (com.trycua.driver) — "
-        "approve it, then return here."
-    )
+    print("Requesting Accessibility + Screen Recording for CuaDriver.\n"
+          "macOS will show a dialog attributed to CuaDriver (com.trycua.driver) — "
+          "approve it, then return here.")
     try:
         return int(subprocess.run([binary, "permissions", "grant"], env=_child_env(),
                                   stdin=subprocess.DEVNULL).returncode)
