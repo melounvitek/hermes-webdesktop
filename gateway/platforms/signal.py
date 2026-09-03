@@ -28,9 +28,8 @@ import httpx
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.base import (
-    BasePlatformAdapter, MessageEvent, MessageType, ProcessingOutcome, SendResult,
-    cache_image_from_bytes, cache_audio_from_bytes, cache_document_from_bytes, cache_image_from_url,
-    utf16_len)
+    BasePlatformAdapter, MessageEvent, MessageType, ProcessingOutcome, SendResult, cache_image_from_bytes,
+    cache_audio_from_bytes, cache_document_from_bytes, cache_image_from_url, utf16_len)
 from gateway.platforms.helpers import redact_phone
 from gateway.platforms.media_cache import mime_for_ext
 from tools.audio_container import CONTAINER_TO_EXT, sniff_container
@@ -66,10 +65,8 @@ def _parse_comma_list(value: str) -> List[str]:
 
 
 def _guess_extension(data: bytes) -> str:
-    """Guess file extension from magic bytes.
-
-    WEBP is claimed before the shared audio/AV sniffer (it shares RIFF with WAVE);
-    tools/audio_container.py owns the MP3-vs-ADTS-AAC sync-word disambiguation."""
+    """Guess file extension from magic bytes. WEBP is claimed before the shared audio/AV sniffer
+    (it shares RIFF with WAVE); tools/audio_container.py owns MP3-vs-ADTS-AAC disambiguation."""
     for magic, ext in _MAGIC_EXTENSIONS:
         if data.startswith(magic):
             return ext
@@ -96,9 +93,7 @@ def _ext_to_mime(ext: str) -> str:
 
 def _remux_aac_to_m4a(aac_data: bytes) -> Optional[Tuple[bytes, str]]:
     """Losslessly remux raw ADTS AAC (Android voice notes, rejected by most STT APIs) to .m4a.
-
-    Returns ``(m4a_bytes, ".m4a")`` or ``None`` when ffmpeg is missing or fails —
-    callers must then pass the input through unchanged."""
+    Returns ``(m4a_bytes, ".m4a")``, or ``None`` when ffmpeg is missing/fails (caller keeps the input)."""
     # Fall back to common Homebrew/local prefixes on macOS dev hosts.
     ffmpeg = shutil.which("ffmpeg") or next(
         (p for p in ("/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg")
@@ -135,8 +130,7 @@ def _remux_aac_to_m4a(aac_data: bytes) -> Optional[Tuple[bytes, str]]:
 
 
 def _render_mentions(text: str, mentions: list) -> str:
-    """Replace Signal mention placeholders (\\uFFFC + out-of-band start/length/number
-    metadata) with readable @identifiers. Replace from the end so indices hold."""
+    """Replace \\uFFFC mention placeholders with readable @identifiers (from the end so indices hold)."""
     if not mentions or "\uFFFC" not in text:
         return text
     for mention in sorted(mentions, key=lambda m: m.get("start", 0), reverse=True):
@@ -186,8 +180,7 @@ class SignalAdapter(BasePlatformAdapter):
     platform = Platform.SIGNAL
     MAX_MESSAGE_LENGTH = MAX_MESSAGE_LENGTH
     splits_long_messages = True  # send() chunks after markdown → Signal formatting conversion
-    # Signal has no real edit API; declaring it lets streaming suppress the visible
-    # cursor instead of leaving a stale tofu square behind when edits fail.
+    # No real edit API; declaring it lets streaming suppress the cursor instead of a stale tofu square.
     SUPPORTS_MESSAGE_EDITING = False
 
     def __init__(self, config: PlatformConfig):
@@ -203,15 +196,14 @@ class SignalAdapter(BasePlatformAdapter):
         self.require_mention = (
             bool(_rm_cfg) if _rm_cfg is not None
             else os.getenv("SIGNAL_REQUIRE_MENTION", "false").lower() in _TRUTHY)
-        # DM allowlist mirrors run.py's SIGNAL_ALLOWED_USERS check so the reaction hooks
-        # (which fire before run.py's auth gate) can skip unauthorized senders. "*" = open.
+        # DM allowlist mirrors run.py's SIGNAL_ALLOWED_USERS so reaction hooks (which fire
+        # before run.py's auth gate) can skip unauthorized senders. "*" = open.
         self.dm_allow_from = set(_parse_comma_list(_sig_secret("SIGNAL_ALLOWED_USERS", "*")))
         self.client: Optional[httpx.AsyncClient] = None
         self._sse_task: Optional[asyncio.Task] = None
         self._health_monitor_task: Optional[asyncio.Task] = None
         self._typing_tasks: Dict[str, asyncio.Task] = {}
-        # Per-chat typing-indicator backoff: when signal-cli reports NETWORK_FAILURE,
-        # base.py's _keep_typing loop would otherwise hammer sendTyping every ~2s.
+        # Per-chat typing backoff: on NETWORK_FAILURE base.py's _keep_typing would hammer sendTyping every ~2s.
         self._typing_failures: Dict[str, int] = {}
         self._typing_skip_until: Dict[str, float] = {}
         self._running = False
@@ -227,8 +219,7 @@ class SignalAdapter(BasePlatformAdapter):
         # timestamp, so replies to this bot are recognised after the echo was consumed.
         self._sent_message_timestamps: "OrderedDict[str, None]" = OrderedDict()
         self._max_sent_message_timestamps = 500
-        # Best-effort number↔ACI/PNI UUID mapping so outbound sends can upgrade a
-        # phone number to the UUID signal-cli prefers.
+        # Best-effort number↔ACI/PNI UUID mapping so sends can upgrade a number to the UUID signal-cli prefers.
         self._recipient_uuid_by_number: Dict[str, str] = {}
         self._recipient_number_by_uuid: Dict[str, str] = {}
         self._recipient_cache_lock = asyncio.Lock()
@@ -299,8 +290,7 @@ class SignalAdapter(BasePlatformAdapter):
         logger.info("Signal: disconnected")
 
     async def _handle_sse_line(self, line: str) -> None:
-        """Dispatch one SSE line. Keepalive comments (":") prove the connection is alive —
-        they count as activity so the health monitor stays quiet."""
+        """Dispatch one SSE line; keepalive comments (":") count as activity so the health monitor stays quiet."""
         if line.startswith(":"):
             self._last_sse_activity = time.time()
         elif line.startswith("data:"):
@@ -385,8 +375,8 @@ class SignalAdapter(BasePlatformAdapter):
             self._sse_response = None
 
     def _unwrap_sync_message(self, envelope_data: dict) -> Optional[dict]:
-        """Promote a genuine "Note to Self" / group sync-sent to a dataMessage envelope;
-        None for other sync events (read receipts, typing, our own outbound echoes)."""
+        """Promote a "Note to Self" / group sync-sent to a dataMessage envelope; None for other
+        sync events (read receipts, typing, our own outbound echoes)."""
         sync_msg = envelope_data.get("syncMessage")
         sent_msg = sync_msg.get("sentMessage") if isinstance(sync_msg, dict) else None
         if not sent_msg or not isinstance(sent_msg, dict):
@@ -400,10 +390,8 @@ class SignalAdapter(BasePlatformAdapter):
         return {**envelope_data, "dataMessage": sent_msg}
 
     def _apply_group_mention_rules(self, text: str, data_message: dict) -> Tuple[bool, str]:
-        """Gate on require_mention (False = drop) and strip the bot's own @mention.
-
-        The self-mention is stripped from every group message so the agent doesn't
-        read "@+155****4567 say hello" as a directive to contact that number."""
+        """Gate on require_mention (False = drop) and strip the bot's own @mention from every group
+        message, so the agent doesn't read "@+155****4567 say hello" as a directive to contact that number."""
         account_norm = self._account_normalized
         if self.require_mention:
             mentioned_in_text = account_norm and (f"@{account_norm}" in (text or ""))
@@ -418,8 +406,7 @@ class SignalAdapter(BasePlatformAdapter):
             bot_uuid = self._recipient_uuid_by_number.get(account_norm)
             if bot_uuid:
                 text = text.replace(f"@{bot_uuid}", "")
-            # Collapse only the doubled space the removal introduced; intentional
-            # newlines in multi-line messages are preserved.
+            # Collapse only the doubled space the removal introduced; newlines are preserved.
             text = text.replace("  ", " ").strip()
         return True, text
 
@@ -474,15 +461,8 @@ class SignalAdapter(BasePlatformAdapter):
         group_info = data_message.get("groupInfo")
         group_id = group_info.get("groupId") if group_info else None
         is_group = bool(group_id)
-        # Group policy derives from SIGNAL_GROUP_ALLOWED_USERS: unset → groups disabled;
-        # IDs → only those groups; "*" → all. DM auth is run.py's (_is_user_authorized).
-        if is_group:
-            if not self.group_allow_from:
-                logger.debug("Signal: ignoring group message (no SIGNAL_GROUP_ALLOWED_USERS)")
-                return
-            if "*" not in self.group_allow_from and group_id not in self.group_allow_from:
-                logger.debug("Signal: group %s not in allowlist", group_id[:8] if group_id else "?")
-                return
+        if is_group and not self._group_allowed(group_id):
+            return
         chat_id = f"group:{group_id}" if is_group else sender
         text = data_message.get("message", "")
         mentions = data_message.get("mentions", [])
@@ -498,8 +478,7 @@ class SignalAdapter(BasePlatformAdapter):
         reply_to_id = str(quote_data.get("id")) if quote_data.get("id") else None
         reply_to_author = self._extract_quote_author(quote_data)
         attachments_data = data_message.get("attachments", [])
-        media_urls: List[str] = []
-        media_types: List[str] = []
+        media_urls, media_types = [], []
         if attachments_data and not getattr(self, "ignore_attachments", False):
             media_urls, media_types = await self._collect_attachments(attachments_data)
         # Skip contentless envelopes (profile key updates, empty messages) that still
@@ -516,11 +495,9 @@ class SignalAdapter(BasePlatformAdapter):
         )
         # First matching MIME prefix wins; everything else (application/*, text/*, unknown)
         # is a DOCUMENT so run.py's document-context injection surfaces the cached path.
-        msg_type = MessageType.TEXT
-        if media_types:
-            msg_type = next(
-                (mt for prefix, mt in _MEDIA_TYPE_BY_MIME_PREFIX if any(m.startswith(prefix) for m in media_types)),
-                MessageType.DOCUMENT)
+        msg_type = MessageType.TEXT if not media_types else next(
+            (mt for prefix, mt in _MEDIA_TYPE_BY_MIME_PREFIX if any(m.startswith(prefix) for m in media_types)),
+            MessageType.DOCUMENT)
         ts_ms = envelope_data.get("timestamp", 0)  # milliseconds since epoch
         timestamp = datetime.now(tz=timezone.utc)
         if ts_ms:
@@ -538,6 +515,17 @@ class SignalAdapter(BasePlatformAdapter):
         )
         logger.debug("Signal: message from %s in %s: %s", redact_phone(sender), chat_id[:20], (text or "")[:50])
         await self.handle_message(event)
+
+    def _group_allowed(self, group_id: str) -> bool:
+        """Group policy from SIGNAL_GROUP_ALLOWED_USERS: unset → groups disabled; IDs → only those
+        groups; "*" → all. DM auth is run.py's (_is_user_authorized)."""
+        if not self.group_allow_from:
+            logger.debug("Signal: ignoring group message (no SIGNAL_GROUP_ALLOWED_USERS)")
+            return False
+        if "*" not in self.group_allow_from and group_id not in self.group_allow_from:
+            logger.debug("Signal: group %s not in allowlist", group_id[:8] if group_id else "?")
+            return False
+        return True
 
     def _remember_recipient_identifiers(self, number: Optional[str], service_id: Optional[str]) -> None:
         """Cache any number↔UUID mapping observed from Signal envelopes."""
@@ -644,11 +632,9 @@ class SignalAdapter(BasePlatformAdapter):
     async def _rpc(
         self, method: str, params: dict, rpc_id: str = None, *,
         log_failures: bool = True, raise_on_rate_limit: bool = False, timeout: float = 30.0) -> Any:
-        """Send a JSON-RPC 2.0 request to signal-cli daemon.
-
-        ``log_failures=False`` logs failures at DEBUG (typing path: silence repeated
-        NETWORK_FAILURE spam). ``raise_on_rate_limit=True`` raises ``SignalRateLimitError``
-        on a 429 / RateLimitException instead of swallowing it (multi-attachment sends)."""
+        """Send a JSON-RPC 2.0 request to signal-cli. ``log_failures=False`` logs failures at DEBUG
+        (typing path: silence NETWORK_FAILURE spam); ``raise_on_rate_limit=True`` raises
+        ``SignalRateLimitError`` on a 429 / RateLimitException instead of swallowing it."""
         if not self.client:
             logger.warning("Signal: RPC called but client not connected")
             return None
@@ -730,10 +716,8 @@ class SignalAdapter(BasePlatformAdapter):
     def _split_signal_formatted_message(
         cls, plain_text: str, text_styles: list[str], max_length: int,
     ) -> list[tuple[str, list[str]]]:
-        """Split converted Signal text into chunks, translating body ranges per chunk.
-
-        Splitting after conversion (not before) keeps styles that cross a chunk boundary
-        intact instead of leaking literal Markdown markers."""
+        """Split converted Signal text into chunks, translating body ranges per chunk. Splitting after
+        conversion keeps styles that cross a chunk boundary intact instead of leaking Markdown markers."""
         if utf16_len(plain_text) <= max_length:
             return [(plain_text, text_styles)]
         indicator_reserve = 10  # Mirrors BasePlatformAdapter.truncate_message().
@@ -788,8 +772,7 @@ class SignalAdapter(BasePlatformAdapter):
             last_result, err = await self._rpc_send(params, "RPC send failed")
             if err:
                 return err
-        # Signal has no editable message identifier; message_id=None keeps the stream
-        # consumer on the non-edit fallback path.
+        # No editable message identifier; message_id=None keeps the stream consumer on the non-edit path.
         return SendResult(success=True, message_id=None, raw_response=last_result)
 
     def _track_sent_timestamp(self, rpc_result) -> None:
@@ -820,10 +803,8 @@ class SignalAdapter(BasePlatformAdapter):
         return False
 
     async def send_typing(self, chat_id: str, metadata=None) -> None:
-        """Send a typing indicator (called every ~2s by base.py's ``_keep_typing``).
-
-        On NETWORK_FAILURE only the first consecutive failure logs at WARNING, and after
-        three failures the RPC is skipped for an exponential cooldown; success resets."""
+        """Typing indicator (called every ~2s by base.py's ``_keep_typing``). Only the first consecutive
+        failure logs at WARNING; after three, the RPC is skipped for an exponential cooldown; success resets."""
         now = time.monotonic()
         if now < self._typing_skip_until.get(chat_id, 0.0):
             return
@@ -841,8 +822,7 @@ class SignalAdapter(BasePlatformAdapter):
             self._typing_skip_until.pop(chat_id, None)
 
     async def _resolve_image_path(self, image_url: str) -> Tuple[Optional[str], Optional[str], Any]:
-        """Resolve an http(s):// or file:// image URL to ``(path, None, None)``, or
-        ``(None, reason, detail)`` with reason download (exc) / missing / oversize (size)."""
+        """``(path, None, None)`` or ``(None, reason, detail)``: reason download (exc) / missing / oversize (size)."""
         if image_url.startswith("file://"):
             file_path = unquote(image_url[7:])
         else:
@@ -860,10 +840,8 @@ class SignalAdapter(BasePlatformAdapter):
     async def send_multiple_images(
         self, chat_id: str, images: List[Tuple[str, str]], metadata: Optional[Dict[str, Any]] = None,
         human_delay: float = 0.0) -> None:
-        """Send a batch of images via chunked Signal RPC calls.
-
-        Alt texts are dropped (one shared body per send). Bad images are skipped with a
-        warning. ``human_delay`` is ignored: the rate-limit scheduler paces batches."""
+        """Send a batch of images via chunked Signal RPC calls. Alt texts are dropped (one shared body
+        per send); bad images are skipped with a warning; ``human_delay`` is ignored (scheduler paces)."""
         if not images:
             return
         scheduler = get_scheduler()
@@ -904,10 +882,8 @@ class SignalAdapter(BasePlatformAdapter):
                 scheduler, dict(base_params, attachments=att_batch), n, f"{idx}/{n_batches}")
 
     async def _send_attachment_batch(self, scheduler, params: Dict[str, Any], n: int, label: str) -> None:
-        """Send one attachment batch with rate-limit pacing and a single transient retry.
-
-        Tokens are deducted only on validated success (a None result means the server
-        never accepted the batch); 429s feed the scheduler before the retry."""
+        """Send one attachment batch with rate-limit pacing and a single transient retry. Tokens are
+        deducted only on validated success (None = server never accepted it); 429s feed the scheduler."""
         send_timeout = _signal_send_timeout(n)
         max_attempts = SIGNAL_RATE_LIMIT_MAX_ATTEMPTS
         for attempt in range(1, max_attempts + 1):
@@ -1046,8 +1022,8 @@ class SignalAdapter(BasePlatformAdapter):
         return None
 
     def _reactions_enabled(self, event: "MessageEvent" = None) -> bool:
-        """SIGNAL_REACTIONS env gate, then the DM allowlist: reactions fire before run.py's
-        auth gate, so an unauthorized contact's 👀 would otherwise reveal a listening bot."""
+        """SIGNAL_REACTIONS env gate, then the DM allowlist: reactions fire before run.py's auth gate,
+        so an unauthorized contact's 👀 would otherwise reveal a listening bot."""
         if os.getenv("SIGNAL_REACTIONS", "true").lower() in {"false", "0", "no"}:
             return False
         if event is not None:
