@@ -1,13 +1,11 @@
 #!/usr/bin/env python3
-"""Interact with the in-app browser / preview pane in the Hermes desktop GUI.
+"""Interact with the in-app browser / preview pane in the Hermes desktop GUI (click, type, scroll).
 
-``open_preview`` shows a page, ``read_preview`` reads it; this is the third leg — clicking,
-typing, scrolling, history. Elements are addressed by legible refs from ``action="elements"``
-(``btn-sign-in``); a ref survives re-renders and only a navigation retires it, so the renderer
-answers with a *delta* (appeared/went/changed/rebound) instead of re-sending the inventory.
-Round-trips through the gateway's blocking-prompt bridge (``preview.act.request`` /
-``preview.act.respond``); this module is schema + a thin dispatcher over the platform-injected
-callback. Lives in the ``desktop_ui`` toolset (GUI gateway, desktop-sourced sessions only).
+Elements are addressed by legible refs from ``action="elements"`` (``btn-sign-in``); a ref survives
+re-renders and only a navigation retires it, so the renderer answers with a *delta* instead of
+re-sending the inventory. Round-trips through the gateway's blocking-prompt bridge
+(``preview.act.request`` / ``preview.act.respond``); this module is schema + a thin dispatcher over
+the platform-injected callback. ``desktop_ui`` toolset: desktop-sourced sessions only.
 """
 
 from typing import Callable, Optional
@@ -24,16 +22,9 @@ NEEDS_TARGET = ("click", "hover", "type", "press")
 
 
 def drive_preview_tool(
-    action: str = "",
-    ref: Optional[str] = None,
-    selector: Optional[str] = None,
-    text: Optional[str] = None,
-    key: Optional[str] = None,
-    submit: Optional[bool] = None,
-    amount: Optional[int] = None,
-    to: Optional[str] = None,
-    limit: Optional[int] = None,
-    full: Optional[bool] = None,
+    action: str = "", ref: Optional[str] = None, selector: Optional[str] = None, text: Optional[str] = None,
+    key: Optional[str] = None, submit: Optional[bool] = None, amount: Optional[int] = None,
+    to: Optional[str] = None, limit: Optional[int] = None, full: Optional[bool] = None,
     callback: Optional[Callable] = None) -> str:
     """Dispatch one interaction to the desktop renderer and return its outcome."""
     if callback is None:

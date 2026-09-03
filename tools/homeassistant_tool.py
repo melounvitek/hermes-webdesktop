@@ -58,7 +58,6 @@ def _get_headers(token: str = "") -> Dict[str, str]:
 async def _api_json(method: str, path: str, timeout: float, payload: Any = None) -> Any:
     """One HA REST call (GET or POST JSON) that raises on HTTP errors and returns the JSON body."""
     import aiohttp
-
     hass_url, hass_token = _get_config()
     kwargs: Dict[str, Any] = {"headers": _get_headers(hass_token), "timeout": aiohttp.ClientTimeout(total=timeout)}
     if method == "POST":
@@ -70,8 +69,7 @@ async def _api_json(method: str, path: str, timeout: float, payload: Any = None)
 
 
 # ── async helpers (called from sync handlers via _run_async) ─────────────────
-
-def _filter_and_summarize(states: list, domain: Optional[str] = None, area: Optional[str] = None) -> Dict[str, Any]:
+def _filter_and_summarize(states: list, domain: Optional[str] = None, area: Optional[str] = None) -> Dict:
     """Filter raw HA states by domain/area (area matches friendly_name or area attr) and compact them."""
     if domain:
         states = [s for s in states if s.get("entity_id", "").startswith(f"{domain}.")]
@@ -96,14 +94,11 @@ async def _async_list_entities(domain: Optional[str] = None, area: Optional[str]
 async def _async_get_state(entity_id: str) -> Dict[str, Any]:
     data = await _api_json("GET", f"/api/states/{entity_id}", 10)
     return {
-        "entity_id": data["entity_id"],
-        "state": data["state"],
-        "attributes": data.get("attributes", {}),
-        "last_changed": data.get("last_changed"),
-        "last_updated": data.get("last_updated")}
+        "entity_id": data["entity_id"], "state": data["state"], "attributes": data.get("attributes", {}),
+        "last_changed": data.get("last_changed"), "last_updated": data.get("last_updated")}
 
 
-def _build_service_payload(entity_id: Optional[str] = None, data: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
+def _build_service_payload(entity_id: Optional[str] = None, data: Optional[Dict[str, Any]] = None) -> Dict:
     """JSON payload for a HA service call; ``entity_id`` overrides data["entity_id"]."""
     payload: Dict[str, Any] = dict(data or {})
     if entity_id:
@@ -138,21 +133,21 @@ async def _async_list_services(domain: Optional[str] = None) -> Dict[str, Any]:
             svc_entry: Dict[str, Any] = {"description": svc_info.get("description", "")}
             fields = svc_info.get("fields", {})
             if fields:
-                svc_entry["fields"] = {k: v.get("description", "") for k, v in fields.items() if isinstance(v, dict)}
+                svc_entry["fields"] = {
+                    k: v.get("description", "") for k, v in fields.items() if isinstance(v, dict)}
             domain_services[svc_name] = svc_entry
         result.append({"domain": svc_domain.get("domain", ""), "services": domain_services})
     return {"count": len(result), "domains": result}
 
 
 # ── sync wrappers (handler signature: (args, **kw) -> str) ───────────────────
-
 def _run_async(coro):
     """Run a coroutine from a sync handler; hops to a thread if a loop is already running."""
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
         loop = None
-    if loop and loop.is_running():
+    if loop and loop.is_running():  # already inside a loop: asyncio.run() needs its own thread
         import concurrent.futures
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
             return pool.submit(asyncio.run, coro).result(timeout=30)
@@ -166,12 +161,6 @@ def _dispatch(coro, log_name: str, fail_msg: str) -> str:
     except Exception as e:
         logger.error("%s error: %s", log_name, e)
         return tool_error(f"{fail_msg}: {e}")
-
-
-def _handle_list_entities(args: dict, **kw) -> str:
-    return _dispatch(
-        _async_list_entities(domain=args.get("domain"), area=args.get("area")),
-        "ha_list_entities", "Failed to list entities")
 
 
 def _handle_get_state(args: dict, **kw) -> str:
@@ -211,18 +200,12 @@ def _handle_call_service(args: dict, **kw) -> str:
         "ha_call_service", f"Failed to call {domain}.{service}")
 
 
-def _handle_list_services(args: dict, **kw) -> str:
-    return _dispatch(
-        _async_list_services(domain=args.get("domain")), "ha_list_services", "Failed to list services")
-
-
 def _check_ha_available() -> bool:
     """Tool is only available when HASS_TOKEN is set."""
     return bool(get_secret("HASS_TOKEN"))
 
 
 # ── tool schemas ─────────────────────────────────────────────────────────────
-
 HA_LIST_ENTITIES_SCHEMA = {
     "name": "ha_list_entities",
     "description": (
@@ -344,9 +327,12 @@ HA_CALL_SERVICE_SCHEMA = {
 
 
 for _schema, _handler in (
-    (HA_LIST_ENTITIES_SCHEMA, _handle_list_entities),
+    (HA_LIST_ENTITIES_SCHEMA, lambda args, **kw: _dispatch(
+        _async_list_entities(domain=args.get("domain"), area=args.get("area")),
+        "ha_list_entities", "Failed to list entities")),
     (HA_GET_STATE_SCHEMA, _handle_get_state),
-    (HA_LIST_SERVICES_SCHEMA, _handle_list_services),
+    (HA_LIST_SERVICES_SCHEMA, lambda args, **kw: _dispatch(
+        _async_list_services(domain=args.get("domain")), "ha_list_services", "Failed to list services")),
     (HA_CALL_SERVICE_SCHEMA, _handle_call_service)):
     registry.register(
         name=_schema["name"], toolset="homeassistant", schema=_schema, handler=_handler,

@@ -63,8 +63,7 @@ def _discord_request(
     req = urllib.request.Request(
         url, data=None if body is None else json.dumps(body).encode("utf-8"), method=method,
         headers={
-            "Authorization": f"Bot {token}",
-            "Content-Type": "application/json",
+            "Authorization": f"Bot {token}", "Content-Type": "application/json",
             "User-Agent": "Hermes-Agent (https://github.com/NousResearch/hermes-agent)"})
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
@@ -93,7 +92,6 @@ def _channel_type_name(type_id: int) -> str:
 
 
 # ── capability detection (application intents) ──────────────────────────────
-
 # Per-token in-process cache: the app/me endpoint is hit at most once per process.
 _capability_cache: Dict[str, Dict[str, Any]] = {}
 
@@ -113,7 +111,6 @@ _PERMISSIVE_CAPS = {"has_members_intent": True, "has_message_content": True, "de
 
 def _capability_disk_cache_path() -> Path:
     from hermes_constants import get_hermes_home
-
     return get_hermes_home() / "cache" / "discord_capabilities.json"
 
 
@@ -159,12 +156,9 @@ def _save_caps_to_disk(token: str, caps: Dict[str, Any]) -> None:
 
 
 def _detect_capabilities_nonblocking(token: str) -> Dict[str, Any]:
-    """Non-blocking capability lookup for schema builds.
-
-    Order: in-process cache → fresh disk cache → permissive default plus a fire-and-forget
-    background detection that fills the disk cache for the NEXT process (the blocking
-    HTTPS call, ~2-5s, must stay off the cold-start critical path).
-    """
+    """Schema-build lookup: in-process cache → fresh disk cache → permissive default plus a
+    fire-and-forget background detection that fills the disk cache for the NEXT process
+    (the ~2-5s blocking HTTPS call must stay off the cold-start critical path)."""
     cached = _capability_cache.get(token)
     if cached is not None:
         return cached
@@ -229,8 +223,6 @@ def _reset_capability_cache() -> None:
 
 
 # ── action implementations ───────────────────────────────────────────────────
-
-
 def _listing(key: str, items: List[Dict[str, Any]]) -> str:
     return json.dumps({key: items, "count": len(items)})
 
@@ -239,15 +231,11 @@ def _member_summary(m: Dict[str, Any], *, full: bool) -> Dict[str, Any]:
     """Member row; ``full`` adds the avatar/join fields member_info exposes
     (key order is part of the result text, so the two shapes stay explicit)."""
     user = m.get("user", {})
-    base = {
-        "user_id": user.get("id"), "username": user.get("username"),
-        "display_name": user.get("global_name"), "nickname": m.get("nick")}
-    tail = {"bot": user.get("bot", False), "roles": m.get("roles", [])}
-    if not full:
-        return {**base, **tail}
-    return {
-        **base, "avatar": user.get("avatar"), **tail,
-        "joined_at": m.get("joined_at"), "premium_since": m.get("premium_since")}
+    row = {
+        "user_id": user.get("id"), "username": user.get("username"), "display_name": user.get("global_name"),
+        "nickname": m.get("nick"), "avatar": user.get("avatar"), "bot": user.get("bot", False),
+        "roles": m.get("roles", []), "joined_at": m.get("joined_at"), "premium_since": m.get("premium_since")}
+    return row if full else {k: v for k, v in row.items() if k not in ("avatar", "joined_at", "premium_since")}
 
 
 def _message_summary(msg: Dict[str, Any]) -> Dict[str, Any]:
@@ -375,10 +363,10 @@ def _create_thread(
     auto_archive_duration: int = 1440, **_kwargs: Any) -> str:
     """Create a thread — anchored to ``message_id`` when given, else standalone public."""
     body: Dict[str, Any] = {"name": name, "auto_archive_duration": auto_archive_duration}
+    path = f"/channels/{channel_id}/threads"
     if message_id:
         path = f"/channels/{channel_id}/messages/{message_id}/threads"
     else:
-        path = f"/channels/{channel_id}/threads"
         body["type"] = 11  # PUBLIC_THREAD
     thread = _discord_request("POST", path, token, body=body)
     return json.dumps({"success": True, "thread_id": thread["id"], "name": thread.get("name")})
@@ -404,7 +392,6 @@ _remove_role = _mutation(
 
 
 # ── action dispatch + metadata ───────────────────────────────────────────────
-
 # Single source of truth: (action, handler, required-param signature, description). Order is
 # the schema/enum order; the signature drives runtime required-param validation.
 _ACTION_MANIFEST = [
@@ -475,7 +462,6 @@ def _available_actions(caps: Dict[str, Any], allowlist: Optional[List[str]]) -> 
 
 
 # ── schema construction ──────────────────────────────────────────────────────
-
 _TOOL_DESCRIPTIONS = {
     "discord_admin": (
         "Manage a Discord server via the REST API.",
@@ -560,7 +546,6 @@ get_dynamic_schema_admin = functools.partial(_get_dynamic_schema, _ADMIN_ACTIONS
 
 
 # ── 403 error enrichment ─────────────────────────────────────────────────────
-
 _NO_MANAGE_MESSAGES = "Bot lacks MANAGE_MESSAGES permission in this channel"
 _VIEW_HISTORY = "Bot cannot view this channel (missing VIEW_CHANNEL or READ_MESSAGE_HISTORY)."
 _ROLE_HIERARCHY = "Either the bot lacks MANAGE_ROLES, or the target role sits higher than the bot's highest role."
@@ -598,7 +583,6 @@ def check_discord_tool_requirements() -> bool:
 
 
 # ── handlers ─────────────────────────────────────────────────────────────────
-
 _HANDLER_DEFAULTS = {
     "guild_id": "", "channel_id": "", "user_id": "", "role_id": "", "message_id": "", "query": "",
     "name": "", "limit": 50, "before": "", "after": "", "auto_archive_duration": 1440}
