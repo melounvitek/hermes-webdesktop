@@ -1,9 +1,5 @@
-"""Send Message Tool -- cross-channel messaging via platform APIs.
-
-Sends a message to a user or channel on any connected messaging platform
-(Telegram, Discord, Slack, ...), lists available targets and resolves
-human-friendly channel names to IDs. Works in both CLI and gateway contexts.
-"""
+"""Send Message Tool -- cross-channel messaging via platform APIs (send, list targets,
+react); works in both CLI and gateway contexts."""
 
 import asyncio
 import json
@@ -25,16 +21,14 @@ from tools.send_message_senders import (  # noqa: F401
     _send_weixin, _send_yuanbao)
 from tools.registry import tool_error
 
-# NOTE: ``send_message`` is intentionally NOT registered as an agent-callable model
-# tool (the agent must not fire cross-platform messages on its own). The send engine
-# here is the shared transport for cron delivery, the ``hermes send`` CLI, the gateway
-# kanban notifier and the opt-in MCP server, which import the helpers directly.
+# NOTE: ``send_message`` is intentionally NOT registered as an agent-callable model tool
+# (the agent must not fire cross-platform messages on its own); cron delivery, the
+# ``hermes send`` CLI, the kanban notifier and the opt-in MCP server import the helpers.
 
 
 def prepare_send_message_platforms() -> None:
     """Load enabled standalone plugins before tool schemas/cache keys are built."""
     from hermes_cli.plugins import discover_plugins
-
     discover_plugins()
 
 
@@ -55,8 +49,8 @@ def _split_target(target: str):
 
 
 def _resolve_tool_target(target: str, *, pass_unresolved_references: bool = False):
-    """Split and resolve a tool ``target``; returns ``(platform_name, chat_id, thread_id, error)``.
-    ``chat_id`` is None when no ref was given (caller falls back to the home channel)."""
+    """``(platform_name, chat_id, thread_id, error)`` for a tool ``target``; ``chat_id`` is
+    None when no ref was given (caller falls back to the home channel)."""
     platform_name, target_ref = _split_target(target)
     prepare_send_message_platforms()
     if not target_ref:
@@ -76,10 +70,9 @@ def _handle_list():
 
 
 def _handle_react(args, remove=False):
-    """Attach (or with ``remove=True`` retract) an emoji reaction via a live gateway
-    adapter exposing ``add_reaction(chat_id, emoji, message_id)`` /
-    ``remove_reaction(chat_id, message_id)`` (e.g. photon/iMessage tapbacks). No
-    standalone fallback: reacting needs the adapter's live message-id state."""
+    """Attach (``remove=True``: retract) an emoji reaction via a live gateway adapter's
+    ``add_reaction`` / ``remove_reaction``. No standalone fallback: reacting needs the
+    adapter's live message-id state."""
     target = args.get("target", "")
     emoji = (args.get("emoji") or "").strip()
     message_id = (args.get("message_id") or "").strip() or None
@@ -87,21 +80,19 @@ def _handle_react(args, remove=False):
         return tool_error("'target' is required when action='unreact'" if remove
                           else "Both 'target' and 'emoji' are required when action='react'")
 
-    # Platform-native ids (e.g. photon GUIDs) match no parser/directory entry; hand
-    # them to the adapter unchanged and let it validate.
+    # Platform-native ids (e.g. photon GUIDs) match no parser/directory entry; the
+    # adapter validates them.
     platform_name, chat_id, _thread_id, resolution_error = _resolve_tool_target(
         target, pass_unresolved_references=True)
     if resolution_error:
         return tool_error(resolution_error)
 
-    try:
-        from gateway.config import Platform, load_gateway_config
-        platform = Platform(platform_name)
-    except (ValueError, KeyError):
-        return tool_error(f"Unknown platform: {platform_name}")
-
+    platform, err = _platform_enum(platform_name)
+    if err:
+        return tool_error(err)
     if not chat_id:
         try:
+            from gateway.config import load_gateway_config
             home = load_gateway_config().get_home_channel(platform)
         except Exception:
             home = None
@@ -158,9 +149,8 @@ def _handle_send(args):
 
     from gateway.platforms.base import BasePlatformAdapter
 
-    # Capture [[as_document]] before extract_media strips it: image files then go
-    # through send_document so the original bytes survive (Telegram's sendPhoto
-    # recompresses to 1280px).
+    # Capture [[as_document]] before extract_media strips it: images then go through
+    # send_document so the original bytes survive (Telegram's sendPhoto recompresses).
     force_document_attachments = "[[as_document]]" in message
 
     media_files, cleaned_message = BasePlatformAdapter.extract_media(message)
@@ -186,8 +176,7 @@ def _handle_send(args):
         from model_tools import _run_async
         send_kwargs = {"thread_id": thread_id, "media_files": media_files,
                        "force_document": force_document_attachments}
-        # Only custom plugin handlers receive the complete typed request; the
-        # built-in call contract stays exact.
+        # Only custom plugin handlers receive the complete typed request.
         if entry is not None and entry.send_message_handler is not None:
             send_kwargs["args"] = args
         result = _run_async(_send_to_platform(platform, pconfig, chat_id, cleaned_message, **send_kwargs))
@@ -204,24 +193,27 @@ def _handle_send(args):
         return json.dumps(_error(f"Send failed: {e}"))
 
 
-def _resolve_platform_config(platform_name, config):
-    """Return ``(platform, pconfig, registry_entry, error)`` for a send.
+def _platform_enum(platform_name):
+    """``(Platform, None)`` or ``(None, error)`` for a platform name."""
+    from gateway.config import Platform
+    try:
+        return Platform(platform_name), None
+    except (ValueError, KeyError):
+        return None, f"Unknown platform: {platform_name}"
 
-    Plugin platforms must be registered; disabled/missing platforms error, except
-    Weixin, which may be configured purely via .env (synthesized pconfig so
-    send_message and cron delivery work without a gateway.yaml entry).
-    """
+
+def _resolve_platform_config(platform_name, config):
+    """``(platform, pconfig, registry_entry, error)`` for a send. Plugin platforms must be
+    registered; disabled/missing platforms error, except Weixin, which may be configured
+    purely via .env (synthesized pconfig so cron delivery works without gateway.yaml)."""
     from gateway.config import Platform
     from gateway.platform_registry import platform_registry
-
     entry = platform_registry.get(platform_name)
-    is_builtin = platform_name in {member.value for member in Platform}
-    if not is_builtin and entry is None:
+    if entry is None and platform_name not in {member.value for member in Platform}:
         return None, None, None, f"Unknown or unregistered plugin platform: {platform_name}"
-    try:
-        platform = Platform(platform_name)
-    except (ValueError, KeyError):
-        return None, None, None, f"Unknown platform: {platform_name}"
+    platform, err = _platform_enum(platform_name)
+    if err:
+        return None, None, None, err
 
     pconfig = config.platforms.get(platform)
     if not pconfig or not pconfig.enabled:
@@ -252,9 +244,9 @@ def _home_chat_id(config, platform, platform_name):
 
 
 def _slack_dm_chat_id(pconfig, chat_id):
-    """Open Slack user targets as DM conversations: ``user:U...`` / ``user_name:@handle``
-    from the parser, or a bare U... id from session metadata / home-channel config.
-    chat.postMessage needs a conversation ID. Returns ``(chat_id, None)`` or ``(None, error_dict)``."""
+    """Open Slack user targets (``user:U...`` / ``user_name:@handle`` from the parser, or a
+    bare U... id from session metadata / home-channel config) as DM conversations —
+    chat.postMessage needs a conversation ID. ``(chat_id, None)`` or ``(None, error_dict)``."""
     dm_target = chat_id
     if dm_target.startswith("U") and _SLACK_USER_ID_RE.fullmatch(dm_target):
         dm_target = f"user:{dm_target}"
@@ -352,9 +344,8 @@ def _live_media_method(ext, is_voice, force_document):
 
 async def _send_live_adapter_media(
     adapter, chat_id, message, media_files, *, thread_id=None, metadata=None, force_document=False):
-    """Deliver text and every media descriptor through adapter media APIs.
-    Adapters that only inherit the BasePlatformAdapter stub for a media kind
-    are treated as unsupported rather than silently no-op'd."""
+    """Deliver text and every media descriptor through adapter media APIs. Adapters that
+    only inherit the BasePlatformAdapter stub for a kind are unsupported, not no-op'd."""
     caption, separate_text = _media_caption_split(
         message, media_files, max_caption_len=_DEFAULT_CAPTION_LIMIT)
     last_result = None
@@ -364,16 +355,12 @@ async def _send_live_adapter_media(
             return {"error": f"Adapter send failed: {_bounded_send_error(last_result.error)}"}
 
     from gateway.platforms.base import BasePlatformAdapter
-
     total = len(media_files)
     for index, descriptor in enumerate(media_files):
-        invalid = {"error": f"Adapter media send failed: invalid media descriptor {index + 1}/{total}"}
-        if not isinstance(descriptor, (list, tuple)) or not descriptor:
-            return invalid
-        media_path = descriptor[0]
-        is_voice = bool(descriptor[1]) if len(descriptor) > 1 else False
+        media_path = descriptor[0] if isinstance(descriptor, (list, tuple)) and descriptor else None
         if not isinstance(media_path, str) or not media_path:
-            return invalid
+            return {"error": f"Adapter media send failed: invalid media descriptor {index + 1}/{total}"}
+        is_voice = bool(descriptor[1]) if len(descriptor) > 1 else False
         if not os.path.exists(media_path):
             return {"error": f"Adapter media send failed: media file {index + 1}/{total} was not found"}
 
@@ -381,10 +368,8 @@ async def _send_live_adapter_media(
         method_name, media_kind = _live_media_method(ext, is_voice, force_document)
         adapter_method = getattr(type(adapter), method_name, None)
         if adapter_method is None or adapter_method is getattr(BasePlatformAdapter, method_name):
-            return {
-                "error": (
-                    f"Live adapter does not implement native {media_kind} delivery; "
-                    f"media file {index + 1}/{total} was not sent")}
+            return {"error": (f"Live adapter does not implement native {media_kind} delivery; "
+                              f"media file {index + 1}/{total} was not sent")}
         kwargs = {"caption": caption if index == 0 else None, "reply_to": thread_id, "metadata": metadata}
         try:
             last_result = await getattr(adapter, method_name)(chat_id, media_path, **kwargs)
@@ -403,12 +388,33 @@ async def _send_live_adapter_media(
     return {"success": True, "message_id": last_result.message_id, "media_delivered": True}
 
 
+async def _dispatch_on_gateway_loop(runner, make_coro, log_message):
+    """Await ``make_coro()`` on the gateway's loop. adapter.send() uses queues/tasks bound
+    to that loop; awaiting it from another loop (the tool worker thread) deadlocks, so
+    cross-loop calls are scheduled threadsafe onto it."""
+    gateway_loop = getattr(runner, "_gateway_loop", None)
+    try:
+        current_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        current_loop = None
+    if gateway_loop is None or current_loop is gateway_loop:
+        return await make_coro()  # same loop / no gateway loop (CLI, tests)
+    if not gateway_loop.is_running():
+        return {"error": "Gateway loop is not running; cannot dispatch adapter send"}
+    from agent.async_utils import safe_schedule_threadsafe
+    fut = safe_schedule_threadsafe(make_coro(), gateway_loop, logger=logger, log_message=log_message)
+    if fut is None:
+        return {"error": "Gateway loop unavailable for send dispatch"}
+    # shield: a cancelled caller (agent interrupt) must not cancel the enqueued send or a
+    # retry would duplicate it. No timeout: the adapter and outer _run_async bound the wait.
+    return await asyncio.shield(asyncio.wrap_future(fut))
+
+
 async def _send_via_adapter(
     platform, pconfig, chat_id, chunk, *, thread_id=None, media_files=None, force_document=False):
-    """Send via the live in-process gateway adapter (``_gateway_runner_ref``), else the
-    plugin's ``standalone_sender_fn`` (gateway not in this process, e.g. cron — the runner
-    weakref is None), else a descriptive error naming both options. Media descriptors go
-    through the adapter's native media APIs under the same cross-loop rules as text."""
+    """Live in-process gateway adapter first, else the plugin's ``standalone_sender_fn``
+    (gateway not in this process, e.g. cron), else an error naming both options. Media
+    goes through the adapter's native media APIs under the same cross-loop rules."""
     platform_name = platform.value if hasattr(platform, "value") else str(platform)
     runner, adapter = _live_adapter(platform)
     if adapter is not None:
@@ -419,39 +425,15 @@ async def _send_via_adapter(
             if platform_name == "ntfy" and chat_id:
                 metadata["publish_topic"] = chat_id
             metadata = metadata or None
-            # adapter.send() uses queues/tasks bound to the gateway's loop. Awaiting it
-            # from another loop (the tool worker thread) deadlocks on a cross-loop
-            # Future, so dispatch onto the gateway loop instead.
-            gateway_loop = getattr(runner, "_gateway_loop", None)
-            try:
-                current_loop = asyncio.get_running_loop()
-            except RuntimeError:
-                current_loop = None
-            cross_loop = gateway_loop is not None and current_loop is not gateway_loop
-
-            async def _dispatch(make_coro, log_message):
-                if not cross_loop:
-                    return await make_coro()  # same loop / no gateway loop (CLI, tests)
-                if not gateway_loop.is_running():
-                    return {"error": "Gateway loop is not running; cannot dispatch adapter send"}
-                from agent.async_utils import safe_schedule_threadsafe
-                fut = safe_schedule_threadsafe(
-                    make_coro(), gateway_loop, logger=logger, log_message=log_message)
-                if fut is None:
-                    return {"error": "Gateway loop unavailable for send dispatch"}
-                # shield: a cancelled caller (agent interrupt) must not cancel the
-                # already-enqueued gateway send, or a retry would duplicate it. No timeout
-                # here — the adapter's request timeout and the outer _run_async bound the wait.
-                return await asyncio.shield(asyncio.wrap_future(fut))
-
             if media_files:
-                return await _dispatch(
+                return await _dispatch_on_gateway_loop(
+                    runner,
                     lambda: _send_live_adapter_media(
                         adapter, chat_id, chunk, media_files,
                         thread_id=thread_id, metadata=metadata, force_document=force_document),
                     "send_message: failed to schedule media send on gateway loop")
-            result = await _dispatch(
-                lambda: adapter.send(chat_id=chat_id, content=chunk, metadata=metadata),
+            result = await _dispatch_on_gateway_loop(
+                runner, lambda: adapter.send(chat_id=chat_id, content=chunk, metadata=metadata),
                 "send_message: failed to schedule on gateway loop")
         except asyncio.CancelledError:
             raise
@@ -494,8 +476,7 @@ async def _send_via_adapter(
 
 
 async def _send_chunks(chunks, send_one):
-    """Send chunks in order via ``send_one(chunk, is_last)``; stop at the first
-    error dict, otherwise return the last result."""
+    """``send_one(chunk, is_last)`` in order; stop at the first error dict, else last result."""
     last_result = None
     for i, chunk in enumerate(chunks):
         result = await send_one(chunk, i == len(chunks) - 1)
@@ -506,12 +487,10 @@ async def _send_chunks(chunks, send_one):
 
 
 def _platform_max_length(platform):
-    """Max message length for chunking: the adapter constant for Signal (its raw
-    JSON-RPC path never sees SignalAdapter's own chunking, so signal-cli would reject
-    long sends whole), the registry's ``max_message_length`` for plugins (Slack,
-    Feishu, ...), else None (no chunking)."""
+    """Chunking limit: the adapter constant for Signal (its raw JSON-RPC path bypasses
+    SignalAdapter's own chunking), the registry's ``max_message_length`` for plugins,
+    else None (no chunking)."""
     from gateway.config import Platform
-
     if platform == Platform.SIGNAL:
         try:
             from gateway.platforms.signal import MAX_MESSAGE_LENGTH
@@ -528,11 +507,10 @@ def _platform_max_length(platform):
     return None
 
 
-# Plugin platforms whose media (and, for Discord, all) sends go straight to the registry
-# ``standalone_sender_fn`` — bypassing the live adapter on purpose: Discord's plugin
-# ``_standalone_send`` handles forum channels, threads and multipart uploads
-# (historically the only Discord path); Slack uploads via files_upload_v2; WhatsApp
-# posts each file to the Baileys bridge /send-media so media arrive as native bubbles.
+# Plugin platforms whose media (Discord: all) sends bypass the live adapter on purpose for
+# the registry ``standalone_sender_fn``: Discord's handles forum channels/threads/multipart
+# uploads; Slack uploads via files_upload_v2; WhatsApp posts to the Baileys bridge
+# /send-media so media arrive as native bubbles.
 # platform -> (error label, run discover_plugins first, caption-capable,
 #              media_files sentinel for non-final chunks, forward force_document)
 _PLUGIN_STANDALONE_MEDIA = {
@@ -545,8 +523,8 @@ _PLUGIN_STANDALONE_MEDIA = {
 async def _send_plugin_standalone(
     platform_name, pconfig, chat_id, message, chunks, media_files, *, thread_id, max_len, force_document
 ):
-    """Chunked send through a plugin's standalone_sender_fn, with the single
-    captionable file + short text case riding as the media caption."""
+    """Chunked send through a plugin's standalone_sender_fn; a single captionable file +
+    short text rides as the media caption."""
     label, discover, captionable, empty_media, pass_force = _PLUGIN_STANDALONE_MEDIA[platform_name]
     sender, err = _plugin_standalone_sender(platform_name, label=label, discover=discover)
     if err:
@@ -568,17 +546,13 @@ async def _send_plugin_standalone(
 
 
 # Native-media chunked routes for built-in platforms; media rides on the final chunk,
-# non-final chunks get the platform's empty-media sentinel.
-# platform -> (media required, empty-media sentinel,
-#              sender(platform, pconfig, chat_id, chunk, media, thread_id, force_document))
-# Matrix: ALL sends go through the native adapter so text is encrypted in E2EE rooms
-#   too (the raw-HTTP standalone path is not encryption-aware).
+# non-final chunks get the empty-media sentinel. platform -> (media required, sentinel,
+# sender(platform, pconfig, chat_id, chunk, media, thread_id, force_document)).
+# Matrix: ALL sends use the native adapter so text is encrypted in E2EE rooms too.
 # Signal: attachments ride the JSON-RPC ``attachments`` param.
-# Yuanbao: media needs the running gateway adapter's WebSocket.
-# Slack (text; media was intercepted above): prefer the live adapter — multi-workspace
-#   aware and honors adapter gates like ignored_channels, while the standalone Web-API
-#   path may only have a token list — else the plugin's standalone sender.
-# WeCom: native media only through the live gateway adapter.
+# Yuanbao / WeCom: media needs the running gateway adapter.
+# Slack (text; media intercepted above): prefer the live adapter — multi-workspace aware,
+#   honors gates like ignored_channels — else the plugin's standalone sender.
 # Names resolve at call time so tests can monkeypatch e.g. ``_send_signal``.
 def _via_adapter_route(p, pc, cid, chunk, media, tid, fd):
     return _send_via_adapter(p, pc, cid, chunk, thread_id=tid, media_files=media, force_document=fd)
@@ -612,24 +586,18 @@ _MEDIA_PLATFORMS_NOTE = "telegram, discord, matrix, weixin, signal, yuanbao, fei
 
 
 async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None, media_files=None, force_document=False, args=None):
-    """Route a message to the appropriate platform sender.
-
-    Long messages are chunked with the adapters' smart splitter (code-block aware,
-    part indicators). Branch order matters: Weixin first (its native helper must not
-    be blocked by unrelated optional imports such as lark-oapi's heavy Feishu path),
-    Telegram (chunks itself), plugin standalone media routes, native chunked routes,
-    then the generic text path that drops media with a warning.
-    """
+    """Route a message to the platform sender, chunking long text with the adapters' smart
+    splitter. Branch order matters: Weixin first (its native helper must not be blocked by
+    unrelated optional imports such as lark-oapi), Telegram (chunks itself), plugin
+    standalone media routes, native chunked routes, then the generic text path."""
     from gateway.config import Platform
-
     platform_name = platform.value if hasattr(platform, "value") else str(platform)
     media_files = media_files or []
 
     if platform == Platform.WEIXIN:
         return await _send_weixin(pconfig, chat_id, message, media_files=media_files)
 
-    # Telegram chunks internally on the *formatted* text in UTF-16 units (MarkdownV2/HTML
-    # escaping inflates length), so it gets the whole message; media attaches after all text.
+    # Telegram chunks internally on the *formatted* text (escaping inflates length).
     if platform == Platform.TELEGRAM:
         disable_link_previews = bool(getattr(pconfig, "extra", {}) and pconfig.extra.get("disable_link_previews"))
         return await _send_telegram(
@@ -638,7 +606,6 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             disable_link_previews=disable_link_previews, force_document=force_document)
 
     from gateway.platforms.base import BasePlatformAdapter
-
     max_len = _platform_max_length(platform)
     chunks = BasePlatformAdapter.truncate_message(message, max_len) if max_len else [message]
 
@@ -654,9 +621,8 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
             platform, pconfig, chat_id, chunk,
             media_files if is_last else empty_media, thread_id, force_document))
 
-    # --- Generic path: text only. Buzz is a plugin platform with verified native media
-    # delivery through _send_via_adapter (media-only sends included), so it is exempt
-    # from the media error/warning.
+    # Generic path: text only. Buzz has verified native media delivery through
+    # _send_via_adapter (media-only sends included), so it is exempt from the warning.
     warning = None
     if media_files and platform_name != "buzz":
         if not message.strip():
@@ -672,14 +638,12 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
         send_one = lambda chunk, is_last: text_sender(pconfig, chat_id, chunk, thread_id)  # noqa: E731
     else:
         from gateway.platform_registry import platform_registry
-
         entry = platform_registry.get(platform_name)
         handler = entry.send_message_handler if entry is not None else None
         if handler is not None:
             # Custom handler receives the full typed request once (not per chunk).
             try:
                 import inspect
-
                 result = handler(args or {}, chat_id, platform_name, pconfig)
                 if inspect.isawaitable(result):
                     result = await result
