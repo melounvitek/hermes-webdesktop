@@ -132,7 +132,6 @@ def create_app(adapter: UpstreamAdapter) -> "web.Application":
     the single loop and every other in-flight streaming completion.
     """
     _require_aiohttp()
-
     app = web.Application(client_max_size=MAX_REQUEST_BYTES)
     # AppKey: forward-compat with aiohttp versions that strip bare-string keys.
     app[web.AppKey("adapter", UpstreamAdapter)] = adapter
@@ -153,14 +152,12 @@ def create_app(adapter: UpstreamAdapter) -> "web.Application":
         except Exception as exc:
             logger.warning("proxy: credential resolution failed: %s", exc)
             return _json_error(401, str(exc), code="upstream_auth_failed")
-
         # Body read into memory once (chat/embeddings payloads are small); switch to streaming
         # if large multipart uploads ever need forwarding.
         body = await request.read()
         session, upstream_resp = await _open_upstream(request, rel_path, body, cred)
         if upstream_resp is None:
             return session
-
         if upstream_resp.status in {401, 429}:
             # One-shot retry with a refreshed/rotated credential (Nous: unconditional refresh
             # POST under the auth lock; xAI: pool rotation).
@@ -177,7 +174,6 @@ def create_app(adapter: UpstreamAdapter) -> "web.Application":
                 session, upstream_resp = await _open_upstream(request, rel_path, body, retry_cred)
                 if upstream_resp is None:
                     return session
-
         return await _stream_back(request, session, upstream_resp)
 
     app.router.add_get("/health", handle_health)  # never goes upstream
@@ -193,15 +189,12 @@ async def run_server(
 ) -> None:
     """Run the proxy in the current event loop until shutdown_event is set."""
     _require_aiohttp()
-
     app = create_app(adapter)
     runner = web.AppRunner(app, access_log=None)
     await runner.setup()
     site = web.TCPSite(runner, host=host, port=port)
     await site.start()
-
     logger.info("proxy: listening on http://%s:%d/v1 -> %s", host, port, adapter.display_name)
-
     stop_event = shutdown_event or asyncio.Event()
     if shutdown_event is None:  # we own the loop's lifetime → wire signal handlers
         loop = asyncio.get_running_loop()
@@ -210,7 +203,6 @@ async def run_server(
                 loop.add_signal_handler(sig, stop_event.set)  # windows-footgun: ok
             except NotImplementedError:
                 pass  # Windows / restricted envs — Ctrl+C still raises KeyboardInterrupt
-
     try:
         await stop_event.wait()
     finally:

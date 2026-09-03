@@ -34,22 +34,17 @@ def _safe_extract_tar_gz(archive: Path, destination: Path) -> None:
         for member in tf.getmembers():
             parts = _normalize_member_parts(member.name)
             target = destination.joinpath(*parts)
-
             if member.isdir():
                 target.mkdir(parents=True, exist_ok=True)
                 continue
-
             if not member.isfile():
                 raise PsutilAndroidInstallError(f"Unsupported archive member type: {member.name}")
-
             target.parent.mkdir(parents=True, exist_ok=True)
             extracted = tf.extractfile(member)
             if extracted is None:
                 raise PsutilAndroidInstallError(f"Cannot read archive member: {member.name}")
-
             with extracted, open(target, "wb") as dst:
                 shutil.copyfileobj(extracted, dst)
-
             try:
                 target.chmod(member.mode & 0o777)
             except OSError:
@@ -59,11 +54,9 @@ def _safe_extract_tar_gz(archive: Path, destination: Path) -> None:
 def prepare_patched_psutil_sdist(archive: Path, destination: Path) -> Path:
     """Safely extract the pinned psutil sdist and patch it for Android."""
     _safe_extract_tar_gz(archive, destination)
-
     src_roots = [path for path in destination.iterdir() if path.is_dir() and path.name.startswith("psutil-")]
     if not src_roots:
         raise PsutilAndroidInstallError("psutil sdist did not contain a psutil-* directory")
-
     src_root = min(src_roots, key=lambda path: path.name)
     common_py = src_root / "psutil" / "_common.py"
     rel = common_py.relative_to(src_root)

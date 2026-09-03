@@ -70,7 +70,6 @@ class NousPortalAdapter(UpstreamAdapter):
             state = self._read_state()
             if state is None:
                 raise RuntimeError("Not logged into Nous Portal. Run `hermes auth add nous` first.")
-
             try:
                 refreshed = resolve_nous_runtime_credentials(force_refresh=force_refresh)
             except Exception as exc:
@@ -78,14 +77,12 @@ class NousPortalAdapter(UpstreamAdapter):
                     _quarantine_nous_oauth_state(state, exc, reason="proxy_refresh_failure")
                     self._save_state(state, quarantine_error=exc, quarantine_reason="proxy_refresh_failure")
                 raise RuntimeError(f"Failed to refresh Nous Portal credentials: {exc}") from exc
-
             runtime_key = refreshed.get("api_key")
             if not runtime_key:
                 raise RuntimeError(
                     "Nous Portal refresh did not return a usable inference JWT. "
                     "Try `hermes auth add nous` to re-authenticate."
                 )
-
             # The returned base_url already honors the NOUS_INFERENCE_BASE_URL override (documented
             # dev/staging hatch); validating it against the prod allowlist would reject a legit
             # staging URL. So: env override wins, else network-validate the returned URL, else the
@@ -95,7 +92,6 @@ class NousPortalAdapter(UpstreamAdapter):
                 or _validate_nous_inference_url_from_network(refreshed.get("base_url"))
                 or DEFAULT_NOUS_INFERENCE_URL
             ).rstrip("/")
-
             return UpstreamCredential(bearer=runtime_key, base_url=base_url, expires_at=refreshed.get("expires_at"))
 
     # auth.json access — kept local so hermes_cli.auth's public surface does not grow.

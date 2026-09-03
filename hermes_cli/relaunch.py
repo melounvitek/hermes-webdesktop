@@ -15,7 +15,6 @@ def _build_inherited_flag_table() -> list[tuple[str, bool]]:
     """``(option_string, takes_value)`` for every parser Action carrying ``inherit_on_relaunch``
     (set by ``_parser._inherited_flag``), plus the pre-argparse flags."""
     parser, _subparsers, chat_parser = build_top_level_parser()
-
     table: list[tuple[str, bool]] = []
     seen: set[tuple[str, bool]] = set()
     for p in (parser, chat_parser):
@@ -30,7 +29,6 @@ def _build_inherited_flag_table() -> list[tuple[str, bool]]:
                 if key not in seen:
                     seen.add(key)
                     table.append(key)
-
     table.extend(PRE_ARGPARSE_INHERITED_FLAGS)
     return table
 
@@ -49,7 +47,6 @@ def _extract_inherited_flags(argv: Sequence[str]) -> list[str]:
                 flags.append(arg)
             i += 1
             continue
-
         for flag, takes_value in _INHERITED_FLAGS_TABLE:
             if arg == flag:
                 flags.append(arg)
@@ -90,10 +87,8 @@ def build_relaunch_argv(
     bin_path = resolve_hermes_bin()
     argv = [bin_path] if bin_path else [sys.executable, "-m", "hermes_cli.main"]
     src = list(original_argv) if original_argv is not None else list(sys.argv[1:])
-
     if preserve_inherited:
         argv.extend(_extract_inherited_flags(src))
-
     argv.extend(extra_args)
     return argv
 

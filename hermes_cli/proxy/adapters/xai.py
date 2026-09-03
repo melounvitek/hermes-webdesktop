@@ -52,14 +52,12 @@ class XAIGrokAdapter(UpstreamAdapter):
                 raise RuntimeError(
                     "No xAI OAuth credentials found. Run `hermes auth add xai-oauth --type oauth` first."
                 )
-
             entry = pool.select()
             if entry is None:
                 raise RuntimeError(
                     "No available xAI OAuth credentials found. Run "
                     "`hermes auth reset xai-oauth` or re-authenticate with `hermes auth add xai-oauth --type oauth`."
                 )
-
             self._pool = pool
             return self._credential_from_entry(entry)
 
@@ -68,12 +66,10 @@ class XAIGrokAdapter(UpstreamAdapter):
     ) -> Optional[UpstreamCredential]:
         if status_code not in {401, 429}:
             return None
-
         with self._lock:
             pool = self._pool or self._load_pool()
             if pool is None:
                 return None
-
             # 401: refresh the current key first. 429: never refresh — cooldown the rate-limited
             # key and rotate. None when the pool has nothing else → the status flows to the client.
             refreshed = pool.try_refresh_current() if status_code == 401 else None
@@ -81,7 +77,6 @@ class XAIGrokAdapter(UpstreamAdapter):
                 refreshed = pool.mark_exhausted_and_rotate(status_code=status_code)
             if refreshed is None:
                 return None
-
             retry_cred = self._credential_from_entry(refreshed)
             if retry_cred.bearer == failed_credential.bearer:
                 return None
@@ -102,11 +97,9 @@ class XAIGrokAdapter(UpstreamAdapter):
                 "xAI OAuth credential pool entry did not contain an access token. "
                 "Re-authenticate with `hermes auth add xai-oauth --type oauth`."
             )
-
         base_url = str(
             getattr(entry, "runtime_base_url", None) or entry.base_url or DEFAULT_XAI_OAUTH_BASE_URL
         ).strip().rstrip("/")
-
         return UpstreamCredential(
             bearer=bearer, base_url=base_url or DEFAULT_XAI_OAUTH_BASE_URL, expires_at=entry.expires_at
         )

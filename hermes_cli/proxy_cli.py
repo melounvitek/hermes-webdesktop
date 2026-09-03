@@ -147,7 +147,6 @@ def _setup_ca_cert(console: Console):
 def _setup_mint_tokens(console: Console, args: argparse.Namespace):
     """Discover providers, merge with existing tokens (rotating on request), print the table."""
     _step(console, 3, "Mint proxy tokens for known providers")
-
     available_env_names: List[str] = []
     if args.from_bitwarden:
         available_env_names = _bitwarden_env_names(console)
@@ -159,9 +158,7 @@ def _setup_mint_tokens(console: Console, args: argparse.Namespace):
         loaded = _load_env_file_into_environ()
         if loaded:
             console.print(f"  [dim]Loaded {loaded} provider key name(s) from ~/.hermes/.env for discovery.[/dim]")
-
     discovered = ip.discover_provider_mappings(available_env_names=available_env_names or None)
-
     # Preserve existing tokens unless rotation was requested — re-running setup must not
     # invalidate tokens baked into already-running sandboxes.
     existing = ip.load_mappings()
@@ -192,7 +189,6 @@ def _setup_mint_tokens(console: Console, args: argparse.Namespace):
         console.print(
             "[dim]Note: --rotate-tokens is a no-op on first-time setup (no existing tokens to rotate).[/dim]"
         )
-
     mappings = ip.merge_mappings(existing=existing, discovered=discovered, rotate=rotate)
     if not mappings:
         console.print("  [yellow]No known provider API keys found in env/Bitwarden.[/yellow]")
@@ -200,7 +196,6 @@ def _setup_mint_tokens(console: Console, args: argparse.Namespace):
         for env_name in sorted(ip._BEARER_PROVIDERS):
             console.print(f"    - {env_name}")
         return None
-
     # Providers we recognise but can't proxy (SigV4, service-account OAuth) still work — they
     # just bypass the egress isolation, so say so.
     uncovered = ip.discover_uncovered_providers(available_env_names=available_env_names or None)
@@ -214,7 +209,6 @@ def _setup_mint_tokens(console: Console, args: argparse.Namespace):
             "OAuth (SigV4, service-account files) and will hold real "
             "credentials inside the sandbox.  Egress isolation is INCOMPLETE for these.[/dim]"
         )
-
     console.print(_mappings_table(mappings, "Provider env", "Upstream hosts", show_tokens=False))
     return mappings
 
@@ -222,7 +216,6 @@ def _setup_mint_tokens(console: Console, args: argparse.Namespace):
 def _setup_write_config(console: Console, args: argparse.Namespace, mappings, ca_crt, ca_key):
     """Write proxy.yaml + mappings, then enable the integration in config; returns ``proxy_cfg``."""
     _step(console, 4, "Write config and persist mappings")
-
     cfg = load_config()
     proxy_cfg = cfg.setdefault("proxy", {})
     # None = flag not given. ``0`` is not a valid TCP listener, so it is a hard error rather
@@ -237,10 +230,8 @@ def _setup_write_config(console: Console, args: argparse.Namespace, mappings, ca
     else:
         tunnel_port = int(proxy_cfg.get("tunnel_port", ip._DEFAULT_TUNNEL_PORT))
     proxy_cfg["tunnel_port"] = tunnel_port
-
     extra_hosts = list(proxy_cfg.get("extra_allowed_hosts") or [])
     allowed = list(ip._DEFAULT_ALLOWED_HOSTS) + [h for h in extra_hosts if h not in ip._DEFAULT_ALLOWED_HOSTS]
-
     # Pre-create the audit log 0o600. The pinned v0.39 daemon never writes it (reserved for
     # v0.40+ per-request records), so a pre-create failure is a WARNING, not a setup abort.
     audit_log_path = ip._proxy_state_dir() / "audit.log"
@@ -250,7 +241,6 @@ def _setup_write_config(console: Console, args: argparse.Namespace, mappings, ca
     except RuntimeError as exc:
         audit_log_ok = False
         console.print(f"  [yellow]⚠ {exc}[/yellow]")
-
     # ``proxy.upstream_deny_cidrs`` overrides the deny list; None yields the documented safe
     # default-deny set (loopback, IMDS, RFC1918).
     iron_cfg = ip.build_proxy_config(
@@ -275,7 +265,6 @@ def _setup_write_config(console: Console, args: argparse.Namespace, mappings, ca
             f"[dim](reserved — not written by iron-proxy v0.39; "
             f"per-request records land in iron-proxy.log)[/dim]"
         )
-
     proxy_cfg["enabled"] = True
     proxy_cfg.setdefault("auto_install", True)
     proxy_cfg.setdefault("enforce_on_docker", True)
@@ -310,7 +299,6 @@ def _setup_restart_daemon(console: Console, args: argparse.Namespace, proxy_cfg:
     was_running = ip.get_status().pid is not None
     if was_running:
         ip.stop_proxy()
-
     restart_pref = getattr(args, "restart", None)
     if restart_pref is True or restart_pref is False:
         do_restart = restart_pref
@@ -323,7 +311,6 @@ def _setup_restart_daemon(console: Console, args: argparse.Namespace, proxy_cfg:
         )
     else:
         do_restart = False
-
     if do_restart:
         try:
             new_status = ip.start_proxy(install_if_missing=bool(proxy_cfg.get("auto_install", True)))
@@ -352,7 +339,6 @@ def cmd_start(args: argparse.Namespace) -> int:
     if not proxy_cfg.get("enabled"):
         console.print("[yellow]proxy.enabled is false — run `hermes egress setup` first.[/yellow]")
         return 1
-
     # ``credential_source: bitwarden`` refreshes upstream secrets from BSM at startup — that is
     # the rotation guarantee distinguishing it from ``env``.
     credential_source = proxy_cfg.get("credential_source", "env")
@@ -380,7 +366,6 @@ def cmd_start(args: argparse.Namespace) -> int:
     if refresh_bw and bw_cfg is not None:
         bw_cfg = dict(bw_cfg)
         bw_cfg["allow_env_fallback"] = bool(proxy_cfg.get("allow_env_fallback", False))
-
     # (fail_on_uncovered_providers was removed: the fail-closed provider tier is now empty.)
     # Pre-check the BWS token + project here so bitwarden mode fails loud with actionable
     # messages BEFORE start_proxy could silently degrade to a stale/mismatched host env.
@@ -400,7 +385,6 @@ def cmd_start(args: argparse.Namespace) -> int:
                 "Run `hermes secrets bitwarden setup` to configure the "
                 "project, or switch back via `hermes egress setup --no-bitwarden`.",
             )
-
     try:
         status = ip.start_proxy(
             install_if_missing=bool(proxy_cfg.get("auto_install", True)),
@@ -463,32 +447,27 @@ def format_status_text(*, show_tokens: bool = False) -> str:
     cfg = load_config()
     proxy_cfg = cfg.get("proxy") or {}
     status = ip.get_status()
-
     lines = ["Egress proxy status", ""]
     lines.extend(
         f"{label}: {value}"
         for label, value in _status_rows(proxy_cfg, status, yn=lambda v: "yes" if v else "no", dim=lambda t: t)
     )
     lines.append("Scope: Docker backend only in this release")
-
     mappings = ip.load_mappings()
     if mappings:
         lines.extend(["", "Token mappings:"])
         for m in mappings:
             tok = m.proxy_token if show_tokens else _redact_token(m.proxy_token)
             lines.append(f"  - {m.real_env_name}: {tok} ({', '.join(m.upstream_hosts)})")
-
     uncovered = ip.discover_uncovered_providers()
     if uncovered:
         lines.extend(["", "Uncovered providers (real credentials still visible inside the sandbox):"])
         for name in uncovered:
             lines.append(f"  - {name}")
-
     if bool(proxy_cfg.get("enabled")) and not status.configured:
         lines.extend(["", "Next: run `hermes egress setup` to mint tokens and write proxy.yaml."])
     elif bool(proxy_cfg.get("enabled")) and not (status.pid and status.listening):
         lines.extend(["", "Next: run `hermes egress start` before launching Docker sandboxes."])
-
     return "\n".join(lines)
 
 
@@ -497,14 +476,12 @@ def cmd_status(args: argparse.Namespace) -> int:
     cfg = load_config()
     proxy_cfg = cfg.get("proxy") or {}
     status = ip.get_status()
-
     table = Table(show_header=False, box=None, padding=(0, 2))
     table.add_column("", style="bold")
     table.add_column("")
     for label, value in _status_rows(proxy_cfg, status, yn=_yn, dim=lambda t: f"[dim]{t}[/dim]"):
         table.add_row(label, value)
     console.print(table)
-
     mappings = ip.load_mappings()
     if mappings:
         console.print()
@@ -515,7 +492,6 @@ def cmd_status(args: argparse.Namespace) -> int:
                 "[yellow]⚠[/yellow]  proxy tokens just printed in full — "
                 "they may persist in your shell history.  Consider clearing it after this command."
             )
-
     # Uncovered providers = the isolation boundary is incomplete for those upstreams.
     uncovered = ip.discover_uncovered_providers()
     if uncovered:
@@ -523,7 +499,6 @@ def cmd_status(args: argparse.Namespace) -> int:
         console.print("[yellow]Uncovered providers[/yellow] (real credentials still visible inside the sandbox):")
         for name in uncovered:
             console.print(f"  - {name}")
-
     return 0
 
 

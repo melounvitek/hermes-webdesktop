@@ -24,22 +24,18 @@ def cmd_proxy_start(args: Any) -> int:
     if not AIOHTTP_AVAILABLE:
         _err("hermes proxy requires aiohttp. Run `hermes setup` to install it.")
         return 1
-
     provider = getattr(args, "provider", None) or "nous"
     try:
         adapter = get_adapter(provider)
     except ValueError as exc:
         _err(f"Error: {exc}")
         return 2
-
     if not adapter.is_authenticated():
         auth_hint = getattr(adapter, "auth_hint", f"hermes auth add {adapter.name}")
         _err(f"Not logged into {adapter.display_name}. Run `{auth_hint}` first.")
         return 2
-
     host = getattr(args, "host", None) or DEFAULT_HOST
     port = getattr(args, "port", None) or DEFAULT_PORT
-
     _err(
         f"Starting Hermes proxy for {adapter.display_name}\n"
         f"  Listening on:  http://{host}:{port}/v1\n"
@@ -48,7 +44,6 @@ def cmd_proxy_start(args: Any) -> int:
         f"\n"
         f"Press Ctrl+C to stop."
     )
-
     try:
         asyncio.run(run_server(adapter, host=host, port=port))
     except KeyboardInterrupt:

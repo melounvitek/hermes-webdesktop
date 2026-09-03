@@ -30,21 +30,17 @@ def configured_nofile_soft_limit(config: Mapping[str, Any] | None = None) -> int
         try:
             # Profile-aware loader (applies managed-scope overlays and defaults).
             from hermes_cli.config import load_config_readonly
-
             config = load_config_readonly()
         except Exception:
             logger.debug("Could not load config for RLIMIT_NOFILE", exc_info=True)
             return None
-
     if not isinstance(config, Mapping):
         return None
-
     runtime = config.get("runtime", _MISSING)
     if runtime is _MISSING:
         return DEFAULT_NOFILE_SOFT_LIMIT
     if not isinstance(runtime, Mapping):
         return None
-
     raw_value = runtime.get("nofile_soft_limit", _MISSING)
     if raw_value is _MISSING:
         return DEFAULT_NOFILE_SOFT_LIMIT
@@ -62,11 +58,9 @@ def apply_nofile_soft_limit(config: Mapping[str, Any] | None = None) -> bool:
     """
     if _resource is None:
         return False
-
     target = configured_nofile_soft_limit(config)
     if target is None:
         return False
-
     try:
         nofile = _resource.RLIMIT_NOFILE
         current_soft, current_hard = _resource.getrlimit(nofile)
@@ -78,7 +72,6 @@ def apply_nofile_soft_limit(config: Mapping[str, Any] | None = None) -> bool:
         new_soft = target if current_hard == infinity else min(target, current_hard)
         if new_soft <= current_soft:
             return False
-
         _resource.setrlimit(nofile, (new_soft, current_hard))
         return True
     except Exception:

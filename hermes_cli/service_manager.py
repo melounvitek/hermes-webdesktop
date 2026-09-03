@@ -61,7 +61,6 @@ def detect_service_manager() -> ServiceManagerKind:
     # Deferred so importing this module (Protocol type, validate_profile_name) doesn't drag in
     # the whole gateway dependency graph.
     from hermes_cli.gateway import is_macos, is_windows, supports_systemd_services
-
     # Gate on _s6_running() alone, NOT is_container(): the latter only detects Docker/Podman/lxc
     # and is False on Fly's Firecracker microVMs even though s6-overlay is PID 1 there — that
     # made the s6 dispatch inert on Fly, so `hermes gateway start` spawned a foreground gateway
@@ -112,9 +111,7 @@ class _HostServiceManager:
 
     def _backend_module(self):
         import importlib
-
         import hermes_cli
-
         importlib.import_module(f"hermes_cli.{self._backend}")
         return getattr(hermes_cli, self._backend)
 
@@ -437,7 +434,6 @@ class S6ServiceManager:
         restarting would turn every normal exit into a reconnect storm) both map to 125 so s6 stops
         restarting; only other non-zero exits let s6 restart normally."""
         from gateway.restart import GATEWAY_FATAL_CONFIG_EXIT_CODE
-
         code = GATEWAY_FATAL_CONFIG_EXIT_CODE
         return (
             "#!/command/with-contenv sh\n"
@@ -489,7 +485,6 @@ class S6ServiceManager:
         service_dir = self.scandir / name
         if not service_dir.is_dir():
             raise GatewayNotRegisteredError(_profile_from_service(name))
-
         try:
             _s6_run("s6-svc", action_flag, str(service_dir), check=True)
         except subprocess.CalledProcessError as exc:
@@ -520,7 +515,6 @@ class S6ServiceManager:
         if pid is not None:
             try:
                 from gateway.status import write_planned_stop_marker
-
                 write_planned_stop_marker(pid)
             except Exception:
                 pass
@@ -553,7 +547,6 @@ class S6ServiceManager:
         svc_dir = self._service_dir(profile)
         if svc_dir.exists():
             raise ValueError(f"profile gateway {profile!r} already registered at {svc_dir}")
-
         # Build atomically in a DOT-PREFIXED sibling (``.gateway-<profile>.tmp``) then rename:
         # s6-svscan skips dot entries, so a concurrent rescan (cont-init reconciler, sibling
         # register) cannot supervise the half-built slot. Otherwise s6-supervise would spawn AS
@@ -581,12 +574,10 @@ class S6ServiceManager:
             # Mirrors container_boot._register_gateway_slot when start=False.
             if not start_now:
                 (tmp_dir / "down").touch()
-
             tmp_dir.rename(svc_dir)
         except Exception:
             shutil.rmtree(tmp_dir, ignore_errors=True)
             raise
-
         result = _s6_run("s6-svscanctl", "-a", str(self.scandir))
         if result.returncode != 0:
             # No supervisor is watching it — leaving the directory would be confusing.
@@ -605,7 +596,6 @@ class S6ServiceManager:
         svc_dir = self._service_dir(profile)
         if not svc_dir.exists():
             return
-
         _s6_run("s6-svc", "-d", str(svc_dir))
         _s6_run("s6-svwait", "-D", "-t", "10000", str(svc_dir), timeout=15)
         _s6_run("s6-svscanctl", "-an", str(self.scandir))
