@@ -1,9 +1,8 @@
 """Abstract base class for pluggable memory providers.
 
-Plugins ship in ``plugins/memory/<name>/`` and are activated via ``memory.provider``;
-MemoryManager allows only ONE external provider at a time. Lifecycle is driven by
-MemoryManager: initialize -> system_prompt_block / prefetch / sync_turn per turn ->
-tool dispatch -> shutdown, plus the optional ``on_*`` hooks below.
+Plugins ship in ``plugins/memory/<name>/``, activated via ``memory.provider`` (ONE external
+provider at a time). Lifecycle, driven by MemoryManager: initialize -> system_prompt_block /
+prefetch / sync_turn per turn -> tool dispatch -> shutdown, plus optional ``on_*`` hooks.
 """
 
 from __future__ import annotations
@@ -16,9 +15,8 @@ from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
-# v1 = historical implicit contract (best-effort on_pre_compress() with the raw
-# message list); v2 = opt-in fail-closed checkpoint (normalized evidence handoff
-# + strict-mode failure propagation).
+# v1 = best-effort on_pre_compress() with the raw message list; v2 = opt-in fail-closed
+# checkpoint (normalized evidence handoff + strict-mode failure propagation).
 PRE_COMPRESS_CHECKPOINT_API_VERSION = 2
 
 # Default glyph for recall indicators; providers may use their own brand mark.
@@ -36,10 +34,9 @@ class RecallStatus:
     glyph: str = INDICATOR_GLYPH
 
 
-# Prompts with no semantic signal. Single source of truth for the core prefetch
-# gate (turn_context.py, run_agent.py) and provider-side classifiers (honcho).
-# Anchored and followed only by whitespace/punctuation, so "k8s"/"yolo"/"note"
-# do NOT match while "hi!"/"thanks :)"/"done???" do.
+# Prompts with no semantic signal; single source of truth for the core prefetch gate and
+# provider-side classifiers. Anchored and followed only by whitespace/punctuation, so
+# "k8s"/"yolo"/"note" do NOT match while "hi!"/"thanks :)"/"done???" do.
 TRIVIAL_PROMPT_RE = re.compile(
     r'^(yes|no|ok|okay|sure|thanks|thank you|y|n|yep|nope|yeah|nah|'
     r'hi|hey|hello|yo|sup|'
@@ -50,11 +47,8 @@ TRIVIAL_PROMPT_RE = re.compile(
 
 
 def is_trivial_prompt(text: Optional[str]) -> bool:
-    """True for empty input, slash commands and bare greetings/acknowledgements.
-
-    Skipping recall on these saves a blocking network round-trip and keeps
-    stale user-model context from derailing one-word replies.
-    """
+    """True for empty input, slash commands and bare greetings/acknowledgements (skipping
+    recall saves a round-trip and keeps stale context from derailing one-word replies)."""
     stripped = (text or "").strip()
     if not stripped or stripped.startswith("/"):
         return True
@@ -64,8 +58,8 @@ def is_trivial_prompt(text: Optional[str]) -> bool:
 class MemoryProvider(ABC):
     """Abstract base class for memory providers."""
 
-    # Providers that durably checkpoint every successful on_pre_compress() opt
-    # in by setting PRE_COMPRESS_CHECKPOINT_API_VERSION; 1 = best-effort legacy.
+    # Providers that durably checkpoint every successful on_pre_compress() set this to
+    # PRE_COMPRESS_CHECKPOINT_API_VERSION; 1 = best-effort legacy.
     pre_compress_checkpoint_api_version = 1
 
     @property
@@ -84,12 +78,10 @@ class MemoryProvider(ABC):
     def initialize(self, session_id: str, **kwargs) -> None:
         """Initialize once at agent startup (connections, resources, threads).
 
-        kwargs always include ``hermes_home`` (use it for profile-scoped storage,
-        never hardcode ``~/.hermes``) and ``platform``. May include
-        ``agent_context`` ("primary" | "subagent" | "cron" | "flush" — skip
-        writes for non-primary contexts, cron prompts would corrupt user
-        representations), ``agent_identity`` (profile name), ``agent_workspace``,
-        ``parent_session_id``, ``user_id``, ``user_id_alt``.
+        kwargs always include ``hermes_home`` (profile-scoped storage; never hardcode
+        ``~/.hermes``) and ``platform``; may include ``agent_context`` ("primary" |
+        "subagent" | "cron" | "flush" — skip writes for non-primary contexts),
+        ``agent_identity``, ``agent_workspace``, ``parent_session_id``, ``user_id``, ``user_id_alt``.
         """
 
     def unavailable_reason(self) -> str:
@@ -103,11 +95,8 @@ class MemoryProvider(ABC):
         return ""
 
     def prefetch(self, query: str, *, session_id: str = "") -> str:
-        """Formatted recall context for the upcoming turn ("" if none).
-
-        Must be fast — do the recall in the background and return cached
-        results. ``session_id`` scopes concurrent sessions (gateway, cached agents).
-        """
+        """Formatted recall context for the upcoming turn ("" if none). Must be fast — recall
+        in the background and return cached results; ``session_id`` scopes concurrent sessions."""
         return ""
 
     def queue_prefetch(self, query: str, *, session_id: str = "") -> None:
@@ -161,15 +150,10 @@ class MemoryProvider(ABC):
         rewound: bool = False,
         **kwargs,
     ) -> None:
-        """session_id reassigned mid-process (/resume, /branch, /reset, /new,
-        gateway equivalents, context compression) without a provider teardown.
-
-        Update or reset per-session state cached in ``initialize()`` so later
-        writes land in the right record. ``parent_session_id`` carries lineage
-        ("" when none). ``reset`` is True only for a genuinely new conversation
-        (/reset, /new) — flush per-session buffers. ``rewound``: same id but the
-        transcript was truncated, so invalidate per-turn document state.
-        """
+        """session_id reassigned mid-process (/resume, /branch, /reset, /new, compression)
+        without teardown: rebind per-session state so later writes land in the right record.
+        ``reset`` is True only for a genuinely new conversation (flush buffers); ``rewound``:
+        same id but the transcript was truncated."""
 
     def on_pre_compress(self, messages: List[Dict[str, Any]]) -> str:
         """Extract insights from ``messages`` about to be compressed; the returned
@@ -182,14 +166,10 @@ class MemoryProvider(ABC):
         result); the subagent itself has no provider session (skip_memory=True)."""
 
     def get_config_schema(self) -> List[Dict[str, Any]]:
-        """Setup fields for ``hermes memory setup`` ([] if none).
-
-        Each field: ``key``, ``description``, optional ``secret`` (goes to .env),
-        ``required``, ``default``, ``choices``, ``type`` (text | integer |
-        number | boolean), ``minimum`` / ``maximum`` / ``step`` (numeric),
-        ``url`` (where to get the credential), ``env_var`` (explicit secret env
-        var; default auto-generated).
-        """
+        """Setup fields for ``hermes memory setup`` ([] if none): ``key``, ``description``,
+        optional ``secret`` (goes to .env), ``required``, ``default``, ``choices``, ``type``
+        (text | integer | number | boolean), ``minimum``/``maximum``/``step``, ``url``,
+        ``env_var`` (explicit secret env var; default auto-generated)."""
         return []
 
     def save_config(self, values: Dict[str, Any], hermes_home: str) -> None:

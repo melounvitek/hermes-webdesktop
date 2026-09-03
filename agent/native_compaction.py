@@ -1,12 +1,11 @@
 """Native OpenAI Responses server-side compaction — gpt-5.6 on direct OpenAI routes only.
 
 ``context_management=[{"type": "compaction", "compact_threshold": N}]`` makes the server
-summarize older context into an opaque ``compaction`` item (sealed to the issuing
-endpoint) once the input crosses N tokens. Support is deliberately narrow (live-verified):
-gpt-5.6 family only (5.1/5.2 fail server-side with no structured rejection) on direct
-OpenAI routes (api.openai.com or the ChatGPT Codex backend). Hermes' local compressor stays
-armed as fallback: the native threshold is clamped below the local trigger, and captured
-compaction items ride the existing ``codex_reasoning_items`` sidecar. No transport imports.
+summarize older context into an opaque ``compaction`` item once the input crosses N tokens.
+Deliberately narrow (live-verified): gpt-5.6 only (5.1/5.2 fail server-side with no
+structured rejection) on api.openai.com or the ChatGPT Codex backend. The local compressor
+stays armed as fallback (native threshold clamped below the local trigger); compaction items
+ride the ``codex_reasoning_items`` sidecar. No transport imports (shared gate, no cycles).
 """
 
 from __future__ import annotations
@@ -20,8 +19,7 @@ from agent.message_content import flatten_message_text
 
 logger = logging.getLogger(__name__)
 
-# Native compaction fires this many tokens below the local compressor's
-# trigger so the server always gets the first shot.
+# Native compaction fires this far below the local trigger so the server gets the first shot.
 LOCAL_TRIGGER_SAFETY_MARGIN = 8_192
 # Fallback when automatic mode has no local trigger to follow.
 DEFAULT_COMPACT_THRESHOLD = 200_000
@@ -35,30 +33,18 @@ def is_native_compaction_model(model: Optional[str]) -> bool:
 
 
 def resolve_native_compaction_capabilities(
-    *,
-    model: Optional[str],
-    base_url: Optional[str],
-    provider: Optional[str] = None,
-    is_codex_backend: bool = False,
+    *, model: Optional[str], base_url: Optional[str], provider: Optional[str] = None, is_codex_backend: bool = False,
 ) -> Dict[str, bool]:
-    """Resolve the native-compaction capability for a runtime destination.
-
-    A resolved ``False`` is distinct from "unresolved" and must survive model
-    switches unchanged.
-    """
+    """Resolve the native-compaction capability for a runtime destination (a resolved ``False``
+    is distinct from "unresolved" and must survive model switches unchanged)."""
     direct_default = (provider or "").strip().lower() == "openai" and not base_url
     eligible = is_native_compaction_model(model) and (
-        direct_default
-        or is_direct_openai_route(base_url, is_codex_backend=is_codex_backend)
+        direct_default or is_direct_openai_route(base_url, is_codex_backend=is_codex_backend)
     )
     return {"native_compaction": eligible}
 
 
-def is_direct_openai_route(
-    base_url: Optional[str],
-    *,
-    is_codex_backend: bool = False,
-) -> bool:
+def is_direct_openai_route(base_url: Optional[str], *, is_codex_backend: bool = False) -> bool:
     """True for api.openai.com or the ChatGPT Codex backend — nothing else."""
     if is_codex_backend:
         return True
@@ -80,24 +66,17 @@ def _positive_int(value: Any, *, reject: tuple = (bool,)) -> Optional[int]:
     return parsed if parsed > 0 else None
 
 
-def resolve_compact_threshold(
-    configured_threshold: Any,
-    local_trigger_tokens: Any = None,
-) -> int:
+def resolve_compact_threshold(configured_threshold: Any, local_trigger_tokens: Any = None) -> int:
     """Resolve automatic mode or clamp an explicit native threshold.
 
-    An omitted/invalid setting follows the local compressor trigger
-    (``ContextCompressor.threshold_tokens``) minus the safety margin. An
-    explicit positive integer is absolute unless it must be clamped so native
-    compaction fires first. Booleans are never thresholds.
+    Omitted/invalid follows the local compressor trigger minus the safety margin. An
+    explicit positive integer is absolute unless it must be clamped so native compaction
+    fires first. Booleans are never thresholds.
     """
     local = _positive_int(local_trigger_tokens)
     upper = None
     if local is not None:
-        if local > LOCAL_TRIGGER_SAFETY_MARGIN:
-            upper = max(1_024, local - LOCAL_TRIGGER_SAFETY_MARGIN)
-        else:
-            upper = max(1_024, int(local * 0.8))
+        upper = max(1_024, local - LOCAL_TRIGGER_SAFETY_MARGIN if local > LOCAL_TRIGGER_SAFETY_MARGIN else int(local * 0.8))
 
     configured = _positive_int(configured_threshold, reject=(bool, float))
     if configured is None:
@@ -124,43 +103,29 @@ def _warn_native_compaction_suppressed_by_checkpoint_gate() -> None:
 
 
 def native_compaction_context_management(
-    agent: Any,
-    *,
-    is_codex_backend: bool,
-    is_xai_responses: bool = False,
-    is_github_responses: bool = False,
+    agent: Any, *, is_codex_backend: bool, is_xai_responses: bool = False, is_github_responses: bool = False,
 ) -> Optional[List[Dict[str, Any]]]:
-    """Return the ``context_management`` payload for this request, or None.
+    """Return the ``context_management`` payload for this request, or None ("do not send").
 
-    None means "do not send the field" (request byte-identical to pre-feature).
-    Every gate is re-checked per request so a mid-session model switch or the
-    in-session kill switch (``agent.codex_responses_native_compaction = False``,
-    set by rejection recovery) takes effect on the next call.
+    Every gate is re-checked per request so a mid-session model switch or the in-session
+    kill switch (``agent.codex_responses_native_compaction = False``) takes effect next call.
     """
     capabilities = getattr(agent, "runtime_capabilities", None)
     if isinstance(capabilities, dict) and not capabilities.get("native_compaction", False):
         return None
-    if not getattr(agent, "codex_responses_native_compaction", False):
-        return None
     # compression.enabled: false disables ALL automatic compaction, native included.
-    if not getattr(agent, "compression_enabled", True):
+    if not getattr(agent, "codex_responses_native_compaction", False) or not getattr(agent, "compression_enabled", True):
         return None
-    # Server-side compaction is a lossy boundary the provider owns — no
-    # pre-compress checkpoint can run first — so the checkpoint-aware Hermes
-    # compressor stays authoritative. Explicit-True matches compress_context().
+    # Server-side compaction is a lossy boundary the provider owns (no pre-compress checkpoint
+    # can run first), so the checkpoint-aware compressor stays authoritative. Explicit-True
+    # matches compress_context().
     if getattr(agent, "compression_checkpoint_required", False) is True:
         _warn_native_compaction_suppressed_by_checkpoint_gate()
         return None
-    if is_xai_responses or is_github_responses:
+    if is_xai_responses or is_github_responses or not is_native_compaction_model(getattr(agent, "model", None)):
         return None
-    if not is_native_compaction_model(getattr(agent, "model", None)):
-        return None
-    trusted_proxy = bool(
-        getattr(agent, "capabilities", {}).get("openai_native_compaction", False)
-    )
-    if not trusted_proxy and not is_direct_openai_route(
-        getattr(agent, "base_url", None), is_codex_backend=is_codex_backend
-    ):
+    trusted_proxy = bool(getattr(agent, "capabilities", {}).get("openai_native_compaction", False))
+    if not trusted_proxy and not is_direct_openai_route(getattr(agent, "base_url", None), is_codex_backend=is_codex_backend):
         return None
 
     compressor = getattr(agent, "context_compressor", None)
@@ -171,9 +136,8 @@ def native_compaction_context_management(
     return [{"type": "compaction", "compact_threshold": threshold}]
 
 
-# Retention budgets for plaintext user messages / local compression summaries
-# carried across a native compaction boundary (mirrors Codex CLI's
-# RETAINED_MESSAGE_TOKEN_BUDGET; the summary budget prevents summary inflation).
+# Retention budgets for plaintext user messages / local summaries carried across a native
+# compaction boundary (mirrors Codex CLI's RETAINED_MESSAGE_TOKEN_BUDGET).
 RETAINED_USER_MESSAGE_TOKEN_BUDGET = 64_000
 RETAINED_SUMMARY_TOKEN_BUDGET = 32_000
 
@@ -216,11 +180,8 @@ def _extract_item_text(item: Any) -> Optional[str]:
 
 
 def _has_retainable_image_content(item: Any) -> bool:
-    """True for a converted Responses message with a valid ``input_image`` part.
-
-    Only the adapter-owned ``input_image`` shape counts: unknown or empty
-    multipart placeholders must not become durable history for being non-empty.
-    """
+    """True for a converted Responses message with a valid ``input_image`` part (only the
+    adapter-owned shape counts, so empty multipart placeholders never become durable history)."""
     if not isinstance(item, dict):
         return False
     content = item.get("content")
@@ -235,10 +196,8 @@ def _has_retainable_image_content(item: Any) -> bool:
     )
 
 
-# Canonical provenance check (metadata marker, then canonical prefix classifier).
-# Deliberately NOT a second heuristic: no underscore-key scan, no matching on
-# ad-hoc headings — either could promote ordinary or adversarial content to
-# durable retained history.
+# Canonical provenance check. Deliberately NOT a second heuristic (no underscore-key scan,
+# no ad-hoc headings) — either could promote adversarial content to durable history.
 _is_summary_item = is_compaction_summary_message
 
 
@@ -255,29 +214,23 @@ def prune_pre_checkpoint_items(
 ) -> List[Dict[str, Any]]:
     """Restructure Responses input around the newest compaction checkpoint.
 
-    The server drops every input item preceding a replayed ``compaction`` item,
-    which silently erases the user's plaintext asks and any local-compression
-    summary (``role="assistant"``). With a checkpoint present, rebuild as::
+    The server drops every input item preceding a replayed ``compaction`` item, erasing the
+    user's plaintext asks and any local-compression summary. Rebuild as::
 
         [checkpoint run] + [retained user & summary messages (newest-first budget)] + [post]
 
     - The NEWEST contiguous run of checkpoints wins.
-    - User messages are kept verbatim within ``retained_user_token_budget``;
-      the boundary message is head-truncated when it only partially fits
-      (string content only — goals are stated up front). A recognized
-      image-only user message is retained whole at one-token cost.
-    - Summaries are retained whole within ``retained_summary_token_budget`` and
-      never sliced (their structural framing would corrupt); one that doesn't
-      fit is dropped. Identical summary text is never retained twice.
-    - Relative order between user messages and summaries is preserved.
-    - ``item_sources`` (parallel to ``items``) is the raw chat message each item
-      was converted from. Conversion can be lossy for summaries (a
-      merge-into-tail carrier becomes a typed ``function_call_output``, or an
-      assistant carrier is shadowed by a stale exact replay), so when a source
-      is itself a canonical summary carrier its content is read from the
-      SOURCE and retained as a synthesized ``role="assistant"`` message.
-    - ``enable_summary_retention`` is a function-level override for tests, not
-      a config surface.
+    - User messages are kept verbatim within ``retained_user_token_budget``; the boundary
+      message is head-truncated when it only partially fits (string content only). A
+      recognized image-only user message is retained whole at one-token cost.
+    - Summaries are retained whole within ``retained_summary_token_budget``, never sliced
+      (framing would corrupt) and never duplicated. Relative order is preserved.
+    - ``item_sources`` (parallel to ``items``) is the raw chat message each item came from.
+      Conversion can be lossy for summaries (merge-into-tail carrier → typed
+      ``function_call_output``; assistant carrier shadowed by a stale replay), so a source
+      that is itself a canonical summary carrier is read from the SOURCE and retained as a
+      synthesized ``role="assistant"`` message.
+    - ``enable_summary_retention`` is a test override, not a config surface.
     """
     if not isinstance(items, list) or not items:
         return items
@@ -297,10 +250,8 @@ def prune_pre_checkpoint_items(
     checkpoint_run = items[first_cp : last_cp + 1]
     post = items[last_cp + 1 :]
 
-    if isinstance(item_sources, list) and len(item_sources) == len(items):
-        pre_sources: List[Any] = item_sources[:first_cp]
-    else:
-        pre_sources = [None] * len(pre)
+    has_sources = isinstance(item_sources, list) and len(item_sources) == len(items)
+    pre_sources: List[Any] = item_sources[:first_cp] if has_sources else [None] * len(pre)
 
     retained_reversed: List[Dict[str, Any]] = []
     user_remaining = max(0, int(retained_user_token_budget))
@@ -383,11 +334,10 @@ _REJECTION_MARKERS = (
 def is_native_compaction_rejection(error: Any, status_code: Any = None) -> bool:
     """True when a provider error is a STRUCTURED rejection of ``context_management``.
 
-    Drives the loop's one-shot recovery (strip the field, disable for the
-    session, retry), so matching is narrow: a transient 5xx whose body merely
-    ECHOES the request must not permanently downgrade native compaction. Requires
-    ``status_code`` 400 (or unknown — some transports surface only a message)
-    AND the field name alongside rejection language.
+    Drives one-shot recovery (strip, disable for the session, retry), so matching is
+    narrow: a transient 5xx that merely ECHOES the request must not downgrade native
+    compaction. Requires ``status_code`` 400 (or unknown) AND the field name with rejection
+    language.
     """
     text = str(error or "").lower()
     if "context_management" not in text and "compact_threshold" not in text:
@@ -404,22 +354,18 @@ def is_native_compaction_rejection(error: Any, status_code: Any = None) -> bool:
 def has_compaction_checkpoint(items: Any) -> bool:
     """Does this ``codex_reasoning_items`` sidecar carry a compaction checkpoint?
 
-    A ``type: "compaction"`` item is cumulative context, not per-turn
-    reasoning, and exists in exactly one place: anything that rewrites or
-    discards the sidecar must ask this first or lose the compacted history.
+    A compaction item is cumulative context that exists in exactly one place: anything
+    that rewrites or discards the sidecar must ask this first or lose the history.
     """
     return isinstance(items, list) and any(_is_compaction_item(item) for item in items)
 
 
-def merge_interim_reasoning_items(
-    prior_items: Any,
-    new_items: Any,
-) -> List[Dict[str, Any]]:
+def merge_interim_reasoning_items(prior_items: Any, new_items: Any) -> List[Dict[str, Any]]:
     """Merge ``codex_reasoning_items`` across Codex incomplete-continuation dedup.
 
-    A checkpoint captured on the EARLIER response is not re-emitted by the
-    continuation, so a blind overwrite drops the only copy. Rule: newer items
-    win, but prior checkpoints are prepended unless the newer payload has its own.
+    A checkpoint on the EARLIER response is not re-emitted by the continuation, so a blind
+    overwrite drops the only copy: newer items win, prior checkpoints are prepended unless
+    the newer payload has its own.
     """
     kept_checkpoints = [
         item for item in (prior_items if isinstance(prior_items, list) else []) if _is_compaction_item(item)
