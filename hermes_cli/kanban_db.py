@@ -185,13 +185,9 @@ def _fire_worker_spawned_hook(
         return
     try:
         _fire_kanban_lifecycle_hook(
-            "on_kanban_worker_spawned",
-            task.id,
-            board=board or get_current_board(),
-            assignee=task.assignee,
-            run_id=_current_run_id(conn, task.id),
-            worker_pid=int(pid) if pid else None,
-            workspace_path=str(workspace_path),
+            "on_kanban_worker_spawned", task.id, board=board or get_current_board(),
+            assignee=task.assignee, run_id=_current_run_id(conn, task.id),
+            worker_pid=int(pid) if pid else None, workspace_path=str(workspace_path),
         )
     except Exception as exc:  # pragma: no cover - defensive
         _log.debug("kanban worker spawned hook failed: %s", exc)
@@ -208,16 +204,12 @@ def notify_task_updated(
         return
     try:
         row = conn.execute(
-            "SELECT assignee, current_run_id FROM tasks WHERE id = ?",
-            (task_id,),
+            "SELECT assignee, current_run_id FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         _fire_kanban_lifecycle_hook(
-            "on_kanban_task_updated",
-            task_id,
-            board=board or get_current_board(),
+            "on_kanban_task_updated", task_id, board=board or get_current_board(),
             assignee=row["assignee"] if row else None,
-            run_id=row["current_run_id"] if row else None,
-            changed_fields=list(changed_fields),
+            run_id=row["current_run_id"] if row else None, changed_fields=list(changed_fields),
         )
     except Exception as exc:  # pragma: no cover - defensive
         _log.debug("kanban task updated hook failed: %s", exc)
@@ -254,12 +246,8 @@ def _fire_dispatch_tick_hook(
         elif not any(getattr(result, f) for f in _TICK_ACTIVITY_FIELDS):
             outcome = "idle"
         invoke_hook(
-            "on_kanban_dispatch_tick",
-            board=board,
-            profile_name=profile_name,
-            dry_run=bool(dry_run),
-            outcome=outcome,
-            result=result,
+            "on_kanban_dispatch_tick", board=board, profile_name=profile_name,
+            dry_run=bool(dry_run), outcome=outcome, result=result,
         )
     except Exception as exc:  # pragma: no cover - defensive
         _log.debug("kanban dispatch tick hook failed: %s", exc)
@@ -337,8 +325,7 @@ def _relative_age(ts: Optional[int], now: Optional[int] = None) -> str:
 
 DEFAULT_BOARD = "default"
 _CURRENT_BOARD_OVERRIDE: ContextVar[str | None] = ContextVar(
-    "hermes_kanban_current_board_override",
-    default=None,
+    "hermes_kanban_current_board_override", default=None,
 )
 
 
@@ -1279,8 +1266,7 @@ def create_task(
         row = conn.execute(
             "SELECT id FROM tasks WHERE idempotency_key = ? "
             "AND status != 'archived' "
-            "ORDER BY created_at DESC LIMIT 1",
-            (idempotency_key,),
+            "ORDER BY created_at DESC LIMIT 1", (idempotency_key,),
         ).fetchone()
         if row:
             return row["id"]
@@ -1383,8 +1369,7 @@ def _initial_task_status(
     if parents:
         rows = conn.execute(
             "SELECT status FROM tasks WHERE id IN "
-            "(" + ",".join("?" * len(parents)) + ")",
-            parents,
+            "(" + ",".join("?" * len(parents)) + ")", parents,
         ).fetchall()
         if any(r["status"] != "done" for r in rows):
             return "todo"
@@ -1433,8 +1418,7 @@ def _inherit_notify_subs(
     if not parent_ids:
         return
     row = conn.execute(
-        "SELECT COALESCE(MAX(id), 0) AS cursor FROM task_events WHERE task_id = ?",
-        (child_id,),
+        "SELECT COALESCE(MAX(id), 0) AS cursor FROM task_events WHERE task_id = ?", (child_id,),
     ).fetchone()
     cursor = int(row["cursor"] if row is not None else 0)
     placeholders = ",".join("?" * len(parent_ids))
@@ -1524,8 +1508,7 @@ def assign_task(conn: sqlite3.Connection, task_id: str, profile: Optional[str]) 
             # The failure streak is per task/profile; a new profile starts fresh.
             conn.execute(
                 "UPDATE tasks SET assignee = ?, consecutive_failures = 0, "
-                "last_failure_error = NULL WHERE id = ?",
-                (profile, task_id),
+                "last_failure_error = NULL WHERE id = ?", (profile, task_id),
             )
         else:
             conn.execute("UPDATE tasks SET assignee = ? WHERE id = ?", (profile, task_id))
@@ -1574,8 +1557,7 @@ def set_reasoning_effort(conn: sqlite3.Connection, task_id: str, effort: Optiona
     other; applies on the NEXT dispatch, so settable while running."""
     effort = normalize_reasoning_effort(effort)
     return _set_task_override(
-        conn, task_id,
-        "UPDATE tasks SET reasoning_effort = ? WHERE id = ?", (effort,),
+        conn, task_id, "UPDATE tasks SET reasoning_effort = ? WHERE id = ?", (effort,),
         "reasoning_effort_set", {"reasoning_effort": effort},
         ("reasoning_effort",), archived_msg="cannot set reasoning effort",
     )
@@ -1596,8 +1578,7 @@ def link_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> None:
         # If child was ready but parent is not yet done, demote child to todo.
         if _task_status(conn, parent_id) != "done":
             conn.execute(
-                "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'",
-                (child_id,),
+                "UPDATE tasks SET status = 'todo' WHERE id = ? AND status = 'ready'", (child_id,),
             )
         _append_event(
             conn, child_id, "linked", {"parent": parent_id, "child": child_id},
@@ -1626,8 +1607,7 @@ def _would_cycle(conn: sqlite3.Connection, parent_id: str, child_id: str) -> boo
 def unlink_tasks(conn: sqlite3.Connection, parent_id: str, child_id: str) -> bool:
     with write_txn(conn):
         cur = conn.execute(
-            "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?",
-            (parent_id, child_id),
+            "DELETE FROM task_links WHERE parent_id = ? AND child_id = ?", (parent_id, child_id),
         )
         removed = cur.rowcount > 0
         if removed:
@@ -1666,8 +1646,7 @@ def task_graph_contexts(conn: sqlite3.Connection, task_ids: Iterable[str]) -> di
         for row in conn.execute(
             f"SELECT l.{own} AS owner_id, t.id, t.title, t.status "
             f"FROM task_links l JOIN tasks t ON t.id = l.{other} "
-            f"WHERE l.{own} IN ({placeholders}) ORDER BY l.{own}, t.id",
-            tuple(ordered_ids),
+            f"WHERE l.{own} IN ({placeholders}) ORDER BY l.{own}, t.id", tuple(ordered_ids),
         ).fetchall():
             contexts[row["owner_id"]][bucket].append(
                 {"id": row["id"], "title": row["title"], "status": row["status"]}
@@ -1694,8 +1673,7 @@ def add_comment(conn: sqlite3.Connection, task_id: str, author: str, body: str) 
         _require_task(conn, task_id)
         cur = conn.execute(
             "INSERT INTO task_comments (task_id, author, body, created_at) "
-            "VALUES (?, ?, ?, ?)",
-            (task_id, author.strip(), body.strip(), now),
+            "VALUES (?, ?, ?, ?)", (task_id, author.strip(), body.strip(), now),
         )
         _append_event(conn, task_id, "commented", {"author": author, "len": len(body)})
         return int(cur.lastrowid or 0)
@@ -1723,8 +1701,7 @@ def list_comments_after(
     same-second burst is never skipped (live worker comment bridge)."""
     rows = conn.execute(
         "SELECT id, task_id, author, body, created_at FROM task_comments "
-        "WHERE task_id = ? AND id > ? ORDER BY id ASC",
-        (task_id, int(after_id)),
+        "WHERE task_id = ? AND id > ? ORDER BY id ASC", (task_id, int(after_id)),
     ).fetchall()
     return [Comment.from_row(r) for r in rows]
 
@@ -1809,9 +1786,7 @@ def add_attachment(
             (task_id, filename.strip(), stored_path, content_type, int(size), uploaded_by, now),
         )
         _append_event(
-            conn,
-            task_id,
-            "attached",
+            conn, task_id, "attached",
             {"filename": filename.strip(), "size": int(size), "by": uploaded_by},
         )
         return int(cur.lastrowid or 0)
@@ -1852,8 +1827,7 @@ def _insert_comment(
     opens its own txn and emits ``commented``)."""
     conn.execute(
         "INSERT INTO task_comments (task_id, author, body, created_at) "
-        "VALUES (?, ?, ?, ?)",
-        (task_id, author, body, created_at),
+        "VALUES (?, ?, ?, ?)", (task_id, author, body, created_at),
     )
 
 
@@ -1864,8 +1838,7 @@ def _append_event(
     """Insert an event row inside the caller's txn; ``run_id`` groups it by attempt (NULL = task-scoped)."""
     conn.execute(
         "INSERT INTO task_events (task_id, run_id, kind, payload, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (task_id, run_id, kind, _json_or_null(payload), int(time.time())),
+        "VALUES (?, ?, ?, ?, ?)", (task_id, run_id, kind, _json_or_null(payload), int(time.time())),
     )
 
 
@@ -1949,8 +1922,7 @@ def _synthesize_ended_run(
     NOT touch the tasks row."""
     now = int(time.time())
     trow = conn.execute(
-        "SELECT assignee, current_step_key FROM tasks WHERE id = ?",
-        (task_id,),
+        "SELECT assignee, current_step_key FROM tasks WHERE id = ?", (task_id,),
     ).fetchone()
     profile = trow["assignee"] if trow else None
     step_key = trow["current_step_key"] if trow else None
@@ -1981,8 +1953,7 @@ def _has_sticky_block(conn: sqlite3.Connection, task_id: str) -> bool:
     row = conn.execute(
         "SELECT kind FROM task_events "
         "WHERE task_id = ? AND kind IN ('blocked', 'unblocked') "
-        "ORDER BY id DESC LIMIT 1",
-        (task_id,),
+        "ORDER BY id DESC LIMIT 1", (task_id,),
     ).fetchone()
     return bool(row) and row["kind"] == "blocked"
 
@@ -2008,8 +1979,7 @@ def _resume_status_from_events(conn: sqlite3.Connection, task_id: str) -> str:
         "'blocked', 'block_loop_detected', 'dependency_wait', 'gave_up', "
         "'unblocked', 'changes_requested', 'review_reopened', 'status', 'reclaimed', "
         "'stale', 'timed_out', 'crashed', 'spawn_failed', 'rate_limited'"
-        ") ORDER BY id DESC LIMIT 1",
-        (task_id,),
+        ") ORDER BY id DESC LIMIT 1", (task_id,),
     ).fetchone()
     payload = _json_dict(_row_get(row, "payload"))
     for key in ("resume_status", "retry_status", "source_status"):
@@ -2044,8 +2014,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
             parents = conn.execute(
                 "SELECT t.status FROM tasks t "
                 "JOIN task_links l ON l.parent_id = t.id "
-                "WHERE l.child_id = ?",
-                (task_id,),
+                "WHERE l.child_id = ?", (task_id,),
             ).fetchall()
             if all(p["status"] in ("done", "archived") for p in parents):
                 resume_status = _resume_status_from_events(conn, task_id)
@@ -2063,8 +2032,7 @@ def recompute_ready(conn: sqlite3.Connection, failure_limit: int = None) -> int:
                         continue
                     conn.execute(
                         "UPDATE tasks SET status = ? "
-                        "WHERE id = ? AND status = 'blocked'",
-                        (resume_status, task_id),
+                        "WHERE id = ? AND status = 'blocked'", (resume_status, task_id),
                     )
                 else:
                     conn.execute(
@@ -2087,8 +2055,7 @@ def _parents_satisfied(conn: sqlite3.Connection, task_id: str) -> bool:
         "SELECT 1 FROM task_links l "
         "JOIN tasks p ON p.id = l.parent_id "
         "WHERE l.child_id = ? "
-        "AND p.status NOT IN ('done', 'archived') LIMIT 1",
-        (task_id,),
+        "AND p.status NOT IN ('done', 'archived') LIMIT 1", (task_id,),
     ).fetchone() is None
 
 
@@ -2113,11 +2080,9 @@ def _claim_and_open_run(
     )
     if cur.rowcount != 1:
         return None
-    # Populate the run with the task's assignee / step / runtime cap.
     trow = conn.execute(
         "SELECT assignee, max_runtime_seconds, current_step_key "
-        "FROM tasks WHERE id = ?",
-        (task_id,),
+        "FROM tasks WHERE id = ?", (task_id,),
     ).fetchone()
     run_cur = conn.execute(
         """
@@ -2160,12 +2125,9 @@ def claim_task(
         if not _parents_satisfied(conn, task_id):
             conn.execute(
                 "UPDATE tasks SET status = 'todo' "
-                "WHERE id = ? AND status = 'ready'",
-                (task_id,),
+                "WHERE id = ? AND status = 'ready'", (task_id,),
             )
-            _append_event(
-                conn, task_id, "claim_rejected", {"reason": "parents_not_done"},
-            )
+            _append_event(conn, task_id, "claim_rejected", {"reason": "parents_not_done"})
             return None
         # Close a leaked prior run so the CAS below doesn't strand it.
         _reclaim_dangling_run(
@@ -2193,18 +2155,12 @@ def claim_review_task(
         if not _parents_satisfied(conn, task_id):
             demoted = conn.execute(
                 "UPDATE tasks SET status = 'todo' "
-                "WHERE id = ? AND status = 'review' AND claim_lock IS NULL",
-                (task_id,),
+                "WHERE id = ? AND status = 'review' AND claim_lock IS NULL", (task_id,),
             )
             if demoted.rowcount == 1:
                 _append_event(
-                    conn,
-                    task_id,
-                    "dependency_wait",
-                    {
-                        "reason": "parent_reopened",
-                        "source_status": "review",
-                    },
+                    conn, task_id, "dependency_wait",
+                    {"reason": "parent_reopened", "source_status": "review"},
                 )
             return None
         run_id = _claim_and_open_run(
@@ -2263,8 +2219,7 @@ def goal_run_status(
     if task.status in {"ready", "todo"}:
         event = conn.execute(
             "SELECT kind FROM task_events WHERE task_id = ? "
-            "ORDER BY id DESC LIMIT 1",
-            (task_id,),
+            "ORDER BY id DESC LIMIT 1", (task_id,),
         ).fetchone()
         if event and event["kind"] == "changes_requested":
             return "changes_requested"
@@ -2281,8 +2236,7 @@ def heartbeat_claim(
     with write_txn(conn):
         cur = conn.execute(
             "UPDATE tasks SET claim_expires = ? "
-            "WHERE id = ? AND status = 'running' AND claim_lock = ?",
-            (expires, task_id, lock),
+            "WHERE id = ? AND status = 'running' AND claim_lock = ?", (expires, task_id, lock),
         )
         if cur.rowcount != 1:
             return False
@@ -2315,8 +2269,7 @@ def release_stale_claims(conn: sqlite3.Connection, *, signal_fn=None) -> int:
         "       assignee "
         "FROM tasks "
         "WHERE status = 'running' AND claim_expires IS NOT NULL "
-        "  AND claim_expires < ?",
-        (now,),
+        "  AND claim_expires < ?", (now,),
     ).fetchall()
     for row in stale:
         host_local = (row["claim_lock"] or "").startswith(host_prefix)
@@ -2367,14 +2320,9 @@ def release_stale_claims(conn: sqlite3.Connection, *, signal_fn=None) -> int:
         # Post-commit observer; every non-reclaim branch ``continue``d above.
         if _kanban_observer_consumed("on_kanban_worker_stale_claim"):
             _fire_kanban_lifecycle_hook(
-                "on_kanban_worker_stale_claim",
-                row["id"],
-                board=get_current_board(),
-                assignee=row["assignee"],
-                run_id=run_id,
-                worker_pid=_opt_int(row["worker_pid"]),
-                heartbeat_stale=bool(heartbeat_stale),
-                retry_status=retry_status,
+                "on_kanban_worker_stale_claim", row["id"], board=get_current_board(),
+                assignee=row["assignee"], run_id=run_id, worker_pid=_opt_int(row["worker_pid"]),
+                heartbeat_stale=bool(heartbeat_stale), retry_status=retry_status,
             )
     return reclaimed
 
@@ -2403,8 +2351,7 @@ def _extend_live_stale_claim(conn: sqlite3.Connection, row: sqlite3.Row, now: in
             "WHERE id = ? AND status = 'running' "
             "  AND claim_lock IS ? "
             "  AND claim_expires IS NOT NULL "
-            "  AND claim_expires < ?",
-            (new_expires, row["id"], row["claim_lock"], now),
+            "  AND claim_expires < ?", (new_expires, row["id"], row["claim_lock"], now),
         )
         if cur.rowcount != 1:
             return
@@ -2429,8 +2376,7 @@ def reclaim_task(
     """Operator reclaim regardless of TTL: release the claim, restore the source
     phase, reset the failure counter. False when not running."""
     row = conn.execute(
-        "SELECT status, claim_lock, worker_pid FROM tasks WHERE id = ?",
-        (task_id,),
+        "SELECT status, claim_lock, worker_pid FROM tasks WHERE id = ?", (task_id,),
     ).fetchone()
     if not row:
         return False
@@ -2445,8 +2391,7 @@ def reclaim_task(
             "UPDATE tasks SET status = ?, claim_lock = NULL, "
             "claim_expires = NULL, worker_pid = NULL "
             "WHERE id = ? AND status IN ('running', 'ready', 'blocked') "
-            "AND claim_lock IS ?",
-            (retry_status, task_id, prev_lock),
+            "AND claim_lock IS ?", (retry_status, task_id, prev_lock),
         )
         if cur.rowcount != 1:
             return False
@@ -2498,8 +2443,7 @@ def _verify_created_cards(
     # Batch-fetch existence + created_by in one query.
     placeholders = ",".join(["?"] * len(ordered))
     rows = conn.execute(
-        f"SELECT id, created_by FROM tasks WHERE id IN ({placeholders})",
-        tuple(ordered),
+        f"SELECT id, created_by FROM tasks WHERE id IN ({placeholders})", tuple(ordered),
     ).fetchall()
     found = {r["id"]: r["created_by"] for r in rows}
 
@@ -2926,8 +2870,7 @@ def block_task(
         raise ValueError(f"block kind must be one of {sorted(VALID_BLOCK_KINDS)} or None")
     with write_txn(conn):
         cur_row = conn.execute(
-            "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?",
-            (task_id,),
+            "SELECT status, block_kind, block_recurrences FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if cur_row is None:
             return False
@@ -3044,8 +2987,7 @@ def request_review(
             and trow["claim_lock"] is not None
         ):
             return _ret(
-                False,
-                "task is running under a live claim; pass expected_run_id "
+                False, "task is running under a live claim; pass expected_run_id "
                 "(worker ownership) or force=True (explicit operator "
                 "override) instead of clearing the live run's claim",
             )
@@ -3054,8 +2996,7 @@ def request_review(
             reviewer = _prior_reviewer(conn, task_id)
             if reviewer is False:
                 return _ret(
-                    False,
-                    "re-review has no durable reviewer provenance (the "
+                    False, "re-review has no durable reviewer provenance (the "
                     "latest changes_requested event is missing or "
                     "malformed); pass reviewer= explicitly",
                 )
@@ -3108,8 +3049,7 @@ def _prior_reviewer(conn: sqlite3.Connection, task_id: str):
     changes_run = conn.execute(
         "SELECT id FROM task_runs "
         "WHERE task_id = ? AND outcome = 'changes_requested' "
-        "ORDER BY id DESC LIMIT 1",
-        (task_id,),
+        "ORDER BY id DESC LIMIT 1", (task_id,),
     ).fetchone()
     if changes_run is None:
         return None
@@ -3134,8 +3074,7 @@ def request_changes(
 
     with write_txn(conn):
         task_row = conn.execute(
-            "SELECT status, assignee, current_run_id FROM tasks WHERE id = ?",
-            (task_id,),
+            "SELECT status, assignee, current_run_id FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if task_row is None:
             return False, "task not found"
@@ -3214,8 +3153,7 @@ def promote_task(
         parents = conn.execute(
             "SELECT t.id, t.status FROM tasks t "
             "JOIN task_links l ON l.parent_id = t.id "
-            "WHERE l.child_id = ?",
-            (task_id,),
+            "WHERE l.child_id = ?", (task_id,),
         ).fetchall()
         unsatisfied = [p["id"] for p in parents if p["status"] not in ("done", "archived")]
         if unsatisfied:
@@ -3230,16 +3168,12 @@ def promote_task(
     with write_txn(conn):
         upd = conn.execute(
             "UPDATE tasks SET status = 'ready' "
-            "WHERE id = ? AND status IN ('todo', 'blocked')",
-            (task_id,),
+            "WHERE id = ? AND status IN ('todo', 'blocked')", (task_id,),
         )
         if upd.rowcount != 1:
             return False, f"task {task_id} status changed during promotion"
         _append_event(
-            conn,
-            task_id,
-            "promoted_manual",
-            {"actor": actor, "reason": reason, "forced": force},
+            conn, task_id, "promoted_manual", {"actor": actor, "reason": reason, "forced": force},
         )
 
     return True, None
@@ -3304,8 +3238,7 @@ def unblock_task(conn: sqlite3.Connection, task_id: str) -> bool:
         cur = conn.execute(
             "UPDATE tasks SET status = ?, current_run_id = NULL, "
             "consecutive_failures = 0, last_failure_error = NULL "
-            "WHERE id = ? AND status IN ('blocked', 'scheduled')",
-            (new_status, task_id),
+            "WHERE id = ? AND status IN ('blocked', 'scheduled')", (new_status, task_id),
         )
         if cur.rowcount != 1:
             return False
@@ -3351,10 +3284,7 @@ def reopen_review_task(conn: sqlite3.Connection, task_id: str) -> bool:
         if implementer:
             payload["implementer"] = implementer
         _append_event(
-            conn,
-            task_id,
-            "review_reopened",
-            payload if payload != {"status": "ready"} else None,
+            conn, task_id, "review_reopened", payload if payload != {"status": "ready"} else None,
         )
         return True
 
@@ -3419,8 +3349,7 @@ def invalidate_descendants_for_parent_reopen(
             conn.execute(
                 "UPDATE tasks SET status = 'todo', completed_at = NULL, "
                 "claim_lock = NULL, claim_expires = NULL, worker_pid = NULL, "
-                "current_run_id = NULL, consecutive_failures = 0 WHERE id = ?",
-                (row["id"],),
+                "current_run_id = NULL, consecutive_failures = 0 WHERE id = ?", (row["id"],),
             )
             entry = {
                 "id": row["id"], "prior_status": previous_status,
@@ -3442,11 +3371,9 @@ def invalidate_descendants_for_parent_reopen(
                 run_id=run_id,
             )
             _insert_comment(
-                conn, row["id"], author,
-                f"Invalidated: ancestor {task_id} was reopened; "
+                conn, row["id"], author, f"Invalidated: ancestor {task_id} was reopened; "
                 f"retracted from '{previous_status}' to 'todo' "
-                f"(will resume via '{resume_status}').",
-                now,
+                f"(will resume via '{resume_status}').", now,
             )
             invalidated.append(entry)
     if not caller_owns_txn:
@@ -3493,8 +3420,7 @@ def specify_triage_task(
         params.append(task_id)
         cur = conn.execute(
             f"UPDATE tasks SET {', '.join(sets)} "
-            f"WHERE id = ? AND status = 'triage'",
-            tuple(params),
+            f"WHERE id = ? AND status = 'triage'", tuple(params),
         )
         if cur.rowcount != 1:
             return False
@@ -3506,9 +3432,7 @@ def specify_triage_task(
                 int(time.time()),
             )
         _append_event(
-            conn,
-            task_id,
-            "specified",
+            conn, task_id, "specified",
             {"changed_fields": changed_fields} if changed_fields else None,
         )
     # Own IMMEDIATE txn (outside the one above): a parent-free specified task
@@ -3577,8 +3501,7 @@ def decompose_triage_task(
     with write_txn(conn):
         root_row = conn.execute(
             "SELECT id, status, tenant, workspace_kind, workspace_path "
-            "FROM tasks WHERE id = ?",
-            (task_id,),
+            "FROM tasks WHERE id = ?", (task_id,),
         ).fetchone()
         if root_row is None or root_row["status"] != "triage":
             return None
@@ -3670,8 +3593,7 @@ def archive_task(conn: sqlite3.Connection, task_id: str) -> bool:
         cur = conn.execute(
             "UPDATE tasks SET status = 'archived', "
             "    claim_lock = NULL, claim_expires = NULL, worker_pid = NULL "
-            "WHERE id = ? AND status != 'archived'",
-            (task_id,),
+            "WHERE id = ? AND status != 'archived'", (task_id,),
         )
         if cur.rowcount != 1:
             return False
@@ -3880,8 +3802,7 @@ def _ctx_parent_results(lines: list[str], conn: sqlite3.Connection, task_id: str
     falling back to ``task.result`` for pre-runs-table data. Stamped with a
     relative age so the worker re-verifies stale upstream results."""
     parent_rows = conn.execute(
-        "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id",
-        (task_id,),
+        "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id", (task_id,),
     ).fetchall()
     wrote_header = False
     for pid in (r["parent_id"] for r in parent_rows):
@@ -3926,8 +3847,7 @@ def _ctx_role_history(lines: list[str], conn: sqlite3.Connection, task: Task, no
         "FROM task_runs r JOIN tasks t ON r.task_id = t.id "
         "WHERE r.profile = ? AND r.task_id != ? "
         "  AND r.outcome = 'completed' "
-        "ORDER BY r.ended_at DESC LIMIT 5",
-        (task.assignee, task.id),
+        "ORDER BY r.ended_at DESC LIMIT 5", (task.assignee, task.id),
     ).fetchall()
     if not role_rows:
         return
@@ -4043,8 +3963,7 @@ def gc_events(conn: sqlite3.Connection, *, older_than_seconds: int = 30 * 24 * 3
     with write_txn(conn):
         cur = conn.execute(
             "DELETE FROM task_events WHERE created_at < ? AND task_id IN "
-            "(SELECT id FROM tasks WHERE status IN ('done', 'archived'))",
-            (cutoff,),
+            "(SELECT id FROM tasks WHERE status IN ('done', 'archived'))", (cutoff,),
         )
     return int(cur.rowcount or 0)
 
@@ -4163,8 +4082,7 @@ def latest_run(conn: sqlite3.Connection, task_id: str) -> Optional[Run]:
     """Return the most recent run regardless of outcome (active or closed)."""
     row = conn.execute(
         "SELECT * FROM task_runs WHERE task_id = ? "
-        "ORDER BY started_at DESC, id DESC LIMIT 1",
-        (task_id,),
+        "ORDER BY started_at DESC, id DESC LIMIT 1", (task_id,),
     ).fetchone()
     return Run.from_row(row) if row else None
 
@@ -4175,8 +4093,7 @@ def latest_summary(conn: sqlite3.Connection, task_id: str) -> Optional[str]:
     row = conn.execute(
         "SELECT summary FROM task_runs "
         "WHERE task_id = ? AND summary IS NOT NULL AND summary != '' "
-        "ORDER BY COALESCE(ended_at, started_at) DESC, id DESC LIMIT 1",
-        (task_id,),
+        "ORDER BY COALESCE(ended_at, started_at) DESC, id DESC LIMIT 1", (task_id,),
     ).fetchone()
     return row["summary"] if row else None
 
