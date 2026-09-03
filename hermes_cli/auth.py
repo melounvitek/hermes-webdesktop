@@ -23,7 +23,7 @@ import time
 import uuid
 import webbrowser  # noqa: F401  (tests patch auth_mod.webbrowser.open; same module object)
 
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -550,6 +550,15 @@ def _auth_lock_holder_for(target_path: Path) -> threading.local:
         return _auth_target_lock_holders.setdefault(key, threading.local())
 
 
+def _kernel_lock(lock_file: Any, acquire: bool) -> None:
+    """Non-blocking exclusive flock (fcntl) or 1-byte msvcrt lock at offset 0; ``acquire=False`` releases."""
+    if fcntl:
+        fcntl.flock(lock_file.fileno(), (fcntl.LOCK_EX | fcntl.LOCK_NB) if acquire else fcntl.LOCK_UN)
+    else:
+        lock_file.seek(0)
+        msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK if acquire else msvcrt.LK_UNLCK, 1)
+
+
 @contextmanager
 def _file_lock(
     lock_path: Path, holder: threading.local, timeout_seconds: float, timeout_message: str):
@@ -568,53 +577,39 @@ def _file_lock(
         return
 
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-
-    if fcntl is None and msvcrt is None:
-        holder.depth = 1
-        try:
-            yield
-        finally:
-            holder.depth = 0
-        return
-
-    # msvcrt.locking needs a non-empty file with the pointer at 0. This convenience write can race
-    # another holder's byte-range lock and raise PermissionError (reproduced with 20 concurrent
-    # processes on Windows); losing that race just means the file already has content, so swallow
-    # it.
-    if msvcrt and (not lock_path.exists() or lock_path.stat().st_size == 0):
-        try:
-            lock_path.write_text(" ", encoding="utf-8")
-        except (OSError, PermissionError):
-            pass
-
-    with lock_path.open("r+" if msvcrt else "a+", encoding="utf-8") as lock_file:
-        deadline = time.monotonic() + max(1.0, timeout_seconds)
-        while True:
-            try:
-                if fcntl:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-                else:
-                    lock_file.seek(0)
-                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_NBLCK, 1)
-                break
-            except (BlockingIOError, OSError, PermissionError):
-                if time.monotonic() >= deadline:
-                    raise TimeoutError(timeout_message)
-                time.sleep(0.05)
+    with ExitStack() as stack:
+        lock_file = None
+        if fcntl is not None or msvcrt is not None:
+            # msvcrt.locking needs a non-empty file with the pointer at 0. This convenience write can
+            # race another holder's byte-range lock and raise PermissionError (reproduced with 20
+            # concurrent processes on Windows); losing the race just means the file already has
+            # content, so swallow it.
+            if msvcrt and (not lock_path.exists() or lock_path.stat().st_size == 0):
+                try:
+                    lock_path.write_text(" ", encoding="utf-8")
+                except (OSError, PermissionError):
+                    pass
+            lock_file = stack.enter_context(lock_path.open("r+" if msvcrt else "a+", encoding="utf-8"))
+            deadline = time.monotonic() + max(1.0, timeout_seconds)
+            while True:
+                try:
+                    _kernel_lock(lock_file, True)
+                    break
+                except (BlockingIOError, OSError, PermissionError):
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(timeout_message)
+                    time.sleep(0.05)
 
         holder.depth = 1
         try:
             yield
         finally:
             holder.depth = 0
-            try:
-                if fcntl:
-                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
-                elif msvcrt:
-                    lock_file.seek(0)
-                    msvcrt.locking(lock_file.fileno(), msvcrt.LK_UNLCK, 1)
-            except (OSError, IOError):
-                pass
+            if lock_file is not None:
+                try:
+                    _kernel_lock(lock_file, False)
+                except (OSError, IOError):
+                    pass
 
 
 @contextmanager
@@ -1167,11 +1162,10 @@ def _keyless_provider_has_explicit_config(normalized: str) -> bool:
 # exception as "no"; the env-var check is NOT best-effort — a failure there must surface rather
 # than let a later, weaker signal decide.
 _EXPLICIT_CONFIG_CHECKS: Tuple[Tuple[Callable[[str], bool], bool], ...] = (
-    (_active_provider_is, True),
-    (_config_selects_provider, True),
-    (_explicit_env_credentials_present, False),
-    (_explicit_pool_entry_present, True),
-    (_keyless_provider_has_explicit_config, True))
+    (_active_provider_is, True), (_config_selects_provider, True),
+    (_explicit_env_credentials_present, False), (_explicit_pool_entry_present, True),
+    (_keyless_provider_has_explicit_config, True),
+)
 
 
 def is_provider_explicitly_configured(provider_id: str) -> bool:
@@ -1565,7 +1559,6 @@ def _optional_base_url(value: Any) -> Optional[str]:
 # back to the default. localhost / 127.0.0.1 are for local development and testing.
 _NOUS_PORTAL_ALLOWED_HOSTS: FrozenSet[str] = frozenset({
     "portal.nousresearch.com", "localhost", "127.0.0.1"})
-
 
 # Per-process memo for resolve_nous_access_token. Startup runs check_tool_availability once per
 # managed-tool check_fn (browser, image_gen, ...) and each independently triggers a ~15s blocking

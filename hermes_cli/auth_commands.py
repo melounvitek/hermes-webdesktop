@@ -312,12 +312,10 @@ def _add_nous_oauth_credential(args, provider: str) -> None:
     creds = auth_mod._nous_device_code_login(
         portal_base_url=getattr(args, "portal_url", None),
         inference_base_url=getattr(args, "inference_url", None),
-        client_id=getattr(args, "client_id", None),
-        scope=getattr(args, "scope", None),
-        open_browser=not getattr(args, "no_browser", False),
-        timeout_seconds=timeout,
-        insecure=bool(getattr(args, "insecure", False)),
-        ca_bundle=getattr(args, "ca_bundle", None))
+        client_id=getattr(args, "client_id", None), scope=getattr(args, "scope", None),
+        open_browser=not getattr(args, "no_browser", False), timeout_seconds=timeout,
+        insecure=bool(getattr(args, "insecure", False)), ca_bundle=getattr(args, "ca_bundle", None),
+    )
     _persist(creds, "Saved")
 
 
@@ -345,14 +343,9 @@ def _add_api_key_credential(args, provider: str, pool) -> None:
         label = line_input(f"Label (optional, default: {default_label}): ").strip()
     label = label or default_label
     entry = PooledCredential(
-        provider=provider,
-        id=uuid.uuid4().hex[:6],
-        label=label,
-        auth_type=AUTH_TYPE_API_KEY,
-        priority=0,
-        source=SOURCE_MANUAL,
-        access_token=token,
-        base_url=_provider_base_url(provider))
+        provider=provider, id=uuid.uuid4().hex[:6], label=label, auth_type=AUTH_TYPE_API_KEY,
+        priority=0, source=SOURCE_MANUAL, access_token=token, base_url=_provider_base_url(provider),
+    )
     pool.add_entry(entry)
     print(f'Added {provider} credential #{len(pool.entries())}: "{label}"')
 
@@ -553,8 +546,7 @@ def _print_azure_entra_status() -> None:
         print(f"  Endpoint: {base_url or '(not configured)'}")
         print(f"  Scope: {scope}")
         if not has_azure_identity_installed():
-            print("  Status: ⚠ azure-identity not installed "
-                  "(pip install azure-identity)")
+            print("  Status: ⚠ azure-identity not installed (pip install azure-identity)")
         else:
             info = describe_active_credential(config=EntraIdentityConfig(scope=scope), timeout_seconds=10.0)
             env_sources = info.get("env_sources") or []
