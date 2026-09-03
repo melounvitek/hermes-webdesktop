@@ -26,7 +26,6 @@ import json
 import logging
 import os
 import re
-import secrets
 import stat
 import sys
 from importlib.metadata import version as _distribution_version
@@ -36,7 +35,7 @@ from typing import Any, List, NoReturn, Optional, Tuple
 from packaging.requirements import Requirement
 
 from hermes_constants import display_hermes_home, get_hermes_home
-from utils import atomic_replace
+from utils import atomic_write_text
 
 # Pinned legacy logger name so operator log filters keep matching (see adapter.py).
 logger = logging.getLogger("gateway.platforms.google_chat_user_oauth")
@@ -204,24 +203,12 @@ def _chmod_quiet(path: Path, mode: int) -> None:
 
 
 def _write_private_json(path: Path, data: Any) -> None:
-    """Atomically write JSON with 0o600 permissions where supported."""
+    """Atomically write JSON with 0o600 permissions (0o700 parent) where supported."""
     path.parent.mkdir(parents=True, exist_ok=True)
     _chmod_quiet(path.parent, 0o700)
-    tmp_path = path.with_suffix(f".tmp.{os.getpid()}.{secrets.token_hex(4)}")
-    try:
-        fd = os.open(str(tmp_path), os.O_WRONLY | os.O_CREAT | os.O_EXCL, stat.S_IRUSR | stat.S_IWUSR)
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
-            json.dump(data, fh, indent=2, ensure_ascii=False)
-            fh.flush()
-            os.fsync(fh.fileno())
-        atomic_replace(tmp_path, path)
-        _chmod_quiet(path, stat.S_IRUSR | stat.S_IWUSR)
-    finally:
-        try:
-            if tmp_path.exists():
-                tmp_path.unlink()
-        except OSError:
-            pass
+    # mkstemp's 0o600 temp + atomic rename never exposes the token at process umask.
+    atomic_write_text(path, json.dumps(data, indent=2, ensure_ascii=False), create_mode=0o600)
+    _chmod_quiet(path, stat.S_IRUSR | stat.S_IWUSR)
 
 
 def _fail(*lines: str) -> NoReturn:
