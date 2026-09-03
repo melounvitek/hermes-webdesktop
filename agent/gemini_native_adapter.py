@@ -435,10 +435,8 @@ def _usage_from_metadata(usage_meta: Dict[str, Any]) -> SimpleNamespace:
 
 def _envelope(model: str, object_: str, choice: SimpleNamespace, usage: Any, cls: type = SimpleNamespace) -> Any:
     """OpenAI chat.completion / chat.completion.chunk envelope around one choice."""
-    return cls(
-        id=f"chatcmpl-{uuid.uuid4().hex[:12]}", object=object_, created=int(time.time()), model=model,
-        choices=[choice], usage=usage,
-    )
+    return cls(id=f"chatcmpl-{uuid.uuid4().hex[:12]}", object=object_, created=int(time.time()), model=model,
+               choices=[choice], usage=usage)
 
 
 def _tool_call_ns(name: str, arguments: str, index: int, call_id: str, extra_content: Any) -> SimpleNamespace:
@@ -483,10 +481,8 @@ def translate_gemini_response(resp: Dict[str, Any], model: str) -> SimpleNamespa
         finish_reason = "tool_calls" if tool_calls else _FINISH_REASON_MAP.get(str(cand.get("finishReason") or "").upper(), "stop")
         usage = _usage_from_metadata(resp.get("usageMetadata") or {})
     reasoning = "".join(pieces[True]) or None
-    message = SimpleNamespace(
-        role="assistant", content="".join(pieces[False]) if pieces[False] else ("" if cand is None else None),
-        tool_calls=tool_calls or None, reasoning=reasoning, reasoning_content=reasoning, reasoning_details=None,
-    )
+    message = SimpleNamespace(role="assistant", content="".join(pieces[False]) if pieces[False] else ("" if cand is None else None),
+                              tool_calls=tool_calls or None, reasoning=reasoning, reasoning_content=reasoning, reasoning_details=None)
     return _envelope(model, "chat.completion", SimpleNamespace(index=0, message=message, finish_reason=finish_reason), usage)
 
 
@@ -501,10 +497,8 @@ def _make_stream_chunk(
     tool_calls = None if d is None else [
         _tool_call_ns(d.get("name") or "", d.get("arguments") or "", d.get("index", 0), _new_call_id(d), d.get("extra_content"))
     ]
-    delta = SimpleNamespace(
-        role="assistant", content=content or None, tool_calls=tool_calls,
-        reasoning=reasoning or None, reasoning_content=reasoning or None,
-    )
+    delta = SimpleNamespace(role="assistant", content=content or None, tool_calls=tool_calls, reasoning=reasoning or None,
+                            reasoning_content=reasoning or None)
     choice = SimpleNamespace(index=0, delta=delta, finish_reason=finish_reason)
     return _envelope(model, "chat.completion.chunk", choice, None, cls=_GeminiStreamChunk)
 
@@ -515,10 +509,10 @@ def _iter_sse_events(response: httpx.Response) -> Iterator[Dict[str, Any]]:
         buffer += chunk or ""
         while "\n" in buffer:
             line, buffer = buffer.split("\n", 1)
-            data = line.rstrip("\r")[6:] if line.rstrip("\r").startswith("data: ") else None
-            if data is None:
+            line = line.rstrip("\r")
+            if not line.startswith("data: "):
                 continue
-            if data == "[DONE]":
+            if (data := line[6:]) == "[DONE]":
                 return
             try:
                 payload = json.loads(data)
@@ -606,23 +600,20 @@ def gemini_http_error(response: httpx.Response, *, body_text: Optional[str] = No
         f"Gemini HTTP {status} ({err_status or 'error'}): {err_message}" if err_message
         else f"Gemini returned HTTP {status}: {body_text[:500]}"
     )
-    # Users who bypassed the setup wizard (raw GOOGLE_API_KEY in .env) still need to learn
-    # the free tier cannot sustain an agent session.
+    # Users who bypassed the setup wizard (raw GOOGLE_API_KEY in .env) still need to learn the free
+    # tier cannot sustain an agent session; a legacy "Standard" key gets the real fix (Google's raw 401 asks for OAuth).
     if status == 429 and is_free_tier_quota_error(err_message or body_text):
         message += _FREE_TIER_GUIDANCE
-    # Legacy "Standard" key rejection: Google's raw 401 misleadingly asks for OAuth; append the real fix.
     if is_standard_key_auth_error(status, err_message or body_text, reason):
         message += _STANDARD_KEY_GUIDANCE
     return GeminiAPIError(
         message, code=_HTTP_ERROR_CODES.get(status, f"gemini_http_{status}"), status_code=status, response=response,
-        retry_after=retry_after,
-        details={"status": err_status, "reason": reason, "metadata": metadata, "message": err_message},
+        retry_after=retry_after, details={"status": err_status, "reason": reason, "metadata": metadata, "message": err_message},
     )
 
 
 class GeminiNativeClient:
-    """Minimal OpenAI-SDK-compatible facade (``client.chat.completions.create(**kwargs)``)
-    over Gemini's native REST API."""
+    """Minimal OpenAI-SDK-compatible facade (``client.chat.completions.create(**kwargs)``) over Gemini's native REST API."""
 
     # For agent/auxiliary_client.py: a complete client, never re-dispatched through a wire adapter.
     # (No HERMES_SKIP_ASYNC_WRAP — the async path has a real conversion, AsyncGeminiNativeClient.)
