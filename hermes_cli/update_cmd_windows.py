@@ -7,10 +7,12 @@ Origin helpers are imported lazily per function (no cycle; test patches on the o
 import logging
 from contextlib import contextmanager, suppress
 import os
+import re
+import shlex
 import subprocess
 import sys
 import time as _time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from hermes_cli.update_cmd_common import _best_effort
@@ -31,8 +33,6 @@ def _abort_on_error(prefix: str):
 def _write_update_planned_stop_marker(profile_path: Path, pid: int) -> bool:
     """Write a planned-stop marker into a specific profile home."""
     try:
-        from datetime import timezone
-
         from gateway.status import _get_process_start_time
         from utils import atomic_json_write
 
@@ -218,8 +218,6 @@ def _hermes_holder_subcommand(cmdline: str) -> str | None:
     ``hermes(.exe)`` entry token, return the first following token that isn't a flag or a flag's value.
     """
     try:
-        import shlex
-
         tokens = shlex.split(cmdline, posix=False)
     except Exception:
         tokens = cmdline.split()
@@ -352,9 +350,7 @@ def _refuse_gateway_ancestor_tree_kill(pids: list[int], *, gateway_mode: bool) -
     return True
 
 
-def _ledger_manual_serve_holders(
-    matches: list[tuple[int, str, str]],
-) -> list[dict]:
+def _ledger_manual_serve_holders(matches: list[tuple[int, str, str]]) -> list[dict]:
     """Full ledger entries for venv holders that are MANUAL serve/dashboard backends.
 
     Positive identity only: self-registered purpose serve/dashboard, live (pid, create_time), recorded spawner
@@ -559,9 +555,7 @@ def _handoff_reapable_backend_pids(matches: list[tuple[int, str, str]]) -> list[
     return roots or None
 
 
-def _stop_process_trees(
-    pids: list[int] | list[tuple[int, int]],
-) -> None:
+def _stop_process_trees(pids: list[int] | list[tuple[int, int]]) -> None:
     """Force-stop each PID with its full child tree (Windows); best effort, never raises.
 
     ``taskkill /T /F``: stopping only the parent can leave a ``.hermes-runtime`` child holding the install open.
@@ -570,11 +564,7 @@ def _stop_process_trees(
     from hermes_cli._subprocess_compat import pid_is_hermes, windows_hide_flags
 
     for entry in pids:
-        if isinstance(entry, tuple):
-            pid, expected_start_time = entry
-        else:
-            pid = int(entry)
-            expected_start_time = get_process_start_time(pid)
+        pid, expected_start_time = entry if isinstance(entry, tuple) else (int(entry), get_process_start_time(int(entry)))
         try:
             if expected_start_time is None:
                 logger.debug("Skipping taskkill of PID %s: process identity unavailable", pid)
@@ -1011,15 +1001,13 @@ def _refresh_bootstrap_cache_scripts(branch: str = "main") -> None:
     """
     from hermes_cli.update_cmd import _m
     with _best_effort('Could not refresh bootstrap-cache scripts after update: %s'):
-        import re as _re
-
         cache_dir = Path(_m().get_hermes_home()) / "bootstrap-cache"
         if not cache_dir.is_dir():
             return
         # Mirror install_script.rs::sanitize_ref().
-        safe_ref = _re.sub(r"[^A-Za-z0-9._-]", "_", str(branch or "main"))
+        safe_ref = re.sub(r"[^A-Za-z0-9._-]", "_", str(branch or "main"))
         # Mirror install_script.rs::is_valid_commit(): immutable commit pin, never rewrite.
-        if _re.fullmatch(r"[0-9a-fA-F]{7,40}", safe_ref):
+        if re.fullmatch(r"[0-9a-fA-F]{7,40}", safe_ref):
             return
         refreshed = []
         for kind, src_name in (("ps1", "install.ps1"), ("sh", "install.sh")):
