@@ -4,15 +4,15 @@ load/save paths (state.db gateway_routing primary, sessions.json legacy mirror).
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import json
 import os
 import tempfile
 import threading
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 from utils import atomic_replace
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from gateway.session import SessionEntry
@@ -43,8 +43,8 @@ class SessionPersistenceMixin:
     """SessionStore storage plumbing: SessionDB handle resolution and routing-index load/save."""
 
     def _open_session_db_for_active_scope(self, db_path: Optional[Path] = None):
-        """SessionDB for the profile scope active on this task. ``db_path`` pins the store;
-        otherwise ``_default_db_path()`` follows the context-local HERMES_HOME (resolved per call so
+        """SessionDB for the active profile scope. ``db_path`` pins the store; otherwise
+        ``_default_db_path()`` follows the context-local HERMES_HOME (resolved per call so
         multiplexed profiles reach their own store). Handles are cached per path; failed opens enter
         a bounded backoff during which callers keep using the JSONL fallback."""
         from hermes_state import _default_db_path, get_shared_session_db
@@ -72,9 +72,7 @@ class SessionPersistenceMixin:
         ``store._db = None``); unpinned, each read resolves the scope so a multiplexed profile's
         writes reach its own store."""
         pinned = self._pinned_db()
-        if pinned is not _DB_UNPINNED:
-            return pinned
-        return self._open_session_db_for_active_scope()
+        return self._open_session_db_for_active_scope() if pinned is _DB_UNPINNED else pinned
 
     @_db.setter
     def _db(self, value) -> None:
@@ -105,9 +103,7 @@ class SessionPersistenceMixin:
         if not getattr(self.config, "multiplex_profiles", False):
             return None
         profile = self._profile_from_session_key(session_key)
-        if not profile or profile == "default":
-            return None
-        return profile
+        return None if not profile or profile == "default" else profile
 
     def _profile_home_for_key(self, session_key: Optional[str]) -> Optional[Path]:
         """HERMES_HOME of the profile owning *session_key*, or None (no named owner or
@@ -121,7 +117,6 @@ class SessionPersistenceMixin:
         home: Optional[Path] = None
         try:
             from hermes_cli.profiles import get_profile_dir, profile_exists
-
             if profile_exists(profile):
                 home = Path(get_profile_dir(profile))
         except Exception as exc:
@@ -134,11 +129,10 @@ class SessionPersistenceMixin:
         return home
 
     def _db_for_key(self, session_key: Optional[str]):
-        """The SessionDB holding *session_key*'s rows, whatever scope is active. ``_db`` follows the
-        ambient HERMES_HOME that only the inbound message path installs; background work (expiry
-        watcher) runs unscoped and would write profile rows into the ROOT store until the
-        stale-route self-heal drops a live conversation. The owning profile is encoded in the
-        key."""
+        """The SessionDB holding *session_key*'s rows, whatever scope is active (the owning profile
+        is encoded in the key). ``_db`` follows the ambient HERMES_HOME that only the inbound message
+        path installs; unscoped background work (expiry watcher) would otherwise write profile rows
+        into the ROOT store until the stale-route self-heal drops a live conversation."""
         pinned = self._pinned_db()
         if pinned is not _DB_UNPINNED:
             return pinned
@@ -212,8 +206,7 @@ class SessionPersistenceMixin:
 
     def _routing_db_method(self, name: str):
         """Bound ``_routing_db.<name>`` if the handle exists and has it, else None."""
-        db = self._routing_db
-        method = getattr(db, name, None) if db else None
+        method = getattr(self._routing_db or None, name, None)
         return method if callable(method) else None
 
     def _load_routing_rows_locked(self) -> bool:
@@ -364,8 +357,7 @@ class SessionPersistenceMixin:
 
     def _save(self) -> None:
         """Persist the routing index while the caller holds ``_lock``."""
-        data, generation = self._snapshot_routing_locked()
-        self._persist_routing_data(data, generation)
+        self._persist_routing_data(*self._snapshot_routing_locked())
 
     def _next_routing_generation_locked(self) -> int:
         """Bump and return the shared routing counter (lock held). Full snapshots AND single-entry
@@ -482,24 +474,14 @@ class SessionPersistenceMixin:
         already persisted (the reverse case lives in ``_persist_routing_data``). No DB or a failed
         upsert falls back to the full rewrite. ``entry_data`` persists a candidate BEFORE it is
         published to the live entry (failure-atomic transitions); the fallback carries it too."""
-        def _locked(fn):
-            if lock_held:
-                return fn()
-            with self._lock:
-                return fn()
-
-        def _capture():
-            if session_key not in self._entries:
-                return None
-            entry = self._entries[session_key]
+        guard = contextlib.nullcontext() if lock_held else self._lock
+        with guard:
+            entry = self._entries.get(session_key)
+            if entry is None:
+                return
             serialized = dict(entry_data) if entry_data is not None else entry.to_dict()
             # The O(n) full snapshot is deferred to the fallback branch.
-            return json.dumps(serialized), self._next_routing_generation_locked()
-
-        captured = _locked(_capture)
-        if captured is None:
-            return
-        entry_json, revision = captured
+            entry_json, revision = json.dumps(serialized), self._next_routing_generation_locked()
         saver = self._routing_db_method("save_gateway_routing_entry")
         if saver is not None:
             try:
@@ -519,7 +501,8 @@ class SessionPersistenceMixin:
                     "to full index rewrite", session_key, exc)
         if entry_data is not None:
             # Full-snapshot fallback carrying the candidate transition.
-            fallback_data = _locked(self._entries_as_dicts)
+            with guard:
+                fallback_data = self._entries_as_dicts()
             fallback_data[session_key] = dict(entry_data)
             self._persist_routing_data(fallback_data, revision)
         else:
