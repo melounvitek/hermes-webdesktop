@@ -85,8 +85,7 @@ def reset_current_session_key(token: contextvars.Token[str]) -> None:
 _Tokens = tuple[contextvars.Token[str], contextvars.Token[str], contextvars.Token[str]]
 
 
-def set_current_observability_context(*, turn_id: str = "", tool_call_id: str = "",
-                                      session_id: str = "") -> _Tokens:
+def set_current_observability_context(*, turn_id: str = "", tool_call_id: str = "", session_id: str = "") -> _Tokens:
     """Bind active tool correlation IDs to approval hooks."""
     return (_approval_turn_id.set(turn_id or ""), _approval_tool_call_id.set(tool_call_id or ""),
             _approval_session_id.set(session_id or ""))
@@ -245,8 +244,7 @@ def _get_approval_timeout() -> int:
     except Exception:
         safe_cap = 365 * 24 * 3600  # fail CLOSED: the raw value would re-open the overflow
     if raw > safe_cap:
-        logger.warning("approvals.timeout=%s exceeds the platform-safe maximum; "
-                       "clamping to %ss", raw, safe_cap)
+        logger.warning("approvals.timeout=%s exceeds the platform-safe maximum; clamping to %ss", raw, safe_cap)
     return min(raw, safe_cap)
 
 

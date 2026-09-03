@@ -47,8 +47,7 @@ def _user_deny_block_result(pattern: str) -> dict:
         f"BLOCKED: this command matches the user-defined deny rule "
         f"'{pattern}' (approvals.deny in config.yaml). It cannot be "
         "executed via the agent — not even with --yolo, /yolo, or "
-        "approvals.mode=off. Do NOT retry or rephrase this command; "
-        "the user has explicitly forbidden it.")}
+        "approvals.mode=off. Do NOT retry or rephrase this command; the user has explicitly forbidden it.")}
 
 
 def _save_blocked_payload(command: str) -> str | None:
@@ -74,8 +73,7 @@ def _save_blocked_payload(command: str) -> str | None:
             "#!/bin/bash\n"
             "# Auto-saved by Hermes: this command exceeded the inline command\n"
             "# parser limit and was blocked from direct execution. Review it,\n"
-            f"# then run it via: bash {path}\n"
-            + command + ("" if command.endswith("\n") else "\n"),
+            f"# then run it via: bash {path}\n" + command + ("" if command.endswith("\n") else "\n"),
             encoding="utf-8", errors="replace",
         )
         return str(path)
@@ -86,8 +84,7 @@ def _save_blocked_payload(command: str) -> str | None:
 
 _RECOVERY_PREFIX = (
     " RECOVERY: this block fires on oversized/unparseable inline "
-    "command payloads (heredocs, giant one-liners), not on the "
-    "operation itself. "
+    "command payloads (heredocs, giant one-liners), not on the operation itself. "
 )
 
 
@@ -99,8 +96,7 @@ def _hardline_block_result(description: str, command: str = "") -> dict:
         "This command is on the unconditional blocklist and cannot "
         "be executed via the agent — not even with --yolo, /yolo, "
         "approvals.mode=off, or cron approve mode. If you genuinely "
-        "need to run it, run it yourself in a terminal outside the "
-        "agent."
+        "need to run it, run it yourself in a terminal outside the agent."
     )
     # The parser-limit block is almost always a giant inline payload, not a forbidden operation, and is typically
     # followed by blind rephrase retries — point at the saved script (or the write_file recipe).
@@ -108,8 +104,7 @@ def _hardline_block_result(description: str, command: str = "") -> dict:
         saved = _a._save_blocked_payload(command) if command else None
         if saved:
             message += _RECOVERY_PREFIX + (
-                f"Your command was saved to {saved} — "
-                f"review it, then run: terminal(command=\"bash {saved}\"). "
+                f"Your command was saved to {saved} — review it, then run: terminal(command=\"bash {saved}\"). "
                 "Do not retry inline."
             )
         else:
@@ -127,8 +122,7 @@ def _sudo_stdin_block_result(description: str) -> dict:
         f"BLOCKED: {description}. "
         "Do not pipe passwords to 'sudo -S' — this is a brute-force "
         "attack vector. Set SUDO_PASSWORD in your .env file if the "
-        "agent needs passwordless sudo, or run the sudo command "
-        "manually in your own terminal.")}
+        "agent needs passwordless sudo, or run the sudo command manually in your own terminal.")}
 
 
 # Shell control characters that make a command compound when they appear OUTSIDE quotes. Inside quotes they are

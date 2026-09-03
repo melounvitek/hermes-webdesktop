@@ -186,10 +186,9 @@ def _present_with_selected_transport(*, command: str, description: str, pattern_
         timeout_seconds = _a._get_approval_timeout()
         request = ApprovalRequest.create(
             command=redact_sensitive_text(command, force=True),
-            description=redact_sensitive_text(description, force=True),
-            pattern_key=pattern_key, pattern_keys=tuple(pattern_keys), session_key=session_key,
-            surface=surface, allow_session=allow_session, allow_permanent=allow_permanent,
-            timeout_seconds=timeout_seconds,
+            description=redact_sensitive_text(description, force=True), pattern_key=pattern_key,
+            pattern_keys=tuple(pattern_keys), session_key=session_key, surface=surface, allow_session=allow_session,
+            allow_permanent=allow_permanent, timeout_seconds=timeout_seconds,
         )
     except Exception:
         # Never fall back to raw text if redaction or request construction fails:

@@ -102,8 +102,7 @@ def _await_coalesced_leader(session_key: str, leader, payload: dict):
     return _finish(payload, resolved, choice, getattr(leader, "reason", None), coalesced=True)
 
 
-def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
-                            *, surface: str = "gateway") -> dict:
+def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict, *, surface: str = "gateway") -> dict:
     """Enqueue *approval_data*, notify the user, and block until resolved or timed
     out. Shared by the terminal command guard, the execute_code guard, the plugin
     escalation gate, and MCP elicitation. Returns ``{"resolved", "choice",
@@ -160,8 +159,7 @@ def _await_gateway_decision(session_key: str, notify_cb, approval_data: dict,
         return {"resolved": False, "choice": None, "notify_failed": True}
 
     state = _poll_event(entry.event, session_key,
-                        interrupt_log="Approval wait interrupted by user signal — "
-                                      "returning deny for session %s")
+                        interrupt_log="Approval wait interrupted by user signal — returning deny for session %s")
     if state == "interrupted":
         entry.result = "deny"
         entry.event.set()
