@@ -1,8 +1,5 @@
-"""Interactive picker for ``hermes sessions browse`` (extracted from sessions_cmd).
-
-Curses UI with live search filtering and ``d`` delete-with-confirmation; a
-numbered-list fallback when curses is unavailable (Windows, etc.).
-"""
+"""Interactive picker for ``hermes sessions browse``: curses UI with live search filtering and ``d``
+delete-with-confirmation; numbered-list fallback when curses is unavailable (Windows, etc.)."""
 
 from typing import Optional
 
@@ -15,8 +12,7 @@ def _session_status_tag(status: Optional[str]) -> str:
 
 
 def _annotate_session_statuses(sessions: list, session_db) -> None:
-    """Attach a ``_status`` key to each row via one indexed lookup per session
-    (never a transcript scan). On failure rows stay untagged and render '-'."""
+    """Attach ``_status`` per row via one indexed lookup (never a transcript scan); on failure rows render '-'."""
     if session_db is None or not sessions:
         return
     try:
@@ -29,7 +25,7 @@ def _annotate_session_statuses(sessions: list, session_db) -> None:
 
 def _label(s: dict) -> str:
     """Title, else preview, else id."""
-    return ((s.get("title") or "").strip() or (s.get("preview") or "").strip() or s["id"])
+    return (s.get("title") or "").strip() or (s.get("preview") or "").strip() or s["id"]
 
 
 def _msgs_str(s: dict) -> str:
@@ -48,18 +44,14 @@ def _match(s: dict, query: str) -> bool:
     )
 
 
-# Layout: [arrow 3] [title/preview flexible] [status 5] [msgs 5]
-#         [active 12] [src 6] [id 18]
+# Layout: [arrow 3] [title/preview flexible] [status 5] [msgs 5] [active 12] [src 6] [id 18]
 _FIXED_COLS = 3 + 5 + 2 + 5 + 2 + 12 + 6 + 18 + 6
 
 
 def _format_row(s: dict, max_x: int) -> str:
-    """Format a session row for display."""
     name_width = max(20, max_x - _FIXED_COLS)
-    title = (s.get("title") or "").strip()
-    preview = (s.get("preview") or "").strip()
     sid = s["id"][:18]
-    name = (title or preview)[:name_width] or sid
+    name = ((s.get("title") or "").strip() or (s.get("preview") or "").strip())[:name_width] or sid
     return (
         f"{name:<{name_width}}  {_session_status_tag(s.get('_status')):<5}  "
         f"{_msgs_str(s):>5}  {_relative_time(s.get('last_active')):<10}  "
@@ -71,12 +63,9 @@ class _CursesBrowser:
     """State + render loop for the curses picker. ``run`` is the wrapper target."""
 
     def __init__(self, curses, sessions, delete_fn):
-        self.curses = curses
-        self.sessions = sessions
-        self.delete_fn = delete_fn  # None => no delete support
+        self.curses, self.sessions, self.delete_fn = curses, sessions, delete_fn  # delete_fn None => no delete
         self.result = None
-        self.cursor = 0
-        self.scroll = 0
+        self.cursor = self.scroll = 0
         self.search = ""
         self.confirm_delete = None  # session dict pending y/n confirmation
         self.flash = ""  # one-frame notice (e.g. "Deleted.")
@@ -97,10 +86,9 @@ class _CursesBrowser:
             pass
 
     def _refilter(self, reset_cursor=True):
-        self.filtered = ([s for s in self.sessions if _match(s, self.search)] if self.search else list(self.sessions))
+        self.filtered = [s for s in self.sessions if _match(s, self.search)] if self.search else list(self.sessions)
         if reset_cursor:
-            self.cursor = 0
-            self.scroll = 0
+            self.cursor = self.scroll = 0
 
     def _draw(self, stdscr, max_y, max_x):
         c = self.curses
@@ -163,8 +151,7 @@ class _CursesBrowser:
     def _handle_key(self, key) -> bool:
         """Apply one keypress; return True when the picker should exit."""
         c = self.curses
-        if self.confirm_delete is not None:
-            # y/n confirmation mode — only an explicit 'y' deletes.
+        if self.confirm_delete is not None:  # y/n confirmation mode — only an explicit 'y' deletes
             target, self.confirm_delete = self.confirm_delete, None
             if key in {ord("y"), ord("Y")}:
                 if self.delete_fn(target["id"]):
@@ -261,14 +248,10 @@ def _fallback_picker(sessions: list) -> Optional[str]:
 
 
 def _session_browse_picker(sessions: list, session_db=None) -> Optional[str]:
-    """Interactive curses-based session browser with live search filtering.
+    """Curses session browser with live search; returns the selected session ID, or None if cancelled.
 
-    Shows lifecycle status (done / intr / err / empty) and message count per
-    session when *session_db* is provided. With a live *session_db*, pressing
-    ``d`` on a row (while the search filter is empty) prompts y/n and deletes
-    the session via ``SessionDB.delete_session``.
-
-    Returns the selected session ID, or None if cancelled.
+    With *session_db*: shows lifecycle status / message count per row, and ``d`` (while the filter is
+    empty) prompts y/n and deletes via ``SessionDB.delete_session``.
     """
     if not sessions:
         print("No sessions found.")

@@ -1,8 +1,5 @@
-"""Session recap — summarize what's happened in the current session.
-
-Differences from Claude Code: - Pure local computation from the in-memory conversation history. No
-LLM call, no auxiliary model, no prompt-cache invalidation. A recap should be instant and free.
-"""
+"""Session recap — summarize the current session from in-memory history. Pure local computation: no
+LLM call, no auxiliary model, no prompt-cache invalidation. A recap should be instant and free."""
 from __future__ import annotations
 
 import json
@@ -12,35 +9,20 @@ from typing import Any, Iterable, List, Mapping, Optional, Sequence, Tuple
 
 from tools.ansi_strip import sanitize_display_text
 
-# How many recent user/assistant turns we consider "recent activity".
-_RECENT_TURN_WINDOW = 20
-
-# How many characters of the latest user prompt to show.
+_RECENT_TURN_WINDOW = 20  # user/assistant turns considered "recent activity"
 _PROMPT_PREVIEW_CHARS = 140
-
-# How many characters of the latest assistant text to show.
 _ASSISTANT_PREVIEW_CHARS = 200
-
-# How many recently-touched files to list.
 _MAX_FILES_LISTED = 5
 
-# Tool names that identify a file-editing action and the argument key that
-# holds the path.
+# File-touching tool name -> argument key holding the path.
 _FILE_EDIT_TOOLS: Mapping[str, str] = {
-    "write_file": "path",
-    "patch": "path",
-    "read_file": "path",
-    "skill_manage": "file_path",
-    "skill_view": "file_path",
+    "write_file": "path", "patch": "path", "read_file": "path",
+    "skill_manage": "file_path", "skill_view": "file_path",
 }
 
 
 def _coerce_text(value: Any) -> str:
-    """Flatten assistant/user ``content`` into a plain string.
-
-    Content may be a string or a list of blocks (multimodal/reasoning models); text-like blocks
-    are concatenated and the rest ignored.
-    """
+    """Flatten ``content`` (string, or list of blocks whose text-like parts are joined) into a string."""
     if value is None:
         return ""
     if isinstance(value, str):
@@ -59,14 +41,8 @@ def _coerce_text(value: Any) -> str:
 
 
 def _tool_call_name_and_args(tool_call: Any) -> Tuple[str, Mapping[str, Any]]:
-    """Extract ``(name, arguments_dict)`` from a tool_call entry.
-
-    ``arguments`` may be a JSON string or a dict depending on provider. Return an empty dict if it
-    cannot be parsed.
-    """
-    if not isinstance(tool_call, Mapping):
-        return "", {}
-    fn = tool_call.get("function") or {}
+    """``(name, arguments_dict)`` from a tool_call; ``arguments`` may be a JSON string or dict ({} if unparsable)."""
+    fn = tool_call.get("function") if isinstance(tool_call, Mapping) else None
     if not isinstance(fn, Mapping):
         return "", {}
     name = str(fn.get("name") or "")
@@ -81,9 +57,7 @@ def _tool_call_name_and_args(tool_call: Any) -> Tuple[str, Mapping[str, Any]]:
 
 def _iter_assistant_tool_calls(messages: Sequence[Mapping[str, Any]]) -> Iterable[Tuple[str, Mapping[str, Any]]]:
     for msg in messages:
-        if not isinstance(msg, Mapping):
-            continue
-        if msg.get("role") != "assistant":
+        if not isinstance(msg, Mapping) or msg.get("role") != "assistant":
             continue
         tool_calls = msg.get("tool_calls") or []
         if not isinstance(tool_calls, list):
@@ -113,21 +87,15 @@ def _latest_text(messages: Sequence[Mapping[str, Any]], role: str) -> Optional[s
 def _recent_window(
     messages: Sequence[Mapping[str, Any]], window: int = _RECENT_TURN_WINDOW
 ) -> List[Mapping[str, Any]]:
-    """Return the tail slice of ``messages`` covering at most ``window`` user+assistant turns (tool
-    messages ride along inside the window).
-    """
+    """Tail slice covering at most ``window`` user+assistant turns (tool messages ride along)."""
     count = 0
-    cut = 0
     for i in range(len(messages) - 1, -1, -1):
         msg = messages[i]
         if isinstance(msg, Mapping) and msg.get("role") in {"user", "assistant"}:
             count += 1
             if count >= window:
-                cut = i
-                break
-    else:
-        return list(messages)
-    return list(messages[cut:])
+                return list(messages[i:])
+    return list(messages)
 
 
 def _shortened_path(path: str) -> str:
@@ -152,16 +120,11 @@ def _shortened_path(path: str) -> str:
 def _summarise_tool_activity(
     tool_calls: Sequence[Tuple[str, Mapping[str, Any]]],
 ) -> Tuple[List[Tuple[str, int]], List[str]]:
-    """Return ``(tool_counts_sorted, recently_edited_files)``.
-
-    Counts are descending and kept in full so callers truncate for display; files are distinct
-    paths, most recent first, from file-editing tools.
-    """
+    """``(tool_counts_sorted_desc, recently_edited_files)`` — files are distinct paths, newest first."""
     counter: Counter[str] = Counter()
     files_seen: List[str] = []
     files_set: set[str] = set()
-    # Walk in reverse so files_seen comes out newest→oldest (Counter ignores order).
-    for name, args in reversed(list(tool_calls)):
+    for name, args in reversed(list(tool_calls)):  # reversed so files_seen comes out newest -> oldest
         counter[name] += 1
         arg_key = _FILE_EDIT_TOOLS.get(name)
         if arg_key:
@@ -181,14 +144,10 @@ def _join_capped(items: List[str], limit: int) -> str:
 
 
 def _truncate(text: str, limit: int) -> str:
-    # Stored history is untrusted for display — remove escape sequences and
-    # control chars so a recap line can't clear the screen / retitle the
-    # window when echoed to a terminal (openai/codex#31494 bug class).
-    text = sanitize_display_text(text)
-    text = " ".join(text.split())  # collapse newlines for a compact one-liner
-    if len(text) <= limit:
-        return text
-    return text[: limit - 1].rstrip() + "…"
+    # Stored history is untrusted for display: strip escapes/control chars so a recap line can't clear
+    # the screen or retitle the window when echoed to a terminal.
+    text = " ".join(sanitize_display_text(text).split())  # collapse newlines for a compact one-liner
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
 
 
 def build_recap(
@@ -198,20 +157,13 @@ def build_recap(
     session_id: Optional[str] = None,
     platform: Optional[str] = None,
 ) -> str:
-    """Build a multi-line recap of recent activity from chat-completion-style ``messages``.
-
-    ``platform`` is accepted for forward compat but does not change behavior. Output is plain
-    text that renders well both in an 80-col terminal and in a gateway message bubble.
-    """
-    _ = platform  # reserved for future use
-    lines: List[str] = []
-
-    header_bits: List[str] = ["Session recap"]
+    """Multi-line plain-text recap of recent activity (80-col terminal / gateway bubble friendly).
+    ``platform`` is accepted for forward compat and does not change behavior."""
+    lines: List[str] = ["Session recap"]
     if session_title:
-        header_bits.append(f"— {session_title}")
+        lines[0] += f" — {session_title}"
     elif session_id:
-        header_bits.append(f"— {session_id[:8]}")
-    lines.append(" ".join(header_bits))
+        lines[0] += f" — {session_id[:8]}"
 
     if not messages:
         lines.append("  (nothing to recap — no messages yet)")
@@ -245,8 +197,7 @@ def build_recap(
     if latest_reply:
         lines.append(f"  Last reply: {_truncate(latest_reply, _ASSISTANT_PREVIEW_CHARS)}")
 
-    if len(lines) == 2:
-        # Only the header + scope line — nothing substantive to show.
+    if len(lines) == 2:  # only header + scope line: nothing substantive to show
         lines.append("  (no assistant activity yet in this window)")
 
     return "\n".join(lines)
