@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 """Text-to-speech tool: config resolution, built-in provider dispatch, output policy, registration.
 
-Built-in providers: Edge (free default), ElevenLabs, OpenAI, DeepInfra, MiniMax, Mistral,
-Gemini, xAI, and the local NeuTTS / KittenTTS / Piper engines; plus any ``type: command``
-provider under ``tts.providers.<name>`` and plugin-registered providers. Output is Opus
-(.ogg) for voice-bubble platforms, MP3 elsewhere. Sibling ``tts_tool_*`` modules hold the
-backends/delivery/lifecycle; their names are re-imported here so ``tools.tts_tool.<name>``
-keeps resolving and tests patching ``tools.tts_tool.<seam>`` still take effect (siblings
-resolve those seams through ``_origin()`` at call time).
+Built-ins: Edge (free default), ElevenLabs, OpenAI, DeepInfra, MiniMax, Mistral, Gemini, xAI,
+local NeuTTS / KittenTTS / Piper; plus ``type: command`` providers under ``tts.providers.<name>``
+and plugin-registered ones. Output is Opus (.ogg) on voice-bubble platforms, MP3 elsewhere.
+Sibling ``tts_tool_*`` modules hold backends/delivery/lifecycle; their names are re-imported
+here so ``tools.tts_tool.<name>`` resolves and test patches on this module still apply
+(siblings read those seams through ``_origin()`` at call time).
 """
 
 import asyncio
+import contextlib
 import datetime
 import importlib.util
 import json
@@ -53,62 +53,52 @@ from tools.tts_command_provider import (  # noqa: F401 — historical names re-e
     _is_command_tts_voice_compatible, _iter_command_providers, _resolve_command_provider_config,
     command_env_passthrough as _command_provider_env_passthrough,
     render_command_template as _render_command_tts_template,
-    run_command_provider as _run_command_tts, shell_quote_context as _shell_quote_context,
-)
+    run_command_provider as _run_command_tts, shell_quote_context as _shell_quote_context)
 from tools.tool_backend_helpers import (  # noqa: F401 — seams patched by tests, resolved via tts_tool_openai._origin()
-    NOUS_MANAGED_PROVIDER, managed_nous_tools_enabled, read_selection, resolve_openai_audio_api_key,
-)
+    NOUS_MANAGED_PROVIDER, managed_nous_tools_enabled, read_selection, resolve_openai_audio_api_key)
 from tools.tts_tool_delivery import (  # noqa: F401 — historical names re-exported
     FALLBACK_MAX_TEXT_LENGTH, PROVIDER_MAX_TEXT_LENGTH, _resolve_max_text_length,
     AudioDeliveryProfile, _build_audio_delivery_files, _concat_audio_files, _convert_to_opus,
-    _pack_audio_files_for_delivery, _repair_ogg_container, _resolve_audio_delivery_profile,
-    _sniff_audio_container, _split_oversized_sentence, _split_text_for_tts, _wrap_pcm_as_wav,
-)
+    _pack_audio_files_for_delivery, _remove_quietly, _repair_ogg_container,
+    _resolve_audio_delivery_profile, _sniff_audio_container, _split_oversized_sentence,
+    _split_text_for_tts, _wrap_pcm_as_wav)
 from tools.tts_tool_providers import (  # noqa: F401 — historical names re-exported
     DEFAULT_ELEVENLABS_MODEL_ID, DEFAULT_ELEVENLABS_VOICE_ID, DEFAULT_GEMINI_TTS_MODEL,
     DEFAULT_GEMINI_TTS_VOICE, DEFAULT_MINIMAX_BASE_URL, DEFAULT_MINIMAX_CN_BASE_URL,
     TTS_RESPONSE_BODY_LIMIT_BYTES, _XAI_FIRST_SENTENCE_RE, _XAI_INLINE_SPEECH_TAGS,
     _XAI_WRAPPING_SPEECH_TAGS, _apply_xai_auto_speech_tags, _elevenlabs_environment_kwargs,
     _generate_edge_tts, _generate_elevenlabs, _generate_gemini_tts, _generate_minimax_tts,
-    _generate_mistral_tts, _generate_xai_tts, _resolve_minimax_tts_runtime,
-)
+    _generate_mistral_tts, _generate_xai_tts, _resolve_minimax_tts_runtime)
 from tools.tts_tool_local import (  # noqa: F401 — historical names re-exported
     DEFAULT_PIPER_VOICE, _LOCAL_TTS_MODEL_CACHES, _TTS_MODEL_CACHE_MAX, _generate_kittentts,
     _generate_neutts, _generate_piper_tts, _kittentts_model_cache, _piper_voice_cache,
-    _resolve_piper_voice_path, _tts_cache_get_or_load,
-)
+    _resolve_piper_voice_path, _tts_cache_get_or_load)
 from tools.tts_tool_speaker import stream_tts_to_speaker  # noqa: F401 — historical name re-exported
 from tools.tts_text_normalize import _strip_markdown_for_tts  # noqa: F401 — historical name re-exported
 from tools.tts_tool_plugins import (  # noqa: F401 — historical names re-exported
     _dispatch_to_plugin_provider, _plugin_provider_is_available,
-    _plugin_provider_is_voice_compatible,
-)
+    _plugin_provider_is_voice_compatible)
 from tools.tts_tool_openai import (  # noqa: F401 — historical names re-exported
     DEFAULT_OPENAI_BASE_URL, DEFAULT_OPENAI_MODEL, DEFAULT_OPENAI_VOICE, MANAGED_OPENAI_TTS_MODELS,
     _generate_deepinfra_tts, _generate_openai_tts, _has_openai_audio_backend,
-    _resolve_openai_audio_client_config,
-)
+    _resolve_openai_audio_client_config)
 from tools.tts_tool_lifecycle import (  # noqa: F401 — historical names re-exported
     _local_tts_warmers, _reset_tts_leases_for_tests, acquire_tts_lease, release_tts_lease,
-    release_tts_provider, tts_lease_holders, warm_tts_provider,
-)
+    release_tts_provider, tts_lease_holders, warm_tts_provider)
 
 
 # --- Lazy SDK importers -- providers import only when used (headless boxes lack PortAudio etc.) ---
-
 def _sdk_importer(module: str, attr: Optional[str] = None, feature: Optional[str] = None) -> Callable[[], Any]:
     """Lazy SDK importer: returns ``module`` (or ``module.attr``), raising ImportError when absent.
 
-    ``feature`` names a ``tools.lazy_deps`` feature to best-effort install first (users who
-    enabled a provider in config.yaml never ran the post-setup hook); any failure there falls
-    through so the raw import still raises cleanly. sounddevice also raises OSError without PortAudio."""
+    ``feature`` names a ``tools.lazy_deps`` feature to best-effort install first (users who enabled
+    a provider in config.yaml never ran the post-setup hook); any failure there falls through so
+    the raw import still raises cleanly. sounddevice also raises OSError without PortAudio."""
     def _import():
         if feature:
-            try:
+            with contextlib.suppress(Exception):
                 from tools.lazy_deps import ensure
                 ensure(feature, prompt=False)
-            except Exception:
-                pass
         mod = importlib.import_module(module)
         return getattr(mod, attr) if attr else mod
     _import.__name__ = f"_import_{module.split('.')[0]}"
@@ -139,16 +129,9 @@ def _package_installed(name: str) -> bool:
         return False
 
 
-def _check_neutts_available() -> bool:
-    return _package_installed("neutts")
-
-
-def _check_kittentts_available() -> bool:
-    return _package_installed("kittentts")
-
-
-def _check_piper_available() -> bool:
-    return _package_installed("piper")
+def _check_neutts_available() -> bool: return _package_installed("neutts")
+def _check_kittentts_available() -> bool: return _package_installed("kittentts")
+def _check_piper_available() -> bool: return _package_installed("piper")
 
 
 # --- Defaults / config ---
@@ -160,8 +143,7 @@ def _get_default_output_dir() -> str:
     return str(get_hermes_dir("cache/audio", "audio_cache"))
 
 
-DEFAULT_OUTPUT_DIR = _get_default_output_dir()
-_DEFAULT_OUTPUT_DIR_AT_IMPORT = DEFAULT_OUTPUT_DIR
+DEFAULT_OUTPUT_DIR = _DEFAULT_OUTPUT_DIR_AT_IMPORT = _get_default_output_dir()
 
 
 def _default_output_dir() -> str:
@@ -179,15 +161,14 @@ def _load_tts_config() -> Dict[str, Any]:
         return load_config().get("tts") or {}
     except ImportError:
         logger.debug("hermes_cli.config not available, using default TTS config")
-        return {}
     except Exception as e:
         logger.warning("Failed to load TTS config: %s", e, exc_info=True)
-        return {}
+    return {}
 
 
 def _get_provider(tts_config: Dict[str, Any]) -> str:
-    """The configured TTS provider, or the free default — inference credentials never imply consent
-    to paid speech. ``nous`` is serviced by the OpenAI path via the managed openai-audio gateway."""
+    """Configured provider or the free default (inference credentials never imply consent to paid
+    speech); ``nous`` is serviced by the OpenAI path through the managed openai-audio gateway."""
     provider = (tts_config.get("provider") or DEFAULT_PROVIDER).lower().strip()
     return "openai" if provider == NOUS_MANAGED_PROVIDER else provider
 
@@ -199,17 +180,9 @@ _NATIVE_OPUS_PROVIDERS = frozenset({"openai", "elevenlabs", "mistral", "gemini"}
 _FFMPEG_OPUS_PROVIDERS = frozenset({"edge", "neutts", "minimax", "xai", "kittentts", "piper"})
 
 
-def _has_any_command_tts_provider(tts_config: Optional[Dict[str, Any]] = None) -> bool:
-    """Return True when any command-type TTS provider is configured."""
-    if tts_config is None:
-        tts_config = _load_tts_config()
-    return any(True for _ in _iter_command_providers(tts_config))
-
-
 # --- Built-in provider dispatch ---
 # provider -> (availability predicate or None, log label, generator name, "package missing" error).
-# Predicates and generator names resolve module globals at call time so tests that monkeypatch
-# ``tools.tts_tool._import_x`` / ``_check_x`` / ``_generate_x`` apply.
+# Predicates/generator names resolve module globals at call time so test monkeypatches apply.
 _BUILTIN_DISPATCH: Dict[str, tuple] = {
     "elevenlabs": (lambda: _importable(_import_elevenlabs), "ElevenLabs", "_generate_elevenlabs",
                    "ElevenLabs provider selected but 'elevenlabs' package not installed. Run: pip install elevenlabs"),
@@ -233,8 +206,7 @@ _BUILTIN_DISPATCH: Dict[str, tuple] = {
     "piper": (lambda: _importable(_import_piper), "Piper (local)", "_generate_piper_tts",
               "Piper provider selected but 'piper-tts' package not installed. "
               "Run 'hermes tools' and select Piper under TTS, or install manually: "
-              "pip install piper-tts"),
-}
+              "pip install piper-tts")}
 
 
 def _error_json(message: str) -> str:
@@ -243,23 +215,22 @@ def _error_json(message: str) -> str:
 
 def _run_edge_tts(text: str, file_str: str, tts_config: Dict[str, Any]) -> None:
     """Run the async Edge generator from sync code (worker thread; direct run if that fails)."""
+    run = lambda: asyncio.run(_generate_edge_tts(text, file_str, tts_config))  # noqa: E731
     try:
-        import concurrent.futures
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-            pool.submit(lambda: asyncio.run(_generate_edge_tts(text, file_str, tts_config))).result(timeout=60)
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(run).result(timeout=60)
     except RuntimeError:
-        asyncio.run(_generate_edge_tts(text, file_str, tts_config))
+        run()
 
 
 def _select_builtin_engine(provider: str) -> tuple:
-    """Check a built-in provider's SDK -> ``(engine, None)`` or ``(provider, error_json)``. Unknown
-    names take the Edge default; without edge-tts NeuTTS is the fallback (engine != provider)."""
+    """SDK check -> ``(engine, None)`` or ``(provider, error_json)``. Unknown names take the Edge
+    default; without edge-tts NeuTTS is the fallback (engine != provider)."""
     entry = _BUILTIN_DISPATCH.get(provider)
     if entry is not None:
-        available, missing_error = entry[0], entry[3]
-        if available is not None and not available():
-            return provider, _error_json(missing_error)
-        return provider, None
+        available, _label, _generator, missing_error = entry
+        return provider, (_error_json(missing_error) if available is not None and not available() else None)
     if _importable(_import_edge_tts):
         return provider, None  # Edge default; the reported provider stays as configured
     if _check_neutts_available():
@@ -267,8 +238,7 @@ def _select_builtin_engine(provider: str) -> tuple:
         return "neutts", None
     return provider, _error_json(
         "No TTS provider available. Install edge-tts (pip install edge-tts) "
-        "or set up NeuTTS for local synthesis."
-    )
+        "or set up NeuTTS for local synthesis.")
 
 
 def _synthesize_builtin(engine: str, text: str, file_str: str, tts_config: Dict[str, Any], instructions: Optional[str]) -> None:
@@ -286,7 +256,7 @@ def _synthesize_builtin(engine: str, text: str, file_str: str, tts_config: Dict[
 def _finalize_voice_delivery(
     file_str: str, provider: str, command_provider_config: Optional[Dict[str, Any]], want_opus: bool,
 ) -> tuple:
-    """Decide voice-bubble eligibility, Opus-converting when needed -> ``(path, voice_compatible)``.
+    """Voice-bubble eligibility (Opus-converting when needed) -> ``(path, voice_compatible)``.
 
     Command/plugin providers are documents unless they opt in via ``voice_compatible``; native-Opus
     built-ins qualify when the platform wants Opus and they wrote .ogg; MP3/WAV built-ins are
@@ -298,11 +268,9 @@ def _finalize_voice_delivery(
     elif want_opus and provider in _FFMPEG_OPUS_PROVIDERS and not file_str.endswith(".ogg"):
         opus_path = _convert_to_opus(file_str)
         return (opus_path, True) if opus_path else (file_str, False)
-    elif provider in _NATIVE_OPUS_PROVIDERS:
-        return file_str, want_opus and file_str.endswith(".ogg")
     else:
-        return file_str, False
-
+        native = provider in _NATIVE_OPUS_PROVIDERS
+        return file_str, native and want_opus and file_str.endswith(".ogg")
     if not opted_in:
         return file_str, False
     if not file_str.endswith(".ogg"):
@@ -311,14 +279,12 @@ def _finalize_voice_delivery(
 
 
 # --- Main tool function ---
-
 def _apply_call_overrides(tts_config: Dict[str, Any], speed: Optional[float], provider: Optional[str]):
-    """Apply per-call ``speed`` (clamped, on a shallow copy) and resolve the provider name."""
+    """Apply per-call ``speed`` (clamped, on a shallow copy so the cached config isn't mutated) and
+    resolve the provider name."""
     if speed is not None:
-        tts_config = dict(tts_config)  # shallow copy to avoid mutating the cache
-        tts_config["speed"] = max(0.25, min(4.0, float(speed)))
-    provider = provider.lower().strip() if provider else _get_provider(tts_config)
-    return tts_config, provider
+        tts_config = {**tts_config, "speed": max(0.25, min(4.0, float(speed)))}
+    return tts_config, provider.lower().strip() if provider else _get_provider(tts_config)
 
 
 def _session_platform() -> tuple:
@@ -341,9 +307,7 @@ def _resolve_output_base(
         if has_traversal_component(output_path):
             return None, _error_json(
                 f"output_path contains '..' traversal component: {output_path}. "
-                "Use an absolute path or one relative to the current directory "
-                "without '..'."
-            )
+                "Use an absolute path or one relative to the current directory without '..'.")
         file_path = Path(output_path).expanduser()
         if command_provider_config is not None:
             file_path = _configured_command_tts_output_path(file_path, command_provider_config)
@@ -351,19 +315,22 @@ def _resolve_output_base(
         if is_write_denied(str(file_path)) or is_write_approval_required(str(file_path)):
             return None, _error_json(
                 f"output_path targets a protected credential or system path: "
-                f"{file_path}. Choose a normal audio output location."
-            )
+                f"{file_path}. Choose a normal audio output location.")
     else:
-        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-        out_dir = Path(_default_output_dir())
-        out_dir.mkdir(parents=True, exist_ok=True)
         if command_provider_config is not None:
             ext = _get_command_tts_output_format(command_provider_config)
         else:
             ext = "ogg" if want_opus and provider in _NATIVE_OPUS_PROVIDERS else "mp3"
-        file_path = out_dir / f"tts_{timestamp}.{ext}"
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        file_path = Path(_default_output_dir()) / f"tts_{timestamp}.{ext}"
     file_path.parent.mkdir(parents=True, exist_ok=True)
     return file_path, None
+
+
+def _media_tag(paths: List[str], voice_compatible: bool) -> str:
+    """``MEDIA:<path>`` lines; the ``[[audio_as_voice]]`` marker asks the platform for a voice bubble."""
+    media_tag = "\n".join(f"MEDIA:{path}" for path in paths)
+    return f"[[audio_as_voice]]\n{media_tag}" if voice_compatible else media_tag
 
 
 def _tool_failure(prefix: str, provider: str, exc: BaseException) -> str:
@@ -377,7 +344,7 @@ def _text_to_speech_single(
     text: str, file_str: str, *, provider: str, tts_config: Dict[str, Any],
     command_provider_config: Optional[Dict[str, Any]], want_opus: bool, instructions: Optional[str],
 ) -> str:
-    """Synthesize one normalized, provider-safe chunk into *file_str*; returns the result envelope.
+    """Synthesize one provider-safe chunk into *file_str*; returns the result envelope.
 
     Command providers resolve BEFORE built-in dispatch, but built-in names short-circuit so
     ``tts.providers.openai.command`` can't shadow OpenAI. Plugins fire only for names that are
@@ -385,7 +352,8 @@ def _text_to_speech_single(
     try:
         if command_provider_config is not None:
             logger.info("Generating speech with command TTS provider '%s'...", provider)
-            file_str = _generate_command_tts(text, file_str, provider, command_provider_config, tts_config)
+            file_str = _generate_command_tts(
+                text, file_str, provider, command_provider_config, tts_config)
         elif provider not in BUILTIN_TTS_PROVIDERS and (
             _plugin_path := _dispatch_to_plugin_provider(text, file_str, provider, tts_config)
         ) is not None:
@@ -395,24 +363,17 @@ def _text_to_speech_single(
             if error:
                 return error
             _synthesize_builtin(provider, text, file_str, tts_config, instructions)
-
         if not os.path.exists(file_str) or os.path.getsize(file_str) == 0:
             return _error_json(f"TTS generation produced no output (provider: {provider})")
 
         # Sniff once for every provider: MP3/WAV bytes in a .ogg path render as 0-second bubbles.
         file_str = _repair_ogg_container(file_str)
-        file_str, voice_compatible = _finalize_voice_delivery(file_str, provider, command_provider_config, want_opus)
+        file_str, voice_compatible = _finalize_voice_delivery(
+            file_str, provider, command_provider_config, want_opus)
         logger.info("TTS audio saved: %s (%s bytes, provider: %s)", file_str, f"{os.path.getsize(file_str):,}", provider)
-
-        media_tag = f"MEDIA:{file_str}"
-        if voice_compatible:
-            media_tag = f"[[audio_as_voice]]\n{media_tag}"
         return json.dumps({
-            "success": True,
-            "file_path": file_str,
-            "media_tag": media_tag,
-            "provider": provider,
-            "voice_compatible": voice_compatible,
+            "success": True, "file_path": file_str, "media_tag": _media_tag([file_str], voice_compatible),
+            "provider": provider, "voice_compatible": voice_compatible,
         }, ensure_ascii=False)
     except ValueError as e:
         return _tool_failure("TTS configuration error", provider, e)
@@ -458,8 +419,7 @@ def _synthesize_chunks(chunks: List[str], base_path: Path, generated_artifacts: 
 
 def text_to_speech_tool(
     text: str, output_path: Optional[str] = None, speed: Optional[float] = None,
-    instructions: Optional[str] = None, provider: Optional[str] = None,
-) -> str:
+    instructions: Optional[str] = None, provider: Optional[str] = None) -> str:
     """Convert text to speech with long-form chunking; returns the JSON result envelope.
 
     Text is normalized, split into provider-safe chunks (never silently truncated), synthesized
@@ -467,16 +427,13 @@ def text_to_speech_tool(
     separate valid files and no over-limit artifact is ever returned."""
     if not text or not text.strip():
         return tool_error("Text is required", success=False)
-
-    # Shared cleaner: markdown, emoji, think blocks, verifier footer, units, newlines.
-    try:
+    try:  # shared cleaner: markdown, emoji, think blocks, verifier footer, units, newlines
         from tools.tts_text_normalize import prepare_spoken_text
         text = prepare_spoken_text(text, max_chars=None)
     except Exception:
         text = text.strip()
     if not text:
         return tool_error("Text is empty after TTS cleanup", success=False)
-
     tts_config, provider = _apply_call_overrides(_load_tts_config(), speed, provider)
     command_provider_config = _resolve_command_provider_config(provider, tts_config)
     max_len = _resolve_max_text_length(provider, tts_config)
@@ -484,51 +441,36 @@ def text_to_speech_tool(
     if not chunks:
         return tool_error("Text is required", success=False)
     if len(chunks) > 1:
-        logger.info(
-            "TTS text for provider %s split into %d chunks (input=%d chars, cap=%d)",
-            provider, len(chunks), len(text), max_len,
-        )
-
+        logger.info("TTS text for provider %s split into %d chunks (input=%d chars, cap=%d)",
+                    provider, len(chunks), len(text), max_len)
     platform, want_opus = _session_platform()
     delivery_profile = _resolve_audio_delivery_profile(platform, tts_config)
-    base_path, error = _resolve_output_base(output_path, provider, command_provider_config, want_opus)
+    base_path, error = _resolve_output_base(
+        output_path, provider, command_provider_config, want_opus)
     if error:
         return error
-
     generated_artifacts: set[str] = set()
     final_paths: List[str] = []
     try:
         encoded_paths, chunk_results = _synthesize_chunks(
             chunks, base_path, generated_artifacts, provider=provider, tts_config=tts_config,
             command_provider_config=command_provider_config, want_opus=want_opus,
-            instructions=instructions,
-        )
+            instructions=instructions)
         voice_compatible = bool(chunk_results) and all(bool(r.get("voice_compatible")) for r in chunk_results)
         delivery_base = base_path.with_suffix(Path(encoded_paths[0]).suffix)
         final_paths, combined_chunks = _build_audio_delivery_files(
-            encoded_paths, str(delivery_base), delivery_profile, voice_compatible=voice_compatible,
-        )
+            encoded_paths, str(delivery_base), delivery_profile, voice_compatible=voice_compatible)
         for path in final_paths:
             logger.info("TTS audio saved: %s (%s bytes, provider: %s)", path, f"{os.path.getsize(path):,}", provider)
-        media_tag = "\n".join(f"MEDIA:{path}" for path in final_paths)
-        if voice_compatible:
-            media_tag = f"[[audio_as_voice]]\n{media_tag}"
-
         return json.dumps({
-            "success": True,
-            "file_path": final_paths[0],
-            "file_paths": final_paths,
-            "media_tag": media_tag,
-            "provider": chunk_results[0].get("provider", provider),
-            "voice_compatible": voice_compatible,
-            "chunk_count": len(chunks),
-            "delivery_file_count": len(final_paths),
+            "success": True, "file_path": final_paths[0], "file_paths": final_paths,
+            "media_tag": _media_tag(final_paths, voice_compatible),
+            "provider": chunk_results[0].get("provider", provider), "voice_compatible": voice_compatible,
+            "chunk_count": len(chunks), "delivery_file_count": len(final_paths),
             "combined_chunks": bool(combined_chunks),
             "delivery_profile": {
-                "platform": delivery_profile.platform,
-                "max_file_bytes": delivery_profile.max_file_bytes,
-                "target_file_bytes": delivery_profile.target_file_bytes,
-            },
+                "platform": delivery_profile.platform, "max_file_bytes": delivery_profile.max_file_bytes,
+                "target_file_bytes": delivery_profile.target_file_bytes},
         }, ensure_ascii=False)
     except _ChunkFailed as exc:
         return tool_error(str(exc), success=False)
@@ -540,26 +482,21 @@ def text_to_speech_tool(
         final_absolute = {os.path.abspath(path) for path in final_paths}
         for artifact in generated_artifacts:
             if os.path.abspath(artifact) not in final_absolute:
-                try:
-                    os.unlink(artifact)
-                except OSError:
-                    pass
+                _remove_quietly(artifact)
 
 
 # --- check_fn ---
-
 def _minimax_requirements() -> bool:
     try:
         _resolve_minimax_tts_runtime(_load_tts_config())
+        return True
     except ValueError:
         return False
-    return True
 
 
 def _xai_requirements() -> bool:
     try:
         from tools.xai_http import resolve_xai_http_credentials
-
         return bool(resolve_xai_http_credentials().get("api_key"))
     except Exception:
         return False
@@ -578,8 +515,7 @@ _BUILTIN_REQUIREMENTS: Dict[str, Callable[[], bool]] = {
     "mistral": lambda: _importable(_import_mistral_client) and bool(_resolve_provider_key("MISTRAL_API_KEY", "mistral")),
     "neutts": lambda: _check_neutts_available(),
     "kittentts": lambda: _check_kittentts_available(),
-    "piper": lambda: _check_piper_available(),
-}
+    "piper": lambda: _check_piper_available()}
 
 
 def check_tts_requirements() -> bool:
@@ -589,9 +525,7 @@ def check_tts_requirements() -> bool:
     if _resolve_command_provider_config(provider, tts_config) is not None:
         return True
     check = _BUILTIN_REQUIREMENTS.get(provider)
-    if check is not None:
-        return check()
-    return _plugin_provider_is_available(provider)
+    return check() if check is not None else _plugin_provider_is_available(provider)
 
 
 # --- Registry ---
@@ -645,10 +579,6 @@ registry.register(
     schema=TTS_SCHEMA,
     handler=lambda args, **kw: text_to_speech_tool(
         text=args.get("text", ""),
-        output_path=args.get("output_path"),
-        speed=args.get("speed"),
-        instructions=args.get("instructions"),
-        provider=args.get("provider")),
+        **{k: args.get(k) for k in ("output_path", "speed", "instructions", "provider")}),
     check_fn=check_tts_requirements,
-    emoji="🔊",
-)
+    emoji="🔊")
