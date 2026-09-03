@@ -47,9 +47,7 @@ from agent.conversation_compression import (
 )
 from agent.conversation_loop import INTERRUPT_WAITING_FOR_MODEL_PREFIX
 from agent.interrupt_compat import request_hard_interrupt
-from agent.turn_context import (
-    compression_made_progress,
-)
+from agent.turn_context import compression_made_progress
 from hermes_cli.config import _is_ssh_remote_tilde_cwd, cfg_get
 from hermes_cli.fallback_config import get_fallback_chain
 
@@ -126,6 +124,12 @@ _HYGIENE_COOLDOWN_MAX_SECONDS = 3600.0
 _HYGIENE_TURNHOLD_RETRY_SECONDS = 60.0
 
 
+def _gateway_session_db_inner(gateway):
+    """The raw SessionDB behind ``gateway._session_db`` (unwrapping the async facade), or None."""
+    session_db = getattr(gateway, "_session_db", None)
+    return getattr(session_db, "_db", session_db)
+
+
 def _hygiene_cooldown_for_failure(
     gateway,
     session_key: str,
@@ -143,9 +147,7 @@ def _hygiene_cooldown_for_failure(
         state = gateway._session_state(session_key).persistent
     except Exception as exc:
         logger.debug("hygiene failure streak update failed: %s", exc)
-    session_db = getattr(gateway, "_session_db", None)
-    session_db = getattr(session_db, "_db", session_db)
-    increment = getattr(session_db, "increment_hygiene_failure_streak", None)
+    increment = getattr(_gateway_session_db_inner(gateway), "increment_hygiene_failure_streak", None)
     if callable(increment):
         try:
             streak = max(1, int(increment(session_key)))
@@ -176,9 +178,7 @@ def _reset_hygiene_failure_streak(gateway, session_key: str) -> None:
             state.persistent.hygiene_failure_streak = 0
     except Exception as exc:
         logger.debug("hygiene failure streak reset failed: %s", exc)
-    session_db = getattr(gateway, "_session_db", None)
-    session_db = getattr(session_db, "_db", session_db)
-    reset = getattr(session_db, "reset_hygiene_failure_streak", None)
+    reset = getattr(_gateway_session_db_inner(gateway), "reset_hygiene_failure_streak", None)
     if callable(reset):
         try:
             reset(session_key)
@@ -376,16 +376,11 @@ def _record_hygiene_cooldown(
     Shares the in-conversation path's column/recorder so it survives restarts. ``error`` must be
     forwarded: the recorder writes ``compression_failure_error`` UNCONDITIONALLY (else NULL clobber).
     """
-    import time as _time
-    session_db = getattr(gateway, "_session_db", None)
-    if session_db is None:
-        return
-    session_db = getattr(session_db, "_db", session_db)
-    recorder = getattr(session_db, "record_compression_failure_cooldown", None)
+    recorder = getattr(_gateway_session_db_inner(gateway), "record_compression_failure_cooldown", None)
     if recorder is None:
         return
     try:
-        recorder(session_id, _time.time() + cooldown_seconds, error)
+        recorder(session_id, time.time() + cooldown_seconds, error)
     except Exception as exc:
         logger.debug("session hygiene cooldown persist failed: %s", exc)
 
@@ -452,20 +447,6 @@ def _gateway_surface_passes_raw_text(platform: Any) -> bool:
     return _gateway_platform_value(platform) in _GATEWAY_RAW_TEXT_PLATFORMS
 
 
-_GATEWAY_PROVIDER_ERROR_RE = re.compile(
-    r"("  # infrastructure/provider error preambles, not ordinary assistant prose
-    r"api\s+(?:call\s+)?failed"
-    r"|provider\s+authentication\s+failed"
-    r"|non-retryable\s+error"
-    r"|rate\s+limited\s+after\s+\d+\s+retries"
-    r"|error\s+code\s*:"
-    r"|\bhttp\s*\d{3}\b"
-    r"|incorrect\s+api\s+key"
-    r"|invalid\s+api\s+key"
-    r")",
-    re.IGNORECASE,
-)
-
 _GATEWAY_PROVIDER_POLICY_RE = re.compile(
     r"("  # raw provider policy/safety bodies are noisy and may be sensitive
     r"cybersecurity\s+risk"
@@ -491,24 +472,14 @@ _GATEWAY_RATE_LIMIT_RE = re.compile(
     re.IGNORECASE,
 )
 
-_GATEWAY_CONNECTION_ERROR_RE = re.compile(
-    r"("
-    r"(?:\w+\.)?(?:api\s*)?connection\s*(?:error|timeout)"
-    r"|(?:\w+\.)?connect\s*(?:error|timeout)"
-    r"|connection\s+refused"
-    r"|connection\s+reset"
-    r"|connection\s+aborted"
-    r"|actively\s+refused"
-    r"|winerror\s+10061"
-    r"|errno\s+111"
-    r"|no\s+route\s+to\s+host"
-    r"|network\s+is\s+unreachable"
-    r"|cannot\s+connect"
-    r"|failed\s+to\s+establish"
-    r"|could\s+not\s+connect"
-    r")",
-    re.IGNORECASE,
+# Connection-failure markers: the first 8 also anchor the provider-failure envelope shape below.
+_CONNECTION_ERROR_MARKERS = (
+    r"(?:\w+\.)?(?:api\s*)?connection\s*(?:error|timeout)", r"(?:\w+\.)?connect\s*(?:error|timeout)",
+    r"connection\s+refused", r"connection\s+reset", r"connection\s+aborted", r"actively\s+refused",
+    r"winerror\s+10061", r"errno\s+111", r"no\s+route\s+to\s+host", r"network\s+is\s+unreachable",
+    r"cannot\s+connect", r"failed\s+to\s+establish", r"could\s+not\s+connect",
 )
+_GATEWAY_CONNECTION_ERROR_RE = re.compile("(" + "|".join(_CONNECTION_ERROR_MARKERS) + ")", re.IGNORECASE)
 
 _GATEWAY_SECRET_PATTERNS = (
     re.compile(r"\bsk-[A-Za-z0-9][A-Za-z0-9_\-]{12,}\b"),
@@ -623,6 +594,13 @@ def _seed_hygiene_system_prompt(
     return bool(stored_prompt)
 
 
+_TRANSIENT_NETWORK_ERROR_CLASS_NAMES = frozenset({
+    "TimedOut", "NetworkError", "ReadError", "WriteError", "ConnectError", "ConnectTimeout",
+    "ReadTimeout", "WriteTimeout", "PoolTimeout", "RemoteProtocolError", "ServerDisconnectedError",
+    "ClientConnectorError", "ClientOSError",
+})
+
+
 def _is_transient_network_error(exc: BaseException) -> bool:
     """True for transient network errors safe to log + swallow (the next poll recovers; never crash).
 
@@ -631,29 +609,13 @@ def _is_transient_network_error(exc: BaseException) -> bool:
     seen: set[int] = set()
     cur: Optional[BaseException] = exc
     depth = 0
-    transient_class_names = {
-        "TimedOut",
-        "NetworkError",
-        "ReadError",
-        "WriteError",
-        "ConnectError",
-        "ConnectTimeout",
-        "ReadTimeout",
-        "WriteTimeout",
-        "PoolTimeout",
-        "RemoteProtocolError",
-        "ServerDisconnectedError",
-        "ClientConnectorError",
-        "ClientOSError",
-    }
     while cur is not None and depth < 12:
         ident = id(cur)
         if ident in seen:
             break
         seen.add(ident)
         depth += 1
-        name = type(cur).__name__
-        if name in transient_class_names:
+        if type(cur).__name__ in _TRANSIENT_NETWORK_ERROR_CLASS_NAMES:
             return True
         cur = cur.__cause__ or cur.__context__
     return False
@@ -747,51 +709,39 @@ def _format_exec_approval_fallback(
         + ", ".join(choices[:-1]) + f", or {choices[-1]}."
     )
 
+# Ordered: auth beats policy beats rate-limit beats connection; first match wins.
+_PROVIDER_ERROR_REPLIES = (
+    (_GATEWAY_AUTH_ERROR_RE, "⚠️ Provider authentication failed. Check the configured credentials; "
+                             "raw provider details are in the gateway logs."),
+    (_GATEWAY_PROVIDER_POLICY_RE, "⚠️ The model provider rejected the request. I kept the raw provider "
+                                  "error out of chat; check gateway logs for details or try rephrasing."),
+    (_GATEWAY_RATE_LIMIT_RE, "⏱️ The model provider is rate-limiting requests. Please wait a moment and try again."),
+    (_GATEWAY_CONNECTION_ERROR_RE, "⚠️ The model server is not responding — it looks like the configured "
+                                   "model endpoint is not running or is unreachable."),
+)
+
+
 def _gateway_provider_error_reply(text: str) -> str:
     """Map raw provider/API errors to a short user-safe Telegram reply."""
-    if _GATEWAY_AUTH_ERROR_RE.search(text):
-        return (
-            "⚠️ Provider authentication failed. Check the configured credentials; "
-            "raw provider details are in the gateway logs."
-        )
-    if _GATEWAY_PROVIDER_POLICY_RE.search(text):
-        return (
-            "⚠️ The model provider rejected the request. I kept the raw provider "
-            "error out of chat; check gateway logs for details or try rephrasing."
-        )
-    if _GATEWAY_RATE_LIMIT_RE.search(text):
-        return "⏱️ The model provider is rate-limiting requests. Please wait a moment and try again."
-    if _GATEWAY_CONNECTION_ERROR_RE.search(text):
-        return (
-            "⚠️ The model server is not responding — it looks like the configured "
-            "model endpoint is not running or is unreachable."
-        )
+    for pattern, reply in _PROVIDER_ERROR_REPLIES:
+        if pattern.search(text):
+            return reply
     return (
         "⚠️ The model provider failed after retries. I kept raw provider details "
         "out of chat; check gateway logs for diagnostics."
     )
 
 
+# Provider/API failure envelope preambles (not ordinary assistant prose), anchored at line start.
+_PROVIDER_ERROR_MARKERS = (
+    r"api\s+(?:call\s+)?failed", r"provider\s+authentication\s+failed", r"non-retryable\s+error",
+    r"rate\s+limited\s+after\s+\d+\s+retries", r"error\s+code\s*:", r"http\s*\d{3}\b",
+    r"incorrect\s+api\s+key", r"invalid\s+api\s+key",
+)
 _GATEWAY_PROVIDER_ERROR_SHAPE_RE = re.compile(
     r"^\s*(\W*\s*)?("
-    r"api\s+(?:call\s+)?failed"
-    r"|provider\s+authentication\s+failed"
-    r"|non-retryable\s+error"
-    r"|rate\s+limited\s+after\s+\d+\s+retries"
-    r"|error\s+code\s*:"
-    r"|http\s*\d{3}\b"
-    r"|incorrect\s+api\s+key"
-    r"|invalid\s+api\s+key"
-    r"|(?:\w+\.)?(?:api\s*)?connection\s*(?:error|timeout)"
-    r"|(?:\w+\.)?connect\s*(?:error|timeout)"
-    r"|connection\s+refused"
-    r"|connection\s+reset"
-    r"|connection\s+aborted"
-    r"|actively\s+refused"
-    r"|winerror\s+10061"
-    r"|errno\s+111"
-    r"|all\s+connection\s+attempts\s+failed"
-    r")",
+    + "|".join(_PROVIDER_ERROR_MARKERS + _CONNECTION_ERROR_MARKERS[:8] + (r"all\s+connection\s+attempts\s+failed",))
+    + ")",
     re.IGNORECASE,
 )
 
@@ -1846,7 +1796,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 # Resolve Hermes home directory (respects HERMES_HOME override)
 from hermes_constants import get_hermes_home, get_hermes_home_override
-from utils import atomic_json_write, base_url_hostname, is_truthy_value  # noqa: F401  (re-exported: run_* mixins + tests resolve gateway.run.<name>)
+from utils import atomic_json_write  # noqa: F401  (re-exported: run_* mixins + tests resolve gateway.run.<name>)
 _hermes_home = get_hermes_home()
 
 # Load environment variables from ~/.hermes/.env first.
@@ -1934,11 +1884,7 @@ def _current_max_iterations() -> int:
     return _resolve_turn_limit(os.getenv("HERMES_MAX_ITERATIONS"))
 
 
-from contextlib import (
-    asynccontextmanager as _asynccontextmanager,
-    contextmanager as _contextmanager,
-suppress,
-)
+from contextlib import asynccontextmanager as _asynccontextmanager, contextmanager as _contextmanager, suppress
 
 
 # Platforms that bind a host TCP port. In a profile multiplexer the default profile owns the single
@@ -2566,11 +2512,6 @@ from gateway.restart import (
 )
 
 
-from gateway.whatsapp_identity import (
-    canonical_whatsapp_identifier as _canonical_whatsapp_identifier,  # noqa: F401
-    )
-
-
 logger = logging.getLogger(__name__)
 
 
@@ -2714,6 +2655,15 @@ def _resolve_runtime_agent_kwargs() -> dict:
         else {}
     )
 
+    return {**_runtime_agent_kwargs(runtime), "max_tokens": max_tokens, "capabilities": capabilities}
+
+
+def _runtime_agent_kwargs(runtime: dict) -> dict:
+    """AIAgent constructor kwargs shared by every runtime-provider resolution.
+
+    ``request_overrides`` is passed through as resolved (custom_providers ``extra_body`` etc.) so
+    the provider's configured request body reaches the per-turn route on the gateway path.
+    """
     return {
         "api_key": runtime.get("api_key"),
         "base_url": runtime.get("base_url"),
@@ -2723,13 +2673,7 @@ def _resolve_runtime_agent_kwargs() -> dict:
         "command": runtime.get("command"),
         "args": list(runtime.get("args") or []),
         "credential_pool": runtime.get("credential_pool"),
-        "request_overrides": dict(runtime.get("request_overrides") or {}),
-        "max_tokens": max_tokens,
-        # Per-provider request_overrides (e.g. custom_providers ``extra_body`` with
-        # ``chat_template_kwargs``) from resolve_runtime_provider() must reach the per-turn route,
-        # else the provider's configured request body never reaches the model on the gateway path.
         "request_overrides": runtime.get("request_overrides"),
-        "capabilities": capabilities,
     }
 
 
@@ -2858,14 +2802,7 @@ def _resolve_runtime_agent_kwargs_for_provider(provider: str) -> dict:
     except Exception as exc:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
     return {
-        "api_key": runtime.get("api_key"),
-        "base_url": runtime.get("base_url"),
-        "provider": runtime.get("provider"),
-        "requested_provider": runtime.get("requested_provider"),
-        "api_mode": runtime.get("api_mode"),
-        "command": runtime.get("command"),
-        "args": list(runtime.get("args") or []),
-        "credential_pool": runtime.get("credential_pool"),
+        **_runtime_agent_kwargs(runtime),
         "request_overrides": dict(runtime.get("request_overrides") or {}),
         "capabilities": dict(runtime.get("capabilities") or {}),
         "max_tokens": runtime.get("max_output_tokens"),
@@ -2928,19 +2865,7 @@ def _try_resolve_fallback_provider() -> dict | None:
                     entry.get("provider") or runtime.get("provider"),
                     entry.get("model"),
                 )
-                return {
-                    "api_key": runtime.get("api_key"),
-                    "base_url": runtime.get("base_url"),
-                    "provider": runtime.get("provider"),
-                    "requested_provider": runtime.get("requested_provider"),
-                    "api_mode": runtime.get("api_mode"),
-                    "command": runtime.get("command"),
-                    "args": list(runtime.get("args") or []),
-                    "credential_pool": runtime.get("credential_pool"),
-                    "request_overrides": dict(runtime.get("request_overrides") or {}),
-                    "model": entry.get("model"),
-                    "request_overrides": runtime.get("request_overrides"),
-                }
+                return {**_runtime_agent_kwargs(runtime), "model": entry.get("model")}
             except Exception as fb_exc:
                 logger.debug("Fallback entry %s failed: %s", entry.get("provider"), fb_exc)
                 continue
@@ -2955,24 +2880,23 @@ def _event_media_type_at(event, index: int) -> str:
     return media_types[index] if index < len(media_types) else ""
 
 
-def _event_media_is_image(event, index: int) -> bool:
-    """True if the attachment at *index* is an image.
+def _event_media_kind_is(event, index: int, mime_prefix: str, fallback_types: frozenset) -> bool:
+    """Trust the per-attachment MIME; fall back to the message-level type only when it is unknown.
 
-    Trust the per-attachment MIME; fall back to message-level ``PHOTO`` only when unknown, else a
-    document uploaded alongside an image is base64'd as vision and the provider 400s.
+    Otherwise a document uploaded alongside an image is base64'd as vision and the provider 400s.
     """
     mtype = _event_media_type_at(event, index)
     if mtype:
-        return mtype.startswith("image/")
-    return getattr(event, "message_type", None) == MessageType.PHOTO
+        return mtype.startswith(mime_prefix)
+    return getattr(event, "message_type", None) in fallback_types
+
+
+def _event_media_is_image(event, index: int) -> bool:
+    return _event_media_kind_is(event, index, "image/", frozenset({MessageType.PHOTO}))
 
 
 def _event_media_is_audio(event, index: int) -> bool:
-    """True if the attachment at *index* is audio (per-attachment MIME first)."""
-    mtype = _event_media_type_at(event, index)
-    if mtype:
-        return mtype.startswith("audio/")
-    return getattr(event, "message_type", None) in {MessageType.VOICE, MessageType.AUDIO}
+    return _event_media_kind_is(event, index, "audio/", frozenset({MessageType.VOICE, MessageType.AUDIO}))
 
 
 def _event_media_is_stt_input(event, index: int) -> bool:
@@ -2987,11 +2911,7 @@ def _event_media_is_stt_input(event, index: int) -> bool:
 
 
 def _event_media_is_video(event, index: int) -> bool:
-    """True if the attachment at *index* is video (per-attachment MIME first)."""
-    mtype = _event_media_type_at(event, index)
-    if mtype:
-        return mtype.startswith("video/")
-    return getattr(event, "message_type", None) == MessageType.VIDEO
+    return _event_media_kind_is(event, index, "video/", frozenset({MessageType.VIDEO}))
 
 
 def _build_media_placeholder(event) -> str:
@@ -3713,12 +3633,9 @@ def _format_gateway_process_notification(evt: dict) -> "str | None":
     _sid = evt.get("session_id", "unknown")
     _cmd = evt.get("command", "unknown")
 
-    if evt_type == "watch_disabled":
-        return f"[IMPORTANT: {evt.get('message', '')}]"
-
-    # Overflow events carry their human-readable summary in `message`, like watch_disabled
+    # watch_disabled and overflow events carry their human-readable summary in `message`
     # (shared formatter in tools/process_registry.py).
-    if evt_type in ("watch_overflow_tripped", "watch_overflow_released"):
+    if evt_type in ("watch_disabled", "watch_overflow_tripped", "watch_overflow_released"):
         return f"[IMPORTANT: {evt.get('message', '')}]"
 
     if evt_type == "watch_match":
@@ -3856,14 +3773,9 @@ def _normalize_empty_agent_response(
             "This may be a transient error — try sending your message again."
         )
 
-    # api_calls == 0, not failed, not interrupted: the agent never ran (post-/stop generation race).
-    # Without this the gateway silently drops the turn and the user sees no reply.
-    if (
-        api_calls == 0
-        and not agent_result.get("interrupted")
-        and not agent_result.get("failed")
-        and not agent_result.get("partial")
-    ):
+    # api_calls == 0, not failed, not interrupted (all returned above): the agent never ran
+    # (post-/stop generation race). Without this the turn is silently dropped with no reply.
+    if api_calls == 0 and not agent_result.get("partial"):
         return (
             "⚠️ Your message wasn't processed (the previous turn was still "
             "being cleaned up). Please send it again."
@@ -4740,21 +4652,10 @@ class GatewayRunner(
     _VOICE_MODE_PATH = _hermes_home / "gateway_voice_mode.json"
 
 
-    @property
-    def should_exit_cleanly(self) -> bool:
-        return self._exit_cleanly
-
-    @property
-    def should_exit_with_failure(self) -> bool:
-        return self._exit_with_failure
-
-    @property
-    def exit_reason(self) -> Optional[str]:
-        return self._exit_reason
-
-    @property
-    def exit_code(self) -> Optional[int]:
-        return self._exit_code
+    should_exit_cleanly = property(lambda self: self._exit_cleanly)
+    should_exit_with_failure = property(lambda self: self._exit_with_failure)
+    exit_reason = property(lambda self: self._exit_reason)
+    exit_code = property(lambda self: self._exit_code)
 
     def _session_key_for_source(self, source: SessionSource) -> str:
         """Resolve the current session key for a source, honoring gateway config when available."""
@@ -6026,22 +5927,20 @@ def _looks_like_profile_conflict_from_cmdline(command: str, our_home) -> bool:
                 return tok[len(prefix):]
         return None
 
-    if profile_name is not None and profile_name != "default":
-        # Our home is a named profile: any explicit DIFFERENT named profile on the argv contradicts it;
-        # bare argv stays consistent (legacy default-gateway argv never carried profile flags).
-        for flag in ("--profile", "-p"):
-            value = _flag_value(flag)
-            if value is not None and value != profile_name:
-                return True
-        home_value = _flag_value("--hermes-home") or _env_home_value()
-        return bool(home_value is not None and os.path.normcase(os.path.normpath(home_value)) != os.path.normcase(os.path.normpath(str(our_home))))
+    def _norm(path: str) -> str:
+        return os.path.normcase(os.path.normpath(path))
 
-    # Our home is the default/root: ANY explicit named-profile flag on the
-    # argv contradicts it.
-    if _flag_value("--profile") is not None or _flag_value("-p") is not None:
-        return True
+    for flag in ("--profile", "-p"):
+        value = _flag_value(flag)
+        if value is None:
+            continue
+        # Named-profile home: a DIFFERENT explicit profile contradicts it (bare argv stays consistent;
+        # legacy default-gateway argv never carried profile flags). Default/root home: ANY explicit
+        # named-profile flag contradicts it.
+        if profile_name is None or profile_name == "default" or value != profile_name:
+            return True
     home_value = _flag_value("--hermes-home") or _env_home_value()
-    return bool(home_value is not None and os.path.normcase(os.path.normpath(home_value)) != os.path.normcase(os.path.normpath(str(our_home))))
+    return bool(home_value is not None and _norm(home_value) != _norm(str(our_home)))
 
 
 async def _start_gateway_replace_existing_instance(existing_pid: int, replace: bool) -> bool:
