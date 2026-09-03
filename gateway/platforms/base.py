@@ -1,6 +1,7 @@
 """Base platform adapter interface; every platform adapter inherits from BasePlatformAdapter."""
 
 import asyncio
+import contextlib
 import inspect
 import ipaddress
 import logging
@@ -68,10 +69,8 @@ def transcode_to_ogg_opus(path: str, *, bitrate: str = "32k") -> "str | None":
             return ogg_path
     except Exception:
         logger.debug("voice transcode to Ogg/Opus failed for %s", path, exc_info=True)
-    try:
+    with contextlib.suppress(OSError):
         os.unlink(ogg_path)
-    except OSError:
-        pass
     return None
 _POST_DELIVERY_CALLBACK_TIMEOUT_SECONDS = 30.0
 # Delivery-time history is best-effort dedup metadata: stay well below the Discord heartbeat
@@ -89,12 +88,17 @@ def _platform_name(platform) -> str:
     return str(value or "").lower()
 
 
+def _or_default(thunk, default, exc=(TypeError, ValueError)):
+    """``thunk()``, or ``default`` when it raises one of ``exc`` (numeric config/env coercion)."""
+    try:
+        return thunk()
+    except exc:
+        return default
+
+
 def _float_env(name: str, default: float) -> float:
     raw = os.environ.get(name, "").strip()
-    try:
-        return float(raw) if raw else default
-    except (TypeError, ValueError):
-        return default
+    return _or_default(lambda: float(raw) if raw else default, default)
 
 
 def _thread_metadata_for_source(source, reply_to_message_id: str | None = None) -> dict | None:
@@ -216,13 +220,11 @@ def _prefix_within_utf16_limit(s: str, limit: int) -> str:
 def is_network_accessible(host: str) -> bool:
     """True if *host* would expose the server beyond loopback (incl. IPv4-mapped
     ::ffff:127.0.0.1); hostnames are resolved and DNS failure fails closed (True)."""
-    try:
+    with contextlib.suppress(ValueError):  # ValueError: hostname — resolve below
         addr = ipaddress.ip_address(host)
         # ::ffff:127.0.0.1 reports is_loopback=False; check the mapped IPv4 explicitly.
         mapped = getattr(addr, "ipv4_mapped", None)
         return not (addr.is_loopback or (mapped and mapped.is_loopback))
-    except ValueError:
-        pass  # hostname — resolve below
     try:
         resolved = _socket.getaddrinfo(host, None, _socket.AF_UNSPEC, _socket.SOCK_STREAM)
         # Network-accessible if any resolved address is non-loopback.
@@ -291,9 +293,7 @@ def _no_proxy_entry_matches(entry: str, host: str, port: int | None = None) -> b
     if token == "*":
         return True
     token_host, token_port = _split_host_port(token)
-    if token_port is not None and (port is None or token_port != port):
-        return False
-    if not token_host:
+    if not token_host or (token_port is not None and (port is None or token_port != port)):
         return False
     host_ip = _ip_or_none(host)
     network = _ip_or_none(token_host, lambda v: ipaddress.ip_network(v, strict=False))
@@ -431,8 +431,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Dict, List, Optional, Any, Callable, Awaitable, Tuple, Union
 from enum import Enum
 
-from pathlib import Path as _Path
-sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from gateway.config import Platform, PlatformConfig
 from gateway.platforms.helpers import fence_state_after
@@ -505,9 +504,7 @@ def safe_url_for_log(url: str, max_len: int = 80) -> str:
         safe = f"{parsed.scheme}://{parsed.netloc.rsplit('@', 1)[-1]}{tail}"
     if len(safe) <= max_len:
         return safe
-    if max_len <= 3:
-        return "." * max_len
-    return f"{safe[:max_len - 3]}..."
+    return "." * max_len if max_len <= 3 else f"{safe[:max_len - 3]}..."
 
 
 async def _ssrf_redirect_guard(response):
@@ -545,10 +542,9 @@ DEFAULT_INBOUND_MEDIA_MAX_BYTES = 128 * 1024 * 1024
 def get_inbound_media_max_bytes() -> int:
     """Max inbound media bytes held in memory (``gateway.max_inbound_media_bytes``);
     ``0`` / negative / unparseable disables the cap; unreadable config → default."""
-    try:
-        return int(_config_section("gateway")["max_inbound_media_bytes"])
-    except (KeyError, TypeError, ValueError):
-        return DEFAULT_INBOUND_MEDIA_MAX_BYTES
+    return _or_default(
+        lambda: int(_config_section("gateway")["max_inbound_media_bytes"]),
+        DEFAULT_INBOUND_MEDIA_MAX_BYTES, (KeyError, TypeError, ValueError))
 
 
 def validate_inbound_media_size(
@@ -601,9 +597,7 @@ get_image_cache_dir, cleanup_image_cache = _cache_dir_accessors(
 
 def _looks_like_image(data: bytes) -> bool:
     """Return True if *data* starts with a known image magic-byte sequence."""
-    if len(data) < 4:
-        return False
-    return (
+    return len(data) >= 4 and (
         data[:8] == b"\x89PNG\r\n\x1a\n"
         or data[:3] == b"\xff\xd8\xff"
         or data[:6] in {b"GIF87a", b"GIF89a"}
@@ -674,11 +668,9 @@ def _cleanup_cache_dir(cache_dir: Path, max_age_hours: int) -> int:
     removed = 0
     for f in cache_dir.iterdir():
         if f.is_file() and f.stat().st_mtime < cutoff:
-            try:
+            with contextlib.suppress(OSError):
                 f.unlink()
                 removed += 1
-            except OSError:
-                pass
     return removed
 
 
@@ -826,10 +818,8 @@ def _media_delivery_recency_seconds() -> float:
     if raw in ("0", "false", "no", "off", ""):
         return 0.0
     custom = os.environ.get(MEDIA_DELIVERY_TRUST_RECENT_SECONDS_ENV, "").strip()
-    try:
-        return max(0.0, float(custom)) if custom else float(_MEDIA_DELIVERY_TRUST_RECENT_DEFAULT_SECONDS)
-    except (TypeError, ValueError):
-        return float(_MEDIA_DELIVERY_TRUST_RECENT_DEFAULT_SECONDS)
+    default = float(_MEDIA_DELIVERY_TRUST_RECENT_DEFAULT_SECONDS)
+    return _or_default(lambda: max(0.0, float(custom)) if custom else default, default)
 
 
 def _media_delivery_denied_paths() -> List[Path]:
@@ -842,19 +832,24 @@ def _media_delivery_denied_paths() -> List[Path]:
     return denied
 
 
+def _resolve_path(path: Path, *, strict: bool = False, expand: bool = False) -> Optional[Path]:
+    """``path[.expanduser()].resolve(strict)`` or None when it fails (OSError / RuntimeError /
+    ValueError — embedded NUL, symlink loop, undeterminable home, missing file under ``strict``)."""
+    try:
+        return (path.expanduser() if expand else path).resolve(strict=strict)
+    except (OSError, RuntimeError, ValueError):
+        return None
+
+
 def _path_under_denied_prefix(resolved: Path) -> bool:
     """True if ``resolved`` lives under a deny-listed system path — except a denied prefix that
     IS the running user's own home: ``/root`` is listed so a non-root gateway can't deliver
     another user's home, but a root-run gateway's own deliverables live under ``$HOME=/root``.
     Credential sub-dirs (``~/.ssh``, ``~/.hermes/.env``) stay blocked (more-specific entries)."""
-    try:
-        home = Path(os.path.expanduser("~")).resolve(strict=False)
-    except (OSError, RuntimeError, ValueError):
-        home = None
+    home = _resolve_path(Path(os.path.expanduser("~")))
     for denied in _media_delivery_denied_paths():
-        try:
-            resolved_denied = denied.expanduser().resolve(strict=False)
-        except (OSError, RuntimeError, ValueError):
+        resolved_denied = _resolve_path(denied, expand=True)
+        if resolved_denied is None:
             continue
         hit = resolved == resolved_denied or _path_is_within(resolved, resolved_denied)
         if hit and resolved_denied != home:
@@ -868,18 +863,16 @@ def _file_is_recently_produced(resolved: Path, window_seconds: float) -> bool:
     if window_seconds <= 0:
         return False
     try:
-        mtime = resolved.stat().st_mtime
+        return (time.time() - resolved.stat().st_mtime) <= window_seconds
     except OSError:
         return False
-    return (time.time() - mtime) <= window_seconds
 
 
 def _path_is_within(path: Path, root: Path) -> bool:
-    try:
+    with contextlib.suppress(ValueError):
         path.relative_to(root)
         return True
-    except ValueError:
-        return False
+    return False
 
 
 def _tenv(name: str, default: str = "") -> str:
@@ -916,12 +909,8 @@ def _parse_docker_volume_mounts() -> List[Tuple[Path, Path]]:
         host_expanded = os.path.expanduser(spec[:sep])
         if not (host_expanded.startswith("/") or (len(host_expanded) > 1 and host_expanded[1] == ":")):
             continue
-        try:
-            host_path = Path(host_expanded).resolve(strict=False)
-            container_path = Path(container_raw)
-        except (OSError, RuntimeError, ValueError):
-            continue
-        if container_path.is_absolute():
+        host_path, container_path = _resolve_path(Path(host_expanded)), Path(container_raw)
+        if host_path is not None and container_path.is_absolute():
             mounts.append((host_path, container_path))
     return mounts
 
@@ -1029,11 +1018,9 @@ def _translate_docker_container_media_path(candidate: Path, session_key: str = "
         return None
     # In-process gateways (Desktop, `hermes serve`) may not have bridged terminal.*
     # config into TERMINAL_* env; run the idempotent bridge so mount parsing sees it.
-    try:
+    with contextlib.suppress(Exception):
         from tools.terminal_tool import _ensure_terminal_env_bridged
         _ensure_terminal_env_bridged()
-    except Exception:
-        pass
     mounts = [*_parse_docker_volume_mounts(), *_cache_dir_container_mounts()]
     mounted = {c.as_posix() for _, c in mounts}
     # Synthetic /workspace mounts: profile-scoped layout first, then legacy per-session.
@@ -1091,19 +1078,13 @@ def validate_media_delivery_path(path: str, session_key: str = "") -> Optional[s
     # Docker agents emit MEDIA:/workspace/... — map container paths to host paths first.
     resolved = _translate_docker_container_media_path(expanded, session_key=session_key)
     if resolved is None:
-        try:
-            resolved = expanded.resolve(strict=True)
-        except (OSError, RuntimeError, ValueError):
-            return None
-    if not resolved.is_file():
+        resolved = _resolve_path(expanded, strict=True)
+    if resolved is None or not resolved.is_file():
         return None
     # Cache / operator allowlist is trusted unconditionally, regardless of mode.
     for root in _media_delivery_allowed_roots():
-        try:
-            resolved_root = root.expanduser().resolve(strict=False)
-        except (OSError, RuntimeError, ValueError):
-            continue
-        if _path_is_within(resolved, resolved_root):
+        resolved_root = _resolve_path(root, expand=True)
+        if resolved_root is not None and _path_is_within(resolved, resolved_root):
             return str(resolved)
     # Non-strict (default): accept anything not denylisted — /etc, /proc, ~/.ssh, ~/.aws and the
     # Hermes-root secret stores stay rejected (MEDIA:/etc/passwd, MEDIA:~/.hermes/google_token.json)
@@ -1359,12 +1340,12 @@ class CachedMedia:
         return f"[{self.kind} '{self.display_name}' saved at: {self.path}]"
 
 
-# MIME -> extension reverse lookup; first match across image, video, document tables wins.
-_MIME_TO_EXT: Dict[str, str] = {}
-for _table in (SUPPORTED_IMAGE_DOCUMENT_TYPES, SUPPORTED_VIDEO_TYPES, SUPPORTED_DOCUMENT_TYPES):
-    for _ext, _mime in _table.items():
-        _MIME_TO_EXT.setdefault(_mime, _ext)
-del _table, _ext, _mime
+# MIME -> extension reverse lookup; FIRST match across image, video, document tables wins
+# (built in reverse so the earliest extension is the one that survives).
+_MIME_TO_EXT: Dict[str, str] = {
+    mime: ext
+    for table in (SUPPORTED_DOCUMENT_TYPES, SUPPORTED_VIDEO_TYPES, SUPPORTED_IMAGE_DOCUMENT_TYPES)
+    for ext, mime in reversed(table.items())}
 
 
 def _resolve_media_ext(filename: str, mime_type: str) -> str:
@@ -1534,7 +1515,7 @@ def coerce_plaintext_gateway_command(event: "MessageEvent") -> None:
     """Rewrite a tiny set of DM plaintext admin phrases into slash commands, keeping ``restart
     gateway`` out of the LLM/tool path (a self-restart from inside the running agent leaves the
     gateway stuck in ``draining`` waiting on that agent). Narrow: DM text, exact phrases only."""
-    try:
+    with contextlib.suppress(Exception):
         if event is None or event.message_type != MessageType.TEXT:
             return
         text = (event.text or "").strip()
@@ -1544,8 +1525,6 @@ def coerce_plaintext_gateway_command(event: "MessageEvent") -> None:
             return
         if any(pattern.match(text) for pattern in _PLAINTEXT_GATEWAY_RESTART_PATTERNS):
             event.text = "/restart"
-    except Exception:
-        return
 
 
 @dataclass
@@ -1888,10 +1867,7 @@ class BasePlatformAdapter(ABC):
         """Per-chat max length in ``message_len_fn_for_chat`` units. Default: the adapter
         scalar ``MAX_MESSAGE_LENGTH`` (4096 when absent); the relay adapter overrides
         because one adapter fronts N platforms with different caps."""
-        try:
-            return int(getattr(self, "MAX_MESSAGE_LENGTH", 4096) or 4096)
-        except (TypeError, ValueError):
-            return 4096
+        return _or_default(lambda: int(getattr(self, "MAX_MESSAGE_LENGTH", 4096) or 4096), 4096)
 
     def message_len_fn_for_chat(self, chat_id: str) -> Callable[[str], int]:
         """Per-chat length function (companion to max_message_length_for_chat); the relay
@@ -1998,28 +1974,16 @@ class BasePlatformAdapter(ABC):
         the preview's metadata (e.g. a URL shortened for display)."""
         return preview.text
 
-    @property
-    def has_fatal_error(self) -> bool:
-        return self._fatal_error_message is not None
-
-    @property
-    def fatal_error_message(self) -> Optional[str]:
-        return self._fatal_error_message
-
-    @property
-    def fatal_error_code(self) -> Optional[str]:
-        return self._fatal_error_code
-
-    @property
-    def fatal_error_retryable(self) -> bool:
-        return self._fatal_error_retryable
+    has_fatal_error = property(lambda self: self._fatal_error_message is not None)
+    fatal_error_message = property(lambda self: self._fatal_error_message)
+    fatal_error_code = property(lambda self: self._fatal_error_code)
+    fatal_error_retryable = property(lambda self: self._fatal_error_retryable)
 
     def _should_auto_tts_for_chat(self, chat_id: str) -> bool:
         """Whether auto-TTS fires for ``chat_id``: explicit ``/voice on|tts`` wins,
         then explicit ``/voice off``, then the global ``voice.auto_tts`` default."""
-        if chat_id in self._auto_tts_enabled_chats:
-            return True
-        return chat_id not in self._auto_tts_disabled_chats and bool(self._auto_tts_default)
+        return chat_id in self._auto_tts_enabled_chats or (
+            chat_id not in self._auto_tts_disabled_chats and bool(self._auto_tts_default))
 
     def set_fatal_error_handler(self, handler: Callable[["BasePlatformAdapter"], Awaitable[None] | None]) -> None:
         self._fatal_error_handler = handler
@@ -2094,8 +2058,7 @@ class BasePlatformAdapter(ABC):
         acquired, existing = acquire_scoped_lock(scope, identity, metadata=lock_meta)
         if acquired:
             return True
-        if (bool(getattr(self, "_platform_lock_takeover_allowed", False))
-                and not bool(getattr(self, "_platform_lock_takeover_attempted", False))
+        if (self._platform_lock_takeover_allowed and not self._platform_lock_takeover_attempted
                 and isinstance(existing, dict)):
             # Consume the authority before any I/O: one adapter connect gets at most one
             # termination attempt, even if lock re-acquire or later initialization fails.
@@ -2371,9 +2334,8 @@ class BasePlatformAdapter(ABC):
             except BaseException as exc:
                 error = exc
             try:
-                loop.call_soon_threadsafe(_publish_result, result, error)
-            except RuntimeError:
-                pass  # Event loop already closed during gateway shutdown.
+                with contextlib.suppress(RuntimeError):  # loop already closed (gateway shutdown)
+                    loop.call_soon_threadsafe(_publish_result, result, error)
             finally:
                 admission.release()
         try:
@@ -2437,10 +2399,7 @@ class BasePlatformAdapter(ABC):
     def _get_ephemeral_system_ttl_default(self) -> int:
         """Default :class:`EphemeralReply` TTL from ``display.ephemeral_system_ttl``
         (``0`` = no auto-delete); non-fatal if config is unreadable."""
-        try:
-            return int(_config_section("display").get("ephemeral_system_ttl", 0))
-        except (TypeError, ValueError):
-            return 0
+        return _or_default(lambda: int(_config_section("display").get("ephemeral_system_ttl", 0)), 0)
 
     def _schedule_ephemeral_delete(self, chat_id: str, message_id: str, ttl_seconds: int) -> None:
         """Spawn a detached task that deletes ``message_id`` after ``ttl_seconds``; best-effort
@@ -2952,10 +2911,9 @@ class BasePlatformAdapter(ABC):
         try:
             if typing_task is not None and not typing_task.done():
                 typing_task.cancel()
-                try:
+                # Slow adapter cleanup must not block delivery/shutdown.
+                with contextlib.suppress(asyncio.CancelledError, asyncio.TimeoutError):
                     await asyncio.wait_for(asyncio.shield(typing_task), timeout=timeout)
-                except (asyncio.CancelledError, asyncio.TimeoutError):
-                    pass  # Cancelled; slow adapter cleanup must not block delivery/shutdown.
             if not hasattr(self, "stop_typing"):
                 return
             for attempt in range(max(1, stop_attempts)):
@@ -2967,10 +2925,8 @@ class BasePlatformAdapter(ABC):
 
     async def _stop_typing_quietly(self, chat_id: str, metadata=None) -> None:
         """Best-effort platform stop_typing; adapter errors are swallowed."""
-        try:
+        with contextlib.suppress(Exception):
             await self._stop_typing_with_metadata(chat_id, metadata)
-        except Exception:
-            pass
 
     def pause_typing_for_chat(self, chat_id: str) -> None:
         """Pause typing for a chat (approval waits); GIL-safe from the sync agent thread."""
@@ -3105,10 +3061,7 @@ class BasePlatformAdapter(ABC):
             return response, 0
         ttl = response.ttl_seconds
         if ttl is None:
-            try:
-                ttl = int(self._get_ephemeral_system_ttl_default())
-            except Exception:
-                ttl = 0
+            ttl = _or_default(lambda: int(self._get_ephemeral_system_ttl_default()), 0, Exception)
         if ttl and ttl > 0 and type(self).delete_message is BasePlatformAdapter.delete_message:
             ttl = 0
         return response.text, int(ttl or 0)
@@ -3148,9 +3101,8 @@ class BasePlatformAdapter(ABC):
         except Exception:
             logger.debug("[%s] Failed to resolve live adapter for final delivery", self.name)
             return self
-        if isinstance(live_adapter, BasePlatformAdapter) and live_adapter.platform == self.platform:
-            return live_adapter
-        return self
+        is_peer = isinstance(live_adapter, BasePlatformAdapter) and live_adapter.platform == self.platform
+        return live_adapter if is_peer else self
 
     async def _send_with_retry(
         self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Any = None,
@@ -3374,13 +3326,20 @@ class BasePlatformAdapter(ABC):
         guard = interrupt_event or asyncio.Event()
         self._active_sessions[session_key] = guard
         task = asyncio.create_task(self._process_message_background(event, session_key))
+        if not self._track_session_task(session_key, task):
+            self._session_tasks.pop(session_key, None)
+            self._release_session_guard(session_key, guard=guard)
+            return False
+        return True
+
+    def _track_session_task(self, session_key: str, task: Any) -> bool:
+        """Record ``task`` as the session owner and track it for shutdown; False when
+        ``create_task`` was stubbed with an unhashable sentinel (tests) — the owner entry
+        is left for the caller to roll back."""
         self._session_tasks[session_key] = task
         try:
             self._background_tasks.add(task)
         except TypeError:
-            # Tests stub create_task() with unhashable sentinels lacking lifecycle callbacks.
-            self._session_tasks.pop(session_key, None)
-            self._release_session_guard(session_key, guard=guard)
             return False
         if hasattr(task, "add_done_callback"):
             task.add_done_callback(self._background_tasks.discard)
@@ -3552,11 +3511,8 @@ class BasePlatformAdapter(ABC):
             return 0.0
         if mode == "natural":
             return random.uniform(800 / 1000.0, 2500 / 1000.0)
-        def _ms(name: str, default: int) -> int:
-            try:
-                return int(os.getenv(name, str(default)))
-            except (TypeError, ValueError):
-                return default  # custom mode tolerates malformed env vars
+        def _ms(name: str, default: int) -> int:  # custom mode tolerates malformed env vars
+            return _or_default(lambda: int(os.getenv(name, str(default))), default)
         return random.uniform(
             _ms("HERMES_HUMAN_DELAY_MIN_MS", 800) / 1000.0,
             _ms("HERMES_HUMAN_DELAY_MAX_MS", 2500) / 1000.0)
@@ -3851,12 +3807,10 @@ class BasePlatformAdapter(ABC):
         _post_cb = self.pop_post_delivery_callback(
             session_key, generation=getattr(interrupt_event, "_hermes_run_generation", None))
         if callable(_post_cb):
-            try:
+            with contextlib.suppress(asyncio.TimeoutError, Exception):
                 _post_result = _post_cb()
                 if inspect.isawaitable(_post_result):
                     await asyncio.wait_for(_post_result, timeout=_POST_DELIVERY_CALLBACK_TIMEOUT_SECONDS)
-            except (asyncio.TimeoutError, Exception):
-                pass
 
     def _finish_session_task(self, session_key: str, interrupt_event: asyncio.Event) -> None:
         """End-of-task guard/ownership reconciliation. A late ``_pending_messages``
@@ -3925,15 +3879,11 @@ class BasePlatformAdapter(ABC):
                             event, text_content, _tts_path, _tts_index == 0, _final_thread_metadata,
                             _record_delivery)
                     finally:
-                        try:
+                        with contextlib.suppress(OSError):
                             os.remove(_tts_path)
-                        except OSError:
-                            pass
                 if not _tts_paths and _tts_requested_path is not None:
-                    try:
+                    with contextlib.suppress(OSError):
                         os.remove(_tts_requested_path)
-                    except OSError:
-                        pass
                 if text_content and not _tts_caption_delivered:
                     await self._send_final_text(
                         event, session_key, text_content, _final_thread_metadata,
@@ -3997,13 +3947,8 @@ class BasePlatformAdapter(ABC):
         _active = self._active_sessions.get(session_key)
         if _active is not None:
             _active.clear()
-        drain_task = asyncio.create_task(self._process_message_background(pending_event, session_key))
-        self._session_tasks[session_key] = drain_task
-        try:
-            self._background_tasks.add(drain_task)
-            drain_task.add_done_callback(self._background_tasks.discard)
-        except TypeError:
-            pass  # Tests stub create_task() with non-hashable sentinels; tolerate.
+        self._track_session_task(
+            session_key, asyncio.create_task(self._process_message_background(pending_event, session_key)))
 
     def _cleanup_finished_session_task(
         self, session_key: str, interrupt_event: Optional[asyncio.Event]) -> None:
@@ -4039,12 +3984,9 @@ class BasePlatformAdapter(ABC):
         self._background_tasks.clear()
         self._expected_cancelled_tasks.clear()
         self._session_tasks.clear()
-        # Flush pending messages to disk before clearing.
-        try:
+        with contextlib.suppress(Exception):  # flush pending messages to disk before clearing
             from gateway.shutdown_flush import flush_pending_to_file
             flush_pending_to_file(self._pending_messages, reason="adapter_shutdown")
-        except Exception:
-            pass
         self._pending_messages.clear()
         self._active_sessions.clear()
         for state in list(self._text_debounce_store().values()):
@@ -4185,6 +4127,5 @@ class BasePlatformAdapter(ABC):
                 carry_lang = None
             chunks.append(full_chunk)
         if len(chunks) > 1:
-            total = len(chunks)
-            chunks = [f"{chunk} ({i + 1}/{total})" for i, chunk in enumerate(chunks)]
+            chunks = [f"{chunk} ({i + 1}/{len(chunks)})" for i, chunk in enumerate(chunks)]
         return chunks
