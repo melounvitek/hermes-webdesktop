@@ -120,8 +120,7 @@ class DashboardOAuthFlow:
                 "server_name": self.server_name,
                 "status": self.status,
                 "authorization_url": self.authorization_url,
-                "error": self.error,
-            }
+                "error": self.error}
 
     def mark_worker_done(self) -> None:
         self._worker_done.set()

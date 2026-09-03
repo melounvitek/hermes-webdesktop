@@ -118,12 +118,10 @@ def read_nous_access_token() -> Optional[str]:
 
 def get_tool_gateway_scheme() -> str:
     """Return configured shared gateway URL scheme."""
-    scheme = os.getenv("TOOL_GATEWAY_SCHEME", "").strip().lower()
-    if not scheme:
-        return _DEFAULT_TOOL_GATEWAY_SCHEME
-    if scheme in {"http", "https"}:
-        return scheme
-    raise ValueError("TOOL_GATEWAY_SCHEME must be 'http' or 'https'")
+    scheme = os.getenv("TOOL_GATEWAY_SCHEME", "").strip().lower() or _DEFAULT_TOOL_GATEWAY_SCHEME
+    if scheme not in {"http", "https"}:
+        raise ValueError("TOOL_GATEWAY_SCHEME must be 'http' or 'https'")
+    return scheme
 
 
 def build_vendor_gateway_url(vendor: str) -> str:
@@ -136,8 +134,7 @@ def build_vendor_gateway_url(vendor: str) -> str:
 
 
 def resolve_managed_tool_gateway(
-    vendor: str,
-    gateway_builder: Optional[Callable[[str], str]] = None,
+    vendor: str, gateway_builder: Optional[Callable[[str], str]] = None,
     token_reader: Optional[Callable[[], Optional[str]]] = None,
 ) -> Optional[ManagedToolGatewayConfig]:
     """Resolve shared managed-tool gateway config for a vendor."""
@@ -153,8 +150,7 @@ def resolve_managed_tool_gateway(
 def is_managed_tool_gateway_ready(
     vendor: str,
     gateway_builder: Optional[Callable[[str], str]] = None,
-    token_reader: Optional[Callable[[], Optional[str]]] = None,
-) -> bool:
+    token_reader: Optional[Callable[[], Optional[str]]] = None) -> bool:
     """True when a gateway URL and a likely-usable Nous token are present. Defaults to
     :func:`peek_nous_access_token` (no OAuth refresh); callers about to make a real request
     use :func:`resolve_managed_tool_gateway` instead."""
