@@ -16,6 +16,7 @@ from agent import relay_runtime
 from hermes_cli import __version__
 
 from .shared_metrics import SharedMetricsStore
+from . import shared_metrics_contract as contract
 from .shared_metrics_contract import (
     CLIENT_ACTIVE_MARK,
     MODEL_CALL_PROFILE_MODEL,
@@ -28,15 +29,6 @@ from .shared_metrics_contract import (
     TASK_SCOPE,
     TOOL_APPROVAL_MARK,
     TOOL_CALL_SCOPE,
-    model_call_fields,
-    skill_lifecycle_fields,
-    skill_load_fields,
-    task_start_fields,
-    task_terminal_fields,
-    task_terminal_state,
-    tool_approval_outcome,
-    tool_category,
-    tool_terminal_fields,
 )
 from .shared_metrics_subscriber import SharedMetricsSubscriber
 
@@ -72,10 +64,47 @@ def _forget(index: dict[Any, _MetricsSession], key: Any, owner: _MetricsSession)
         index.pop(key, None)
 
 
+def _task_parent_handle(session: _MetricsSession, task_id: str) -> Any:
+    """The active turn's handle when it owns this exact task, else the session handle."""
+    active_turn = relay_runtime.active_turn(session.session_id)
+    if (
+        active_turn is not None
+        and active_turn.lease.session_id == session.session_id
+        and active_turn.task_id == task_id
+        and active_turn.handle is not None
+    ):
+        return active_turn.handle
+    return session.relay_session.handle
+
+
+def _scope_handle(session: _MetricsSession, task: _TaskRun | None) -> Any:
+    return task.handle if task is not None else session.relay_session.handle
+
+
 def _sole(items: Any) -> Any:
     """The single distinct element of ``items`` (identity-deduplicated), else None."""
     unique = {id(item): item for item in items}
     return next(iter(unique.values())) if len(unique) == 1 else None
+
+
+def _identities_compatible(candidate: tuple[str, str, str], observed: tuple[str, str, str]) -> bool:
+    """Match partial hook context without crossing known call boundaries."""
+    if not observed[2] or candidate[2] != observed[2]:
+        return False
+    return all(
+        not left or not right or left == right
+        for left, right in zip(candidate[:2], observed[:2], strict=True)
+    )
+
+
+def _compatible_tool_call_keys(
+    session: _MetricsSession, task_id: str, identity: tuple[str, str, str]
+) -> list[tuple[str, str, str, str]]:
+    return [
+        key
+        for key in session.tool_calls
+        if key[0] == task_id and _identities_compatible(key[1:], identity)
+    ]
 
 
 @dataclass
@@ -183,16 +212,10 @@ class _Runtime:
         self, session: _MetricsSession, task: _TaskRun | None, name: str, data: dict[str, str]
     ) -> None:
         """Emit one Relay mark under the task scope when given, else the session scope."""
-        handle = task.handle if task is not None else session.relay_session.handle
         self._run_scoped(
             session, task, self.relay.scope.event, name,
-            handle=handle, data=data, metadata=self._event_metadata(),
+            handle=_scope_handle(session, task), data=data, metadata=self._event_metadata(),
         )
-
-    def _run_in_session(
-        self, session: _MetricsSession, callback: Callable[..., Any], *args: Any, **kwargs: Any
-    ) -> Any:
-        return self.host.run_in_session(session.relay_session, callback, *args, **kwargs)
 
     def start_task(self, event: dict[str, Any]) -> _TaskRun | None:
         """Open one Relay function scope for a Hermes task run."""
@@ -224,21 +247,12 @@ class _Runtime:
                     return None
                 self._emit_client_active(session)
                 task_context = session.relay_session.context.copy()
-                start_fields = task_start_fields(event)
-                active_turn = relay_runtime.active_turn(session.session_id)
-                parent_handle = session.relay_session.handle
-                if (
-                    active_turn is not None
-                    and active_turn.lease.session_id == session.session_id
-                    and active_turn.task_id == task_id
-                    and active_turn.handle is not None
-                ):
-                    parent_handle = active_turn.handle
-
+                start_fields = contract.task_start_fields(event)
                 handle = task_context.run(
                     self._with_scope_stack, self.relay.scope.push,
                     TASK_SCOPE, self.relay.ScopeType.Function,
-                    handle=parent_handle, input=start_fields, metadata=self._event_metadata(),
+                    handle=_task_parent_handle(session, task_id), input=start_fields,
+                    metadata=self._event_metadata(),
                 )
                 task = _TaskRun(
                     task_id=task_id,
@@ -276,7 +290,7 @@ class _Runtime:
         if not request_id:
             return
         model_call_key = (task_id, request_id)
-        fields = model_call_fields(event)
+        fields = contract.model_call_fields(event)
         retry_ordinal = _retry_ordinal(event)
         with session.lock:
             if session.closing:
@@ -300,8 +314,7 @@ class _Runtime:
                     task.retry_count += 1
             handle = self._run_scoped(
                 session, task, self.relay.llm.call, MODEL_CALL_SCOPE, self.relay.LLMRequest({}, {}),
-                handle=task.handle if task is not None else session.relay_session.handle,
-                metadata=self._event_metadata(),
+                handle=_scope_handle(session, task), metadata=self._event_metadata(),
                 model_name=MODEL_CALL_PROFILE_MODEL,
             )
             session.model_calls[model_call_key] = _ModelCall(handle, task_id, fields)
@@ -325,7 +338,7 @@ class _Runtime:
             model_call = session.model_calls.get(model_call_key) if model_call_key else None
             if model_call is None:
                 return
-            model_call.fields = model_call_fields(event)
+            model_call.fields = contract.model_call_fields(event)
             if finish:
                 self._finish_model_call(session, model_call_key)
 
@@ -350,7 +363,7 @@ class _Runtime:
         session, task = self._approval_task(event)
         if session is None or task is None:
             return
-        outcome = tool_approval_outcome(event)
+        outcome = contract.tool_approval_outcome(event)
         attribution = "unattributed"
         with session.lock:
             if session.closing or not self._event_matches_task_turn(task, event):
@@ -359,7 +372,7 @@ class _Runtime:
                 identity = self._tool_call_identity(event)
                 tool_call = session.tool_calls.get((task.task_id, *identity))
                 if tool_call is None:
-                    key = _sole(self._compatible_tool_call_keys(session, task.task_id, identity))
+                    key = _sole(_compatible_tool_call_keys(session, task.task_id, identity))
                     tool_call = session.tool_calls[key] if key is not None else None
                 if tool_call is not None:
                     tool_call.approval_outcome = outcome
@@ -386,13 +399,11 @@ class _Runtime:
                 tool_call = session.tool_calls.pop((task_id, *identity), None)
                 if tool_call is None:
                     if any(
-                        self._tool_call_identities_are_compatible(completed, observed_identity)
+                        _identities_compatible(completed, observed_identity)
                         for completed in task.completed_tool_call_ids
                     ):
                         return
-                    matching_keys = self._compatible_tool_call_keys(
-                        session, task_id, observed_identity
-                    )
+                    matching_keys = _compatible_tool_call_keys(session, task_id, observed_identity)
                     if len(matching_keys) > 1:
                         # Partial context cannot safely choose between concurrent calls
                         # that reused the provider-local ID.
@@ -411,32 +422,30 @@ class _Runtime:
     def record_skill_lifecycle(self, event: dict[str, Any]) -> None:
         """Emit one allowlisted skill fact without its local identity."""
         if _text(event, "action").strip().lower() == "loaded":
-            mark, fields = SKILL_LOAD_MARK, skill_load_fields(event)
+            mark, fields = SKILL_LOAD_MARK, contract.skill_load_fields(event)
         else:
-            mark, fields = SKILL_LIFECYCLE_MARK, skill_lifecycle_fields(event)
+            mark, fields = SKILL_LIFECYCLE_MARK, contract.skill_lifecycle_fields(event)
         if fields is None:
             return
 
         session_id, task_id = _text(event, "session_id"), _text(event, "task_id")
         session, task = self._task_pair(event, allow_task_id_fallback=not session_id)
-        if session is not None:
-            if task is None:
-                return
-            with session.lock:
-                if (
-                    session.closing
-                    or session.tasks.get(task.task_id) is not task
-                    or not self._event_matches_task_turn(task, event)
-                ):
-                    return
+        if session is None:
+            if not (session_id and task_id):
+                # No owning task: a bare process-level mark.
+                self._with_scope_stack(
+                    self.relay.scope.event, mark, data=fields, metadata=self._event_metadata()
+                )
+            return
+        if task is None:
+            return
+        with session.lock:
+            if (
+                not session.closing
+                and session.tasks.get(task.task_id) is task
+                and self._event_matches_task_turn(task, event)
+            ):
                 self._mark(session, task, mark, fields)
-            return
-        if session_id and task_id:
-            return
-
-        self._with_scope_stack(
-            self.relay.scope.event, mark, data=fields, metadata=self._event_metadata()
-        )
 
     def finish_task(self, event: dict[str, Any]) -> None:
         """Close one task scope exactly once with bounded terminal fields."""
@@ -481,10 +490,7 @@ class _Runtime:
             return
         self._flush_and_export("Hermes shared-metrics shutdown flush failed")
         self._deregister()
-        # The final export may have started a send; give it the same bounded chance
-        # deactivate() gets, or a short-lived CLI exits and kills the daemon thread mid-request.
-        self._join_send_thread()
-        self._unregister_atexit()
+        self._release()
 
     def _deregister(self) -> None:
         self._safe(self.relay.subscribers.deregister, self._subscriber_name)
@@ -507,15 +513,21 @@ class _Runtime:
         with self._task_sessions_lock:
             self._task_sessions.clear()
             self._turn_sessions.clear()
+        self._release()
+
+    def _release(self) -> None:
+        """Let an in-flight send finish briefly, then drop the atexit hook.
+
+        A short-lived CLI process would otherwise exit and kill the daemon send thread
+        mid-request — the common case for this feature's one cadence.
+        """
         self._join_send_thread()
-        self._unregister_atexit()
+        with contextlib.suppress(Exception):
+            atexit.unregister(self.shutdown)
 
     def _join_send_thread(self, timeout: float = 2.0) -> None:
-        """Give an in-flight send a brief, bounded chance to finish at exit.
-
-        Pending packages stay in SQLite and go out next run, so blocking on a slow network
-        is the wrong trade; the daemon thread dies with the process.
-        """
+        """Bounded on purpose: pending packages stay in SQLite and go out next run, so
+        blocking on a slow network is the wrong trade; the daemon thread dies with the process."""
         with self._send_lock:
             thread = self._send_thread
         if thread is not None and thread.is_alive():
@@ -556,7 +568,7 @@ class _Runtime:
         """Run under the task context when the call belongs to a task, else the session."""
         if task is not None:
             return self._run_in_task(task, callback, *args, **kwargs)
-        return self._run_in_session(session, callback, *args, **kwargs)
+        return self.host.run_in_session(session.relay_session, callback, *args, **kwargs)
 
     def _flush_and_export(self, failure_message: str) -> None:
         """Flush the Relay subscriber, then export; a failed flush skips the export."""
@@ -577,10 +589,6 @@ class _Runtime:
                 self._finish_task(session, task_id, {**base_event, "task_id": task_id})
             self._end_pending_model_calls(session, base_event)
         return True
-
-    def _unregister_atexit(self) -> None:
-        with contextlib.suppress(Exception):
-            atexit.unregister(self.shutdown)
 
     def _task_session(
         self, event: dict[str, Any], *, allow_task_id_fallback: bool = False
@@ -617,28 +625,6 @@ class _Runtime:
     def _tool_call_identity(event: dict[str, Any]) -> tuple[str, str, str]:
         """Identify one provider-local tool call without exporting its IDs."""
         return _text(event, "api_request_id"), _text(event, "turn_id"), _text(event, "tool_call_id")
-
-    @staticmethod
-    def _tool_call_identities_are_compatible(
-        candidate: tuple[str, str, str], observed: tuple[str, str, str]
-    ) -> bool:
-        """Match partial hook context without crossing known call boundaries."""
-        if not observed[2] or candidate[2] != observed[2]:
-            return False
-        return all(
-            not left or not right or left == right
-            for left, right in zip(candidate[:2], observed[:2], strict=True)
-        )
-
-    @classmethod
-    def _compatible_tool_call_keys(
-        cls, session: _MetricsSession, task_id: str, identity: tuple[str, str, str]
-    ) -> list[tuple[str, str, str, str]]:
-        return [
-            key
-            for key in session.tool_calls
-            if key[0] == task_id and cls._tool_call_identities_are_compatible(key[1:], identity)
-        ]
 
     @staticmethod
     def _event_matches_task_turn(task: _TaskRun, event: dict[str, Any]) -> bool:
@@ -707,12 +693,12 @@ class _Runtime:
             task, self.relay.tools.call, TOOL_CALL_SCOPE, {},
             handle=task.handle, metadata=self._event_metadata(),
         )
-        return _ToolCall(handle, tool_category(event), monotonic_ns())
+        return _ToolCall(handle, contract.tool_category(event), monotonic_ns())
 
     def _finish_tool_call(
         self, task: _TaskRun, tool_call: _ToolCall, event: dict[str, Any]
     ) -> None:
-        fields = tool_terminal_fields(
+        fields = contract.tool_terminal_fields(
             event,
             category=tool_call.category,
             approval_outcome=tool_call.approval_outcome,
@@ -727,7 +713,7 @@ class _Runtime:
     def _end_pending_tool_calls(
         self, session: _MetricsSession, task: _TaskRun, event: dict[str, Any]
     ) -> None:
-        task_outcome, _, _ = task_terminal_state(event)
+        task_outcome, _, _ = contract.task_terminal_state(event)
         status = {"cancelled": "cancelled", "timed_out": "timeout"}.get(task_outcome, "error")
         for key in [key for key in session.tool_calls if key[0] == task.task_id]:
             self._finish_tool_call(task, session.tool_calls.pop(key), {**event, "status": status})
@@ -771,7 +757,7 @@ class _Runtime:
             return False
         self._end_pending_tool_calls(session, task, event)
         self._end_pending_model_calls(session, {**event, "task_id": task_id})
-        fields = task_terminal_fields(
+        fields = contract.task_terminal_fields(
             {**task.start_fields, **event},
             duration_ms=max(0, (monotonic_ns() - task.started_ns) // 1_000_000),
             model_call_count=len(task.model_call_ids),
@@ -823,13 +809,12 @@ class _Runtime:
 
         with self._send_lock:
             # One in-flight pass per process; the next hook fire picks up what is pending.
-            if self._send_thread is not None and self._send_thread.is_alive():
-                return
-            self._send_thread = threading.Thread(
-                target=self._run_send_pass, args=(resolved.endpoint,),
-                name="hermes-shared-metrics-send", daemon=True,
-            )
-            self._send_thread.start()
+            if self._send_thread is None or not self._send_thread.is_alive():
+                self._send_thread = threading.Thread(
+                    target=self._run_send_pass, args=(resolved.endpoint,),
+                    name="hermes-shared-metrics-send", daemon=True,
+                )
+                self._send_thread.start()
 
     def _run_send_pass(self, endpoint: str) -> None:
         from hermes_cli.observability.shared_metrics_sender import SharedMetricsSender
@@ -892,9 +877,9 @@ def enabled() -> bool:
     except Exception:
         logger.debug("Unable to read Hermes shared-metrics policy", exc_info=True)
         config = None
-    telemetry = config.get("telemetry") if isinstance(config, dict) else None
-    shared_metrics = telemetry.get("shared_metrics") if isinstance(telemetry, dict) else None
-    if isinstance(shared_metrics, dict) and shared_metrics.get("enabled") is True:
+    for key in ("telemetry", "shared_metrics"):
+        config = config.get(key) if isinstance(config, dict) else None
+    if isinstance(config, dict) and config.get("enabled") is True:
         return True
     with _RUNTIME_LOCK:
         runtime = _RUNTIMES.pop(profile_key, None)
@@ -923,6 +908,7 @@ def _reconcile_send_consent_once() -> None:
         return
     _consent_reconcile_done = True
     try:
+        # Lazy: tests patch ``shared_metrics.SharedMetricsStore`` at its origin.
         from hermes_cli.observability.shared_metrics import SharedMetricsStore
         from hermes_constants import get_hermes_home
 
@@ -1014,12 +1000,8 @@ def start_task_run(
 
 
 def finish_task_run(
-    *,
-    session_id: str,
-    task_id: str,
-    platform: str,
-    result: dict[str, Any] | None = None,
-    error: BaseException | None = None,
+    *, session_id: str, task_id: str, platform: str,
+    result: dict[str, Any] | None = None, error: BaseException | None = None,
 ) -> None:
     """Finish task metrics for every return or exception path."""
     if not enabled():
@@ -1028,33 +1010,39 @@ def finish_task_run(
     if runtime is None:
         return
 
-    terminal = result if isinstance(result, dict) else {}
-    interrupted = terminal.get("interrupted") is True
-    completed = terminal.get("completed") is True
-    failed = terminal.get("failed") is True
-    reason = str(terminal.get("turn_exit_reason") or terminal.get("failure_reason") or "")
+    runtime._safe(
+        runtime.finish_task,
+        {
+            "session_id": session_id, "task_id": task_id, "platform": platform,
+            **_terminal_flags(result, error),
+        },
+    )
+
+
+def _terminal_flags(result: dict[str, Any] | None, error: BaseException | None) -> dict[str, Any]:
+    """Bounded completed/failed/interrupted/turn_exit_reason for a task's return or raise."""
     if error is not None:
         interrupted = (
             isinstance(error, (KeyboardInterrupt, InterruptedError))
             or type(error).__name__ == "CancelledError"
         )
-        completed = False
-        failed = not interrupted
         if interrupted:
             reason = "interrupted_by_user"
         else:
             reason = "timed_out" if isinstance(error, TimeoutError) else "system_aborted"
-    elif not reason:
-        reason = "failed" if failed else "unknown"
-
-    runtime._safe(
-        runtime.finish_task,
-        {
-            "session_id": session_id, "task_id": task_id, "platform": platform,
-            "completed": completed, "failed": failed, "interrupted": interrupted,
+        return {
+            "completed": False, "failed": not interrupted, "interrupted": interrupted,
             "turn_exit_reason": reason,
-        },
-    )
+        }
+    terminal = result if isinstance(result, dict) else {}
+    failed = terminal.get("failed") is True
+    reason = str(terminal.get("turn_exit_reason") or terminal.get("failure_reason") or "")
+    return {
+        "completed": terminal.get("completed") is True,
+        "failed": failed,
+        "interrupted": terminal.get("interrupted") is True,
+        "turn_exit_reason": reason or ("failed" if failed else "unknown"),
+    }
 
 
 def _get_runtime(
@@ -1067,18 +1055,14 @@ def _get_runtime(
             if host is None or runtime.host is host:
                 return runtime
             runtime.deactivate()
-            _RUNTIMES.pop(profile_key, None)
-        elif runtime is _RUNTIME_FAILED:
-            if not retry_failed:
-                return None
-            _RUNTIMES.pop(profile_key, None)
+        elif runtime is _RUNTIME_FAILED and not retry_failed:
+            return None
         try:
-            runtime = _Runtime(host=host)
+            _RUNTIMES[profile_key] = runtime = _Runtime(host=host)
         except Exception:
             logger.warning("Hermes shared metrics initialization failed", exc_info=True)
             _RUNTIMES[profile_key] = _RUNTIME_FAILED
             return None
-        _RUNTIMES[profile_key] = runtime
         return runtime
 
 

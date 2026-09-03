@@ -35,6 +35,93 @@ _ACTIVE_INSTALL_INTERVAL = timedelta(hours=24)
 # Column order of the client resource in every counter_aggregates statement.
 _RESOURCE_COLUMNS = ("hermes_version", "os_family", "architecture", "install_method")
 
+_CREATE_TELEMETRY_STATE_SQL = """
+            CREATE TABLE IF NOT EXISTS telemetry_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """
+_CREATE_COUNTER_AGGREGATES_SQL = """
+            CREATE TABLE IF NOT EXISTS counter_aggregates (
+                period_start TEXT NOT NULL,
+                metric_name TEXT NOT NULL,
+                hermes_version TEXT NOT NULL,
+                os_family TEXT NOT NULL,
+                architecture TEXT NOT NULL,
+                install_method TEXT NOT NULL,
+                dimensions_json TEXT NOT NULL,
+                value INTEGER NOT NULL,
+                packaged_value INTEGER NOT NULL DEFAULT 0,
+                PRIMARY KEY (
+                    period_start, metric_name, hermes_version, os_family, architecture,
+                    install_method, dimensions_json
+                )
+            )
+            """
+_CREATE_PACKAGE_OUTBOX_SQL = """
+            CREATE TABLE IF NOT EXISTS package_outbox (
+                package_id TEXT PRIMARY KEY,
+                period_start TEXT NOT NULL,
+                period_end TEXT NOT NULL,
+                payload_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                exported_at TEXT
+            )
+            """
+# ``send_consent_windows`` records consent as explicit intervals rather than a moving
+# day-stamp: opened when send consent is observed, heartbeat-confirmed on every later
+# observation, closed at the LAST CONFIRMED moment (never "now") on withdrawal. Additive
+# like the send columns; old readers never touch these tables.
+_CREATE_CONSENT_TABLES_SQL = (
+    """
+            CREATE TABLE IF NOT EXISTS send_consent_windows (
+                opened_at TEXT NOT NULL,
+                last_confirmed_at TEXT NOT NULL,
+                closed_at TEXT
+            )
+            """,
+    """
+            CREATE TABLE IF NOT EXISTS consent_marks (
+                name TEXT PRIMARY KEY CHECK (name IN ('obs', 'data')),
+                stamp TEXT NOT NULL
+            )
+            """,
+)
+# v1 -> v2: the resource columns were added to the counter primary key.
+_MIGRATE_V1_SQL = (
+    "ALTER TABLE counter_aggregates RENAME TO counter_aggregates_v1",
+    _CREATE_COUNTER_AGGREGATES_SQL,
+    """
+            INSERT INTO counter_aggregates(
+                period_start, metric_name, hermes_version, os_family, architecture,
+                install_method, dimensions_json, value, packaged_value
+            )
+            SELECT
+                period_start, metric_name, hermes_version, 'unknown', 'unknown', 'unknown',
+                dimensions_json, value, packaged_value
+            FROM counter_aggregates_v1
+            """,
+    "DROP TABLE counter_aggregates_v1",
+)
+# (column, declaration) added to package_outbox for transmission bookkeeping.
+_SEND_COLUMNS = (
+    # When the 202 was received. NULL = never acknowledged.
+    ("sent_at", "TEXT"),
+    # NULL/'pending' = eligible, 'sent' = done, 'rejected' = permanent 400.
+    ("send_state", "TEXT"),
+    ("send_attempts", "INTEGER NOT NULL DEFAULT 0"),
+    # Earliest next attempt; enforces backoff across process restarts.
+    ("next_attempt_at", "TEXT"),
+    ("last_error", "TEXT"),
+    # The install_id actually transmitted, frozen on the first attempt so retries stay
+    # byte-identical; the body is recomputed from payload_json.
+    ("sent_install_id", "TEXT"),
+    # Rewritten on every claim. Settlement and the pre-POST revalidation are compare-and-set
+    # on it, so a claimant whose lease lapsed loses authority the moment another process
+    # reclaims (else a suspended sender double-POSTs).
+    ("claim_token", "TEXT"),
+)
+
 logger = logging.getLogger(__name__)
 
 
@@ -240,152 +327,41 @@ class SharedMetricsStore:
     def _ensure_schema(self) -> None:
         # Serialize first-run creation and upgrades across Hermes processes.
         with self._write(busy_timeout_ms=_SCHEMA_BUSY_TIMEOUT_MS) as connection:
-            self._ensure_schema_in_transaction(connection)
-
-    @staticmethod
-    def _ensure_schema_in_transaction(connection: sqlite3.Connection) -> None:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS telemetry_state (
-                key TEXT PRIMARY KEY,
-                value TEXT NOT NULL
-            )
-            """
-        )
-        schema_row = connection.execute(
-            "SELECT value FROM telemetry_state WHERE key = 'schema_version'"
-        ).fetchone()
-        schema_version = str(schema_row["value"]) if schema_row is not None else None
-        if schema_version == "1":
-            SharedMetricsStore._migrate_v1_counter_aggregates(connection)
-            schema_version = _STORE_SCHEMA_VERSION
-        if schema_version is not None and schema_version != _STORE_SCHEMA_VERSION:
-            raise RuntimeError(
-                f"Unsupported shared-metrics store schema version: {schema_version}"
-            )
-        SharedMetricsStore._create_counter_aggregates_table(connection)
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS package_outbox (
-                package_id TEXT PRIMARY KEY,
-                period_start TEXT NOT NULL,
-                period_end TEXT NOT NULL,
-                payload_json TEXT NOT NULL,
-                created_at TEXT NOT NULL,
-                exported_at TEXT
-            )
-            """
-        )
-        SharedMetricsStore._add_send_columns(connection)
-        SharedMetricsStore._add_consent_tables(connection)
-        connection.execute(
-            "INSERT INTO telemetry_state(key, value) VALUES ('schema_version', ?)"
-            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-            (_STORE_SCHEMA_VERSION,),
-        )
-
-    @staticmethod
-    def _add_send_columns(connection: sqlite3.Connection) -> None:
-        """Add transmission bookkeeping to ``package_outbox``, idempotently.
-
-        Additive and nullable; the schema version is deliberately NOT bumped because
-        ``_ensure_schema_in_transaction`` raises on unknown versions, so a bump would
-        hard-fail an older Hermes (second profile, rollback) sharing the database. Old
-        readers select named columns, never ``SELECT *``.
-        """
-        existing = {
-            str(row["name"])
-            for row in connection.execute("PRAGMA table_info(package_outbox)")
-        }
-        for column, declaration in (
-            # When the 202 was received. NULL = never acknowledged.
-            ("sent_at", "TEXT"),
-            # NULL/'pending' = eligible, 'sent' = done, 'rejected' = permanent 400.
-            ("send_state", "TEXT"),
-            ("send_attempts", "INTEGER NOT NULL DEFAULT 0"),
-            # Earliest next attempt; enforces backoff across process restarts.
-            ("next_attempt_at", "TEXT"),
-            ("last_error", "TEXT"),
-            # The install_id actually transmitted, frozen on the first attempt so
-            # retries stay byte-identical; the body is recomputed from payload_json.
-            ("sent_install_id", "TEXT"),
-            # Rewritten on every claim. Settlement and the pre-POST revalidation are
-            # compare-and-set on it, so a claimant whose lease lapsed loses authority
-            # the moment another process reclaims (else a suspended sender double-POSTs).
-            ("claim_token", "TEXT"),
-        ):
-            if column not in existing:
-                connection.execute(
-                    f"ALTER TABLE package_outbox ADD COLUMN {column} {declaration}"
+            connection.execute(_CREATE_TELEMETRY_STATE_SQL)
+            schema_row = connection.execute(
+                "SELECT value FROM telemetry_state WHERE key = 'schema_version'"
+            ).fetchone()
+            schema_version = str(schema_row["value"]) if schema_row is not None else None
+            if schema_version == "1":
+                for statement in _MIGRATE_V1_SQL:
+                    connection.execute(statement)
+                schema_version = _STORE_SCHEMA_VERSION
+            if schema_version is not None and schema_version != _STORE_SCHEMA_VERSION:
+                raise RuntimeError(
+                    f"Unsupported shared-metrics store schema version: {schema_version}"
                 )
-
-    @staticmethod
-    def _add_consent_tables(connection: sqlite3.Connection) -> None:
-        """Create the consent-window tables, idempotently (additive; version not bumped).
-
-        ``send_consent_windows`` records consent as explicit intervals rather than a moving
-        day-stamp: opened when send consent is observed, heartbeat-confirmed on every later
-        observation, closed at the LAST CONFIRMED moment (never "now") on withdrawal.
-        """
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS send_consent_windows (
-                opened_at TEXT NOT NULL,
-                last_confirmed_at TEXT NOT NULL,
-                closed_at TEXT
+            connection.execute(_CREATE_COUNTER_AGGREGATES_SQL)
+            connection.execute(_CREATE_PACKAGE_OUTBOX_SQL)
+            # Send bookkeeping columns are ADDITIVE and nullable; the schema version is
+            # deliberately NOT bumped because the check above raises on unknown versions,
+            # so a bump would hard-fail an older Hermes (second profile, rollback) sharing
+            # the database. Old readers select named columns, never ``SELECT *``.
+            existing = {
+                str(row["name"])
+                for row in connection.execute("PRAGMA table_info(package_outbox)")
+            }
+            for column, declaration in _SEND_COLUMNS:
+                if column not in existing:
+                    connection.execute(
+                        f"ALTER TABLE package_outbox ADD COLUMN {column} {declaration}"
+                    )
+            for statement in _CREATE_CONSENT_TABLES_SQL:
+                connection.execute(statement)
+            connection.execute(
+                "INSERT INTO telemetry_state(key, value) VALUES ('schema_version', ?)"
+                " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (_STORE_SCHEMA_VERSION,),
             )
-            """
-        )
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS consent_marks (
-                name TEXT PRIMARY KEY CHECK (name IN ('obs', 'data')),
-                stamp TEXT NOT NULL
-            )
-            """
-        )
-
-    @staticmethod
-    def _create_counter_aggregates_table(connection: sqlite3.Connection) -> None:
-        connection.execute(
-            """
-            CREATE TABLE IF NOT EXISTS counter_aggregates (
-                period_start TEXT NOT NULL,
-                metric_name TEXT NOT NULL,
-                hermes_version TEXT NOT NULL,
-                os_family TEXT NOT NULL,
-                architecture TEXT NOT NULL,
-                install_method TEXT NOT NULL,
-                dimensions_json TEXT NOT NULL,
-                value INTEGER NOT NULL,
-                packaged_value INTEGER NOT NULL DEFAULT 0,
-                PRIMARY KEY (
-                    period_start, metric_name, hermes_version, os_family, architecture,
-                    install_method, dimensions_json
-                )
-            )
-            """
-        )
-
-    @staticmethod
-    def _migrate_v1_counter_aggregates(connection: sqlite3.Connection) -> None:
-        connection.execute(
-            "ALTER TABLE counter_aggregates RENAME TO counter_aggregates_v1"
-        )
-        SharedMetricsStore._create_counter_aggregates_table(connection)
-        connection.execute(
-            """
-            INSERT INTO counter_aggregates(
-                period_start, metric_name, hermes_version, os_family, architecture,
-                install_method, dimensions_json, value, packaged_value
-            )
-            SELECT
-                period_start, metric_name, hermes_version, 'unknown', 'unknown', 'unknown',
-                dimensions_json, value, packaged_value
-            FROM counter_aggregates_v1
-            """
-        )
-        connection.execute("DROP TABLE counter_aggregates_v1")
 
     def _install_id(self, connection: sqlite3.Connection) -> str:
         query = "SELECT value FROM telemetry_state WHERE key = 'install_id'"

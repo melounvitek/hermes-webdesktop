@@ -156,47 +156,31 @@ _COUNTER_DIMENSION_VALUES: dict[str, dict[str, frozenset[str]]] = {
     CLIENT_ACTIVE_METRIC: {},
     # Retained only so pre-v2 pending rows remain packageable.
     LEGACY_MODEL_CALL_METRIC: {
-        "call_role": frozenset({"primary"}),
-        "locality": _LEGACY_MODEL_LOCALITIES,
-        "model_family": _LEGACY_MODEL_FAMILIES,
-        "outcome": _LEGACY_MODEL_OUTCOMES,
+        "call_role": frozenset({"primary"}), "locality": _LEGACY_MODEL_LOCALITIES,
+        "model_family": _LEGACY_MODEL_FAMILIES, "outcome": _LEGACY_MODEL_OUTCOMES,
         "provider_family": _LEGACY_PROVIDER_FAMILIES,
     },
-    TASK_STARTED_METRIC: {
-        "entrypoint": TASK_ENTRYPOINTS,
-        "execution_surface": EXECUTION_SURFACES,
-    },
+    TASK_STARTED_METRIC: {"entrypoint": TASK_ENTRYPOINTS, "execution_surface": EXECUTION_SURFACES},
     TASK_FINISHED_METRIC: {
-        "duration_bucket": DURATION_BUCKETS,
-        "end_reason": TASK_END_REASONS,
-        "entrypoint": TASK_ENTRYPOINTS,
-        "execution_surface": EXECUTION_SURFACES,
-        "model_call_count_bucket": COUNT_BUCKETS,
-        "outcome": TASK_OUTCOMES,
-        "retry_count_bucket": COUNT_BUCKETS,
-        "termination": TASK_TERMINATIONS,
+        "duration_bucket": DURATION_BUCKETS, "end_reason": TASK_END_REASONS,
+        "entrypoint": TASK_ENTRYPOINTS, "execution_surface": EXECUTION_SURFACES,
+        "model_call_count_bucket": COUNT_BUCKETS, "outcome": TASK_OUTCOMES,
+        "retry_count_bucket": COUNT_BUCKETS, "termination": TASK_TERMINATIONS,
         "tool_call_count_bucket": COUNT_BUCKETS,
     },
     TOOL_CALL_METRIC: {
-        "approval_outcome": TOOL_APPROVAL_OUTCOMES,
-        "latency_bucket": TOOL_LATENCY_BUCKETS,
-        "outcome": TOOL_OUTCOMES,
-        "retry_count_bucket": TOOL_RETRY_BUCKETS,
+        "approval_outcome": TOOL_APPROVAL_OUTCOMES, "latency_bucket": TOOL_LATENCY_BUCKETS,
+        "outcome": TOOL_OUTCOMES, "retry_count_bucket": TOOL_RETRY_BUCKETS,
         "tool_category": TOOL_CATEGORIES,
     },
     TOOL_APPROVAL_METRIC: {
         "attribution": TOOL_APPROVAL_ATTRIBUTIONS,
         "outcome": TOOL_APPROVAL_OUTCOMES - {"not_required"},
     },
-    SKILL_LIFECYCLE_METRIC: {
-        "action": SKILL_LIFECYCLE_ACTIONS,
-        "provenance": SKILL_PROVENANCES,
-    },
+    SKILL_LIFECYCLE_METRIC: {"action": SKILL_LIFECYCLE_ACTIONS, "provenance": SKILL_PROVENANCES},
     SKILL_LOAD_METRIC: {
-        "post_patch_state": SKILL_POST_PATCH_STATES,
-        "provenance": SKILL_PROVENANCES,
-        "reuse_state": SKILL_REUSE_STATES,
-        "use_count_bucket": COUNT_BUCKETS,
+        "post_patch_state": SKILL_POST_PATCH_STATES, "provenance": SKILL_PROVENANCES,
+        "reuse_state": SKILL_REUSE_STATES, "use_count_bucket": COUNT_BUCKETS,
     },
 }
 _MODEL_ROUTE_MAX_LENGTHS = {
@@ -209,8 +193,7 @@ _METRIC_FIELDS: dict[str, frozenset[str]] = {
 }
 COUNTER_METRICS = frozenset(_METRIC_FIELDS) - {LEGACY_MODEL_CALL_METRIC}
 _SKILL_MARK_METRICS = {
-    SKILL_LIFECYCLE_MARK: SKILL_LIFECYCLE_METRIC,
-    SKILL_LOAD_MARK: SKILL_LOAD_METRIC,
+    SKILL_LIFECYCLE_MARK: SKILL_LIFECYCLE_METRIC, SKILL_LOAD_MARK: SKILL_LOAD_METRIC,
 }
 
 
@@ -230,7 +213,9 @@ def counter_dimensions_are_valid(metric_name: str, dimensions: dict[str, Any]) -
     )
 
 
-def _relay_metadata(event: Any, schema_key: str, schema_version: str, *extra_keys: str) -> dict | None:
+def _relay_metadata(
+    event: Any, schema_key: str, schema_version: str, *extra_keys: str
+) -> dict | None:
     """Return the event metadata when it carries only the allowlisted Relay keys."""
     metadata = getattr(event, "metadata", None)
     if not isinstance(metadata, dict) or metadata.get(schema_key) != schema_version:
@@ -379,15 +364,11 @@ def skill_lifecycle_fields(kwargs: dict[str, Any]) -> dict[str, str] | None:
 
 def skill_load_fields(kwargs: dict[str, Any]) -> dict[str, str] | None:
     """Build bounded skill-use fields without exporting local skill identity."""
-    use_count = kwargs.get("use_count")
-    reused = kwargs.get("reused")
+    use_count, reused = kwargs.get("use_count"), kwargs.get("reused")
     reuse_after_patch = kwargs.get("reuse_after_patch")
     if (
-        isinstance(use_count, bool)
-        or not isinstance(use_count, int)
-        or use_count < 1
-        or not isinstance(reused, bool)
-        or not isinstance(reuse_after_patch, bool)
+        isinstance(use_count, bool) or not isinstance(use_count, int) or use_count < 1
+        or not isinstance(reused, bool) or not isinstance(reuse_after_patch, bool)
         or (reuse_after_patch and not reused)
     ):
         return None
@@ -456,11 +437,7 @@ def task_entrypoint(kwargs: dict[str, Any], surface: str | None = None) -> str:
 
 
 def task_terminal_fields(
-    kwargs: dict[str, Any],
-    *,
-    duration_ms: int,
-    model_call_count: int,
-    tool_call_count: int,
+    kwargs: dict[str, Any], *, duration_ms: int, model_call_count: int, tool_call_count: int,
     retry_count: int,
 ) -> dict[str, str]:
     """Build the bounded terminal payload for one task scope."""
@@ -527,11 +504,8 @@ def count_bucket(count: int) -> str:
 
 _TOOL_CATEGORY_EXACT = {
     **{category: category for category in TOOL_CATEGORIES},
-    "clarify": "planning", "kanban": "planning", "todo": "planning",
-    "session_search": "memory",
-    "cronjob": "scheduler",
-    "skills": "skill",
-    "x_search": "web",
+    "clarify": "planning", "kanban": "planning", "todo": "planning", "session_search": "memory",
+    "cronjob": "scheduler", "skills": "skill", "x_search": "web",
 }
 _TOOL_CATEGORY_PREFIXES = (
     ("mcp", "mcp"),
@@ -567,7 +541,9 @@ def tool_outcome(kwargs: dict[str, Any]) -> str:
 
 
 _APPROVAL_CHOICES = {
-    **dict.fromkeys(("always", "approve", "approved", "once", "session", "smart_approve"), "approved"),
+    **dict.fromkeys(
+        ("always", "approve", "approved", "once", "session", "smart_approve"), "approved"
+    ),
     **dict.fromkeys(("deny", "denied", "smart_deny"), "denied"),
     **dict.fromkeys(("timed_out", "timeout"), "timed_out"),
 }
@@ -579,10 +555,7 @@ def tool_approval_outcome(kwargs: dict[str, Any]) -> str:
 
 
 def tool_terminal_fields(
-    kwargs: dict[str, Any],
-    *,
-    category: str | None = None,
-    approval_outcome: str = "not_required",
+    kwargs: dict[str, Any], *, category: str | None = None, approval_outcome: str = "not_required",
     fallback_duration_ms: int | None = None,
 ) -> dict[str, str]:
     """Build one bounded tool-call terminal payload."""
@@ -602,7 +575,9 @@ def tool_latency_bucket(value: Any, *, fallback_duration_ms: int | None = None) 
     duration_ms = _non_negative_number(value)
     if duration_ms is None:
         duration_ms = _non_negative_number(fallback_duration_ms)
-    return "unknown" if duration_ms is None else _bucket(duration_ms, _LATENCY_THRESHOLDS, "gte_30s")
+    if duration_ms is None:
+        return "unknown"
+    return _bucket(duration_ms, _LATENCY_THRESHOLDS, "gte_30s")
 
 
 def tool_retry_bucket(value: Any) -> str:
