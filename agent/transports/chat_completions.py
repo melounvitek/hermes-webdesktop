@@ -197,6 +197,15 @@ def _dump_extra_content(extra: Any) -> Any:
     return extra
 
 
+def _pareto_score(raw: Any) -> float | None:
+    """Coding-score floor for the Pareto router as a float in [0, 1], else None."""
+    try:
+        score = float(raw) if raw not in (None, "") else None
+    except (TypeError, ValueError):
+        return None
+    return score if score is not None and 0.0 <= score <= 1.0 else None
+
+
 def _swap_developer_role(sanitized: list, model_lower: str) -> list:
     """GPT-5/Codex models take a ``developer`` role instead of ``system``."""
     if (
@@ -357,12 +366,8 @@ class ChatCompletionsTransport(ProviderTransport):
             extra_body["provider"] = params["provider_preferences"]
         # Pareto Code router plugin (same shape as the OpenRouter profile path).
         if is_openrouter and model == "openrouter/pareto-code":
-            _pareto_score = params.get("openrouter_min_coding_score")
-            try:
-                _pareto_score_f = float(_pareto_score) if _pareto_score not in (None, "") else None
-            except (TypeError, ValueError):
-                _pareto_score_f = None
-            if _pareto_score_f is not None and 0.0 <= _pareto_score_f <= 1.0:
+            _pareto_score_f = _pareto_score(params.get("openrouter_min_coding_score"))
+            if _pareto_score_f is not None:
                 extra_body["plugins"] = [{"id": "pareto-router", "min_coding_score": _pareto_score_f}]
         if is_kimi:
             extra_body["thinking"] = {"type": "disabled" if thinking_off else "enabled"}
@@ -375,10 +380,8 @@ class ChatCompletionsTransport(ProviderTransport):
             else:
                 _effort = (reasoning_config.get("effort", "medium") or "medium") if reasoning_config and isinstance(reasoning_config, dict) else "medium"
                 # Honor explicit "thinking off" like the profile path — never re-enable it.
-                if thinking_off or _effort == "none":
-                    extra_body["reasoning"] = {"enabled": False, "effort": "none"}
-                else:
-                    extra_body["reasoning"] = {"enabled": True, "effort": _effort}
+                off = thinking_off or _effort == "none"
+                extra_body["reasoning"] = {"enabled": not off, "effort": "none" if off else _effort}
 
         if str(params.get("provider_name") or "").strip().lower() == "gemini":
             raw_thinking_config = _build_gemini_thinking_config(model, reasoning_config)
@@ -386,9 +389,7 @@ class ChatCompletionsTransport(ProviderTransport):
                 thinking_config = _snake_case_gemini_thinking_config(raw_thinking_config)
                 if thinking_config:
                     openai_compat_extra = extra_body.get("extra_body", {})
-                    google_extra = openai_compat_extra.get("google", {})
-                    google_extra["thinking_config"] = thinking_config
-                    openai_compat_extra["google"] = google_extra
+                    openai_compat_extra["google"] = {**openai_compat_extra.get("google", {}), "thinking_config": thinking_config}
                     extra_body["extra_body"] = openai_compat_extra
             elif raw_thinking_config:
                 extra_body["thinking_config"] = raw_thinking_config
