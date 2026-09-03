@@ -22,16 +22,12 @@ def resolve_placeholder_terminal_cwd(
 ) -> str | None:
     """Return the ``TERMINAL_CWD`` value to set, or ``None`` to leave it unset.
 
-    Cases:
-      - **local** + placeholder → ``MESSAGING_CWD`` or ``home_fallback``
-      - **docker** + placeholder + mount on + host ``MESSAGING_CWD`` → host path
-        (for ``terminal_tool`` ``/workspace`` mapping)
-      - **docker** + placeholder + mount off → ``None`` (sandbox default)
-      - other non-local backends + placeholder → ``None``
+    local + placeholder → ``MESSAGING_CWD`` or ``home_fallback``; docker +
+    placeholder + mount on + host ``MESSAGING_CWD`` → that host path (for the
+    ``/workspace`` mapping); any other non-local backend → ``None`` (sandbox default).
     """
     if configured_cwd and configured_cwd not in CWD_PLACEHOLDERS:
         return configured_cwd
-
     backend = (terminal_backend or "local").strip().lower()
     messaging = (messaging_cwd or "").strip()
     if backend == "local":

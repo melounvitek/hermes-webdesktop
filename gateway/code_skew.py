@@ -1,15 +1,11 @@
 """Detect when the gateway is running stale code after a hot ``git pull``.
 
 The gateway's ``sys.modules`` is frozen at boot.  If the checkout is updated
-underneath it (manual ``git pull``, or the window before ``hermes update``'s
-graceful restart), a first-time lazy import can resolve a freshly-pulled module
-against a stale cached dependency -> ImportError
-(``tests/test_stale_utils_module_import.py``).  We snapshot the revision at
+underneath it, a first-time lazy import can resolve a freshly-pulled module
+against a stale cached dependency -> ImportError.  We snapshot the revision at
 startup so risky callers (e.g. ``/model`` switching) can refuse with a clear
-"restart the gateway" message instead.
-
-If the revision can't be read (non-git install, IO error) the boot snapshot
-stays ``None`` and detection no-ops — never a false positive.
+"restart the gateway" message.  If the revision can't be read (non-git install,
+IO error) the boot snapshot stays ``None`` and detection no-ops — never a false positive.
 """
 
 from __future__ import annotations
@@ -41,17 +37,12 @@ def record_boot_fingerprint() -> None:
 def _short(fingerprint: str) -> str:
     """Render a ``git:<ref>:<sha>`` fingerprint as a compact label."""
     sha = fingerprint.rsplit(":", 1)[-1]
-    if sha and sha != "unresolved" and len(sha) > 10:
-        return sha[:10]
-    return sha or fingerprint
+    return sha[:10] if sha and sha != "unresolved" and len(sha) > 10 else (sha or fingerprint)
 
 
 def detect_code_skew() -> tuple[str, str] | None:
-    """Return ``(boot_rev, disk_rev)`` short labels if the checkout drifted
-    since boot, else ``None``."""
-    if _boot_fingerprint is None:
-        return None
-    current = _fingerprint()
+    """``(boot_rev, disk_rev)`` short labels if the checkout drifted since boot, else ``None``."""
+    current = _fingerprint() if _boot_fingerprint is not None else None
     if current is None or current == _boot_fingerprint:
         return None
     return _short(_boot_fingerprint), _short(current)
