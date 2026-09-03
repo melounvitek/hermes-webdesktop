@@ -1,12 +1,10 @@
-"""Transport-neutral browser-control broker core: binds an identity-scoped
-*controller* (the party driving a browser) to *callers* on any transport.
-
-Tickets are short-lived, single-use, identity-bound and consumed exactly once;
-``select`` matches every stable identity field plus the current capability set;
-``complete`` is single-shot; ``detach`` fails pending work closed while
-``disconnect`` only marks the transport offline. State changes happen under one
-RLock; the send callback runs *outside* it so a controller may ``complete`` from
-inside its own send."""
+"""Transport-neutral browser-control broker core: binds an identity-scoped *controller*
+(the party driving a browser) to *callers* on any transport. Tickets are short-lived,
+single-use, identity-bound and consumed exactly once; ``select`` matches every stable
+identity field plus the current capability set; ``complete`` is single-shot; ``detach``
+fails pending work closed while ``disconnect`` only marks the transport offline. State
+changes happen under one RLock; the send callback runs *outside* it so a controller may
+``complete`` from inside its own send."""
 
 from __future__ import annotations
 
@@ -26,25 +24,17 @@ DEFAULT_TICKET_TTL = 30.0
 DEFAULT_COMMAND_TIMEOUT = 30.0
 #: Maximum cancel frames retained while a same-identity controller is offline.
 MAX_DEFERRED_CANCELS = 512
-
-#: Current wire protocol version. Registration requires this exact integer;
-#: booleans are rejected even though ``bool`` subclasses ``int``.
+#: Current wire protocol version; registration requires this exact int (bools rejected).
 BROWSER_CONTROL_PROTOCOL_VERSION = 1
 
-#: Exact controller capability allowlist shared by every transport. Raw CDP,
-#: script evaluation, console access, and other privileged surfaces stay out.
+#: Exact controller capability allowlist shared by every transport (raw CDP/eval/console stay out).
 BROWSER_CONTROL_CAPABILITIES = frozenset({
-    "controller.noop", "browser_back", "browser_click", "browser_navigate", "browser_press",
-    "browser_screenshot", "browser_scroll", "browser_snapshot", "browser_tab_activate",
-    "browser_tabs", "browser_type",
+    "controller.noop", "browser_back", "browser_click", "browser_navigate", "browser_press", "browser_screenshot",
+    "browser_scroll", "browser_snapshot", "browser_tab_activate", "browser_tabs", "browser_type",
 })
-
-#: Privileged capabilities (JS eval, raw CDP): fail-closed unless Developer Mode
-#: (``browser.extension_control.developer_mode``) is on AND explicitly negotiated.
+#: Privileged capabilities: fail-closed unless Developer Mode is on AND explicitly negotiated.
 BROWSER_CONTROL_DEVELOPER_CAPABILITIES = frozenset({"browser_cdp", "browser_evaluate"})
-
-#: Artifact transport capabilities. Non-developer because payloads never ride
-#: in controller frames: only a store-validated ``artifact_id`` is dispatched.
+#: Artifact transport capabilities; non-developer because only a store-validated ``artifact_id`` travels.
 BROWSER_CONTROL_ARTIFACT_CAPABILITIES = frozenset({"browser_artifact_download", "browser_artifact_upload"})
 
 #: Wire method names for controller frames; transports carry them verbatim.
@@ -61,8 +51,7 @@ def _extension_control_flag(config: Optional[dict], key: str) -> bool:
     """Read ``browser.extension_control.<key>`` as a literal ``True`` (default off)."""
     if config is None:
         try:
-            # Hot path (every browser tool call / check_fn): the read-only
-            # loader skips load_config()'s deepcopy; we never mutate.
+            # Hot path (every browser tool call): the read-only loader skips load_config()'s deepcopy.
             from hermes_cli.config import load_config_readonly
             config = load_config_readonly()
         except Exception:
@@ -83,13 +72,12 @@ def browser_control_enabled(config: Optional[dict] = None) -> bool:
 
 
 def filter_browser_control_capabilities(value: Any, *, developer_mode: Optional[bool] = None) -> frozenset:
-    """Permitted subset of a capability list (non-list -> empty); developer caps only
-    when Developer Mode is on (passed in, else read from live config)."""
+    """Permitted subset of a capability list (non-list -> empty); developer caps only in Developer Mode."""
     if not isinstance(value, list):
         return frozenset()
     allowed = BROWSER_CONTROL_CAPABILITIES | BROWSER_CONTROL_ARTIFACT_CAPABILITIES
     if (browser_control_developer_mode() if developer_mode is None else developer_mode) is True:
-        allowed = allowed | BROWSER_CONTROL_DEVELOPER_CAPABILITIES
+        allowed |= BROWSER_CONTROL_DEVELOPER_CAPABILITIES
     return frozenset(c for c in value if isinstance(c, str) and c in allowed)
 
 
@@ -120,7 +108,6 @@ class ControllerRejected(BrowserControlError):
 @dataclass(frozen=True)
 class ControllerScope:
     """Exact controller identity plus capability set; equality is over all fields."""
-
     principal_id: Optional[str] = None
     profile_id: Optional[str] = None
     session_id: Optional[str] = None
@@ -141,7 +128,6 @@ def _same_scope_identity(first: ControllerScope, second: ControllerScope) -> boo
 @dataclass(frozen=True)
 class Ticket:
     """Opaque, single-use registration credential."""
-
     value: str
     expires_at: float
 
@@ -160,8 +146,7 @@ class _Controller:
     owner: Any = None
     connected: bool = True
     deferred_cancels: list[dict] = field(default_factory=list)
-    # Serializes command/cancel writes with detach or replacement. Broker state is
-    # never held while waiting on it, so a send callback may complete() synchronously.
+    # Serializes command/cancel writes with detach or replacement; never held with broker state.
     send_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -177,13 +162,14 @@ class _PendingCommand:
     result: Any = None
 
 
+def _cancel_frame(pending: _PendingCommand) -> dict:
+    return {"method": FRAME_CANCEL, "params": {"command_id": pending.command_id, "tool_call_id": pending.tool_call_id}}
+
+
 class BrowserControlBroker:
     """Thread-safe broker core; ``clock`` is injectable (default ``time.monotonic``)."""
-
-    def __init__(
-        self, *, ticket_ttl: float = DEFAULT_TICKET_TTL, command_timeout: float = DEFAULT_COMMAND_TIMEOUT,
-        clock: Optional[Callable[[], float]] = None, developer_mode: Optional[bool] = None,
-    ) -> None:
+    def __init__(self, *, ticket_ttl: float = DEFAULT_TICKET_TTL, command_timeout: float = DEFAULT_COMMAND_TIMEOUT,
+                 clock: Optional[Callable[[], float]] = None, developer_mode: Optional[bool] = None) -> None:
         self._ticket_ttl = ticket_ttl
         self._command_timeout = command_timeout
         self._clock = clock if clock is not None else time.monotonic
@@ -191,15 +177,15 @@ class BrowserControlBroker:
         self._tickets: Dict[str, _TicketRecord] = {}
         self._controllers: Dict[ControllerScope, _Controller] = {}
         self._pending: Dict[str, _PendingCommand] = {}
-        # None defers to live config on every selection so flipping developer_mode off
-        # REVOKES raw CDP/eval from attached controllers without restart; a bool pins the gate.
+        # None defers to live config on every selection (so flipping developer_mode off REVOKES
+        # raw CDP/eval from attached controllers without restart); a bool pins the gate.
         self._developer_mode_pinned: Optional[bool] = None if developer_mode is None else developer_mode is True
-        # Artifact stores keyed by profile id; ``None`` is the default slot so
-        # multiplex profile A never pins profile B to A's physical root.
+        # Artifact stores keyed by profile id; ``None`` is the default slot.
         self._artifact_stores: Dict[Optional[str], Any] = {}
 
-    def _developer_mode_now(self) -> bool:
-        """Current Developer Mode authority (live config unless pinned)."""
+    @property
+    def developer_mode(self) -> bool:
+        """Whether privileged capabilities may be selected/dispatched (live config unless pinned)."""
         if self._developer_mode_pinned is not None:
             return self._developer_mode_pinned
         try:
@@ -207,19 +193,13 @@ class BrowserControlBroker:
         except Exception:
             return False
 
-    @property
-    def developer_mode(self) -> bool:
-        """Whether privileged capabilities may be selected/dispatched."""
-        return self._developer_mode_now()
-
     def attach_artifact_store(self, store: Any, *, profile_id: Optional[str] = None) -> None:
-        """Attach a store exposing ``validate(artifact_id, *, scope) -> receipt`` for one
-        profile (``None`` = default slot); ``store=None`` clears the slot. Artifact
-        actions without a resolvable store fail closed."""
+        """Attach a store exposing ``validate(artifact_id, *, scope) -> receipt`` for one profile
+        (``None`` = default slot); ``store=None`` clears the slot. Artifact actions fail closed without one."""
         if store is None:
             self._artifact_stores.pop(profile_id, None)
-            return
-        self._artifact_stores[profile_id] = store
+        else:
+            self._artifact_stores[profile_id] = store
 
     def _artifact_store_for_scope(self, scope: "ControllerScope") -> Any:
         store = self._artifact_stores.get(getattr(scope, "profile_id", None) or None)
@@ -229,16 +209,13 @@ class BrowserControlBroker:
         """Mint a short-lived, single-use ticket bound to ``scope``."""
         now = self._clock()
         with self._lock:
-            for stale in [v for v, rec in self._tickets.items() if rec.expires_at <= now]:
-                del self._tickets[stale]
+            self._tickets = {v: rec for v, rec in self._tickets.items() if rec.expires_at > now}
             value = secrets.token_urlsafe(32)
-            record = _TicketRecord(scope=scope, expires_at=now + self._ticket_ttl)
-            self._tickets[value] = record
+            self._tickets[value] = record = _TicketRecord(scope=scope, expires_at=now + self._ticket_ttl)
         return Ticket(value=value, expires_at=record.expires_at)
 
     def consume_ticket(self, value: str) -> ControllerScope:
-        """Exchange a ticket for its scope exactly once; :class:`ControllerTicketInvalid`
-        for unknown/consumed/expired tickets (expiry checked at consume time)."""
+        """Exchange a ticket for its scope exactly once; unknown/consumed/expired -> ControllerTicketInvalid."""
         now = self._clock()
         with self._lock:
             record = self._tickets.get(value)
@@ -261,17 +238,16 @@ class BrowserControlBroker:
         return controller if controller is not None and controller.connected else None
 
     def attach(self, scope: ControllerScope, send: Callable[[dict], None], *, owner: Any = None) -> None:
-        """Attach or refresh the controller for one stable identity: a same-identity reconnect
-        refreshes send callback and capabilities without cancelling pending work; a different
-        controller/browser profile in the same authenticated session lane hard-replaces it."""
+        """Attach or refresh the controller for one stable identity: a same-identity reconnect refreshes send
+        and capabilities without cancelling pending work; a different controller/browser profile in the same
+        authenticated session lane hard-replaces it."""
         while True:
             with self._lock:
                 existing = self._controller_for_identity_locked(scope)
                 lane_scopes = [
-                    c for c in self._controllers
-                    if (c.principal_id, c.profile_id, c.session_id, c.transport_family)
+                    c for c in self._controllers if not _same_scope_identity(c, scope)
+                    and (c.principal_id, c.profile_id, c.session_id, c.transport_family)
                     == (scope.principal_id, scope.profile_id, scope.session_id, scope.transport_family)
-                    and not _same_scope_identity(c, scope)
                 ]
                 if existing is None and not lane_scopes:
                     self._controllers[scope] = _Controller(scope=scope, send=send, owner=owner)
@@ -289,29 +265,21 @@ class BrowserControlBroker:
                     if self._controllers.get(existing.scope) is not existing:
                         continue
                     self._controllers.pop(existing.scope, None)
-                    existing.scope = scope
-                    existing.send = send
-                    existing.owner = owner
-                    existing.connected = False
-                    for pending in self._pending.values():
-                        if _same_scope_identity(pending.scope, scope):
-                            pending.scope = scope
-                    deferred = list(existing.deferred_cancels)
-                    existing.deferred_cancels.clear()
+                    existing.scope, existing.send, existing.owner, existing.connected = scope, send, owner, False
+                    for pending in self._pending_for_scope_locked(scope):
+                        pending.scope = scope
+                    deferred, existing.deferred_cancels = existing.deferred_cancels, []
                     self._controllers[scope] = existing
 
-                unsent: list[dict] = []
                 for index, frame in enumerate(deferred):
                     try:
                         send(frame)
+                        continue
                     except Exception:
                         logger.exception("failed to flush deferred browser-controller cancel")
-                        unsent = deferred[index:]
-                        break
-                if unsent:
                     with self._lock:
                         if self._controllers.get(scope) is existing:
-                            existing.deferred_cancels = unsent[-MAX_DEFERRED_CANCELS:]
+                            existing.deferred_cancels = deferred[index:][-MAX_DEFERRED_CANCELS:]
                     raise ConnectionError("browser controller reconnect could not flush deferred cancels")
                 with self._lock:
                     if self._controllers.get(scope) is existing:
@@ -319,17 +287,15 @@ class BrowserControlBroker:
                 return
 
     def select(self, scope: ControllerScope, capability: str) -> Optional[_Controller]:
-        """Connected controller matching identity whose *current* negotiated set holds
-        ``capability`` (the caller's set is not authoritative); developer capabilities
-        are additionally gated on the LIVE Developer Mode flag unless pinned."""
-        if capability in BROWSER_CONTROL_DEVELOPER_CAPABILITIES and not self._developer_mode_now():
+        """Connected controller matching identity whose *current* negotiated set holds ``capability`` (the
+        caller's set is not authoritative); developer capabilities are also gated on LIVE Developer Mode."""
+        if capability in BROWSER_CONTROL_DEVELOPER_CAPABILITIES and not self.developer_mode:
             return None
         controller = self._live_controller(scope)
         return controller if controller is not None and capability in controller.scope.capabilities else None
 
     def is_owner(self, scope: ControllerScope, owner: Any) -> bool:
-        """Whether ``owner`` is the exact live transport for ``scope``; independent of
-        capabilities so a least-privilege controller can heartbeat/complete."""
+        """Whether ``owner`` is the exact live transport for ``scope`` (capability-independent)."""
         controller = self._live_controller(scope)
         return controller is not None and controller.owner is owner
 
@@ -341,26 +307,21 @@ class BrowserControlBroker:
             return False
         with controller.send_lock:
             with self._lock:
-                if self._controllers.get(controller.scope) is not controller or (
-                    owner is not _OWNER_UNSET and controller.owner is not owner
-                ):
+                owned = owner is _OWNER_UNSET or controller.owner is owner
+                if self._controllers.get(controller.scope) is not controller or not owned:
                     return False
-                controller.connected = False
-                controller.owner = None
+                controller.connected, controller.owner = False, None
         return True
 
     def detach(self, scope: ControllerScope, *, owner: Any = _OWNER_UNSET, notify_controller: bool = True) -> None:
-        """Remove the controller for ``scope`` and fail its pending work closed
-        (dispatchers raise :class:`ControllerCancelled`; late ``complete`` -> ``False``)."""
+        """Remove the controller for ``scope`` and fail its pending work closed (ControllerCancelled)."""
         with self._lock:
             controller = self._controllers.get(scope)
         if controller is None or (owner is not _OWNER_UNSET and controller.owner != owner):
             return
         with controller.send_lock:
             with self._lock:
-                if self._controllers.get(scope) is not controller or (
-                    owner is not _OWNER_UNSET and controller.owner != owner
-                ):
+                if self._controllers.get(scope) is not controller or (owner is not _OWNER_UNSET and controller.owner != owner):
                     return
                 self._controllers.pop(scope, None)
                 pendings = self._pending_for_scope_locked(scope)
@@ -372,12 +333,10 @@ class BrowserControlBroker:
                 self._emit_cancel_frames(controller, pendings)
 
     def dispatch(
-        self, scope: ControllerScope, *, action: str, arguments: Optional[dict] = None,
-        tool_call_id: Optional[str] = None,
+        self, scope: ControllerScope, *, action: str, arguments: Optional[dict] = None, tool_call_id: Optional[str] = None,
     ) -> Any:
-        """Send one controller command and block for its completion; raises ControllerUnavailable,
-        ControllerCancelled, ControllerTimeout, or ControllerRejected (``ok=False``). Artifact
-        actions also need an attached store and an approved ``artifact_id`` (only the id travels)."""
+        """Send one controller command and block for completion; raises ControllerUnavailable/Cancelled/Timeout/
+        Rejected. Artifact actions also need an attached store and an approved ``artifact_id`` (only the id travels)."""
         controller = self.select(scope, action)
         if controller is None:
             raise ControllerUnavailable(f"no controller for scope {scope!r} with capability {action!r}")
@@ -386,17 +345,15 @@ class BrowserControlBroker:
             self._validate_artifact_reference(scope, action, arguments)
         command_id = secrets.token_hex(16)
         frame = {"method": FRAME_COMMAND, "params": {
-            "command_id": command_id, "action": action, "arguments": arguments,
-            "controller_id": scope.controller_id, "browser_profile_id": scope.browser_profile_id,
-            "tool_call_id": tool_call_id,
+            "command_id": command_id, "action": action, "arguments": arguments, "controller_id": scope.controller_id,
+            "browser_profile_id": scope.browser_profile_id, "tool_call_id": tool_call_id,
         }}
         pending = _PendingCommand(scope=controller.scope, command_id=command_id, tool_call_id=tool_call_id)
         with controller.send_lock:
             with self._lock:
                 # select() ran outside the send lock; revalidate the live
                 # controller so disconnect/replacement can't strand a command.
-                attached = self._controller_for_identity_locked(scope)
-                if attached is not controller or not controller.connected:
+                if self._controller_for_identity_locked(scope) is not controller or not controller.connected:
                     raise ControllerUnavailable(f"controller for scope {scope!r} detached before dispatch")
                 pending.scope = controller.scope
                 self._pending[command_id] = pending
@@ -409,14 +366,13 @@ class BrowserControlBroker:
                 raise
 
         if not pending.event.wait(timeout=self._command_timeout):
-            timed_out = False
             with self._lock:
                 # Event.wait() may return False at the exact boundary where a
                 # completion already won and removed the pending command.
-                if not pending.done and self._pending.get(command_id) is pending:
+                timed_out = not pending.done and self._pending.get(command_id) is pending
+                if timed_out:
                     pending.done = True
                     del self._pending[command_id]
-                    timed_out = True
             if timed_out:
                 with controller.send_lock:
                     with self._lock:
@@ -426,47 +382,35 @@ class BrowserControlBroker:
                             active = None
                     if active is not None:
                         self._emit_cancel_frames(active, [pending])
-                raise ControllerTimeout(
-                    f"controller did not complete command {command_id!r} within {self._command_timeout}s"
-                )
+                raise ControllerTimeout(f"controller did not complete command {command_id!r} within {self._command_timeout}s")
         if pending.cancelled:
             raise ControllerCancelled(f"command {command_id!r} was cancelled")
         if not pending.ok:
             raise ControllerRejected(f"controller rejected command {command_id!r}: {pending.result!r}")
         return pending.result
 
-    def complete(
-        self, command_id: str, *, scope: Optional[ControllerScope] = None, ok: bool, result: Any = None,
-    ) -> bool:
-        """Resolve a pending command by id; ``False`` when none is pending (late
-        completions after ``cancel``/``detach``). Safe from inside the send callback."""
+    def complete(self, command_id: str, *, scope: Optional[ControllerScope] = None, ok: bool, result: Any = None) -> bool:
+        """Resolve a pending command by id; ``False`` when none is pending. Safe from inside the send callback."""
         with self._lock:
             pending = self._pending.get(command_id)
             if pending is None or pending.done or (scope is not None and pending.scope != scope):
                 return False
-            pending.done = True
-            pending.ok = ok is True
-            pending.result = result
+            pending.done, pending.ok, pending.result = True, ok is True, result
             del self._pending[command_id]
             pending.event.set()
         return True
 
     def cancel(self, scope: ControllerScope, *, tool_call_id: Optional[str]) -> bool:
-        """Cancel exactly the pending command matching ``scope`` + tool_call_id; emits one
-        cancel frame, ``False`` when nothing matched so transports answer idempotently."""
+        """Cancel the pending command matching ``scope`` + tool_call_id (one cancel frame); ``False`` if none."""
         controller = self._live_controller(scope)
         if controller is None:
             return False
         with controller.send_lock:
             with self._lock:
-                attached = self._controller_for_identity_locked(scope)
-                if attached is not controller or not controller.connected:
+                if self._controller_for_identity_locked(scope) is not controller or not controller.connected:
                     return False
-                target = next(
-                    (p for p in self._pending.values()
-                     if _same_scope_identity(p.scope, scope) and p.tool_call_id == tool_call_id and not p.done),
-                    None,
-                )
+                target = next((p for p in self._pending_for_scope_locked(scope)
+                               if p.tool_call_id == tool_call_id and not p.done), None)
                 if target is None:
                     return False
                 self._resolve_pending(target, cancelled=True)
@@ -474,14 +418,12 @@ class BrowserControlBroker:
             return True
 
     def _resolve_pending(self, pending: _PendingCommand, *, cancelled: bool) -> None:
-        pending.cancelled = cancelled
-        pending.done = True
+        pending.cancelled, pending.done = cancelled, True
         del self._pending[pending.command_id]
         pending.event.set()
 
     def _validate_artifact_reference(self, scope: ControllerScope, action: str, arguments: dict) -> None:
-        """Fail closed unless ``arguments`` carries a store-approved artifact id; every
-        store failure surfaces as :class:`ControllerRejected` before a frame is emitted."""
+        """Fail closed unless ``arguments`` carries a store-approved artifact id (failures -> ControllerRejected)."""
         store = self._artifact_store_for_scope(scope)
         if store is None:
             raise ControllerRejected(f"{action} requires an attached artifact store")
@@ -495,12 +437,8 @@ class BrowserControlBroker:
         except Exception as exc:
             raise ControllerRejected(f"{action} rejected artifact reference {artifact_id!r}: {exc}") from exc
 
-    @staticmethod
-    def _cancel_frame(pending: _PendingCommand) -> dict:
-        return {"method": FRAME_CANCEL, "params": {"command_id": pending.command_id, "tool_call_id": pending.tool_call_id}}
-
     def _defer_cancel_locked(self, controller: _Controller, pending: _PendingCommand) -> None:
-        controller.deferred_cancels.append(self._cancel_frame(pending))
+        controller.deferred_cancels.append(_cancel_frame(pending))
         if len(controller.deferred_cancels) > MAX_DEFERRED_CANCELS:
             del controller.deferred_cancels[:-MAX_DEFERRED_CANCELS]
 
@@ -511,7 +449,7 @@ class BrowserControlBroker:
         """Send cancel frames (caller holds ``send_lock``, never the broker lock)."""
         for pending in pendings:
             try:
-                controller.send(self._cancel_frame(pending))
+                controller.send(_cancel_frame(pending))
             except Exception:
                 logger.exception("failed to emit cancel frame for command %r", pending.command_id)
 
@@ -523,23 +461,17 @@ class BrowserControlBroker:
         with self._lock:
             return [s for s in self._controllers if (s.session_id, s.principal_id, s.transport_family) == key]
 
-    def scope_for_session(
-        self, *, session_id: Optional[str] = None, task_id: Optional[str] = None,
-        principal_id: Optional[str] = None, transport_family: Optional[str] = None,
-    ) -> Optional[ControllerScope]:
-        """One unambiguous attached scope for a server-owned session. The session id is
-        only a hint; the caller must supply its server-derived principal and transport
-        family. Missing identity, no match, or multiple matches fail closed."""
+    def scope_for_session(self, *, session_id: Optional[str] = None, task_id: Optional[str] = None,
+                          principal_id: Optional[str] = None, transport_family: Optional[str] = None) -> Optional[ControllerScope]:
+        """One unambiguous attached scope for a server-owned session (session id is only a hint; the caller
+        supplies its server-derived principal + transport family). Missing/ambiguous identity fails closed."""
         matches = self._lane_scopes(session_id, task_id, principal_id, transport_family)
         return matches[0] if len(matches) == 1 else None
 
-    def lane_registered(
-        self, *, session_id: Optional[str] = None, task_id: Optional[str] = None,
-        principal_id: Optional[str] = None, transport_family: Optional[str] = None,
-    ) -> bool:
-        """Whether ANY controller (even offline) registered for this lane: "bound but
-        unavailable" fails closed (extension lane stays authoritative) vs "never
-        registered" (caller keeps the legacy backend). Ambiguous lanes report True."""
+    def lane_registered(self, *, session_id: Optional[str] = None, task_id: Optional[str] = None,
+                        principal_id: Optional[str] = None, transport_family: Optional[str] = None) -> bool:
+        """Whether ANY controller (even offline) registered for this lane: "bound but unavailable" fails closed
+        vs "never registered" (caller keeps the legacy backend). Ambiguous lanes report True."""
         return bool(self._lane_scopes(session_id, task_id, principal_id, transport_family))
 
     def disconnect_owner(self, owner: Any) -> int:

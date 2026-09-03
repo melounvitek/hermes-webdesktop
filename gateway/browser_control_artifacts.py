@@ -1,12 +1,9 @@
-"""One-shot artifact transport for browser control (Gateway side): a transport-neutral
-store for bounded artifacts; :mod:`gateway.platforms.api_server` authenticates and
-rate-limits, then hands bytes here.
-
-Controller frames carry only server-minted ``[0-9a-f]{32}`` ids (client filenames are
-metadata, never paths); bytes live under a controlled root for a short TTL. Size/MIME
-caps apply before any write; SHA-256 is re-verified on read; ``load`` needs the exact
-scope key and consumes atomically. The index is lock-guarded and files are temp-written
-then renamed so readers never see partials."""
+"""One-shot artifact transport for browser control (Gateway side); :mod:`gateway.platforms.api_server`
+authenticates and rate-limits, then hands bytes here. Controller frames carry only server-minted
+``[0-9a-f]{32}`` ids (client filenames are metadata, never paths); bytes live under a controlled root
+for a short TTL. Size/MIME caps apply before any write; SHA-256 is re-verified on read; ``load`` needs
+the exact scope key and consumes atomically. The index is lock-guarded and files are temp-written then
+renamed so readers never see partials."""
 
 from __future__ import annotations
 
@@ -28,8 +25,7 @@ DEFAULT_ARTIFACT_TTL_SECONDS = 300.0
 DEFAULT_MAX_ARTIFACT_BYTES = 10 * 1024 * 1024
 #: Exact allowlist — parameterized/unknown variants are rejected.
 DEFAULT_ALLOWED_MIME_TYPES = frozenset({
-    "application/json", "application/pdf", "image/gif", "image/jpeg",
-    "image/png", "image/webp", "text/plain",
+    "application/json", "application/pdf", "image/gif", "image/jpeg", "image/png", "image/webp", "text/plain",
 })
 _ARTIFACT_ID_RE = re.compile(r"^[0-9a-f]{32}$")
 _TEMP_SUFFIX = ".tmp"
@@ -70,7 +66,6 @@ class ArtifactTraversal(ArtifactError):
 @dataclass(frozen=True)
 class ArtifactReceipt:
     """Provenance record returned to the caller of ``store``."""
-
     artifact_id: str
     sha256: str
     size_bytes: int
@@ -83,24 +78,21 @@ class ArtifactReceipt:
 
     def to_dict(self, *, download_path: str = "") -> dict[str, Any]:
         """Serialize to the wire receipt (never contains file paths)."""
-        receipt = {
+        return {
             "artifact_id": self.artifact_id, "sha256": self.sha256, "size_bytes": self.size_bytes,
             "content_type": self.content_type, "filename": self.filename, "created_at": self.created_at,
             "expires_at": self.expires_at, "ttl_seconds": self.ttl_seconds, "one_shot": True,
+            **({"download_path": download_path} if download_path else {}),
         }
-        if download_path:
-            receipt["download_path"] = download_path
-        return receipt
 
 
 def artifact_scope_key(scope: Any) -> str:
     """Derive the stable scope key an artifact is bound to.
 
-    Only principal (mandatory) + transport family participate. ``session_id`` is deliberately
-    EXCLUDED: HTTP artifact routes authenticate by API key and can't resolve a session, while
-    broker dispatch always carries one — hashing it would make upload and dispatch never compose
-    (ids are unguessable and downloads one-shot, so cross-session reuse within one principal is
-    by design). Capabilities/optional ids are excluded so a reconnect keeps its artifacts."""
+    Only principal (mandatory) + transport family participate. ``session_id`` is deliberately EXCLUDED: HTTP
+    artifact routes authenticate by API key and can't resolve a session while broker dispatch always carries
+    one, so hashing it would make upload and dispatch never compose (ids are unguessable and downloads
+    one-shot). Capabilities/optional ids are excluded so a reconnect keeps its artifacts."""
     principal = family = ""
     try:
         principal = str(getattr(scope, "principal_id", "") or "")
@@ -121,12 +113,8 @@ class _ArtifactEntry:
 
 class ArtifactStore:
     """Thread-safe, TTL-bounded, scope-bound one-shot artifact store."""
-
-    def __init__(
-        self, root: Path, *, ttl_seconds: float = DEFAULT_ARTIFACT_TTL_SECONDS,
-        max_bytes: int = DEFAULT_MAX_ARTIFACT_BYTES, allowed_mime_types: frozenset = DEFAULT_ALLOWED_MIME_TYPES,
-        clock: Optional[Callable[[], float]] = None,
-    ) -> None:
+    def __init__(self, root: Path, *, ttl_seconds: float = DEFAULT_ARTIFACT_TTL_SECONDS, max_bytes: int = DEFAULT_MAX_ARTIFACT_BYTES,
+                 allowed_mime_types: frozenset = DEFAULT_ALLOWED_MIME_TYPES, clock: Optional[Callable[[], float]] = None) -> None:
         self._root = Path(root)
         self._root.mkdir(parents=True, exist_ok=True)
         self._ttl_seconds = max(1.0, float(ttl_seconds))
@@ -140,8 +128,7 @@ class ArtifactStore:
         self._sweep_orphan_files()
 
     def _sweep_orphan_files(self) -> None:
-        """Delete on-disk files with no live index entry; only minted-id-shaped names
-        and ``*.tmp`` staging files are touched, anything else is left."""
+        """Delete on-disk files with no live index entry; only minted-id-shaped and ``*.tmp`` names are touched."""
         try:
             candidates = list(self._root.iterdir())
         except OSError:
@@ -149,8 +136,8 @@ class ArtifactStore:
         with self._lock:
             live = set(self._entries)
         for path in candidates:
-            is_temp = path.name.endswith(_TEMP_SUFFIX)
-            if path.is_file() and (is_temp or (_ARTIFACT_ID_RE.fullmatch(path.name) and path.name not in live)):
+            orphan = path.name.endswith(_TEMP_SUFFIX) or (_ARTIFACT_ID_RE.fullmatch(path.name) and path.name not in live)
+            if path.is_file() and orphan:
                 with contextlib.suppress(OSError):
                     path.unlink(missing_ok=True)
 
@@ -168,8 +155,7 @@ class ArtifactStore:
         return self._allowed_mime_types
 
     def store(self, data: bytes, *, filename: str, content_type: str, scope: Any) -> ArtifactReceipt:
-        """Validate and store one artifact, returning its receipt; :class:`ArtifactTooLarge` /
-        :class:`ArtifactMimeRejected` fire before any disk write."""
+        """Validate and store one artifact, returning its receipt; size/MIME rejections fire before any disk write."""
         size = len(data)
         if size > self._max_bytes:
             raise ArtifactTooLarge(f"artifact is {size} bytes; cap is {self._max_bytes}")
@@ -183,16 +169,14 @@ class ArtifactStore:
             artifact_id = secrets.token_hex(16)
             target = self._artifact_path(artifact_id)
             with self._lock:
-                if artifact_id in self._entries or target.exists():
-                    continue
-                receipt = ArtifactReceipt(
-                    artifact_id=artifact_id, sha256=hashlib.sha256(data).hexdigest(), size_bytes=size,
-                    content_type=normalized_type, filename=_bounded_filename(filename),
-                    created_at=now, expires_at=now + self._ttl_seconds,
-                    ttl_seconds=self._ttl_seconds, scope_key=scope_key,
-                )
-                self._entries[artifact_id] = _ArtifactEntry(receipt=receipt, path=target)
-                break
+                if artifact_id not in self._entries and not target.exists():
+                    receipt = ArtifactReceipt(
+                        artifact_id=artifact_id, sha256=hashlib.sha256(data).hexdigest(), size_bytes=size,
+                        content_type=normalized_type, filename=_bounded_filename(filename), created_at=now,
+                        expires_at=now + self._ttl_seconds, ttl_seconds=self._ttl_seconds, scope_key=scope_key,
+                    )
+                    self._entries[artifact_id] = _ArtifactEntry(receipt=receipt, path=target)
+                    break
         # Temp + atomic rename so readers never observe a partial artifact.
         temp = target.with_name(f"{target.name}{_TEMP_SUFFIX}")
         try:
@@ -214,8 +198,7 @@ class ArtifactStore:
         return self._entry_for(artifact_id, scope=scope).receipt
 
     def load(self, artifact_id: str, *, scope: Any) -> tuple[bytes, ArtifactReceipt]:
-        """One-shot download: verify, read, checksum, then consume. A second ``load`` raises
-        :class:`ArtifactNotFound`; a checksum mismatch raises without consuming."""
+        """One-shot download: verify, read, checksum, then consume (a checksum mismatch does not consume)."""
         with self._lock:
             entry = self._entry_for(artifact_id, scope=scope)
             if not entry.path.exists():
@@ -241,11 +224,9 @@ class ArtifactStore:
         with self._lock:
             removed = self._prune_expired_locked(now)
             for temp in self._root.glob(f"*{_TEMP_SUFFIX}"):
-                try:
+                with contextlib.suppress(OSError):
                     if temp.stat().st_mtime <= now - self._ttl_seconds:
                         temp.unlink(missing_ok=True)
-                except OSError:
-                    continue
         return removed
 
     def count(self) -> int:
@@ -280,12 +261,10 @@ class ArtifactStore:
             return entry
 
     def _prune_expired_locked(self, now: float) -> int:
-        removed = 0
-        for artifact_id, entry in list(self._entries.items()):
-            if entry.receipt.expires_at <= now:
-                self._discard_locked(artifact_id, entry.path)
-                removed += 1
-        return removed
+        expired = [(aid, e.path) for aid, e in self._entries.items() if e.receipt.expires_at <= now]
+        for artifact_id, path in expired:
+            self._discard_locked(artifact_id, path)
+        return len(expired)
 
     def _artifact_path(self, artifact_id: str) -> Path:
         """Resolve a minted id strictly inside the controlled root."""
@@ -314,7 +293,6 @@ def _bounded_filename(value: str, limit: int = 160) -> str:
 
 class ArtifactRateLimiter:
     """Sliding-window per-key limiter; the API server keys it by principal."""
-
     def __init__(self, *, window_seconds: float = 60.0, max_requests: int = 30, clock: Optional[Callable[[], float]] = None) -> None:
         self._window_seconds = max(1.0, float(window_seconds))
         self._max_requests = max(1, int(max_requests))
@@ -327,9 +305,8 @@ class ArtifactRateLimiter:
         if not isinstance(key, str) or not key:
             return False
         now = self._clock()
-        window_start = now - self._window_seconds
         with self._lock:
-            hits = [hit for hit in self._hits.get(key, []) if hit > window_start]
+            hits = [hit for hit in self._hits.get(key, []) if hit > now - self._window_seconds]
             allowed = len(hits) < self._max_requests
             if allowed:
                 hits.append(now)
