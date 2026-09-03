@@ -1,12 +1,9 @@
 """``!<command>`` shell mode for the interactive CLI.
 
-Typing ``!git status`` at the composer runs the command directly in the session's working directory.
-The model is never invoked: no user message, no assistant message, no tool result enters the
-conversation history, so a bang command costs zero tokens and cannot perturb role alternation or the
-prompt cache.
-
-CLI-only by design: gateway/API/cron sessions have their own shells and no composer, so
-:func:`bang_shell_enabled` gates the feature off there.
+``!git status`` at the composer runs directly in the session's working directory. The model is
+never invoked — no user/assistant message or tool result enters history — so a bang command costs
+zero tokens and cannot perturb role alternation or the prompt cache. CLI-only by design:
+gateway/API/cron sessions have their own shells and no composer (:func:`bang_shell_enabled`).
 """
 
 from __future__ import annotations
@@ -17,27 +14,25 @@ from typing import Optional
 
 USAGE_HINT = "Usage: !<command> — run a shell command without spending a model turn (e.g. !git status)"
 
-# Bang commands are interactive convenience, not agent work. Keep the ceiling
-# well under the terminal tool's foreground cap: a user watching output can
-# Ctrl+C, and an accidental `!sleep 999` should not wedge the composer.
+# Interactive convenience, not agent work: keep the ceiling well under the terminal tool's foreground
+# cap so an accidental `!sleep 999` cannot wedge the composer (the user can Ctrl+C anyway).
 DEFAULT_TIMEOUT = 120
 
 
 def is_bang_command(text: Optional[str]) -> bool:
-    """Return True when *text* is a ``!`` shell-mode submission.
+    """True when *text* is a ``!`` shell-mode submission.
 
-    Only a leading ``!`` (after surrounding whitespace) counts. A line that merely *contains* ``!``
-    mid-text (``fix the bug!``, ``echo hi!``) is an ordinary prompt and must reach the agent
-    untouched.
+    Only a leading ``!`` (after surrounding whitespace) counts; ``fix the bug!`` is an ordinary
+    prompt and must reach the agent untouched.
     """
     return isinstance(text, str) and text.strip().startswith("!")
 
 
 def parse_bang_command(text: str) -> str:
-    """Return the shell command inside a bang submission (``""`` when bare).
+    """The shell command inside a bang submission (``""`` when bare).
 
-    ``!  ls -la`` -> ``ls -la``; ``!!`` -> ``!`` -- a literal second bang is part of the command
-    (e.g. history expansion for the user's shell), not a Hermes token.
+    ``!  ls -la`` -> ``ls -la``; ``!!`` -> ``!`` — a literal second bang belongs to the user's shell
+    (history expansion), not to Hermes.
     """
     if not is_bang_command(text):
         return ""
@@ -65,11 +60,10 @@ def bang_shell_enabled() -> bool:
 
 
 def resolve_bang_cwd(session_key: Optional[str] = None) -> Optional[str]:
-    """Return the directory a bang command should run in.
+    """The directory a bang command should run in.
 
-    Mirrors the terminal tool's resolution order so ``!pwd`` matches where the agent's own commands
-    land: the session's recorded ``cd`` state first (``terminal_tool.get_session_cwd``, updated
-    after every agent command), then the configured ``TERMINAL_CWD``/backend default.
+    Mirrors the terminal tool's order so ``!pwd`` matches the agent's own commands: the session's
+    recorded ``cd`` state first, then the configured ``TERMINAL_CWD``/backend default.
     """
     try:
         from tools.terminal_tool import _get_env_config, get_session_cwd
@@ -82,30 +76,26 @@ def resolve_bang_cwd(session_key: Optional[str] = None) -> Optional[str]:
 def check_bang_approval(command: str) -> dict:
     """Run *command* through the terminal tool's approval gate.
 
-    Reuses ``tools.terminal_tool._check_all_guards`` — the exact function ``terminal_tool()`` calls
-    before executing anything — so the hardline blocklist, user deny rules, tirith findings, and the
-    interactive dangerous-command prompt all apply to user-typed bang commands too.
-
-    Returns the gate's decision dict (``{"approved": bool, "message": ...}``). Falls back to
-    *approved* only when the gate itself cannot be imported, which would mean a broken install
-    rather than a policy decision.
+    Reuses ``tools.terminal_tool._check_all_guards`` — exactly what ``terminal_tool()`` calls — so the
+    hardline blocklist, user deny rules, tirith findings, and the dangerous-command prompt all apply
+    to user-typed bang commands too. Returns the gate's ``{"approved": bool, "message": ...}``;
+    falls back to *approved* only when the gate itself cannot be imported (a broken install, not a
+    policy decision).
     """
     try:
         from tools.terminal_tool import _check_all_guards
     except Exception:
         return {"approved": True, "message": None}
 
-    # env_type mirrors the terminal tool: bang commands always run locally in
-    # the CLI process, never inside a remote/sandbox backend.
+    # Bang commands always run locally in the CLI process, never inside a remote/sandbox backend.
     return _check_all_guards(command, "local", has_host_access=False)
 
 
 def _bang_env() -> dict:
-    """Environment for a bang command, with Hermes-managed secrets filtered.
+    """Environment for a bang command with Hermes-managed secrets filtered.
 
-    The CLI process holds every provider API key in ``os.environ``; a bang command is user-typed
-    but may still run a third-party script, so reuse the sanitizer ``quick_commands`` and the
-    local terminal backend use rather than hand the whole keyring to an arbitrary subprocess.
+    The CLI process holds every provider API key; a user-typed command may still run a third-party
+    script, so reuse the sanitizer ``quick_commands`` and the local terminal backend use.
     """
     try:
         from tools.environments.local import _sanitize_subprocess_env
@@ -115,19 +105,10 @@ def _bang_env() -> dict:
         return os.environ.copy()
 
 
-def run_bang_command(
-    command: str,
-    *,
-    cwd: Optional[str] = None,
-    timeout: int = DEFAULT_TIMEOUT,
-    writer=None,
-) -> int:
-    """Execute *command* and stream its output, returning the exit code.
+def run_bang_command(command: str, *, cwd: Optional[str] = None, timeout: int = DEFAULT_TIMEOUT, writer=None) -> int:
+    """Execute *command*, streaming merged stdout/stderr through *writer* (default ``print``); return the exit code.
 
-    stdout and stderr are merged and written through *writer* (defaults to ``print``) as they
-    arrive, so long-running commands show progress instead of buffering to the end. Nothing is
-    returned to a caller for insertion into conversation history — the output exists only on the
-    user's terminal.
+    Output exists only on the user's terminal — nothing is returned for insertion into history.
     """
     emit = writer or (lambda line: print(line, end="" if line.endswith("\n") else "\n"))
 
@@ -143,8 +124,7 @@ def run_bang_command(
         creationflags = 0
 
     try:
-        # shell=True is intentional and matches quick_commands: this is a
-        # command the human typed into their own composer, not model output.
+        # shell=True is intentional (matches quick_commands): the human typed this, not the model.
         proc = subprocess.Popen(
             command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, encoding="utf-8", errors="replace",
@@ -176,4 +156,3 @@ def run_bang_command(
             pass
 
     return int(proc.returncode or 0)
-
