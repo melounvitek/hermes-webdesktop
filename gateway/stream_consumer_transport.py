@@ -490,12 +490,10 @@ class StreamTransportMixin:
             hasattr(type(self.adapter), "prefers_fresh_final_streaming")
             or "prefers_fresh_final_streaming" in getattr(self.adapter, "__dict__", {})
         )
-        prefers_fresh = self._adapter_prefers_fresh_final(text)
-        if (
-            finalize
-            and (prefers_fresh or (not has_prefers_hook and self._should_send_fresh_final()))
-            and await self._try_fresh_final(text, is_turn_final=is_turn_final)
-        ):
+        prefers_fresh = self._adapter_prefers_fresh_final(text)  # probed every edit (hook contract)
+        if finalize and (
+            prefers_fresh or (not has_prefers_hook and self._should_send_fresh_final())
+        ) and await self._try_fresh_final(text, is_turn_final=is_turn_final):
             return True
         result = await self._edit_message(
             message_id=self._message_id, content=text, finalize=finalize,
@@ -509,8 +507,10 @@ class StreamTransportMixin:
         # Oversized edit split across continuations: message_id is now the LAST
         # continuation, which holds only the final chunk — retarget edits and reset
         # skip-if-same.  getattr keeps SimpleNamespace test mocks working.
-        continuation_ids = getattr(result, "continuation_message_ids", ()) or ()
-        if continuation_ids and result.message_id and result.message_id != self._message_id:
+        if (
+            (getattr(result, "continuation_message_ids", ()) or ())
+            and result.message_id and result.message_id != self._message_id
+        ):
             self._last_edit_overflowed = True
             self._turn_split_delivery = True
             self._adopt_message_id(str(result.message_id))
