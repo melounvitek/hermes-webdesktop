@@ -11,6 +11,7 @@ import json
 import logging
 import re
 import threading
+from contextlib import suppress
 from typing import Any, Callable, Optional
 
 from agent.auxiliary_client import call_llm
@@ -407,10 +408,8 @@ def auto_title_session(
         from agent.portal_tags import set_conversation_context
 
         conversation_id = session_id
-        try:
+        with suppress(Exception):
             conversation_id = session_db.get_conversation_root(session_id) or session_id
-        except Exception:
-            pass
         set_conversation_context(conversation_id)
         set_accounting_context(session_db, session_id)
 

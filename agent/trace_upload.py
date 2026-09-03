@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import uuid
+from contextlib import suppress
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -225,11 +226,9 @@ def _do_upload(
 ) -> str:
     """Create (idempotently) the private dataset and push the trace file.
     Returns a user-facing status string. Never raises."""
-    try:
+    with suppress(Exception):  # lazy-install unavailable/declined — the import below surfaces the hint
         from tools import lazy_deps
         lazy_deps.ensure("tool.trace_upload", prompt=False)
-    except Exception:
-        pass  # lazy-install unavailable/declined — the import below surfaces the hint
     try:
         from huggingface_hub import HfApi
     except ImportError:

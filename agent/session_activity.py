@@ -8,6 +8,7 @@ the default agent clock stamps ``unknown`` unless a writer passes an explicit ``
 from __future__ import annotations
 
 import time
+from contextlib import suppress
 from enum import Enum
 from typing import Any, Mapping, Optional
 
@@ -50,10 +51,8 @@ def normalize_activity_provenance(provenance: Optional[ActivityProvenance | str]
 def reset_session_activity_persist_window(agent: Any) -> None:
     """Clear the durable persist rate-limit so the next stamp writes through (terminal compression
     labels must not stay stuck on mid-compress text)."""
-    try:
+    with suppress(Exception):
         agent._session_activity_last_persist_mono = 0.0
-    except Exception:
-        pass
 
 
 def build_activity_snapshot(

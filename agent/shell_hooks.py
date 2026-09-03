@@ -20,7 +20,7 @@ import sys
 import tempfile
 import threading
 import time
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -361,10 +361,8 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
     except Exception as exc:
         # Kill the whole tree — forked helpers holding the pipes would stall the drain.
         kill_process_tree(proc)
-        try:
+        with suppress(Exception):
             proc.communicate(timeout=1)
-        except Exception:
-            pass
         if not isinstance(exc, subprocess.TimeoutExpired):  # pragma: no cover — defensive
             return failed(str(exc))
         result["timed_out"] = True
@@ -540,10 +538,8 @@ def save_allowlist(data: Dict[str, Any]) -> None:
                 fh.write(json.dumps(data, indent=2, sort_keys=True))
             atomic_replace(tmp_path, p)
         except Exception:
-            try:
+            with suppress(OSError):
                 os.unlink(tmp_path)
-            except OSError:
-                pass
             raise
     except OSError as exc:
         logger.warning(
@@ -576,10 +572,8 @@ def _locked_update_approvals() -> Iterator[Dict[str, Any]]:
 
 
 def _flock_unlock(lock_fh: Any) -> None:
-    try:
+    with suppress(OSError):
         fcntl.flock(lock_fh.fileno(), fcntl.LOCK_UN)
-    except OSError:
-        pass
 
 
 def _prompt_and_record(event: str, command: str, *, accept_hooks: bool) -> bool:
