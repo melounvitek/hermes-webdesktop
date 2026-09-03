@@ -594,13 +594,6 @@ def _file_cache_signature(path: Path) -> tuple[bool, Optional[int], Optional[int
     return (True, st.st_mtime_ns, st.st_size)
 
 
-def _running_pid_cache_signature(pid_path: Path, *, include_runtime_status: bool) -> tuple:
-    paths = [pid_path, _get_gateway_lock_path(pid_path)]
-    if include_runtime_status:
-        paths.append(_get_runtime_status_path())
-    return tuple(_file_cache_signature(p) for p in paths)
-
-
 def _cleanup_invalid_pid_path(pid_path: Path, *, cleanup_stale: bool) -> None:
     """Force-unlink a stale PID file + sibling lock (lock confirmed inactive, so no pid check)."""
     if not cleanup_stale:
@@ -1402,6 +1395,7 @@ def _snapshot_gateway_children(pid: int) -> list:
         return []
     try:
         import psutil  # type: ignore
+
         return psutil.Process(int(pid)).children(recursive=True)
     except Exception:
         logger.debug("Could not snapshot children of gateway PID %d", pid, exc_info=True)
@@ -1422,26 +1416,23 @@ def reap_gateway_children(children: list, *, parent_pid: int, timeout: float = 5
     reaped = 0
     try:
         import psutil  # type: ignore
+
         live = []
         for child in children:
             try:
                 if not child.is_running() or child.status() == psutil.STATUS_ZOMBIE:
                     continue
                 if child.ppid() == parent_pid:
-                    logger.debug(
-                        "Skipping child PID %d of old gateway %d: parent still appears alive",
-                        child.pid, parent_pid,
-                    )
+                    logger.debug("Skipping child PID %d of old gateway %d: parent still appears "
+                                 "alive", child.pid, parent_pid)
                     continue
                 child.terminate()
                 live.append(child)
             except psutil.NoSuchProcess:
                 continue
             except Exception:
-                logger.debug(
-                    "Could not terminate child PID %s of old gateway %d",
-                    getattr(child, "pid", "?"), parent_pid, exc_info=True,
-                )
+                logger.debug("Could not terminate child PID %s of old gateway %d",
+                             getattr(child, "pid", "?"), parent_pid, exc_info=True)
         if not live:
             return 0
         gone, alive = psutil.wait_procs(live, timeout=max(0.0, timeout))
@@ -1451,15 +1442,11 @@ def reap_gateway_children(children: list, *, parent_pid: int, timeout: float = 5
                 child.kill()
                 reaped += 1
             except Exception:
-                logger.debug(
-                    "Could not force-kill child PID %s of old gateway %d",
-                    getattr(child, "pid", "?"), parent_pid, exc_info=True,
-                )
+                logger.debug("Could not force-kill child PID %s of old gateway %d",
+                             getattr(child, "pid", "?"), parent_pid, exc_info=True)
         if reaped:
-            logger.info(
-                "Reaped %d orphaned child process(es) of replaced gateway PID %d.",
-                reaped, parent_pid,
-            )
+            logger.info("Reaped %d orphaned child process(es) of replaced gateway PID %d.",
+                        reaped, parent_pid)
     except Exception:
         logger.debug("Child reap for replaced gateway PID %d failed", parent_pid, exc_info=True)
     return reaped
@@ -1601,8 +1588,8 @@ def get_running_pid_identity_strict(pid_path: Path) -> Optional[tuple[int, float
     resolved_pid_path = Path(pid_path)
     resolved_lock_path = _get_gateway_lock_path(resolved_pid_path)
     pid_exists = _strict_path_exists(resolved_pid_path, "gateway PID")
-    # A stale PID file without a lock is not a live gateway; the lock probe is
-    # authoritative for absence.
+    # A stale PID file without a lock is not a live gateway; the lock probe is authoritative
+    # for absence.
     if not _strict_path_exists(resolved_lock_path, "gateway lock"):
         return None
     if not _is_gateway_runtime_lock_active_strict(resolved_lock_path):
@@ -1630,18 +1617,19 @@ def get_running_pid_identity_strict(pid_path: Path) -> Optional[tuple[int, float
         raise RuntimeError("gateway process identity changed")
     if not all(_record_matches_live_gateway_pid(record, pid) for record in records):
         raise RuntimeError("runtime metadata does not identify a live gateway")
-    # Windows persists a centisecond fingerprint; SCM checks need the exact psutil
-    # epoch. Re-read only after validation and prove it rounds to the same value.
-    if _IS_WINDOWS:
-        try:
-            import psutil  # type: ignore
-            exact_create_time = float(psutil.Process(pid).create_time())
-        except Exception as exc:
-            raise RuntimeError("exact gateway creation time is unavailable") from exc
-        if int(round(exact_create_time * 100)) != int(current):
-            raise RuntimeError("gateway process identity changed")
-        return pid, exact_create_time
-    return pid, current
+    if not _IS_WINDOWS:
+        return pid, current
+    # Windows persists a centisecond fingerprint; SCM checks need the exact psutil epoch.
+    # Re-read only after validation and prove it rounds to the same value.
+    try:
+        import psutil  # type: ignore
+
+        exact_create_time = float(psutil.Process(pid).create_time())
+    except Exception as exc:
+        raise RuntimeError("exact gateway creation time is unavailable") from exc
+    if int(round(exact_create_time * 100)) != int(current):
+        raise RuntimeError("gateway process identity changed")
+    return pid, exact_create_time
 
 
 def get_running_pid_cached(
@@ -1657,9 +1645,11 @@ def get_running_pid_cached(
         return get_running_pid(pid_path, cleanup_stale=cleanup_stale)
     resolved_pid_path = pid_path or _get_pid_path()
     include_runtime_status = pid_path is None
-    signature = _running_pid_cache_signature(
-        resolved_pid_path, include_runtime_status=include_runtime_status
-    )
+    # The signature covers the PID file, its sibling lock and (unscoped) the runtime status file.
+    watched = [resolved_pid_path, _get_gateway_lock_path(resolved_pid_path)]
+    if include_runtime_status:
+        watched.append(_get_runtime_status_path())
+    signature = tuple(_file_cache_signature(p) for p in watched)
     key = (str(resolved_pid_path), bool(cleanup_stale), include_runtime_status)
     now = time.monotonic()
     with _gateway_running_pid_cache_lock:
@@ -1667,9 +1657,7 @@ def get_running_pid_cached(
         if cached is not None and now - cached[0] <= ttl_seconds and cached[1] == signature:
             return cached[2]
     pid = get_running_pid(pid_path, cleanup_stale=cleanup_stale)
-    refreshed_signature = _running_pid_cache_signature(
-        resolved_pid_path, include_runtime_status=include_runtime_status
-    )
+    refreshed_signature = tuple(_file_cache_signature(p) for p in watched)
     with _gateway_running_pid_cache_lock:
         _gateway_running_pid_cache[key] = (time.monotonic(), refreshed_signature, pid)
     return pid
