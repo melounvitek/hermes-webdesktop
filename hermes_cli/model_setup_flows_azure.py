@@ -6,6 +6,8 @@ Prompt strings and config write order are behavior.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+
 from hermes_cli.config import clear_model_endpoint_credentials
 from hermes_cli.model_setup_flows_common import _HTTP, _ask, _commit_model_config, _load_config_model_section, _say
 
@@ -14,15 +16,37 @@ def _azure_mode_label(mode: str) -> str:
     return "OpenAI-style" if mode == "chat_completions" else "Anthropic-style"
 
 
+@dataclass
+class _AzureCurrent:
+    """The active Azure Foundry settings shown as prompt defaults."""
+    base_url: str = ""
+    api_mode: str = ""
+    auth_mode: str = "api_key"
+    entra: dict = field(default_factory=dict)
+    api_key: str = ""
+
+
+def _azure_current(config) -> _AzureCurrent:
+    from hermes_cli.config import get_env_value
+
+    cur = _AzureCurrent(api_key=get_env_value("AZURE_FOUNDRY_API_KEY") or "")
+    model_cfg = config.get("model", {})
+    if isinstance(model_cfg, dict) and model_cfg.get("provider") == "azure-foundry":
+        cur.base_url = str(model_cfg.get("base_url", "") or "")
+        cur.api_mode = str(model_cfg.get("api_mode", "") or "")
+        cur.auth_mode = str(model_cfg.get("auth_mode") or "api_key").strip().lower() or "api_key"
+        _cur_entra = model_cfg.get("entra") or {}
+        cur.entra = _cur_entra if isinstance(_cur_entra, dict) else {}
+    return cur
+
+
 def _azure_entra_preflight(current_entra: dict):
-    """Entra ID credential preflight for the Azure flow. Returns
-    ``(token_provider, entra_overrides)``; ``None`` when the user cancelled;
-    ``False`` when the adapter is missing (caller falls back to API-key auth)."""
+    """Entra ID credential preflight. Returns ``(token_provider, entra_overrides)``; ``None``
+    when the user cancelled; ``False`` when the adapter is missing (fall back to API key)."""
     try:
         from agent.azure_identity_adapter import (
             EntraIdentityConfig, SCOPE_AI_AZURE_DEFAULT, build_token_provider, describe_active_credential,
-            has_azure_identity_installed,
-        )
+            has_azure_identity_installed)
     except ImportError as exc:
         _say("", f"⚠ Could not import azure-identity adapter: {exc}", "  Falling back to API key auth.")
         return False
@@ -61,8 +85,8 @@ def _azure_entra_preflight(current_entra: dict):
             print("Cancelled.")
             return None
 
-    # Best-effort token provider for the detection probe; on failure the probe
-    # falls back to manual entry.
+    # Best-effort token provider for the detection probe; on failure the probe falls back
+    # to manual entry.
     try:
         token_provider = build_token_provider(config=_config)
     except Exception as exc:
@@ -92,99 +116,11 @@ def _azure_pick_model(discovered_models: list, current_model: str):
     return pick
 
 
-def _model_flow_azure_foundry(config, current_model=""):
-    """Azure Foundry provider: configure endpoint, auth mode, API mode, and model.
-
-    Two transports (OpenAI-style ``/v1/chat/completions``, Anthropic-style
-    ``/v1/messages``) and two auth modes: **API key** (``AZURE_FOUNDRY_API_KEY``) or
-    **Microsoft Entra ID** (keyless RBAC via ``azure-identity``; the same ``Azure AI
-    User`` role covers both transports — OpenAI SDK takes a callable ``api_key``,
-    Anthropic gets a bearer-injecting ``httpx.Client`` from
-    :func:`agent.azure_identity_adapter.build_bearer_http_client`).
-
-    Detection order: ``/anthropic`` URL suffix → Anthropic; ``GET <base>/models``
-    success → OpenAI-style + model picker; Anthropic Messages probe; manual entry.
-    Context length resolves via :func:`agent.model_metadata.get_model_context_length`.
-    """
-    from hermes_cli.config import get_env_value, save_env_value
+def _azure_detect_transport(effective_url: str, effective_key: str, token_provider, current_api_mode: str):
+    """Probe the endpoint; returns ``(api_mode, discovered_models)`` (manual pick of the API
+    format when detection is incomplete) or None when cancelled."""
     from hermes_cli import azure_detect
 
-    # ── Load current Azure Foundry configuration ─────────────────────
-    model_cfg = config.get("model", {})
-    current_base_url = current_api_mode = ""
-    current_auth_mode, current_entra = "api_key", {}
-    if isinstance(model_cfg, dict) and model_cfg.get("provider") == "azure-foundry":
-        current_base_url = str(model_cfg.get("base_url", "") or "")
-        current_api_mode = str(model_cfg.get("api_mode", "") or "")
-        current_auth_mode = str(model_cfg.get("auth_mode") or "api_key").strip().lower() or "api_key"
-        _cur_entra = model_cfg.get("entra") or {}
-        current_entra = _cur_entra if isinstance(_cur_entra, dict) else {}
-    current_api_key = get_env_value("AZURE_FOUNDRY_API_KEY") or ""
-
-    _say("", "Azure Foundry Configuration", "=" * 50, "",
-         "Azure Foundry can host models with either OpenAI-style or",
-         "Anthropic-style API endpoints.  Hermes will probe your",
-         "endpoint to auto-detect the transport and the deployed",
-         "models when possible.", "")
-    if current_base_url:
-        print(f"  Current endpoint:  {current_base_url}")
-    if current_api_mode:
-        print(f"  Current API mode:  {_azure_mode_label(current_api_mode)}")
-    if current_auth_mode == "entra_id":
-        print("  Current auth mode: Microsoft Entra ID (keyless)")
-    elif current_api_key:
-        print(f"  Current auth mode: API key ({current_api_key[:8]}...)")
-    print()
-
-    # ── Step 1: endpoint URL ─────────────────────────────────────────
-    _placeholder = current_base_url or (
-        "e.g. https://<resource>.openai.azure.com/openai/v1 or https://<resource>.services.ai.azure.com/anthropic"
-    )
-    base_url = _ask(f"API endpoint URL [{_placeholder}]: ")
-    if base_url is None:
-        return
-    effective_url = (base_url or current_base_url).rstrip("/")
-    if not effective_url:
-        print("No endpoint URL provided. Cancelled.")
-        return
-    if not effective_url.startswith(_HTTP):
-        print(f"Invalid URL: {effective_url} (must start with http:// or https://)")
-        return
-
-    # ── Step 2: authentication mode ──────────────────────────────────
-    _say("", "Authentication:", "  1. API key                  (AZURE_FOUNDRY_API_KEY in .env)",
-         "  2. Microsoft Entra ID       (managed identity / workload identity / az login)",
-         "     Recommended by Microsoft. Works for both OpenAI-style and Anthropic-style endpoints.",
-         "     Requires the 'Azure AI User' role on the Foundry resource.")
-    _auth_default = "2" if current_auth_mode == "entra_id" else "1"
-    auth_choice = _ask(f"Authentication mode [1/2] ({_auth_default}): ", raw=True)
-    if auth_choice is None:
-        return
-    use_entra = (auth_choice or _auth_default) == "2"
-
-    # ── Step 3: credentials (key OR Entra preflight) ─────────────────
-    effective_key: str = ""
-    entra_overrides: dict = {}
-    token_provider = None  # callable when entra
-    if use_entra:
-        preflight = _azure_entra_preflight(current_entra)
-        if preflight is None:
-            return
-        if preflight is False:
-            use_entra = False
-        else:
-            token_provider, entra_overrides = preflight
-    if not use_entra:
-        print()
-        api_key = _ask(f"API key [{current_api_key[:8] + '...' if current_api_key else 'required'}]: ", secret=True)
-        if api_key is None:
-            return
-        effective_key = api_key or current_api_key
-        if not effective_key:
-            print("No API key provided. Cancelled.")
-            return
-
-    # ── Step 4: auto-detect transport + models ───────────────────────
     _say("", "◐ Probing endpoint to auto-detect transport and models...")
     detection = azure_detect.detect(effective_url, api_key=effective_key, token_provider=token_provider)
     discovered_models: list[str] = list(detection.models)
@@ -195,20 +131,99 @@ def _model_flow_azure_foundry(config, current_model=""):
             print(f"    ({detection.reason})")
         if discovered_models:
             print(f"✓ Found {len(discovered_models)} deployed model(s) on this endpoint")
-    else:
-        _say(f"⚠ Auto-detection incomplete: {detection.reason}", "",
-             "Select the API format your Azure Foundry endpoint uses:",
-             "  1. OpenAI-style  (POST /v1/chat/completions)",
-             "     For: GPT models, Llama, Mistral, and most open models",
-             "  2. Anthropic-style  (POST /v1/messages)",
-             "     For: Claude models deployed via Anthropic API format")
-        default_choice = "2" if current_api_mode == "anthropic_messages" else "1"
-        mode_choice = _ask(f"API format [1/2] ({default_choice}): ", raw=True)
-        if mode_choice is None:
-            return
-        api_mode = "anthropic_messages" if (mode_choice or default_choice) == "2" else "chat_completions"
+        return api_mode, discovered_models
+    _say(f"⚠ Auto-detection incomplete: {detection.reason}", "",
+         "Select the API format your Azure Foundry endpoint uses:",
+         "  1. OpenAI-style  (POST /v1/chat/completions)",
+         "     For: GPT models, Llama, Mistral, and most open models",
+         "  2. Anthropic-style  (POST /v1/messages)",
+         "     For: Claude models deployed via Anthropic API format")
+    default_choice = "2" if current_api_mode == "anthropic_messages" else "1"
+    mode_choice = _ask(f"API format [1/2] ({default_choice}): ", raw=True)
+    if mode_choice is None:
+        return None
+    return ("anthropic_messages" if (mode_choice or default_choice) == "2" else "chat_completions"), discovered_models
 
-    # ── Step 5: model name ───────────────────────────────────────────
+
+def _model_flow_azure_foundry(config, current_model=""):
+    """Azure Foundry: endpoint, auth mode, API mode, model. Two transports (OpenAI-style
+    ``/v1/chat/completions``, Anthropic-style ``/v1/messages``) and two auth modes: API key
+    (``AZURE_FOUNDRY_API_KEY``) or Microsoft Entra ID (keyless RBAC via ``azure-identity``; the
+    ``Azure AI User`` role covers both transports). Detection: ``/anthropic`` URL suffix → Anthropic;
+    ``GET <base>/models`` → OpenAI-style + picker; Anthropic Messages probe; manual entry."""
+    from hermes_cli.config import get_env_value, save_env_value
+    from hermes_cli import azure_detect
+
+    cur = _azure_current(config)
+    _say("", "Azure Foundry Configuration", "=" * 50, "",
+         "Azure Foundry can host models with either OpenAI-style or",
+         "Anthropic-style API endpoints.  Hermes will probe your",
+         "endpoint to auto-detect the transport and the deployed",
+         "models when possible.", "")
+    if cur.base_url:
+        print(f"  Current endpoint:  {cur.base_url}")
+    if cur.api_mode:
+        print(f"  Current API mode:  {_azure_mode_label(cur.api_mode)}")
+    if cur.auth_mode == "entra_id":
+        print("  Current auth mode: Microsoft Entra ID (keyless)")
+    elif cur.api_key:
+        print(f"  Current auth mode: API key ({cur.api_key[:8]}...)")
+    print()
+
+    # Step 1: endpoint URL
+    _placeholder = cur.base_url or (
+        "e.g. https://<resource>.openai.azure.com/openai/v1 or https://<resource>.services.ai.azure.com/anthropic")
+    base_url = _ask(f"API endpoint URL [{_placeholder}]: ")
+    if base_url is None:
+        return
+    effective_url = (base_url or cur.base_url).rstrip("/")
+    if not effective_url:
+        print("No endpoint URL provided. Cancelled.")
+        return
+    if not effective_url.startswith(_HTTP):
+        print(f"Invalid URL: {effective_url} (must start with http:// or https://)")
+        return
+
+    # Step 2: authentication mode
+    _say("", "Authentication:", "  1. API key                  (AZURE_FOUNDRY_API_KEY in .env)",
+         "  2. Microsoft Entra ID       (managed identity / workload identity / az login)",
+         "     Recommended by Microsoft. Works for both OpenAI-style and Anthropic-style endpoints.",
+         "     Requires the 'Azure AI User' role on the Foundry resource.")
+    _auth_default = "2" if cur.auth_mode == "entra_id" else "1"
+    auth_choice = _ask(f"Authentication mode [1/2] ({_auth_default}): ", raw=True)
+    if auth_choice is None:
+        return
+    use_entra = (auth_choice or _auth_default) == "2"
+
+    # Step 3: credentials (key OR Entra preflight)
+    effective_key: str = ""
+    entra_overrides: dict = {}
+    token_provider = None  # callable when entra
+    if use_entra:
+        preflight = _azure_entra_preflight(cur.entra)
+        if preflight is None:
+            return
+        if preflight is False:
+            use_entra = False
+        else:
+            token_provider, entra_overrides = preflight
+    if not use_entra:
+        print()
+        api_key = _ask(f"API key [{cur.api_key[:8] + '...' if cur.api_key else 'required'}]: ", secret=True)
+        if api_key is None:
+            return
+        effective_key = api_key or cur.api_key
+        if not effective_key:
+            print("No API key provided. Cancelled.")
+            return
+
+    # Step 4: auto-detect transport + models
+    detected = _azure_detect_transport(effective_url, effective_key, token_provider, cur.api_mode)
+    if detected is None:
+        return
+    api_mode, discovered_models = detected
+
+    # Step 5: model name
     print()
     effective_model = _azure_pick_model(discovered_models, current_model)
     if effective_model is None:
@@ -217,10 +232,10 @@ def _model_flow_azure_foundry(config, current_model=""):
         print("No model name provided. Cancelled.")
         return
 
-    # ── Step 6: context-length lookup ────────────────────────────────
+    # Step 6: context-length lookup
     ctx_len = azure_detect.lookup_context_length(effective_model, effective_url, api_key=effective_key, token_provider=token_provider)
 
-    # ── Step 7: persist ──────────────────────────────────────────────
+    # Step 7: persist
     if not use_entra:
         save_env_value("AZURE_FOUNDRY_API_KEY", effective_key)
     cfg, model = _load_config_model_section()
@@ -241,8 +256,7 @@ def _model_flow_azure_foundry(config, current_model=""):
     _commit_model_config(cfg)
     config["model"] = dict(model)
 
-    # Clear conflicting env vars so auxiliary clients don't pick up a stale
-    # OpenAI base URL / key.
+    # Clear conflicting env vars so auxiliary clients don't pick up a stale OpenAI base URL / key.
     for var in ("OPENAI_BASE_URL", "OPENAI_API_KEY"):
         if get_env_value(var):
             save_env_value(var, "")

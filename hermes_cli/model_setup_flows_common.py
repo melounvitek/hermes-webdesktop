@@ -1,15 +1,15 @@
-"""Shared skeleton for the ``_model_flow_*`` wizards in :mod:`hermes_cli.model_setup_flows`.
+"""Shared skeleton for the ``_model_flow_*`` wizards: banner, credentials, model list, picker,
+persist, confirmation — one copy of each step. Prompt strings and the config keys written (and
+their insertion order = config.yaml key order) are behavior; keep them byte-identical.
 
-Every wizard is the same shape — banner, credentials, model list, picker, persist,
-confirmation — and these helpers hold the one copy of each step. Prompt strings and the
-config keys written (and their insertion order, which is the config.yaml key order) are
-behavior; keep them byte-identical when editing.
-
-All hermes_cli.main / auth / config imports are lazy on purpose: main.py re-imports the
-flows (import cycle) and tests patch ``hermes_cli.config.load_config`` etc. at call time.
+hermes_cli.main / auth / config imports are lazy on purpose: main.py re-imports the flows (import
+cycle) and tests patch ``hermes_cli.config.load_config`` etc. at call time.
 """
 
 from __future__ import annotations
+
+import contextlib
+import subprocess
 
 from hermes_cli.cli_output import line_input
 from hermes_cli.config import clear_model_endpoint_credentials
@@ -42,7 +42,6 @@ def _ask(prompt: str, *, secret: bool = False, raw: bool = False, cancel_msg: st
 def _existing_api_key_for_model_flow(provider_id: str, pconfig) -> tuple[str, str]:
     """Resolve an existing wizard credential without changing its storage."""
     from hermes_cli.auth import _resolve_api_key_provider_secret
-
     return _resolve_api_key_provider_secret(provider_id, pconfig)
 
 
@@ -53,7 +52,6 @@ def _ensure_flow_api_key(provider_id: str, pconfig, *, missing_hint=()) -> tuple
     Returns ``(existing_key, resolved_key, abort)``.
     """
     from hermes_cli.main import _prompt_api_key
-
     existing_key, existing_source = _existing_api_key_for_model_flow(provider_id, pconfig)
     if not existing_key:
         for line in missing_hint:
@@ -65,7 +63,6 @@ def _ensure_flow_api_key(provider_id: str, pconfig, *, missing_hint=()) -> tuple
 def _load_config_model_section() -> tuple[dict, dict]:
     """Return ``(cfg, cfg["model"])`` with the model section coerced to a dict."""
     from hermes_cli.config import load_config
-
     cfg = load_config()
     model = cfg.get("model")
     if not isinstance(model, dict):
@@ -78,7 +75,6 @@ def _begin_model_config(selected: str, provider: str) -> tuple[dict, dict]:
     """Record *selected* as the model choice and open the config model section
     with ``provider`` set; callers set endpoint fields then ``_commit_model_config``."""
     from hermes_cli.auth import _save_model_choice
-
     _save_model_choice(selected)
     cfg, model = _load_config_model_section()
     model["provider"] = provider
@@ -89,7 +85,6 @@ def _commit_model_config(cfg: dict) -> None:
     """Persist *cfg* and deactivate any OAuth provider."""
     from hermes_cli.auth import deactivate_provider
     from hermes_cli.config import save_config
-
     save_config(cfg)
     deactivate_provider()
 
@@ -134,7 +129,6 @@ def _activate_provider_model(selected, provider_id: str, base_url: str, done: st
     """OAuth-provider persist: model choice + ``_update_config_for_provider`` (which owns
     the auth-state bookkeeping), then *done*; *no_change* (``None`` = silent) otherwise."""
     from hermes_cli.auth import _save_model_choice, _update_config_for_provider
-
     if not selected:
         if no_change is not None:
             print(no_change)
@@ -157,7 +151,6 @@ def _pick_model_or_prompt(model_list, prompt: str, **kwargs):
     """Radio picker when *model_list* is non-empty, else a free-text ``line_input``
     (None on Ctrl-C/EOF)."""
     from hermes_cli.auth import _prompt_model_selection
-
     if model_list:
         return _prompt_model_selection(model_list, **kwargs)
     return _ask(prompt, cancel_msg=None)
@@ -202,12 +195,9 @@ def _models_dev_merged(provider_id: str, curated) -> list:
     """models.dev agentic models for *provider_id* plus curated ids not yet listed
     (case-insensitive). Empty list when models.dev has nothing / is unavailable."""
     mdev_models: list = []
-    try:
+    with contextlib.suppress(Exception):
         from agent.models_dev import list_agentic_models
-
         mdev_models = list_agentic_models(provider_id)
-    except Exception:
-        pass
     if not mdev_models:
         return []
     seen = {m.lower() for m in mdev_models}
@@ -225,12 +215,9 @@ def _show_curated(model_list) -> None:
 
 
 def _prune_replaced_custom_model_config_credentials(base_url: str, *, provider_name: str = "") -> None:
-    """Drop stale ``model_config`` credentials from inactive custom pools.
-
-    ``model_config`` means "the credential currently stored under ``model.api_key``".
-    After an explicit custom-endpoint switch, any old custom pool still carrying that
-    source points at the previous endpoint and could be selected before the fresh config.
-    """
+    """Drop stale ``model_config`` ("the credential under ``model.api_key``") entries from inactive
+    custom pools: after an explicit custom-endpoint switch an old pool still carrying that source
+    points at the previous endpoint and could be selected before the fresh config."""
     try:
         from agent.credential_pool import CUSTOM_POOL_PREFIX, custom_provider_pool_key_candidates
         from hermes_cli.auth import read_credential_pool, write_credential_pool
@@ -240,8 +227,7 @@ def _prune_replaced_custom_model_config_credentials(base_url: str, *, provider_n
         # endpoint may occupy must be skipped or its own legacy pool gets pruned.
         active_pool_keys = {
             str(key).strip().lower()
-            for key in custom_provider_pool_key_candidates(base_url, provider_name=provider_name or None)
-        }
+            for key in custom_provider_pool_key_candidates(base_url, provider_name=provider_name or None)}
         if not active_pool_keys:
             return
         pools = read_credential_pool(None)
@@ -252,15 +238,13 @@ def _prune_replaced_custom_model_config_credentials(base_url: str, *, provider_n
                 not isinstance(pool_key, str)
                 or not pool_key.startswith(CUSTOM_POOL_PREFIX)
                 or pool_key in active_pool_keys
-                or not isinstance(entries, list)
-            ):
+                or not isinstance(entries, list)):
                 continue
             retained = [e for e in entries if not (isinstance(e, dict) and e.get("source") == "model_config")]
             if len(retained) != len(entries):
                 removed_ids = [
                     str(e["id"]) for e in entries
-                    if isinstance(e, dict) and e.get("source") == "model_config" and e.get("id")
-                ]
+                    if isinstance(e, dict) and e.get("source") == "model_config" and e.get("id")]
                 write_credential_pool(pool_key, retained, removed_ids=removed_ids)
     except Exception:
         return
@@ -271,9 +255,18 @@ def _curses_choice(title: str, rows: list, default_idx: int):
     non-TTY) so the caller can fall back to a numbered prompt."""
     try:
         from hermes_cli.setup import _curses_prompt_choice
-
         return _curses_prompt_choice(title, rows, default_idx)
     except Exception:
+        return None
+
+
+def _radiolist(title: str, items: list, default_idx: int = 0, **kw):
+    """``curses_radiolist`` index (-1 = cancelled), or None when curses is unavailable so the
+    caller can fall back to a numbered prompt."""
+    try:
+        from hermes_cli.curses_ui import curses_radiolist
+        return curses_radiolist(title, items, selected=default_idx, cancel_returns=-1, **kw)
+    except (ImportError, NotImplementedError, OSError, subprocess.SubprocessError):
         return None
 
 
