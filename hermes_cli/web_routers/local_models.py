@@ -103,11 +103,16 @@ def _http_error(status: int, prefix: str = ""):
         raise HTTPException(status_code=status, detail=f"{prefix}{exc}") from exc
 
 
-def _quiet(fn: Callable[[], Any], default: Any) -> Any:
-    """``fn()`` or ``default`` on any exception — for garnish that must never 500."""
+def _quiet(fn: Callable[[], Any], default: Any, *, warn: str | None = None, debug: str | None = None) -> Any:
+    """``fn()`` or ``default`` on any exception — for garnish that must never 500. ``warn`` logs a
+    warning with the exception (%s), ``debug`` a debug line with traceback; silent otherwise."""
     try:
         return fn()
-    except Exception:  # noqa: BLE001
+    except Exception as exc:  # noqa: BLE001
+        if warn:
+            logger.warning(warn, exc)
+        if debug:
+            logger.debug(debug, exc_info=True)
         return default
 
 
@@ -169,10 +174,7 @@ def _spawn_job(job: Dict[str, Any], name: str, body: Callable[[], None], *, fail
 def _refresh_runtime(skip_msg: str) -> None:
     """Bounce a running router so it rescans the models dir (it only scans at spawn).
     Never raises — the file operation already succeeded."""
-    try:
-        bootstrap.refresh_local_runtime()
-    except Exception:  # noqa: BLE001
-        logger.debug(skip_msg, exc_info=True)
+    _quiet(bootstrap.refresh_local_runtime, None, debug=skip_msg)
 
 
 def _router_request(endpoint: Dict[str, Any], path: str, *, timeout: float, payload: dict | None = None) -> Any:
@@ -255,13 +257,14 @@ def _ensure_server(job: Dict[str, Any], config: dict, model_id: str, *, fail_det
     server started before ``model_id`` finished downloading can't serve it — bounce it when it doesn't know it."""
     _step(job, "starting-server", "Starting the local server")
     sup = _start_local_server(config, fail_detail)
+
+    def rescan_if_unknown() -> None:
+        if model_id not in sup.models():
+            job["detail"] = "Refreshing the local server"
+            bootstrap.refresh_local_runtime()
+
     if sup is not None:
-        try:
-            if model_id not in sup.models():
-                job["detail"] = "Refreshing the local server"
-                bootstrap.refresh_local_runtime()
-        except Exception:  # noqa: BLE001
-            logger.debug(skip_msg, exc_info=True)
+        _quiet(rescan_if_unknown, None, debug=skip_msg)
 
 
 def _assign_default(job: Dict[str, Any], model_id: str) -> None:
@@ -462,15 +465,10 @@ def local_models_status():
     runtime_backend = _installed_backend(tag)
     mdir = bootstrap.models_dir()
     running = _state_endpoint()
-    # Resident models from the live router ({} when down): Loaded pills + eject.
-    loaded: Dict[str, str] = {}
-    placement: Dict[str, Any] = {}
-    if running is not None:
-        try:
-            loaded, placement = _loaded_models(running)
-        except Exception as exc:  # noqa: BLE001
-            # Never silent: an empty dict here renders as 'Not in memory' on a machine whose VRAM is visibly full.
-            logger.warning("loaded-models read failed: %r", exc)
+    # Resident models from the live router ({} when down): Loaded pills + eject. A failed read is never
+    # silent: an empty dict here renders as 'Not in memory' on a machine whose VRAM is visibly full.
+    loaded, placement = ({}, {}) if running is None else _quiet(
+        lambda: _loaded_models(running), ({}, {}), warn="loaded-models read failed: %r")
     return {
         "enabled": bool(section.get("enabled")), "tag": tag, "configured_tag": configured_tag,
         # Update pending = engine in use (enabled + something installed) and the configured tag
@@ -637,17 +635,13 @@ def _runtime_progress_hook(job: Dict[str, Any]):
 
 def _restart_on_new_tag(job: Dict[str, Any], tag: str, previous: list) -> bool:
     """Engine update path: a server already running on an older tag moves to the new one now — the click was
-    the consent. Fresh installs (no server) skip this; Use/boot handles their start. Failure is logged only:
-    the new build is installed either way and the next boot serves it."""
-    try:
-        if bootstrap.get_supervisor() is not None and previous and tag not in previous:
-            _step(job, "restarting", "Switching the running server to the new build")
-            bootstrap.shutdown_local_runtime()
-            bootstrap.ensure_local_runtime(_load_config(), force=True)
-            return True
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("post-update restart skipped: %s", exc)
-    return False
+    the consent. Fresh installs (no server) skip this; Use/boot handles their start."""
+    if bootstrap.get_supervisor() is None or not previous or tag in previous:
+        return False
+    _step(job, "restarting", "Switching the running server to the new build")
+    bootstrap.shutdown_local_runtime()
+    bootstrap.ensure_local_runtime(_load_config(), force=True)
+    return True
 
 
 @router.post("/api/local-models/runtime/install")
@@ -660,12 +654,11 @@ async def local_models_runtime_install(body: RuntimeInstallBody):
         previous = binaries.installed_tags()
         _step(job, "downloading", f"Fetching {len(plan.assets)} package(s) for {backend}")
         binaries.ensure_runtime_installed(tag, backend, progress=_runtime_progress_hook(job))
-        restarted = _restart_on_new_tag(job, tag, previous)
+        # Restart failure is logged only: the new build is installed either way and the next boot serves it.
+        restarted = _quiet(lambda: _restart_on_new_tag(job, tag, previous), False, warn="post-update restart skipped: %s")
         # N-1 retention, only after the new tag verified: keep it + the newest previous build as the rollback pin target.
-        try:
-            binaries.prune_old_tags([tag] + [t for t in previous if t != tag][:1])
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("runtime prune skipped: %s", exc)
+        _quiet(lambda: binaries.prune_old_tags([tag] + [t for t in previous if t != tag][:1]), None,
+               warn="runtime prune skipped: %s")
         _finish(job, f"llama.cpp {tag} ready ({backend})" + (" — server restarted on the new build" if restarted else ""))
 
     _spawn_job(job, "lr-runtime-install", _run, fail_msg="runtime install failed: %s")
@@ -712,10 +705,7 @@ async def local_models_delete(model_id: str):
     for path in files:
         path.unlink(missing_ok=True)
     # Growth state dies with the model: a re-download starts back at its zero-spill window, not a stale grown one.
-    try:
-        growth.clear_window_override(model_id)
-    except Exception:  # noqa: BLE001
-        logger.debug("window-override clear skipped", exc_info=True)
+    _quiet(lambda: growth.clear_window_override(model_id), None, debug="window-override clear skipped")
     threading.Thread(target=_refresh_runtime, args=("post-delete runtime refresh skipped",), daemon=True,
                      name="lr-post-delete").start()
     return {"ok": True}
