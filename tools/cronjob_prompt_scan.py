@@ -19,8 +19,7 @@ _CRON_THREAT_PATTERNS = [
     (r'system\s+prompt\s+override', "sys_prompt_override"),
     (r'disregard\s+(your|all|any)\s+(instructions|rules|guidelines)', "disregard_rules"),
     (r'cat\s+[^\n]*(\.env|credentials|\.netrc|\.pgpass|id_rsa|id_ed25519|id_ecdsa)', "read_secrets"),
-    (r'authorized_keys', "ssh_backdoor"),
-    (r'/etc/sudoers|visudo', "sudoers_mod"),
+    (r'authorized_keys', "ssh_backdoor"), (r'/etc/sudoers|visudo', "sudoers_mod"),
     (r'rm\s+-rf\s+/', "destructive_root_rm"),
 ]
 
