@@ -78,15 +78,13 @@ LINE_AV_MAX_BYTES = 200 * 1024 * 1024  # 200 MB for voice/video
 # VOICE (STT path), like Telegram/WhatsApp. Unknown types fall back to TEXT.
 _LINE_MESSAGE_TYPES = {
     "text": MessageType.TEXT, "image": MessageType.PHOTO, "video": MessageType.VIDEO, "audio": MessageType.VOICE,
-    "file": MessageType.DOCUMENT, "location": MessageType.LOCATION, "sticker": MessageType.STICKER,
-}
+    "file": MessageType.DOCUMENT, "location": MessageType.LOCATION, "sticker": MessageType.STICKER}
 
 # 1×1 transparent PNG: fallback video preview (LINE requires ``previewImageUrl``).
 _FALLBACK_PNG_PREVIEW = bytes.fromhex(
     "89504e470d0a1a0a0000000d49484452000000010000000108060000001f15c4"
     "890000000d49444154789c63000100000005000100377a7ff20000000049454e"
-    "44ae426082"
-)
+    "44ae426082")
 
 
 # Markdown LINE can't render, applied in order (code blocks first so their content survives).
@@ -97,8 +95,7 @@ _MD_STRIP_RULES: Tuple[Tuple[re.Pattern, Any], ...] = (
     (re.compile(r"\*\*(.+?)\*\*"), r"\1"),
     (re.compile(r"(?<!\*)\*(?!\s)(.+?)(?<!\s)\*(?!\*)"), r"\1"),
     (re.compile(r"^#{1,6}\s+", re.MULTILINE), ""),
-    (re.compile(r"^[\s]*[-*+]\s+", re.MULTILINE), "• "),
-)
+    (re.compile(r"^[\s]*[-*+]\s+", re.MULTILINE), "• "))
 
 
 def strip_markdown_preserving_urls(text: str) -> str:
@@ -333,8 +330,7 @@ def build_postback_button_message(text: str, button_label: str, request_id: str)
         "type": "postback",
         "label": button_label[:20] or "Get answer",
         "data": json.dumps({"action": "show_response", "request_id": request_id}),
-        "displayText": button_label[:300] or "Get answer",
-    }
+        "displayText": button_label[:300] or "Get answer"}
     return {"type": "template", "altText": alt, "template": {"type": "buttons", "text": truncated, "actions": [action]}}
 
 
@@ -361,8 +357,7 @@ def _credentials(config) -> Tuple[str, str]:
     extra = getattr(config, "extra", {}) or {}
     return (
         _get_scoped_secret("LINE_CHANNEL_ACCESS_TOKEN") or extra.get("channel_access_token", ""),
-        _get_scoped_secret("LINE_CHANNEL_SECRET") or extra.get("channel_secret", ""),
-    )
+        _get_scoped_secret("LINE_CHANNEL_SECRET") or extra.get("channel_secret", ""))
 
 
 def _coerce(cast: Callable[[Any], Any], value: Any, default: Any) -> Any:
@@ -477,24 +472,21 @@ class LineAdapter(BasePlatformAdapter):
             # disable; on Linux it only allows rebinding past TIME_WAIT → keep default.
             self._site = web.TCPSite(
                 self._runner, self.webhook_host, self.webhook_port,
-                reuse_address=False if sys.platform == "darwin" else None,
-            )
+                reuse_address=False if sys.platform == "darwin" else None)
             await self._site.start()
         except OSError as exc:
             return self._fail(
                 "bind_failed",
                 f"Could not bind LINE webhook on {self.webhook_host or 'all IPv4+IPv6 interfaces'}:"
                 f"{self.webhook_port}: {exc}",
-                retryable=True,
-            )
+                retryable=True)
         self._mark_connected()
         logger.info(
             "LINE: webhook listening on %s:%s%s%s",
             self.webhook_host or "* (all interfaces, IPv4+IPv6)",
             self.webhook_port,
             self.webhook_path,
-            f" (public: {self.public_base_url})" if self.public_base_url else "",
-        )
+            f" (public: {self.public_base_url})" if self.public_base_url else "")
         return True
 
     async def disconnect(self) -> None:
@@ -558,8 +550,7 @@ class LineAdapter(BasePlatformAdapter):
             return
         if not _allowed_for_source(
             source, allow_all=self.allow_all, user_ids=self.allowed_users,
-            group_ids=self.allowed_groups, room_ids=self.allowed_rooms,
-        ):
+            group_ids=self.allowed_groups, room_ids=self.allowed_rooms):
             logger.info("LINE: rejecting unauthorized source %s", source)
             return
         if event_type == "message":
@@ -587,8 +578,7 @@ class LineAdapter(BasePlatformAdapter):
             text = msg.get("text", "") or ""
         elif msg_type in _INBOUND_MEDIA_EXT:  # fetch, cache, surface a vision-friendly local path
             local_path, media_type = await self._download_media(
-                message_id, msg_type, filename=msg.get("fileName") or msg.get("file_name")
-            )
+                message_id, msg_type, filename=msg.get("fileName") or msg.get("file_name"))
             if local_path:
                 media_urls.append(local_path)
                 media_types.append(media_type)
@@ -866,8 +856,7 @@ class LineAdapter(BasePlatformAdapter):
 
     async def send_video(
         self, chat_id: str, video_path: str, preview_path: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None,
-    ) -> SendResult:
+        metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         path, err = self._check_media_file("video", video_path)
         if err:
             return err
@@ -1058,6 +1047,4 @@ def register(ctx) -> None:
             "reply, so keep responses concise. Image/audio/video sending "
             "requires LINE_PUBLIC_URL configured to a publicly reachable HTTPS "
             "host. Slow responses surface a 'Get answer' button the user taps "
-            "to fetch the reply via a fresh free token."
-        ),
-    )
+            "to fetch the reply via a fresh free token."))
