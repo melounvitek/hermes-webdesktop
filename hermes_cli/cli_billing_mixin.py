@@ -1,8 +1,5 @@
 """Billing and subscription handlers for the interactive CLI (mixed into ``HermesCLI``).
-
-cli.py-internal symbols (``_cprint``/``_b``/``_d``, display constants) are imported LAZILY inside
-each method — the mixin never imports ``cli`` at module load time (import cycle).
-"""
+cli.py symbols are imported LAZILY inside methods — never at module load (import cycle)."""
 
 from __future__ import annotations
 
@@ -951,7 +948,9 @@ class CLIBillingMixin:
                 return _CANCELLED
             return v.amount
         threshold_amt = _ask_amount("When balance falls below", ar.threshold_usd if currently_on else None)
-        reload_amt = _ask_amount("Reload balance to", ar.reload_to_usd if currently_on else None) if threshold_amt is not _CANCELLED else _CANCELLED
+        if threshold_amt is _CANCELLED:
+            return
+        reload_amt = _ask_amount("Reload balance to", ar.reload_to_usd if currently_on else None)
         if reload_amt is _CANCELLED:
             return
         if reload_amt is None or threshold_amt is None or reload_amt <= threshold_amt:

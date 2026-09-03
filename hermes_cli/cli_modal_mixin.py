@@ -116,12 +116,9 @@ class CLIModalMixin:
             return False
 
     def _submit_editor_buffer(self, buffer) -> None:
-        """Submit the draft an external editor left in ``buffer`` (Ctrl+G done-callback).
-
-        Mirrors the idle/queue branches of the `enter` keybinding: an empty save is ignored (never
-        submits a blank turn), a bang/slash command is dispatched, otherwise the text goes through
-        the same input queues. Runs on the prompt_toolkit loop, so it must stay cheap/non-blocking.
-        """
+        """Submit the draft an external editor left in ``buffer`` (Ctrl+G done-callback), mirroring
+        the `enter` keybinding: empty save ignored, bang/slash dispatched, else queued. Runs on the
+        prompt_toolkit loop, so it must stay cheap/non-blocking."""
         from cli import _DIM, _RST, _cprint, _looks_like_slash_command
         try:
             text = (getattr(buffer, "text", "") or "").strip()
@@ -219,11 +216,9 @@ class CLIModalMixin:
     def _prompt_text_input(self, prompt_text: str) -> str | None:
         """Prompt for free-text input safely inside or outside prompt_toolkit.
 
-        ``run_in_terminal`` returns a coroutine only the main-thread event loop can await; slash
-        commands run on the ``process_loop`` daemon thread, where a bare ``input()`` would block
-        forever on loop-owned stdin (TUI slash-worker hang). Off the main thread with an app running
-        we therefore cancel cleanly (None) — mirroring ``_stdin_fallback`` in the modal prompt.
-        """
+        ``run_in_terminal`` only works on the main-thread loop; on the ``process_loop`` daemon
+        thread a bare ``input()`` would block forever on loop-owned stdin, so with an app running
+        off-main we cancel cleanly (None) — mirroring ``_stdin_fallback`` in the modal prompt."""
         result = [None]
 
         def _ask():
@@ -283,15 +278,11 @@ class CLIModalMixin:
     def _prompt_text_input_modal(
         self, *, title: str, detail: str, choices: list[tuple[str, str, str]], timeout: float = 120
     ) -> str | None:
-        """Slash-command confirmation through the prompt_toolkit composer instead of raw input().
-
-        Raw input() fought prompt_toolkit's stdin ownership (prompt drawn above the TUI, Enter read
-        as EOF). The modal state keeps the choices visible and the normal Enter binding submits.
-        All platforms (incl. native Windows) drive the modal via ``self._app.loop`` +
-        ``call_soon_threadsafe``; the raw ``input()`` fallback is kept only for the safe cases: no
-        running app (tests / non-interactive), no resolvable loop, or a scheduling failure. On
-        Windows a non-main-thread input() deadlocks against prompt_toolkit, so that case cancels.
-        """
+        """Slash-command confirmation through the prompt_toolkit composer (raw input() fought
+        prompt_toolkit's stdin ownership: prompt above the TUI, Enter read as EOF). All platforms
+        drive the modal via ``self._app.loop`` + ``call_soon_threadsafe``; raw ``input()`` is kept
+        only for the safe cases (no app, no loop, scheduling failure) — on Windows a non-main-thread
+        input() deadlocks against prompt_toolkit, so that case cancels instead."""
         if not choices:
             return None
         if not getattr(self, "_app", None):
@@ -503,14 +494,10 @@ class CLIModalMixin:
 
     def _confirm_destructive_slash(
         self, command: str, detail: str, cmd_original: Optional[str] = None) -> Optional[str]:
-        """Confirm a destructive session slash command (``/clear``, ``/new``/``/reset``, ``/undo``).
-
-        Returns ``"once"``, ``"always"`` (also persists ``approvals.destructive_slash_confirm:
-        false``) or ``None`` (cancelled); callers proceed when non-None. Gate off → ``"once"``
-        without prompting. Inline-skip: ``now`` / ``--yes`` / ``-y`` in ``cmd_original`` bypasses
-        the modal (non-interactive escape hatch; callers strip the tokens via
-        :meth:`_split_destructive_skip`).
-        """
+        """Confirm a destructive slash command (``/clear``, ``/new``/``/reset``, ``/undo``): returns
+        ``"once"``, ``"always"`` (persists the opt-out) or ``None`` (cancelled). Gate off → "once"
+        silently; ``now`` / ``--yes`` / ``-y`` in ``cmd_original`` bypasses the modal (callers strip
+        the tokens via :meth:`_split_destructive_skip`)."""
         if cmd_original and self._split_destructive_skip(cmd_original)[1]:
             return "once"
         return _gated_confirm(
@@ -526,13 +513,9 @@ class CLIModalMixin:
             once_verb="proceeding")
 
     def _ring_bell(self, prompt: bool = False, context: str = "", detail: str = "") -> None:
-        """Write a terminal bell (\\a) if the matching display.bell_* flag is on.
-
-        ``prompt=True`` is the blocking-modal variant gated by ``display.bell_on_prompt``; the
-        default is the end-of-turn bell gated by ``display.bell_on_complete``. Works over SSH. The
-        same flag also emits the OSC 9 / Warp OSC 777 desktop notification via
-        ``hermes_cli.terminal_notify``; ``context`` is the short notification body.
-        """
+        """Terminal bell (\\a) gated by ``display.bell_on_prompt`` (``prompt=True``, blocking modals)
+        or ``display.bell_on_complete`` (end of turn); works over SSH. The same flag also emits the
+        OSC 9 / Warp OSC 777 desktop notification; ``context`` is the short notification body."""
         flag = "bell_on_prompt" if prompt else "bell_on_complete"
         if not getattr(self, flag, False):
             return
@@ -598,13 +581,9 @@ class CLIModalMixin:
         return _CLARIFY_TIMEOUT_REPLY
 
     def _clarify_batch_set_active(self, state, index) -> None:
-        """Point the batch clarify panel at question ``index``.
-
-        Mirrors the active question into the flat keys the single-question keybindings/renderer
-        read (``question``/``choices``/``selected``/``multi_select``/``selected_indices``) so
-        ↑/↓/Space/number keys work unchanged; open-ended drops into freetext. Re-visiting an
-        answered question restores the cursor/checkboxes to the earlier pick.
-        """
+        """Point the batch clarify panel at question ``index``: mirror it into the flat keys the
+        single-question keybindings/renderer read so ↑/↓/Space/number keys work unchanged;
+        open-ended drops into freetext; re-visiting restores the earlier cursor/checkboxes."""
         questions_list = state["questions"]
         index = max(0, min(index, len(questions_list) - 1))
         entry = questions_list[index]
@@ -634,13 +613,9 @@ class CLIModalMixin:
             state["selected_indices"] = checked
 
     def _clarify_batch_lock(self, state, answer, meta=None) -> None:
-        """Lock ``answer`` for the active batch question and advance to the next unanswered one.
-
-        Overwrites an earlier answer (locked answers stay editable until the batch completes).
-        ``meta`` records how it was produced ({"kind": "choice"|"other"|"multi", ...}) so a
-        re-visit can restore the cursor / prefill an "Other" edit. When every question is answered
-        the answers dict goes on the response queue and the panel is torn down.
-        """
+        """Lock ``answer`` for the active batch question (overwriting an earlier one) and advance to
+        the next unanswered; ``meta`` ({"kind": "choice"|"other"|"multi", ...}) lets a re-visit
+        restore the cursor / prefill an "Other" edit. All answered → resolve the queue, tear down."""
         entry = state["questions"][state["active"]]
         state["answers"][entry["qid"]] = answer
         state.setdefault("answer_meta", {})[entry["qid"]] = meta or {"kind": "choice"}
@@ -660,12 +635,9 @@ class CLIModalMixin:
         self._clarify_multi_base = None
 
     def _clarify_batch_enter(self, state) -> None:
-        """Enter in batch choice mode: lock the active selection.
-
-        Multi-select locks a JSON array of the checked labels (parsed by the tool core). "Other"
-        switches to freetext (the freetext submit locks the typed answer), prefilled with an
-        earlier typed answer so Enter on an answered Other edits instead of retyping.
-        """
+        """Enter in batch choice mode: lock the active selection. Multi-select locks a JSON array of
+        checked labels (parsed by the tool core); "Other" switches to freetext, prefilled with an
+        earlier typed answer so Enter on an answered Other edits instead of retyping."""
         choices = state.get("choices") or []
         selected = state.get("selected", 0)
         entry = state["questions"][state["active"]]
@@ -874,14 +846,10 @@ class CLIModalMixin:
             pass
 
     def _clear_active_overlays_for_interrupt(self) -> None:
-        """Drain and clear every input-blocking overlay left by an interrupted agent.
-
-        Each prompt blocks a worker thread on ``response_queue.get()``; an interrupt tears the
-        thread down but leaves the state dict set, gating input with nothing servicing it (frozen
-        terminal until the prompt's own timeout). Push a safe terminal value onto each queue
-        (approval -> "deny", clarify/sudo/secret -> cancel), nil the state, restore the draft.
-        Each step is wrapped so a dead queue can't prevent clearing the others.
-        """
+        """Drain and clear every input-blocking overlay left by an interrupted agent: the worker
+        thread is gone but the state dict still gates input (frozen terminal until its timeout).
+        Push a safe value onto each queue (approval -> "deny", others -> cancel), nil the state,
+        restore the draft; each step is wrapped so a dead queue can't block the others."""
         def _put(state, value) -> None:
             try:
                 state["response_queue"].put(value)

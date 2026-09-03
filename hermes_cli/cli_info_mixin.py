@@ -19,10 +19,19 @@ from rich.markup import escape as _escape
 from utils import base_url_hostname
 
 from hermes_cli.cli_modal_mixin import _gated_confirm
+from hermes_cli.colors import Colors as _Colors
 
 CONFIG_WATCH_INTERVAL = 5.0  # seconds between config.yaml stat() calls
 
 _TOOL_PROGRESS_CYCLE = ["off", "new", "all", "verbose"]
+# Raw ANSI (not Rich markup): _cprint routes through prompt_toolkit's renderer, while Rich markup
+# written to stdout gets mangled by patch_stdout's StdoutProxy ('?[33mTool progress: NEW?[0m').
+_TOOL_PROGRESS_LABELS = {
+    "off": f"{_Colors.DIM}Tool progress: OFF{_Colors.RESET} — silent mode, just the final response.",
+    "new": f"{_Colors.YELLOW}Tool progress: NEW{_Colors.RESET} — show each new tool (skip repeats).",
+    "all": f"{_Colors.GREEN}Tool progress: ALL{_Colors.RESET} — show every tool call.",
+    "verbose": f"{_Colors.BOLD}{_Colors.GREEN}Tool progress: VERBOSE{_Colors.RESET} — full args, results, and think blocks.",
+}
 
 _RELOAD_MCP_CHOICES = [
     ("once", "Approve Once", "reload now"),
@@ -156,17 +165,12 @@ class CLIInfoMixin:
             except ValueError:
                 _port = None
             if _port == 11434 or "ollama" in base_url_hostname(base_url):
-                self._console_print(
-                    f"[dim]   Ollama fix: OLLAMA_CONTEXT_LENGTH={MINIMUM_CONTEXT_LENGTH} ollama serve[/]"
-                )
+                fix = f"Ollama fix: OLLAMA_CONTEXT_LENGTH={MINIMUM_CONTEXT_LENGTH} ollama serve"
             elif _port == 1234:
-                self._console_print(
-                    "[dim]   LM Studio fix: Set context length in model settings → reload model[/]"
-                )
+                fix = "LM Studio fix: Set context length in model settings → reload model"
             else:
-                self._console_print(
-                    "[dim]   Fix: Set model.context_length in config.yaml, or increase your server's context setting[/]"
-                )
+                fix = "Fix: Set model.context_length in config.yaml, or increase your server's context setting"
+            self._console_print(f"[dim]   {fix}[/]")
 
         from hermes_cli.model_switch import is_nous_hermes_non_agentic
         if is_nous_hermes_non_agentic(getattr(self, "model", "") or ""):
@@ -565,16 +569,7 @@ class CLIInfoMixin:
             # Sync the live agent so tool_executor rendering reflects the new mode this turn.
             self.agent.tool_progress_mode = self.tool_progress_mode
 
-        # Raw ANSI via _cprint so output routes through prompt_toolkit's renderer; Rich markup to
-        # stdout gets mangled by patch_stdout's StdoutProxy ('?[33mTool progress: NEW?[0m').
-        from hermes_cli.colors import Colors as _Colors
-        labels = {
-            "off": f"{_Colors.DIM}Tool progress: OFF{_Colors.RESET} — silent mode, just the final response.",
-            "new": f"{_Colors.YELLOW}Tool progress: NEW{_Colors.RESET} — show each new tool (skip repeats).",
-            "all": f"{_Colors.GREEN}Tool progress: ALL{_Colors.RESET} — show every tool call.",
-            "verbose": f"{_Colors.BOLD}{_Colors.GREEN}Tool progress: VERBOSE{_Colors.RESET} — full args, results, and think blocks.",
-        }
-        _cprint(labels.get(self.tool_progress_mode, ""))
+        _cprint(_TOOL_PROGRESS_LABELS.get(self.tool_progress_mode, ""))
 
     def _handle_usage_command(self, cmd_original: str):
         """Dispatch `/usage [reset [--force]]`: bare `/usage` is the classic display; `reset`
@@ -865,16 +860,14 @@ class CLIInfoMixin:
 
             with _lock:
                 connected_servers = set(_servers.keys())
-            added = connected_servers - old_servers
-            removed = old_servers - connected_servers
-            reconnected = connected_servers & old_servers
-
-            if reconnected:
-                print(f"  ♻️  Reconnected: {', '.join(sorted(reconnected))}")
-            if added:
-                print(f"  ➕ Added: {', '.join(sorted(added))}")
-            if removed:
-                print(f"  ➖ Removed: {', '.join(sorted(removed))}")
+            diff = {
+                "Added": connected_servers - old_servers,
+                "Removed": old_servers - connected_servers,
+                "Reconnected": connected_servers & old_servers,
+            }
+            for label, icon in (("Reconnected", "♻️ "), ("Added", "➕"), ("Removed", "➖")):
+                if diff[label]:
+                    print(f"  {icon} {label}: {', '.join(sorted(diff[label]))}")
             if not connected_servers:
                 print("  No MCP servers connected.")
             else:
@@ -901,13 +894,9 @@ class CLIInfoMixin:
                     self.enabled_toolsets = enabled_override
 
             # Tell the model tools changed — appended at the END so the prefix cache survives.
-            change_parts = []
-            if added:
-                change_parts.append(f"Added servers: {', '.join(sorted(added))}")
-            if removed:
-                change_parts.append(f"Removed servers: {', '.join(sorted(removed))}")
-            if reconnected:
-                change_parts.append(f"Reconnected servers: {', '.join(sorted(reconnected))}")
+            change_parts = [
+                f"{label} servers: {', '.join(sorted(names))}" for label, names in diff.items() if names
+            ]
             tool_summary = f"{len(new_tools)} MCP tool(s) now available" if new_tools else "No MCP tools available"
             change_detail = ". ".join(change_parts) + ". " if change_parts else ""
             self.conversation_history.append({
