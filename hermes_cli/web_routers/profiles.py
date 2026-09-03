@@ -177,10 +177,8 @@ def _profile_targets(log_label: str, *, lightweight: bool) -> List[Tuple[str, Pa
     config/meta and probes gateways/skills per profile — too heavy per sidebar refresh."""
     from hermes_cli import profiles as profiles_mod
     try:
-        if lightweight:
-            targets = list(profiles_mod.profiles_to_serve(multiplex=True))
-        else:
-            targets = [(info.name, info.path) for info in profiles_mod.list_profiles()]
+        targets = (list(profiles_mod.profiles_to_serve(multiplex=True)) if lightweight
+                   else [(info.name, info.path) for info in profiles_mod.list_profiles()])
     except Exception:
         _log.exception("%s: list_profiles failed", log_label)
         targets = []
@@ -309,11 +307,6 @@ def _sidebar_singleflight_cache(func):
     refresh_lock = threading.Lock()
     miss = object()
 
-    def _key(args, kwargs):
-        bound = signature.bind(*args, **kwargs)
-        bound.apply_defaults()
-        return tuple(bound.arguments.items())
-
     def _lookup(key):
         now = time.monotonic()
         with cache_lock:
@@ -330,7 +323,9 @@ def _sidebar_singleflight_cache(func):
         if ttl <= 0:
             return func(*args, **kwargs)
 
-        key = _key(args, kwargs)
+        bound = signature.bind(*args, **kwargs)
+        bound.apply_defaults()
+        key = tuple(bound.arguments.items())
         cached = _lookup(key)
         if cached is not miss:
             return cached
@@ -359,11 +354,6 @@ def _sidebar_singleflight_cache(func):
                     cache.popitem(last=False)
             return result
 
-    def cache_clear():
-        with cache_lock:
-            cache.clear()
-
-    wrapped.cache_clear = cache_clear
     return wrapped
 
 
@@ -388,10 +378,8 @@ def get_profiles_sessions(
     if order not in ("created", "recent"):
         raise HTTPException(status_code=400, detail="order must be one of: created, recent")
 
-    if profile and profile != "all":
-        targets = [_cron_profile_home(profile)]
-    else:
-        targets = _profile_targets("GET /api/profiles/sessions", lightweight=True)
+    targets = ([_cron_profile_home(profile)] if profile and profile != "all"
+               else _profile_targets("GET /api/profiles/sessions", lightweight=True))
 
     # Source scoping (see /api/sessions): recents pass exclude_sources=cron, the cron-jobs
     # section source=cron — two independent lists so cron sessions can't starve recents.
@@ -594,11 +582,10 @@ def get_profiles_projects_tree(preview_limit: int = 3, session_limit: int = 2000
                 scoped_session_ids.extend(tree["scoped_session_ids"])
         _read_profile_db(name, home, errors, _read)
 
-    return {
-        "projects": sorted(merged.values(), key=lambda p: p.get("lastActive") or 0, reverse=True),
-        # Ownership is per profile, so no project is "the active one" here; the desktop only
-        # reads active_id to bias its overview sort.
-        "active_id": None, "scoped_session_ids": scoped_session_ids, "errors": errors}
+    # active_id is None: ownership is per profile, so no project is "the active one" here.
+    projects = sorted(merged.values(), key=lambda p: p.get("lastActive") or 0, reverse=True)
+    return {"projects": projects, "active_id": None, "scoped_session_ids": scoped_session_ids,
+            "errors": errors}
 
 
 # `gh pr create` prints the PR url and nothing else, so a tool result whose whole output IS a
@@ -690,14 +677,12 @@ async def create_profile_endpoint(body: ProfileCreate):
         "Setting model for new profile %s failed", body.name,
         fn=lambda: (_write_profile_model(path, provider, model), True)[1], default=False)
     mcp_written = _best_effort(
-        "Writing MCP servers for new profile %s failed", body.name,
-        fn=lambda: _write_profile_mcp_servers(path, body.mcp_servers), default=0
-    ) if body.mcp_servers else 0
+        "Writing MCP servers for new profile %s failed", body.name, default=0,
+        fn=lambda: _write_profile_mcp_servers(path, body.mcp_servers)) if body.mcp_servers else 0
     # "keep" has replace semantics; skipped when empty (legacy: keep the bundle).
     skills_disabled = _best_effort(
-        "Applying skill selection for new profile %s failed", body.name,
-        fn=lambda: _disable_unselected_skills(path, body.keep_skills), default=0
-    ) if body.keep_skills else 0
+        "Applying skill selection for new profile %s failed", body.name, default=0,
+        fn=lambda: _disable_unselected_skills(path, body.keep_skills)) if body.keep_skills else 0
 
     # Hub installs spawn async, scoped via `-p <name>` (a fresh subprocess re-binds
     # skills_hub.SKILLS_DIR at import). PIDs go back for the UI to poll.
@@ -874,8 +859,8 @@ async def update_profile_description_endpoint(name: str, body: ProfileDescriptio
 
 @router.put("/api/profiles/{name}/model")
 async def update_profile_model_endpoint(name: str, body: ProfileModelUpdate):
-    """Set the main model for a specific profile's config.yaml without touching the
-    dashboard's own profile — ``POST /api/model/set`` (main scope) via the HERMES_HOME override."""
+    """Set the main model for a specific profile's config.yaml without touching the dashboard's
+    own profile — ``POST /api/model/set`` (main scope) via the HERMES_HOME override."""
     profile_dir = _resolve_profile_dir(name)
     provider = (body.provider or "").strip()
     model = (body.model or "").strip()
@@ -903,12 +888,9 @@ async def describe_profile_auto_endpoint(name: str, body: ProfileDescribeAuto):
                          not_found=(), bad_request=()):
         # A synchronous LLM round-trip with a 60 s ceiling; on the loop it stalls everything.
         outcome = await run_in_threadpool(_run)
-    return {
-        "ok": bool(outcome.ok),
-        "reason": outcome.reason,
-        "description": outcome.description,
-        # A failed sweep leaves any existing description untouched: not auto-authored.
-        "description_auto": bool(outcome.ok)}
+    # description_auto mirrors ok: a failed sweep leaves any existing description untouched.
+    return {"ok": bool(outcome.ok), "reason": outcome.reason, "description": outcome.description,
+            "description_auto": bool(outcome.ok)}
 
 
 # ── Export / Import ── wraps hermes_cli.profiles.export_profile / import_profile. Paths are
@@ -954,10 +936,9 @@ async def import_profile_endpoint(body: ProfileImport):
     imported = profile_dir.name
 
     # Match the CLI import flow: create the wrapper alias when it's safe.
-    def _wrapper():
-        if not profiles_mod.check_alias_collision(imported):
-            profiles_mod.create_wrapper_script(imported)
-    _best_effort("Creating wrapper for imported profile %s failed", imported, fn=_wrapper)
+    _best_effort("Creating wrapper for imported profile %s failed", imported,
+                 fn=lambda: (profiles_mod.check_alias_collision(imported)
+                             or profiles_mod.create_wrapper_script(imported)))
 
     # Bundled desktop appearance overlay, so the desktop needn't make another round-trip.
     desktop_overlay = None
