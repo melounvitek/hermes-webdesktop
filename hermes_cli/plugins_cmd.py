@@ -1706,23 +1706,21 @@ def dashboard_install_plugin(identifier: str, *, force: bool, enable: bool) -> d
     """Non-interactive install for the web dashboard. Returns a JSON-serializable dict."""
     warnings: list[str] = []
     try:
-        insecure = _resolve_git_url(identifier)[0].startswith(("http://", "file://"))
+        if _resolve_git_url(identifier)[0].startswith(("http://", "file://")):
+            warnings.append("Insecure URL scheme; prefer https:// or git@ for production installs.")
     except ValueError:
-        insecure = False
-    if insecure:
-        warnings.append("Insecure URL scheme; prefer https:// or git@ for production installs.")
-
+        pass
     try:
         target, installed_manifest, installed_name = _install_plugin_core(identifier, force=force)
     except PluginScanBlocked as exc:
         fields = ("pattern_id", "severity", "category", "file", "line", "description")
-        findings = [
-            {k: getattr(f, k) for k in fields}
-            for f in (exc.scan_result.findings if exc.scan_result is not None else ())
-        ]
         return {
             "ok": False, "error": str(exc), "scan_blocked": True,
-            "scan_verdict": getattr(exc.scan_result, "verdict", "dangerous"), "scan_findings": findings,
+            "scan_verdict": getattr(exc.scan_result, "verdict", "dangerous"),
+            "scan_findings": [
+                {k: getattr(f, k) for k in fields}
+                for f in (exc.scan_result.findings if exc.scan_result is not None else ())
+            ],
         }
     except PluginOperationError as exc:
         return {"ok": False, "error": str(exc)}
@@ -1763,10 +1761,10 @@ def _get_plugin_toolset_key(name: str) -> Optional[str]:
     def _from_manifest_on_disk() -> Optional[str]:
         from hermes_cli.plugins import get_bundled_plugins_dir
         for base in (get_bundled_plugins_dir(), _plugins_dir()):
-            if base.is_dir() and (base / name).is_dir():
-                toolset = _first_toolset(_read_manifest(base / name).get("provides_tools") or [])
-                if toolset:
-                    return toolset
+            if base.is_dir() and (base / name).is_dir() and (
+                toolset := _first_toolset(_read_manifest(base / name).get("provides_tools") or [])
+            ):
+                return toolset
         return None
 
     for lookup in (_from_loaded_plugin, _from_manifest_on_disk):
@@ -1810,11 +1808,9 @@ def dashboard_set_agent_plugin_enabled(name: str, *, enabled: bool) -> dict[str,
     """Enable or disable a plugin in ``config.yaml`` (runtime allow/deny lists)."""
     if _resolve_plugin_key(name) is None:
         return {"ok": False, "error": f"Plugin '{name}' is not installed or bundled."}
-
     en = _get_enabled_set()
     dis = _get_disabled_set()
-    already = (name in en and name not in dis) if enabled else (name not in en and name in dis)
-    if already:
+    if ((name in en and name not in dis) if enabled else (name not in en and name in dis)):
         return {"ok": True, "name": name, "unchanged": True}
     _set_plugin_enabled(name, enable=enabled)
     _toggle_plugin_toolset(name, enable=enabled)
@@ -1823,9 +1819,8 @@ def dashboard_set_agent_plugin_enabled(name: str, *, enabled: bool) -> dict[str,
 
 def _user_installed_plugin_dir(name: str) -> Optional[Path]:
     """Resolved path under ``~/.hermes/plugins/<name>`` if it exists."""
-    plugins_dir = _plugins_dir()
     try:
-        target = _sanitize_plugin_name(name, plugins_dir, allow_subdir=True)
+        target = _sanitize_plugin_name(name, _plugins_dir(), allow_subdir=True)
     except ValueError:
         return None
     return target if target.is_dir() else None
@@ -1857,12 +1852,13 @@ def _clear_plugin_bytecode(target: Path) -> int:
     removed = 0
     try:
         for cache_dir in target.rglob("__pycache__"):
-            if cache_dir.is_dir():
-                try:
-                    shutil.rmtree(cache_dir)
-                    removed += 1
-                except OSError:
-                    pass
+            if not cache_dir.is_dir():
+                continue
+            try:
+                shutil.rmtree(cache_dir)
+                removed += 1
+            except OSError:
+                pass
     except OSError:
         pass
     return removed
