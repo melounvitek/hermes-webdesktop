@@ -429,10 +429,8 @@ def _envelope(model: str, object_: str, choice: SimpleNamespace, usage: Any, cls
 
 def _tool_call_ns(name: str, arguments: str, index: int, call_id: str, extra_content: Any) -> SimpleNamespace:
     """OpenAI-shaped tool call; ``extra_content`` attached only when it is a dict."""
-    tool_call = SimpleNamespace(id=call_id, type="function", index=index, function=SimpleNamespace(name=name, arguments=arguments))
-    if isinstance(extra_content, dict):
-        tool_call.extra_content = extra_content
-    return tool_call
+    extra = {"extra_content": extra_content} if isinstance(extra_content, dict) else {}
+    return SimpleNamespace(id=call_id, type="function", index=index, function=SimpleNamespace(name=name, arguments=arguments), **extra)
 
 
 def _part_text(part: Dict[str, Any]) -> tuple[Optional[str], bool]:
@@ -463,11 +461,8 @@ def translate_gemini_response(resp: Dict[str, Any], model: str) -> SimpleNamespa
             pieces[is_thought].append(text)
         elif fc := _part_function_call(part):
             tool_calls.append(_tool_call_ns(str(fc["name"]), _dump_call_args(fc), index, _new_call_id(fc), _tool_call_extra_from_part(part)))
-    if cand is None:
-        finish_reason, usage = "stop", _usage_from_metadata({})
-    else:
-        finish_reason = "tool_calls" if tool_calls else _FINISH_REASON_MAP.get(str(cand.get("finishReason") or "").upper(), "stop")
-        usage = _usage_from_metadata(resp.get("usageMetadata") or {})
+    finish_reason = "tool_calls" if tool_calls else _FINISH_REASON_MAP.get(str((cand or {}).get("finishReason") or "").upper(), "stop")
+    usage = _usage_from_metadata((resp.get("usageMetadata") or {}) if cand is not None else {})
     reasoning = "".join(pieces[True]) or None
     message = SimpleNamespace(role="assistant", content="".join(pieces[False]) if pieces[False] else ("" if cand is None else None),
                               tool_calls=tool_calls or None, reasoning=reasoning, reasoning_content=reasoning, reasoning_details=None)

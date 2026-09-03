@@ -103,9 +103,8 @@ def new_credits_latch() -> dict:
 
 @dataclass
 class AgentNotice:
-    """Driver-agnostic out-of-band notice (``AIAgent.notice_callback`` / ``notice_clear_callback``);
-    each driver renders its own way. ``kind``/``ttl_ms`` stay expressive so a future
-    config can switch v1's sticky credits notices to TTL without touching the policy."""
+    """Driver-agnostic out-of-band notice (``AIAgent.notice_callback`` / ``notice_clear_callback``); each driver
+    renders its own way. ``kind``/``ttl_ms`` stay expressive so a future config can switch v1's sticky notices to TTL."""
 
     text: str
     level: str = "info"            # info | warn | error | success
@@ -120,13 +119,11 @@ def _sticky_notice(text: str, level: str, key: str) -> AgentNotice:
 
 
 def is_free_tier_model(model: str, base_url: str = "") -> bool:
-    """True when *model* is a Nous free-tier model, using ONLY local data:
-    (1) ``:free`` suffix — canonical Nous free SKU marker; (2) ``stealth/`` prefix —
-    stealth-preview SKUs are free without the suffix (naming-convention trust: a PAID
-    ``stealth/`` model would wrongly suppress the banner); (3) a PEEK into
-    ``hermes_cli.models``' pricing cache (filled by the model picker; a miss never
-    fetches). Fail-open to False (depleted notice still shows): a wrong warning is
-    recoverable noise; hiding it on a paid model masks a real block."""
+    """True when *model* is a Nous free-tier model, using ONLY local data: (1) ``:free`` suffix — canonical
+    Nous free SKU marker; (2) ``stealth/`` prefix — stealth-preview SKUs are free without the suffix
+    (naming-convention trust: a PAID ``stealth/`` model would wrongly suppress the banner); (3) a PEEK into
+    ``hermes_cli.models``' pricing cache (filled by the model picker; a miss never fetches). Fail-open to
+    False (depleted notice still shows): a wrong warning is recoverable noise; hiding it masks a real block."""
     if not model:
         return False
     if model.endswith(":free") or model.startswith("stealth/"):
@@ -143,12 +140,10 @@ def is_free_tier_model(model: str, base_url: str = "") -> bool:
 
 
 def evaluate_credits_notices(state: CreditsState, latch: dict, *, model_is_free: bool = False) -> tuple[list[AgentNotice], list[str]]:
-    """Reconcile credits notices against the latch (see :func:`new_credits_latch`);
-    mutates ``latch`` IN PLACE. Pure — no I/O, no agent/run_agent imports.
-    ``model_is_free`` suppresses ``credits.depleted`` (a depleted account on a free
-    model keeps inferencing) WITHOUT emitting "restored" — that fires only on a
-    genuine ``paid_access`` flip back to True.
-    Returns ``(to_show, to_clear)``; caller emits to_clear FIRST, then to_show."""
+    """Reconcile credits notices against the latch (see :func:`new_credits_latch`); mutates ``latch`` IN
+    PLACE. Pure — no I/O, no agent/run_agent imports. ``model_is_free`` suppresses ``credits.depleted`` (a
+    depleted account on a free model keeps inferencing) WITHOUT emitting "restored" — that fires only on a
+    genuine ``paid_access`` flip back to True. Returns ``(to_show, to_clear)``; caller emits to_clear FIRST."""
     to_show: list[AgentNotice] = []
     to_clear: list[str] = []
     uf, active = state.used_fraction, latch["active"]

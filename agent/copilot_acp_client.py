@@ -74,8 +74,7 @@ def _resolve_command() -> str:
 
 
 def _resolve_args() -> list[str]:
-    raw = os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()
-    return shlex.split(raw) if raw else ["--acp", "--stdio"]
+    return shlex.split(os.getenv("HERMES_COPILOT_ACP_ARGS", "").strip()) or ["--acp", "--stdio"]
 
 
 def _acp_supported(command: str, args: list[str]) -> bool | None:
@@ -257,8 +256,7 @@ class CopilotACPClient:
         self._acp_args = list(acp_args or args or _resolve_args())
         self._acp_cwd = str(Path(acp_cwd or os.getcwd()).resolve())
         self.chat = SimpleNamespace(completions=SimpleNamespace(create=self._create_chat_completion))
-        self.is_closed = False
-        self._active_process: subprocess.Popen[str] | None = None
+        self.is_closed, self._active_process = False, None
         self._active_process_lock = threading.Lock()
 
     def close(self) -> None:
