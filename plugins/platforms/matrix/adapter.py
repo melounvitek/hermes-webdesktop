@@ -783,10 +783,7 @@ class MatrixAdapter(BasePlatformAdapter):
         self._invite_join_tasks: Dict[str, asyncio.Task] = {}
         self._closing = False
         self._startup_ts: float = 0.0
-        # Clock-skew detector state (see _note_late_grace_drop).
-        self._late_grace_drops: int = 0
-        self._late_grace_skew: float = 0.0
-        self._clock_skew_warned: bool = False
+        self._reset_clock_skew_detector()
         self._last_sync_ts: float = 0.0
         self._dm_rooms: Dict[str, bool] = {}
         self._room_identities: Dict[str, MatrixRoomIdentity] = {}
@@ -882,8 +879,6 @@ class MatrixAdapter(BasePlatformAdapter):
         if configured is not None:
             return configured
         return os.getenv("MATRIX_THREAD_REQUIRE_MENTION", "false").lower() in {"true", "1", "yes", "on"}
-
-    # ---- E2EE helpers ----
 
     @staticmethod
     def _extract_server_ed25519(device_keys_obj: Any) -> Optional[str]:
@@ -1048,7 +1043,13 @@ class MatrixAdapter(BasePlatformAdapter):
             return await self._reverify_keys_after_upload(client, local_ed25519)
         return True
 
-    # ---- connect / disconnect ----
+    @staticmethod
+    async def _abort_connect(api: Any, crypto_db: Any = None) -> bool:
+        """Close what connect() opened so far; always False so callers can ``return await``."""
+        if crypto_db is not None:
+            await crypto_db.stop()
+        await api.session.close()
+        return False
 
     async def _connect_authenticate(self, client: Any, api: Any) -> bool:
         """Authenticate via access token (whoami) or password login; resolve user/device IDs."""
@@ -1097,8 +1098,7 @@ class MatrixAdapter(BasePlatformAdapter):
             except Exception as exc:
                 logger.error(
                     "Matrix: whoami failed — check MATRIX_ACCESS_TOKEN and MATRIX_HOMESERVER: %s", exc, exc_info=True)
-                await api.session.close()
-                return False
+                return await self._abort_connect(api)
         elif self._password and self._user_id:
             try:
                 resp = await client.login(
@@ -1109,12 +1109,10 @@ class MatrixAdapter(BasePlatformAdapter):
                 logger.info("Matrix: logged in as %s", self._user_id)
             except Exception as exc:
                 logger.error("Matrix: login failed — %s", exc)
-                await api.session.close()
-                return False
+                return await self._abort_connect(api)
         else:
             logger.error("Matrix: need MATRIX_ACCESS_TOKEN or MATRIX_USER_ID + MATRIX_PASSWORD")
-            await api.session.close()
-            return False
+            return await self._abort_connect(api)
         return True
 
     async def _connect_setup_e2ee(self, client: Any, api: Any, state_store: Any) -> bool:
@@ -1129,8 +1127,7 @@ class MatrixAdapter(BasePlatformAdapter):
                 logger.error(
                     "Matrix: E2EE is required but dependencies are missing. %s. Refusing to connect — "
                     "encrypted rooms would silently fail.", _E2EE_INSTALL_HINT)
-                await api.session.close()
-                return False
+                return await self._abort_connect(api)
         if self._encryption:
             try:
                 from mautrix.crypto import OlmMachine
@@ -1171,9 +1168,7 @@ class MatrixAdapter(BasePlatformAdapter):
                 olm.send_keys_min_trust = TrustState.UNVERIFIED
                 await olm.load()
                 if not await self._verify_device_keys_on_server(client, olm):
-                    await crypto_db.stop()
-                    await api.session.close()
-                    return False
+                    return await self._abort_connect(api, crypto_db)
                 try:
                     await olm.share_keys()
                 except Exception as exc:
@@ -1182,9 +1177,7 @@ class MatrixAdapter(BasePlatformAdapter):
                             "Matrix: device %s has stale one-time keys on the server signed with a "
                             "previous identity key. Delete the device from the homeserver and restart, "
                             "or generate a new access token to get a fresh device ID.", client.device_id)
-                        await crypto_db.stop()
-                        await api.session.close()
-                        return False
+                        return await self._abort_connect(api, crypto_db)
                     logger.warning("Matrix: share_keys() warning during startup: %s", exc)
                 await self._verify_or_bootstrap_cross_signing(olm, client)
                 client.crypto = olm
@@ -1205,8 +1198,7 @@ class MatrixAdapter(BasePlatformAdapter):
             self._encryption = False
             return True
         logger.error("Matrix: failed to %s E2EE client: %s. %s", what, exc, _E2EE_INSTALL_HINT)
-        await api.session.close()
-        return False
+        return await self._abort_connect(api)
 
     async def _verify_or_bootstrap_cross_signing(self, olm: Any, client: Any) -> None:
         """Verify cross-signing via MATRIX_RECOVERY_KEY, or bootstrap a new key (non-fatal)."""
@@ -1302,10 +1294,7 @@ class MatrixAdapter(BasePlatformAdapter):
         client.add_event_handler(EventType.REACTION, self._on_reaction, wait_sync=True)
         client.add_event_handler(IntEvt.INVITE, self._on_invite, wait_sync=True)
         self._startup_ts = time.time()
-        # Reset the clock-skew detector per connect so a reconnect after an NTP fix starts clean.
-        self._late_grace_drops = 0
-        self._late_grace_skew = 0.0
-        self._clock_skew_warned = False
+        self._reset_clock_skew_detector()  # a reconnect after an NTP fix starts clean
         self._closing = False
         await self._connect_initial_sync(client)
         if self._encryption and getattr(client, "crypto", None):
@@ -1336,7 +1325,7 @@ class MatrixAdapter(BasePlatformAdapter):
                 await asyncio.gather(*pending, return_exceptions=True)
         self._invite_join_tasks.clear()
         self._reaction_redaction_tasks.clear()
-        if hasattr(self, "_crypto_db") and self._crypto_db:
+        if getattr(self, "_crypto_db", None):
             try:
                 await self._crypto_db.stop()
             except Exception as exc:
@@ -1410,8 +1399,6 @@ class MatrixAdapter(BasePlatformAdapter):
                 "allow_room_mentions": self._allow_room_mentions, "process_notices": self._process_notices,
                 "allow_public_rooms": _env_truthy("MATRIX_ALLOW_PUBLIC_ROOMS")},
             "media": {"max_media_bytes": self._max_media_bytes}}
-
-    # ---- optional overrides ----
 
     async def _set_typing(self, chat_id: str, timeout: int) -> None:
         if self._client:
@@ -1714,8 +1701,6 @@ class MatrixAdapter(BasePlatformAdapter):
         """Markdown passes through; strip image markdown (media is uploaded separately)."""
         return re.sub(r"!\[([^\]]*)\]\(([^)]+)\)", r"\2", content)
 
-    # ---- file helpers ----
-
     async def _upload_and_send(
         self, room_id: str, data: bytes, filename: str, content_type: str, msgtype: str,
         caption: Optional[str] = None, reply_to: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None,
@@ -1807,8 +1792,6 @@ class MatrixAdapter(BasePlatformAdapter):
         return await self._upload_and_send(
             room_id, data, fname, ct, msgtype, caption, reply_to, metadata, is_voice, voice_metadata)
 
-    # ---- sync loop ----
-
     async def _sync_loop(self) -> None:
         """Continuously sync with the homeserver."""
         client = self._client
@@ -1849,8 +1832,6 @@ class MatrixAdapter(BasePlatformAdapter):
                 logger.warning("Matrix: sync error: %s — retrying in 5s", exc)
                 await asyncio.sleep(5)
 
-    # ---- event callbacks ----
-
     async def _dispatch_sync_logged(self, sync_data: Dict[str, Any], what: str) -> None:
         try:
             await self._dispatch_sync(sync_data)
@@ -1879,9 +1860,7 @@ class MatrixAdapter(BasePlatformAdapter):
         our own events beats an echo loop ("hall of mirrors").
         """
         own = (self._user_id or "").strip().lower()
-        if not own:
-            return True
-        return sender.strip().lower() == own
+        return not own or sender.strip().lower() == own
 
     @staticmethod
     def _is_system_or_bridge_sender(sender: str) -> bool:
@@ -1903,13 +1882,17 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def _is_allowed_matrix_room_event(self, room_id: str) -> bool:
         """MATRIX_ALLOWED_ROOMS gate; DMs are exempt so personal chats survive a project allowlist."""
-        if self._is_allowed_matrix_room(room_id):
-            return True
         try:
-            return await self._is_dm_room(room_id)
+            return self._is_allowed_matrix_room(room_id) or await self._is_dm_room(room_id)
         except Exception as exc:
             logger.debug("Matrix: could not resolve room identity for allowlist check in %s: %s", room_id, exc)
             return False
+
+    def _reset_clock_skew_detector(self) -> None:
+        """State for _note_late_grace_drop: consecutive-drop count, their skew, and the once-only warning."""
+        self._late_grace_drops: int = 0
+        self._late_grace_skew: float = 0.0
+        self._clock_skew_warned: bool = False
 
     def _note_late_grace_drop(self, event_ts: float) -> None:
         """Clock-skew heuristic for grace-check drops well after startup.
@@ -2201,8 +2184,7 @@ class MatrixAdapter(BasePlatformAdapter):
     async def _on_invite(self, event: Any) -> None:
         """Auto-join rooms when invited, recording DM rooms in m.direct."""
         room_id = str(getattr(event, "room_id", ""))
-        content = getattr(event, "content", None)
-        is_direct = bool(getattr(content, "is_direct", False))
+        is_direct = bool(getattr(getattr(event, "content", None), "is_direct", False))
         inviter = str(getattr(event, "sender", ""))
         # Only authorized inviters — otherwise any federated user could pull the bot into rooms.
         if not self._is_authorized_user(inviter):
@@ -2238,10 +2220,8 @@ class MatrixAdapter(BasePlatformAdapter):
 
     def _schedule_invite_join(self, room_id: str, *, is_direct: bool = False, inviter: str = "") -> None:
         """Schedule an invite join without blocking sync or gateway readiness."""
-        if not room_id or room_id in self._joined_rooms:
-            return
         existing = self._invite_join_tasks.get(room_id)
-        if existing and not existing.done():
+        if not room_id or room_id in self._joined_rooms or (existing and not existing.done()):
             return
 
         async def _join_invite() -> None:
@@ -2257,8 +2237,7 @@ class MatrixAdapter(BasePlatformAdapter):
 
     def _schedule_pending_invite_joins(self, sync_data: Dict[str, Any]) -> None:
         """Join rooms still present in rooms.invite after sync processing."""
-        rooms = sync_data.get("rooms", {}) if isinstance(sync_data, dict) else {}
-        invites = rooms.get("invite", {})
+        invites = (sync_data.get("rooms", {}) if isinstance(sync_data, dict) else {}).get("invite", {})
         if not isinstance(invites, dict):
             return
         for room_id in invites:
@@ -2266,8 +2245,6 @@ class MatrixAdapter(BasePlatformAdapter):
                 continue
             logger.info("Matrix: reconciling pending invite for %s", room_id)
             self._schedule_invite_join(str(room_id))
-
-    # ---- reactions (send, receive, processing lifecycle) ----
 
     async def _send_reaction(self, room_id: str, event_id: str, emoji: str) -> Optional[str]:
         """Send an emoji reaction; returns the reaction event_id, or None on failure."""
@@ -2305,22 +2282,16 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def on_processing_start(self, event: MessageEvent) -> None:
         """Add eyes reaction when the agent starts processing a message."""
-        if not self._reactions_enabled:
-            return
-        msg_id = event.message_id
-        room_id = event.source.chat_id
-        if msg_id and room_id:
+        msg_id, room_id = event.message_id, event.source.chat_id
+        if self._reactions_enabled and msg_id and room_id:
             reaction_event_id = await self._send_reaction(room_id, msg_id, "\U0001f440")
             if reaction_event_id:
                 self._pending_reactions[(room_id, msg_id)] = reaction_event_id
 
     async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
         """Replace eyes with checkmark (success) or cross (failure)."""
-        if not self._reactions_enabled:
-            return
-        msg_id = event.message_id
-        room_id = event.source.chat_id
-        if not msg_id or not room_id or outcome == ProcessingOutcome.CANCELLED:
+        msg_id, room_id = event.message_id, event.source.chat_id
+        if not self._reactions_enabled or not msg_id or not room_id or outcome == ProcessingOutcome.CANCELLED:
             return
         eyes_event_id = self._pending_reactions.pop((room_id, msg_id), None)
         if eyes_event_id:
@@ -2354,23 +2325,38 @@ class MatrixAdapter(BasePlatformAdapter):
             if await handler(room_id, reacts_to, key, sender):
                 return
 
+    async def _claim_reaction_prompt(
+        self, registry: dict, room_id: str, reacts_to: str, key: str, sender: str, label: str, invalid_text: str,
+        on_expired, choices: Optional[dict] = None) -> tuple[bool, Any, Any]:
+        """Shared gate for reaction prompts: (handled, prompt, selection).
+
+        handled=False => not our prompt; selection=None with handled=True => consumed without
+        action (wrong room, expired, unauthorized reactor, or a key that is not a choice).
+        ``choices`` defaults to ``prompt.choices``.
+        """
+        prompt = registry.get(reacts_to)
+        if not prompt or prompt.resolved:
+            return False, None, None
+        if room_id != prompt.chat_id:
+            return True, prompt, None
+        if self._matrix_prompt_expired(prompt):
+            await on_expired(room_id, reacts_to, prompt)
+            return True, prompt, None
+        if not await self._validate_matrix_prompt_reactor(room_id, reacts_to, sender, prompt, label):
+            return True, prompt, None
+        selection = (prompt.choices if choices is None else choices).get(key)
+        if selection is None:
+            await self._send_invalid_reaction_feedback(room_id, reacts_to, invalid_text)
+        return True, prompt, selection
+
     async def _handle_approval_reaction(self, room_id: str, reacts_to: str, key: str, sender: str) -> bool:
         """Resolve a pending exec-approval prompt from a reaction. True if it was the target."""
-        prompt = self._approval_prompts_by_event.get(reacts_to)
-        if not prompt or prompt.resolved:
-            return False
-        if room_id != prompt.chat_id:
-            return True
-        if self._matrix_prompt_expired(prompt):
-            await self._expire_matrix_approval_prompt(room_id, reacts_to, prompt)
-            return True
-        if not await self._validate_matrix_prompt_reactor(room_id, reacts_to, sender, prompt, "approval"):
-            return True
-        choice = self._approval_reaction_map.get(key)
-        if not choice:
-            await self._send_invalid_reaction_feedback(
-                room_id, reacts_to, "That reaction is not valid for this approval prompt.")
-            return True
+        handled, prompt, choice = await self._claim_reaction_prompt(
+            self._approval_prompts_by_event, room_id, reacts_to, key, sender, "approval",
+            "That reaction is not valid for this approval prompt.", self._expire_matrix_approval_prompt,
+            choices=self._approval_reaction_map)
+        if choice is None:
+            return handled
         try:
             from tools.approval import resolve_gateway_approval
             count = resolve_gateway_approval(prompt.session_key, choice)
@@ -2388,21 +2374,11 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def _handle_model_picker_reaction(self, room_id: str, reacts_to: str, key: str, sender: str) -> bool:
         """Apply a model-picker reaction. True if the reaction targeted a pending picker."""
-        model_prompt = self._model_picker_prompts_by_event.get(reacts_to)
-        if not model_prompt or model_prompt.resolved:
-            return False
-        if room_id != model_prompt.chat_id:
-            return True
-        if self._matrix_prompt_expired(model_prompt):
-            await self._expire_matrix_model_picker_prompt(room_id, reacts_to, model_prompt)
-            return True
-        if not await self._validate_matrix_prompt_reactor(room_id, reacts_to, sender, model_prompt, "model picker"):
-            return True
-        selection = model_prompt.choices.get(key)
-        if not selection:
-            await self._send_invalid_reaction_feedback(
-                room_id, reacts_to, "That reaction is not one of the available model choices.")
-            return True
+        handled, model_prompt, selection = await self._claim_reaction_prompt(
+            self._model_picker_prompts_by_event, room_id, reacts_to, key, sender, "model picker",
+            "That reaction is not one of the available model choices.", self._expire_matrix_model_picker_prompt)
+        if selection is None:
+            return handled
         model_prompt.resolved = True
         self._model_picker_prompts_by_event.pop(reacts_to, None)
         model_id, provider_slug = selection
@@ -2418,21 +2394,13 @@ class MatrixAdapter(BasePlatformAdapter):
 
     async def _handle_choice_picker_reaction(self, room_id: str, reacts_to: str, key: str, sender: str) -> bool:
         """Apply a choice-picker reaction. True if the reaction targeted a pending picker."""
-        choice_prompt = self._choice_picker_prompts_by_event.get(reacts_to)
-        if not choice_prompt or choice_prompt.resolved:
-            return False
-        if room_id != choice_prompt.chat_id:
-            return True
-        if self._matrix_prompt_expired(choice_prompt):
-            self._choice_picker_prompts_by_event.pop(reacts_to, None)
-            return True
-        if not await self._validate_matrix_prompt_reactor(room_id, reacts_to, sender, choice_prompt, "choice picker"):
-            return True
-        value = choice_prompt.choices.get(key)
+        async def _expire(_room_id, target_event_id, _prompt):
+            self._choice_picker_prompts_by_event.pop(target_event_id, None)
+        handled, choice_prompt, value = await self._claim_reaction_prompt(
+            self._choice_picker_prompts_by_event, room_id, reacts_to, key, sender, "choice picker",
+            "That reaction is not one of the available choices.", _expire)
         if value is None:
-            await self._send_invalid_reaction_feedback(
-                room_id, reacts_to, "That reaction is not one of the available choices.")
-            return True
+            return handled
         choice_prompt.resolved = True
         self._choice_picker_prompts_by_event.pop(reacts_to, None)
         try:
@@ -2507,8 +2475,6 @@ class MatrixAdapter(BasePlatformAdapter):
             except Exception as exc:
                 logger.debug("Matrix: failed to redact model picker reaction %s: %s", emoji, exc)
 
-    # ---- text aggregation (merges Matrix client-side splits) ----
-
     async def _flush_text_batch(self, key: str) -> None:
         """Wait for the quiet period then dispatch the aggregated text."""
         current_task = asyncio.current_task()
@@ -2525,8 +2491,6 @@ class MatrixAdapter(BasePlatformAdapter):
         finally:
             if self._pending_text_batch_tasks.get(key) is current_task:
                 self._pending_text_batch_tasks.pop(key, None)
-
-    # ---- read receipts / redaction / rooms / presence ----
 
     def _background_read_receipt(self, room_id: str, event_id: str) -> None:
         """Fire-and-forget read receipt with error logging."""
@@ -2627,8 +2591,6 @@ class MatrixAdapter(BasePlatformAdapter):
         except Exception as exc:
             logger.debug("Matrix: set_presence failed: %s", exc)
             return False
-
-    # ---- room identity helpers ----
 
     @staticmethod
     def _state_event_value(event: Any, key: str) -> Optional[str]:
@@ -2769,8 +2731,6 @@ class MatrixAdapter(BasePlatformAdapter):
         # Local cache so _resolve_room_identity sees it immediately.
         self._dm_rooms[room_id] = True
         self._invalidate_room_identities(room_id)
-
-    # ---- outbound formatting / mention helpers ----
 
     def _build_text_message_content(self, text: str, msgtype: str = "m.text") -> Dict[str, Any]:
         """Build Matrix text content with HTML and outbound mention metadata."""
@@ -2987,9 +2947,6 @@ class MatrixAdapter(BasePlatformAdapter):
         return result
 
 
-# ---- plugin glue: register(ctx) + the hook implementations for the bundled-plugin touchpoints ----
-
-
 async def _standalone_send(pconfig, chat_id, message, *, thread_id=None, media_files=None, force_document=False):
     """standalone_sender_fn: out-of-process delivery via the Client-Server API (cron without gateway)."""
     extra = getattr(pconfig, "extra", {}) or {}
@@ -3044,24 +3001,20 @@ def interactive_setup() -> None:
     print_info("Works with any Matrix homeserver (Synapse, Conduit, Dendrite, or matrix.org).")
     print_info("   1. Create a bot user on your homeserver, or use your own account")
     print_info("   2. Get an access token from Element, or provide user ID + password")
-    homeserver = prompt("Homeserver URL (e.g. https://matrix.example.org)")
-    if homeserver:
-        save_env_value("MATRIX_HOMESERVER", homeserver.rstrip("/"))
+    def _ask(key: str, question: str, **kw) -> str:
+        value = prompt(question, **kw)
+        if value:
+            save_env_value(key, value.rstrip("/") if key == "MATRIX_HOMESERVER" else value)
+        return value
+    _ask("MATRIX_HOMESERVER", "Homeserver URL (e.g. https://matrix.example.org)")
     print_info("Auth: provide an access token (recommended), or user ID + password.")
-    token = prompt("Access token (leave empty for password login)", password=True)
+    token = _ask("MATRIX_ACCESS_TOKEN", "Access token (leave empty for password login)", password=True)
     if token:
-        save_env_value("MATRIX_ACCESS_TOKEN", token)
-        user_id = prompt("User ID (@bot:server — optional, will be auto-detected)")
-        if user_id:
-            save_env_value("MATRIX_USER_ID", user_id)
+        _ask("MATRIX_USER_ID", "User ID (@bot:server — optional, will be auto-detected)")
         print_success("Matrix access token saved")
     else:
-        user_id = prompt("User ID (@bot:server)")
-        if user_id:
-            save_env_value("MATRIX_USER_ID", user_id)
-        password = prompt("Password", password=True)
-        if password:
-            save_env_value("MATRIX_PASSWORD", password)
+        _ask("MATRIX_USER_ID", "User ID (@bot:server)")
+        if _ask("MATRIX_PASSWORD", "Password", password=True):
             print_success("Matrix credentials saved")
     if token or get_env_value("MATRIX_PASSWORD"):
         want_e2ee = prompt_yes_no("Enable end-to-end encryption (E2EE)?", False)
