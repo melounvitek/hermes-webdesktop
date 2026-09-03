@@ -18,61 +18,41 @@ import uuid
 import webbrowser
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 from urllib.parse import parse_qs, urlencode, urlparse
 from hermes_cli.auth_constants import (
-    AuthError,
-    DEFAULT_SPOTIFY_ACCOUNTS_BASE_URL,
-    DEFAULT_SPOTIFY_API_BASE_URL,
-    DEFAULT_SPOTIFY_REDIRECT_URI,
-    DEFAULT_SPOTIFY_SCOPE,
-    SPOTIFY_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
-    SPOTIFY_DASHBOARD_URL,
-    SPOTIFY_DOCS_URL,
-    _spotify_err,
-    httpx,
+    AuthError, DEFAULT_SPOTIFY_ACCOUNTS_BASE_URL, DEFAULT_SPOTIFY_API_BASE_URL, DEFAULT_SPOTIFY_REDIRECT_URI,
+    DEFAULT_SPOTIFY_SCOPE, SPOTIFY_ACCESS_TOKEN_REFRESH_SKEW_SECONDS, SPOTIFY_DASHBOARD_URL, SPOTIFY_DOCS_URL,
+    _spotify_err, httpx,
 )
 
 # Log-record parity with the origin module (caplog tests pin "hermes_cli.auth").
 logger = logging.getLogger("hermes_cli.auth")
 
+_CALLBACK_HTML = "<html><body><h1>Spotify authorization {}.</h1>You can close this tab.</body></html>"
 
-def _spotify_scope_list(raw_scope: Optional[str] = None) -> List[str]:
-    scope_text = (raw_scope or DEFAULT_SPOTIFY_SCOPE).strip()
-    scopes = [part for part in scope_text.split() if part]
-    seen: set[str] = set()
-    ordered: List[str] = []
-    for scope in scopes:
-        if scope not in seen:
-            seen.add(scope)
-            ordered.append(scope)
-    return ordered
+
+def _clean(value: Any) -> str:
+    return str(value or "").strip()
 
 
 def _spotify_scope_string(raw_scope: Optional[str] = None) -> str:
-    return " ".join(_spotify_scope_list(raw_scope))
+    """Requested scope, whitespace-normalized and de-duplicated (order kept)."""
+    return " ".join(dict.fromkeys((raw_scope or DEFAULT_SPOTIFY_SCOPE).split()))
 
 
 def _spotify_setting(
-    state: Optional[Dict[str, Any]],
-    state_key: str,
-    env_vars: Tuple[str, ...],
-    default: str,
-    *,
-    explicit: Optional[str] = None,
-    strip_slash: bool = False,
+    state: Optional[Dict[str, Any]], state_key: str, env_vars: Tuple[str, ...], default: str, *,
+    explicit: Optional[str] = None, strip_slash: bool = False,
 ) -> str:
     """First non-empty of explicit arg, env vars (``.env`` aware), stored state, then *default*."""
     from hermes_cli.config import get_env_value
-
     candidates = (
-        explicit,
-        *(get_env_value(var) for var in env_vars),
-        state.get(state_key) if isinstance(state, dict) else None,
-        default,
+        explicit, *(get_env_value(var) for var in env_vars),
+        state.get(state_key) if isinstance(state, dict) else None, default,
     )
     for candidate in candidates:
-        cleaned = str(candidate or "").strip()
+        cleaned = _clean(candidate)
         if strip_slash:
             cleaned = cleaned.rstrip("/")
         if cleaned:
@@ -80,10 +60,7 @@ def _spotify_setting(
     return default
 
 
-def _spotify_client_id(
-    explicit: Optional[str] = None,
-    state: Optional[Dict[str, Any]] = None,
-) -> str:
+def _spotify_client_id(explicit: Optional[str] = None, state: Optional[Dict[str, Any]] = None) -> str:
     client_id = _spotify_setting(
         state, "client_id", ("HERMES_SPOTIFY_CLIENT_ID", "SPOTIFY_CLIENT_ID"), "", explicit=explicit,
     )
@@ -95,10 +72,7 @@ def _spotify_client_id(
     )
 
 
-def _spotify_redirect_uri(
-    explicit: Optional[str] = None,
-    state: Optional[Dict[str, Any]] = None,
-) -> str:
+def _spotify_redirect_uri(explicit: Optional[str] = None, state: Optional[Dict[str, Any]] = None) -> str:
     return _spotify_setting(
         state, "redirect_uri", ("HERMES_SPOTIFY_REDIRECT_URI", "SPOTIFY_REDIRECT_URI"),
         DEFAULT_SPOTIFY_REDIRECT_URI, explicit=explicit,
@@ -107,21 +81,19 @@ def _spotify_redirect_uri(
 
 def _spotify_api_base_url(state: Optional[Dict[str, Any]] = None) -> str:
     return _spotify_setting(
-        state, "api_base_url", ("HERMES_SPOTIFY_API_BASE_URL",),
-        DEFAULT_SPOTIFY_API_BASE_URL, strip_slash=True,
+        state, "api_base_url", ("HERMES_SPOTIFY_API_BASE_URL",), DEFAULT_SPOTIFY_API_BASE_URL, strip_slash=True,
     )
 
 
 def _spotify_accounts_base_url(state: Optional[Dict[str, Any]] = None) -> str:
     return _spotify_setting(
-        state, "accounts_base_url", ("HERMES_SPOTIFY_ACCOUNTS_BASE_URL",),
-        DEFAULT_SPOTIFY_ACCOUNTS_BASE_URL, strip_slash=True,
+        state, "accounts_base_url", ("HERMES_SPOTIFY_ACCOUNTS_BASE_URL",), DEFAULT_SPOTIFY_ACCOUNTS_BASE_URL,
+        strip_slash=True,
     )
 
 
 def _spotify_code_verifier(length: int = 64) -> str:
-    raw = base64.urlsafe_b64encode(os.urandom(length)).decode("ascii")
-    return raw.rstrip("=")[:128]
+    return base64.urlsafe_b64encode(os.urandom(length)).decode("ascii").rstrip("=")[:128]
 
 
 def _spotify_code_challenge(code_verifier: str) -> str:
@@ -130,21 +102,12 @@ def _spotify_code_challenge(code_verifier: str) -> str:
 
 
 def _spotify_build_authorize_url(
-    *,
-    client_id: str,
-    redirect_uri: str,
-    scope: str,
-    state: str,
-    code_challenge: str,
+    *, client_id: str, redirect_uri: str, scope: str, state: str, code_challenge: str,
     accounts_base_url: str,
 ) -> str:
     query = urlencode({
-        "client_id": client_id,
-        "response_type": "code",
-        "redirect_uri": redirect_uri,
-        "scope": scope,
-        "state": state,
-        "code_challenge_method": "S256",
+        "client_id": client_id, "response_type": "code", "redirect_uri": redirect_uri,
+        "scope": scope, "state": state, "code_challenge_method": "S256",
         "code_challenge": code_challenge,
     })
     return f"{accounts_base_url}/authorize?{query}"
@@ -152,32 +115,20 @@ def _spotify_build_authorize_url(
 
 def _spotify_validate_redirect_uri(redirect_uri: str) -> tuple[str, int, str]:
     parsed = urlparse(redirect_uri)
-    if parsed.scheme != "http":
-        raise _spotify_err(
-            "Spotify PKCE redirect_uri must use http://localhost or http://127.0.0.1.",
-            "spotify_redirect_invalid",
-        )
     host = parsed.hostname or ""
-    if host not in {"127.0.0.1", "localhost"}:
-        raise _spotify_err(
-            "Spotify PKCE redirect_uri must point to localhost or 127.0.0.1.",
-            "spotify_redirect_invalid",
-        )
-    if not parsed.port:
-        raise _spotify_err(
-            "Spotify PKCE redirect_uri must include an explicit localhost port.",
-            "spotify_redirect_invalid",
-        )
+    problem = (
+        "must use http://localhost or http://127.0.0.1." if parsed.scheme != "http"
+        else "must point to localhost or 127.0.0.1." if host not in {"127.0.0.1", "localhost"}
+        else "must include an explicit localhost port." if not parsed.port
+        else None
+    )
+    if problem:
+        raise _spotify_err(f"Spotify PKCE redirect_uri {problem}", "spotify_redirect_invalid")
     return host, parsed.port, parsed.path or "/"
 
 
 def _make_spotify_callback_handler(expected_path: str) -> tuple[type[BaseHTTPRequestHandler], dict[str, Any]]:
-    result: dict[str, Any] = {
-        "code": None,
-        "state": None,
-        "error": None,
-        "error_description": None,
-    }
+    result: dict[str, Any] = {"code": None, "state": None, "error": None, "error_description": None}
 
     class _SpotifyCallbackHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
@@ -189,19 +140,13 @@ def _make_spotify_callback_handler(expected_path: str) -> tuple[type[BaseHTTPReq
                 return
 
             params = parse_qs(parsed.query)
-            result["code"] = params.get("code", [None])[0]
-            result["state"] = params.get("state", [None])[0]
-            result["error"] = params.get("error", [None])[0]
-            result["error_description"] = params.get("error_description", [None])[0]
+            for key in result:
+                result[key] = params.get(key, [None])[0]
 
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.end_headers()
-            if result["error"]:
-                body = "<html><body><h1>Spotify authorization failed.</h1>You can close this tab.</body></html>"
-            else:
-                body = "<html><body><h1>Spotify authorization received.</h1>You can close this tab.</body></html>"
-            self.wfile.write(body.encode("utf-8"))
+            self.wfile.write(_CALLBACK_HTML.format("failed" if result["error"] else "received").encode("utf-8"))
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A003
             return
@@ -209,11 +154,7 @@ def _make_spotify_callback_handler(expected_path: str) -> tuple[type[BaseHTTPReq
     return _SpotifyCallbackHandler, result
 
 
-def _spotify_wait_for_callback(
-    redirect_uri: str,
-    *,
-    timeout_seconds: float = 180.0,
-) -> dict[str, Any]:
+def _spotify_wait_for_callback(redirect_uri: str, *, timeout_seconds: float = 180.0) -> dict[str, Any]:
     host, port, path = _spotify_validate_redirect_uri(redirect_uri)
     handler_cls, result = _make_spotify_callback_handler(path)
 
@@ -224,8 +165,7 @@ def _spotify_wait_for_callback(
         server = _ReuseHTTPServer((host, port), handler_cls)
     except OSError as exc:
         raise _spotify_err(
-            f"Could not bind Spotify callback server on {host}:{port}: {exc}",
-            "spotify_callback_bind_failed",
+            f"Could not bind Spotify callback server on {host}:{port}: {exc}", "spotify_callback_bind_failed",
         ) from exc
 
     thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.1}, daemon=True)
@@ -240,21 +180,12 @@ def _spotify_wait_for_callback(
         server.shutdown()
         server.server_close()
         thread.join(timeout=1.0)
-    raise _spotify_err(
-        "Spotify authorization timed out waiting for the local callback.",
-        "spotify_callback_timeout",
-    )
+    raise _spotify_err("Spotify authorization timed out waiting for the local callback.", "spotify_callback_timeout")
 
 
 def _spotify_token_payload_to_state(
-    token_payload: Dict[str, Any],
-    *,
-    client_id: str,
-    redirect_uri: str,
-    requested_scope: str,
-    accounts_base_url: str,
-    api_base_url: str,
-    previous_state: Optional[Dict[str, Any]] = None,
+    token_payload: Dict[str, Any], *, client_id: str, redirect_uri: str, requested_scope: str,
+    accounts_base_url: str, api_base_url: str, previous_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     from hermes_cli.auth import _coerce_ttl_seconds
     now = datetime.now(timezone.utc)
@@ -262,37 +193,22 @@ def _spotify_token_payload_to_state(
     expires_at = datetime.fromtimestamp(now.timestamp() + expires_in, tz=timezone.utc)
     state = dict(previous_state or {})
     state.update({
-        "client_id": client_id,
-        "redirect_uri": redirect_uri,
-        "accounts_base_url": accounts_base_url,
-        "api_base_url": api_base_url,
+        "client_id": client_id, "redirect_uri": redirect_uri,
+        "accounts_base_url": accounts_base_url, "api_base_url": api_base_url,
         "scope": requested_scope,
         "granted_scope": str(token_payload.get("scope") or requested_scope).strip(),
-        "token_type": str(token_payload.get("token_type", "Bearer") or "Bearer").strip() or "Bearer",
-        "access_token": str(token_payload.get("access_token", "") or "").strip(),
-        "refresh_token": str(
-            token_payload.get("refresh_token")
-            or state.get("refresh_token")
-            or ""
-        ).strip(),
-        "obtained_at": now.isoformat(),
-        "expires_at": expires_at.isoformat(),
-        "expires_in": expires_in,
-        "auth_type": "oauth_pkce",
+        "token_type": _clean(token_payload.get("token_type", "Bearer") or "Bearer") or "Bearer",
+        "access_token": _clean(token_payload.get("access_token")),
+        "refresh_token": _clean(token_payload.get("refresh_token") or state.get("refresh_token")),
+        "obtained_at": now.isoformat(), "expires_at": expires_at.isoformat(),
+        "expires_in": expires_in, "auth_type": "oauth_pkce",
     })
     return state
 
 
 def _spotify_token_post(
-    accounts_base_url: str,
-    data: Dict[str, str],
-    *,
-    timeout_seconds: float,
-    what: str,
-    failed_code: str,
-    invalid_code: str,
-    invalid_message: str,
-    failed_suffix: str = "",
+    accounts_base_url: str, data: Dict[str, str], *, timeout_seconds: float, what: str,
+    failed_code: str, invalid_code: str, invalid_message: str, failed_suffix: str = "",
     relogin_required: bool = False,
 ) -> Dict[str, Any]:
     """POST to Spotify's ``/api/token`` and return the JSON payload, or raise a shaped AuthError."""
@@ -309,48 +225,17 @@ def _spotify_token_post(
     if response.status_code >= 400:
         detail = response.text.strip()
         raise _spotify_err(
-            f"Spotify {what} failed.{failed_suffix}"
-            + (f" Response: {detail}" if detail else ""),
+            f"Spotify {what} failed.{failed_suffix}" + (f" Response: {detail}" if detail else ""),
             failed_code, relogin=relogin_required,
         )
     payload = response.json()
-    if not isinstance(payload, dict) or not str(payload.get("access_token", "") or "").strip():
+    if not isinstance(payload, dict) or not _clean(payload.get("access_token")):
         raise _spotify_err(invalid_message, invalid_code, relogin=relogin_required)
     return payload
 
 
-def _spotify_exchange_code_for_tokens(
-    *,
-    client_id: str,
-    code: str,
-    redirect_uri: str,
-    code_verifier: str,
-    accounts_base_url: str,
-    timeout_seconds: float = 20.0,
-) -> Dict[str, Any]:
-    return _spotify_token_post(
-        accounts_base_url,
-        {
-            "client_id": client_id,
-            "grant_type": "authorization_code",
-            "code": code,
-            "redirect_uri": redirect_uri,
-            "code_verifier": code_verifier,
-        },
-        timeout_seconds=timeout_seconds,
-        what="token exchange",
-        failed_code="spotify_token_exchange_failed",
-        invalid_code="spotify_token_exchange_invalid",
-        invalid_message="Spotify token response did not include an access_token.",
-    )
-
-
-def _refresh_spotify_oauth_state(
-    state: Dict[str, Any],
-    *,
-    timeout_seconds: float = 20.0,
-) -> Dict[str, Any]:
-    refresh_token = str(state.get("refresh_token", "") or "").strip()
+def _refresh_spotify_oauth_state(state: Dict[str, Any], *, timeout_seconds: float = 20.0) -> Dict[str, Any]:
+    refresh_token = _clean(state.get("refresh_token"))
     if not refresh_token:
         raise _spotify_err(
             "Spotify refresh token missing. Run `hermes auth spotify` again.",
@@ -361,35 +246,23 @@ def _refresh_spotify_oauth_state(
     accounts_base_url = _spotify_accounts_base_url(state)
     payload = _spotify_token_post(
         accounts_base_url,
-        {
-            "grant_type": "refresh_token",
-            "refresh_token": refresh_token,
-            "client_id": client_id,
-        },
-        timeout_seconds=timeout_seconds,
-        what="token refresh",
-        failed_code="spotify_refresh_failed",
+        {"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": client_id},
+        timeout_seconds=timeout_seconds, what="token refresh", failed_code="spotify_refresh_failed",
         invalid_code="spotify_refresh_invalid",
         invalid_message="Spotify refresh response did not include an access_token.",
-        failed_suffix=" Run `hermes auth spotify` again.",
-        relogin_required=True,
+        failed_suffix=" Run `hermes auth spotify` again.", relogin_required=True,
     )
 
     return _spotify_token_payload_to_state(
-        payload,
-        client_id=client_id,
-        redirect_uri=_spotify_redirect_uri(state=state),
+        payload, client_id=client_id, redirect_uri=_spotify_redirect_uri(state=state),
         requested_scope=str(state.get("scope") or DEFAULT_SPOTIFY_SCOPE),
-        accounts_base_url=accounts_base_url,
-        api_base_url=_spotify_api_base_url(state),
+        accounts_base_url=accounts_base_url, api_base_url=_spotify_api_base_url(state),
         previous_state=state,
     )
 
 
 def resolve_spotify_runtime_credentials(
-    *,
-    force_refresh: bool = False,
-    refresh_if_expiring: bool = True,
+    *, force_refresh: bool = False, refresh_if_expiring: bool = True,
     refresh_skew_seconds: int = SPOTIFY_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
 ) -> Dict[str, Any]:
     from hermes_cli.auth import _auth_store_lock, _is_expiring, _load_auth_store, _load_provider_state, _quarantine_flat_oauth_state, _refresh_spotify_oauth_state, _save_auth_store, _store_provider_state
@@ -398,8 +271,7 @@ def resolve_spotify_runtime_credentials(
         state = _load_provider_state(auth_store, "spotify")
         if not state:
             raise _spotify_err(
-                "Spotify is not authenticated. Run `hermes auth spotify` first.",
-                "spotify_auth_missing", relogin=True,
+                "Spotify is not authenticated. Run `hermes auth spotify` first.", "spotify_auth_missing", relogin=True,
             )
 
         should_refresh = bool(force_refresh)
@@ -420,7 +292,7 @@ def resolve_spotify_runtime_credentials(
                         logger.debug("Spotify OAuth: failed to persist quarantined state: %s", _save_exc)
                 raise
 
-    access_token = str(state.get("access_token", "") or "").strip()
+    access_token = _clean(state.get("access_token"))
     if not access_token:
         raise _spotify_err(
             "Spotify access token missing. Run `hermes auth spotify` again.",
@@ -428,16 +300,13 @@ def resolve_spotify_runtime_credentials(
         )
 
     return {
-        "provider": "spotify",
-        "access_token": access_token,
-        "api_key": access_token,
+        "provider": "spotify", "access_token": access_token, "api_key": access_token,
         "token_type": str(state.get("token_type", "Bearer") or "Bearer"),
         "base_url": _spotify_api_base_url(state),
-        "scope": str(state.get("granted_scope") or state.get("scope") or "").strip(),
+        "scope": _clean(state.get("granted_scope") or state.get("scope")),
         "client_id": _spotify_client_id(state=state),
-        "redirect_uri": _spotify_redirect_uri(state=state),
-        "expires_at": state.get("expires_at"),
-        "refresh_token": str(state.get("refresh_token", "") or "").strip(),
+        "redirect_uri": _spotify_redirect_uri(state=state), "expires_at": state.get("expires_at"),
+        "refresh_token": _clean(state.get("refresh_token")),
     }
 
 
@@ -448,48 +317,37 @@ def get_spotify_auth_status() -> Dict[str, Any]:
         return {"logged_in": False}
 
     expires_at = state.get("expires_at")
-    refresh_token = str(state.get("refresh_token", "") or "").strip()
+    refresh_token = _clean(state.get("refresh_token"))
     return {
         "logged_in": bool(refresh_token or not _is_expiring(expires_at, 0)),
-        "auth_type": state.get("auth_type", "oauth_pkce"),
-        "client_id": state.get("client_id"),
+        "auth_type": state.get("auth_type", "oauth_pkce"), "client_id": state.get("client_id"),
         "redirect_uri": state.get("redirect_uri"),
-        "scope": state.get("granted_scope") or state.get("scope"),
-        "expires_at": expires_at,
-        "api_base_url": state.get("api_base_url"),
-        "has_refresh_token": bool(refresh_token),
+        "scope": state.get("granted_scope") or state.get("scope"), "expires_at": expires_at,
+        "api_base_url": state.get("api_base_url"), "has_refresh_token": bool(refresh_token),
     }
 
 
 def _spotify_interactive_setup(redirect_uri_hint: str) -> str:
-    """Walk the user through creating a Spotify developer app, persist the resulting client_id to
-    ~/.hermes/.env, and return it.
-    """
+    """Walk the user through creating a Spotify developer app; persist the client_id to ~/.hermes/.env."""
     from hermes_cli.auth import _is_remote_session
     from hermes_cli.config import save_env_value
-
-    print()
-    print("=" * 70)
-    print("Spotify first-time setup")
-    print("=" * 70)
-    print()
-    print("Spotify requires every user to register their own lightweight")
-    print("developer app. This takes about two minutes and only has to be")
-    print("done once per machine.")
-    print()
-    print(f"Full guide: {SPOTIFY_DOCS_URL}")
-    print()
-    print("Steps:")
-    print(f"  1. Opening {SPOTIFY_DASHBOARD_URL} in your browser...")
-    print("  2. Click 'Create app' and fill in:")
-    print("       App name:     anything (e.g. hermes-agent)")
-    print("       Description:  anything")
-    print(f"       Redirect URI: {redirect_uri_hint}")
-    print("       API/SDK:      Web API")
-    print("  3. Agree to the terms, click Save.")
-    print("  4. Open the app's Settings page and copy the Client ID.")
-    print("  5. Paste it below.")
-    print()
+    print(
+        f"\n{'=' * 70}\nSpotify first-time setup\n{'=' * 70}\n\n"
+        "Spotify requires every user to register their own lightweight\n"
+        "developer app. This takes about two minutes and only has to be\n"
+        "done once per machine.\n\n"
+        f"Full guide: {SPOTIFY_DOCS_URL}\n\n"
+        "Steps:\n"
+        f"  1. Opening {SPOTIFY_DASHBOARD_URL} in your browser...\n"
+        "  2. Click 'Create app' and fill in:\n"
+        "       App name:     anything (e.g. hermes-agent)\n"
+        "       Description:  anything\n"
+        f"       Redirect URI: {redirect_uri_hint}\n"
+        "       API/SDK:      Web API\n"
+        "  3. Agree to the terms, click Save.\n"
+        "  4. Open the app's Settings page and copy the Client ID.\n"
+        "  5. Paste it below.\n"
+    )
 
     if not _is_remote_session():
         try:
@@ -498,7 +356,6 @@ def _spotify_interactive_setup(redirect_uri_hint: str) -> str:
             pass
 
     from hermes_cli.cli_output import line_input
-
     try:
         raw = line_input("Spotify Client ID: ").strip()
     except (EOFError, KeyboardInterrupt):
@@ -506,20 +363,16 @@ def _spotify_interactive_setup(redirect_uri_hint: str) -> str:
         raise SystemExit("Spotify setup cancelled.")
 
     if not raw:
-        print()
-        print(f"No Client ID entered. See {SPOTIFY_DOCS_URL} for the full guide.")
+        print(f"\nNo Client ID entered. See {SPOTIFY_DOCS_URL} for the full guide.")
         raise SystemExit("Spotify setup cancelled: empty Client ID.")
 
-    # Persist so subsequent `hermes auth spotify` runs skip the wizard.
+    # Persist so subsequent `hermes auth spotify` runs skip the wizard. Only persist a non-default
+    # redirect URI, to avoid pinning users to a value the default might later change to.
     save_env_value("HERMES_SPOTIFY_CLIENT_ID", raw)
-    # Only persist the redirect URI if it's non-default, to avoid pinning
-    # users to a value the default might later change to.
     if redirect_uri_hint and redirect_uri_hint != DEFAULT_SPOTIFY_REDIRECT_URI:
         save_env_value("HERMES_SPOTIFY_REDIRECT_URI", redirect_uri_hint)
 
-    print()
-    print("Saved HERMES_SPOTIFY_CLIENT_ID to ~/.hermes/.env")
-    print()
+    print("\nSaved HERMES_SPOTIFY_CLIENT_ID to ~/.hermes/.env\n")
     return raw
 
 
@@ -527,12 +380,10 @@ def login_spotify_command(args) -> None:
     from hermes_cli.auth import _auth_store_lock, _can_open_graphical_browser, _is_remote_session, _load_auth_store, _print_loopback_ssh_hint, _save_auth_store, _store_provider_state, get_provider_auth_state
     existing_state = get_provider_auth_state("spotify") or {}
 
-    # Interactive wizard: if no client_id is configured anywhere, walk the
-    # user through creating the Spotify developer app instead of crashing
-    # with "HERMES_SPOTIFY_CLIENT_ID is required".
-    explicit_client_id = getattr(args, "client_id", None)
+    # Interactive wizard: if no client_id is configured anywhere, walk the user through creating
+    # the Spotify developer app instead of crashing with "HERMES_SPOTIFY_CLIENT_ID is required".
     try:
-        client_id = _spotify_client_id(explicit_client_id, existing_state)
+        client_id = _spotify_client_id(getattr(args, "client_id", None), existing_state)
     except AuthError as exc:
         if getattr(exc, "code", "") != "spotify_client_id_missing":
             raise
@@ -547,27 +398,17 @@ def login_spotify_command(args) -> None:
     open_browser = not getattr(args, "no_browser", False)
 
     code_verifier = _spotify_code_verifier()
-    code_challenge = _spotify_code_challenge(code_verifier)
     state_nonce = uuid.uuid4().hex
     authorize_url = _spotify_build_authorize_url(
-        client_id=client_id,
-        redirect_uri=redirect_uri,
-        scope=scope,
-        state=state_nonce,
-        code_challenge=code_challenge,
-        accounts_base_url=accounts_base_url,
+        client_id=client_id, redirect_uri=redirect_uri, scope=scope, state=state_nonce,
+        code_challenge=_spotify_code_challenge(code_verifier), accounts_base_url=accounts_base_url,
     )
 
-    print("Starting Spotify PKCE login...")
-    print(f"Client ID: {client_id}")
-    print(f"Redirect URI: {redirect_uri}")
-    print("Make sure this redirect URI is allow-listed in your Spotify app settings.")
-    print()
-    print("Open this URL to authorize Hermes:")
-    print(authorize_url)
-    print()
-    print(f"Full setup guide: {SPOTIFY_DOCS_URL}")
-    print()
+    print(
+        f"Starting Spotify PKCE login...\nClient ID: {client_id}\nRedirect URI: {redirect_uri}\n"
+        "Make sure this redirect URI is allow-listed in your Spotify app settings.\n\n"
+        f"Open this URL to authorize Hermes:\n{authorize_url}\n\nFull setup guide: {SPOTIFY_DOCS_URL}\n"
+    )
 
     _print_loopback_ssh_hint(redirect_uri, docs_url=SPOTIFY_DOCS_URL)
 
@@ -576,36 +417,32 @@ def login_spotify_command(args) -> None:
             opened = webbrowser.open(authorize_url)
         except Exception:
             opened = False
-        if opened:
-            print("Browser opened for Spotify authorization.")
-        else:
-            print("Could not open the browser automatically; use the URL above.")
+        print(
+            "Browser opened for Spotify authorization." if opened
+            else "Could not open the browser automatically; use the URL above."
+        )
 
-    callback = _spotify_wait_for_callback(
-        redirect_uri,
-        timeout_seconds=float(getattr(args, "timeout", None) or 180.0),
-    )
+    callback = _spotify_wait_for_callback(redirect_uri, timeout_seconds=float(getattr(args, "timeout", None) or 180.0))
     if callback.get("error"):
-        detail = callback.get("error_description") or callback["error"]
-        raise SystemExit(f"Spotify authorization failed: {detail}")
+        raise SystemExit(f"Spotify authorization failed: {callback.get('error_description') or callback['error']}")
     if callback.get("state") != state_nonce:
         raise SystemExit("Spotify authorization failed: state mismatch.")
 
-    token_payload = _spotify_exchange_code_for_tokens(
-        client_id=client_id,
-        code=str(callback.get("code") or ""),
-        redirect_uri=redirect_uri,
-        code_verifier=code_verifier,
-        accounts_base_url=accounts_base_url,
+    token_payload = _spotify_token_post(
+        accounts_base_url,
+        {
+            "client_id": client_id, "grant_type": "authorization_code",
+            "code": str(callback.get("code") or ""), "redirect_uri": redirect_uri,
+            "code_verifier": code_verifier,
+        },
         timeout_seconds=float(getattr(args, "timeout", None) or 20.0),
+        what="token exchange", failed_code="spotify_token_exchange_failed",
+        invalid_code="spotify_token_exchange_invalid",
+        invalid_message="Spotify token response did not include an access_token.",
     )
     spotify_state = _spotify_token_payload_to_state(
-        token_payload,
-        client_id=client_id,
-        redirect_uri=redirect_uri,
-        requested_scope=scope,
-        accounts_base_url=accounts_base_url,
-        api_base_url=api_base_url,
+        token_payload, client_id=client_id, redirect_uri=redirect_uri, requested_scope=scope,
+        accounts_base_url=accounts_base_url, api_base_url=api_base_url,
     )
 
     with _auth_store_lock():
@@ -613,7 +450,7 @@ def login_spotify_command(args) -> None:
         _store_provider_state(auth_store, "spotify", spotify_state, set_active=False)
         saved_to = _save_auth_store(auth_store)
 
-    print("Spotify login successful!")
-    print(f"  Auth state: {saved_to}")
-    print("  Provider state saved under providers.spotify")
-    print(f"  Docs: {SPOTIFY_DOCS_URL}")
+    print(
+        f"Spotify login successful!\n  Auth state: {saved_to}\n"
+        f"  Provider state saved under providers.spotify\n  Docs: {SPOTIFY_DOCS_URL}"
+    )

@@ -15,83 +15,47 @@ import json
 import time
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, Optional, TYPE_CHECKING
 from hermes_cli.auth_constants import (
-    AuthError,
-    MINIMAX_OAUTH_GRANT_TYPE,
-    MINIMAX_OAUTH_REFRESH_SKEW_SECONDS,
-    MINIMAX_OAUTH_SCOPE,
-    _FORM_JSON_HEADERS,
-    _minimax_err,
-    httpx,
+    AuthError, MINIMAX_OAUTH_GRANT_TYPE, MINIMAX_OAUTH_REFRESH_SKEW_SECONDS, MINIMAX_OAUTH_SCOPE,
+    _FORM_JSON_HEADERS, _minimax_err, httpx,
 )
-from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:  # annotation-only; the runtime import would be a cycle
     from hermes_cli.auth import ProviderConfig
-
 # Log-record parity with the origin module (caplog tests pin "hermes_cli.auth").
 logger = logging.getLogger("hermes_cli.auth")
-
 
 _MINIMAX_OAUTH_ERROR_BODY_LIMIT = 16 * 1024
 
 
-def _minimax_response_error_text(
-    response: httpx.Response,
-    *,
-    limit: int = _MINIMAX_OAUTH_ERROR_BODY_LIMIT,
-) -> str:
+def _minimax_response_error_text(response: httpx.Response, *, limit: int = _MINIMAX_OAUTH_ERROR_BODY_LIMIT) -> str:
     """Return a bounded error body from a streamed MiniMax OAuth response."""
     limit = max(0, int(limit))
-    chunks: list[bytes] = []
-    total = 0
-    truncated = False
     try:
         if getattr(response, "is_stream_consumed", False):
             text = response.text
             return text[:limit] + ("...[truncated]" if len(text) > limit else "")
-
+        # Read at most limit+1 bytes so truncation can be detected without buffering the whole body.
+        chunks: list[bytes] = []
+        total = 0
         for chunk in response.iter_bytes():
             if not chunk:
                 continue
-            remaining = limit + 1 - total
-            if remaining <= 0:
-                truncated = True
+            chunks.append(chunk[: limit + 1 - total])
+            total += len(chunks[-1])
+            if total > limit:
                 break
-            if len(chunk) > remaining:
-                chunks.append(chunk[:remaining])
-                total += remaining
-                truncated = True
-                break
-            chunks.append(chunk)
-            total += len(chunk)
         raw = b"".join(chunks)
-        if len(raw) > limit:
-            raw = raw[:limit]
-            truncated = True
-        encoding = response.encoding or "utf-8"
-        text = raw.decode(encoding, errors="replace")
-        return text + ("...[truncated]" if truncated else "")
+        text = raw[:limit].decode(response.encoding or "utf-8", errors="replace")
+        return text + ("...[truncated]" if len(raw) > limit else "")
     finally:
         response.close()
 
 
-def _minimax_post_form(
-    client: httpx.Client,
-    url: str,
-    *,
-    data: Dict[str, Any],
-    headers: Dict[str, str],
-) -> httpx.Response:
+def _minimax_post_form(client: httpx.Client, url: str, *, data: Dict[str, Any], headers: Dict[str, str]) -> httpx.Response:
     """POST a MiniMax OAuth form without eagerly reading error bodies."""
-    request = client.build_request(
-        "POST",
-        url,
-        data=data,
-        headers=headers,
-    )
-    response = client.send(request, stream=True)
+    response = client.send(client.build_request("POST", url, data=data, headers=headers), stream=True)
     if response.status_code == 200:
         response.read()
     return response
@@ -101,43 +65,29 @@ def _minimax_pkce_pair() -> tuple:
     """Generate (code_verifier, code_challenge_S256, state) for MiniMax OAuth."""
     import secrets
     verifier = secrets.token_urlsafe(64)[:96]
-    challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(verifier.encode()).digest()
-    ).decode().rstrip("=")
-    state = secrets.token_urlsafe(16)
-    return verifier, challenge, state
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+    return verifier, challenge, secrets.token_urlsafe(16)
 
 
 def _minimax_request_user_code(
-    client: httpx.Client, *, portal_base_url: str, client_id: str,
-    code_challenge: str, state: str,
+    client: httpx.Client, *, portal_base_url: str, client_id: str, code_challenge: str, state: str
 ) -> Dict[str, Any]:
     response = _minimax_post_form(
         client,
         f"{portal_base_url}/oauth/code",
         data={
-            "response_type": "code",
-            "client_id": client_id,
-            "scope": MINIMAX_OAUTH_SCOPE,
-            "code_challenge": code_challenge,
-            "code_challenge_method": "S256",
-            "state": state,
+            "response_type": "code", "client_id": client_id, "scope": MINIMAX_OAUTH_SCOPE,
+            "code_challenge": code_challenge, "code_challenge_method": "S256", "state": state,
         },
         headers={**_FORM_JSON_HEADERS, "x-request-id": str(uuid.uuid4())},
     )
     if response.status_code != 200:
         body = _minimax_response_error_text(response)
-        raise _minimax_err(
-            f"MiniMax OAuth authorization failed: {body or response.reason_phrase}",
-            "authorization_failed",
-        )
+        raise _minimax_err(f"MiniMax OAuth authorization failed: {body or response.reason_phrase}", "authorization_failed")
     payload = response.json()
     for field in ("user_code", "verification_uri", "expired_in"):
         if field not in payload:
-            raise _minimax_err(
-                f"MiniMax OAuth response missing field: {field}",
-                "authorization_incomplete",
-            )
+            raise _minimax_err(f"MiniMax OAuth response missing field: {field}", "authorization_incomplete")
     if payload.get("state") != state:
         raise _minimax_err("MiniMax OAuth state mismatch (possible CSRF).", "state_mismatch")
     return payload
@@ -151,8 +101,7 @@ def _minimax_expired_in_looks_like_unix_ms(expired_in: int, *, now_ms: int) -> b
 def _minimax_resolve_token_expiry_unix(expired_in: int, *, now: datetime) -> float:
     """Return access-token expiry as unix seconds (MiniMax uses ms epoch or TTL seconds)."""
     raw = int(expired_in)
-    now_ms = int(now.timestamp() * 1000)
-    if _minimax_expired_in_looks_like_unix_ms(raw, now_ms=now_ms):
+    if _minimax_expired_in_looks_like_unix_ms(raw, now_ms=int(now.timestamp() * 1000)):
         return raw / 1000.0
     return now.timestamp() + max(1, raw)
 
@@ -172,8 +121,8 @@ def _minimax_poll_token(
     client: httpx.Client, *, portal_base_url: str, client_id: str,
     user_code: str, code_verifier: str, expired_in: int, interval_ms: Optional[int],
 ) -> Dict[str, Any]:
-    # OpenClaw treats expired_in as a unix-ms timestamp (Date.now() < expireTimeMs).
-    # Defensive parsing: if it's small enough to be a duration, treat as seconds.
+    # OpenClaw treats expired_in as a unix-ms timestamp; if it's small enough to be a duration,
+    # treat it as seconds.
     deadline = _minimax_resolve_token_expiry_unix(expired_in, now=datetime.now(timezone.utc))
     interval = max(2.0, (interval_ms or 2000) / 1000.0)
 
@@ -182,14 +131,11 @@ def _minimax_poll_token(
             client,
             f"{portal_base_url}/oauth/token",
             data={
-                "grant_type": MINIMAX_OAUTH_GRANT_TYPE,
-                "client_id": client_id,
-                "user_code": user_code,
-                "code_verifier": code_verifier,
+                "grant_type": MINIMAX_OAUTH_GRANT_TYPE, "client_id": client_id,
+                "user_code": user_code, "code_verifier": code_verifier,
             },
             headers=_FORM_JSON_HEADERS,
         )
-        error_text = ""
         if response.status_code != 200:
             error_text = _minimax_response_error_text(response)
             try:
@@ -205,16 +151,10 @@ def _minimax_poll_token(
 
         status = payload.get("status")
         if status == "error":
-            raise _minimax_err(
-                "MiniMax OAuth reported an error. Please try again later.",
-                "authorization_denied",
-            )
+            raise _minimax_err("MiniMax OAuth reported an error. Please try again later.", "authorization_denied")
         if status == "success":
             if not all(payload.get(k) for k in ("access_token", "refresh_token", "expired_in")):
-                raise _minimax_err(
-                    "MiniMax OAuth success payload missing required token fields.",
-                    "token_incomplete",
-                )
+                raise _minimax_err("MiniMax OAuth success payload missing required token fields.", "token_incomplete")
             return payload
         # "pending" or any other status -> keep polling
         time.sleep(interval)
@@ -228,10 +168,7 @@ def _minimax_save_auth_state(auth_state: Dict[str, Any]) -> None:
     _save_active_provider_state("minimax-oauth", auth_state)
 
 
-def _minimax_oauth_login(
-    *, region: str = "global", open_browser: bool = True,
-    timeout_seconds: float = 15.0,
-) -> Dict[str, Any]:
+def _minimax_oauth_login(*, region: str = "global", open_browser: bool = True, timeout_seconds: float = 15.0) -> Dict[str, Any]:
     """Run MiniMax OAuth flow, persist tokens, return auth state dict."""
     from hermes_cli.auth import PROVIDER_REGISTRY, _can_open_graphical_browser, _is_remote_session, _minimax_pkce_pair, _minimax_request_user_code, _minimax_save_auth_state, _print_device_code_instructions
     pconfig = PROVIDER_REGISTRY["minimax-oauth"]
@@ -250,33 +187,24 @@ def _minimax_oauth_login(
     print(f"Starting Hermes login via MiniMax ({region}) OAuth...")
     print(f"Portal: {portal_base_url}")
 
-    with httpx.Client(timeout=httpx.Timeout(timeout_seconds),
-                      headers={"Accept": "application/json"},
+    with httpx.Client(timeout=httpx.Timeout(timeout_seconds), headers={"Accept": "application/json"},
                       follow_redirects=True) as client:
         code_data = _minimax_request_user_code(
-            client, portal_base_url=portal_base_url,
-            client_id=pconfig.client_id,
-            code_challenge=challenge, state=state,
+            client, portal_base_url=portal_base_url, client_id=pconfig.client_id, code_challenge=challenge, state=state,
         )
-        verification_url = str(code_data["verification_uri"])
-        user_code = str(code_data["user_code"])
-
         _print_device_code_instructions(
-            verification_url,
-            user_code,
+            str(code_data["verification_uri"]), str(code_data["user_code"]),
             open_browser=open_browser and _can_open_graphical_browser(),
         )
 
         interval_raw = code_data.get("interval")
-        interval_ms = int(interval_raw) if interval_raw is not None else None
         print("Waiting for approval...")
 
         token_data = _minimax_poll_token(
-            client, portal_base_url=portal_base_url,
-            client_id=pconfig.client_id,
-            user_code=user_code, code_verifier=verifier,
+            client, portal_base_url=portal_base_url, client_id=pconfig.client_id,
+            user_code=str(code_data["user_code"]), code_verifier=verifier,
             expired_in=int(code_data["expired_in"]),
-            interval_ms=interval_ms,
+            interval_ms=int(interval_raw) if interval_raw is not None else None,
         )
 
     auth_state = {
@@ -300,73 +228,50 @@ def _minimax_oauth_login(
     return auth_state
 
 
-def _refresh_minimax_oauth_state(
-    state: Dict[str, Any], *, timeout_seconds: float = 15.0,
-    force: bool = False,
-) -> Dict[str, Any]:
+def _refresh_minimax_oauth_state(state: Dict[str, Any], *, timeout_seconds: float = 15.0, force: bool = False) -> Dict[str, Any]:
     """Refresh MiniMax OAuth access token if close to expiry (or forced)."""
     from hermes_cli.auth import _minimax_save_auth_state
     if not state.get("refresh_token"):
-        raise _minimax_err(
-            "MiniMax OAuth state has no refresh_token; please re-login.",
-            "no_refresh_token", relogin=True,
-        )
+        raise _minimax_err("MiniMax OAuth state has no refresh_token; please re-login.", "no_refresh_token", relogin=True)
     try:
         expires_at = datetime.fromisoformat(state.get("expires_at", "")).timestamp()
     except Exception:
         expires_at = 0.0
-    now = time.time()
-    if not force and (expires_at - now) > MINIMAX_OAUTH_REFRESH_SKEW_SECONDS:
+    if not force and (expires_at - time.time()) > MINIMAX_OAUTH_REFRESH_SKEW_SECONDS:
         return state
 
-    portal_base_url = state["portal_base_url"]
-    with httpx.Client(timeout=httpx.Timeout(timeout_seconds),
-                      follow_redirects=True) as client:
+    with httpx.Client(timeout=httpx.Timeout(timeout_seconds), follow_redirects=True) as client:
         response = _minimax_post_form(
             client,
-            f"{portal_base_url}/oauth/token",
-            data={
-                "grant_type": "refresh_token",
-                "client_id": state["client_id"],
-                "refresh_token": state["refresh_token"],
-            },
+            f"{state['portal_base_url']}/oauth/token",
+            data={"grant_type": "refresh_token", "client_id": state["client_id"], "refresh_token": state["refresh_token"]},
             headers=_FORM_JSON_HEADERS,
         )
-        # The non-200 branch reads a STREAMED body, so it must run while
-        # the client is still open — iter_bytes() after the client context
-        # closes raises (StreamClosed).  The 200 path was already read by
+        # The non-200 branch reads a STREAMED body, so it must run while the client is still open
+        # (iter_bytes() after close raises StreamClosed). The 200 path was already read by
         # _minimax_post_form, so response.json() below is safe outside.
         if response.status_code != 200:
             body = _minimax_response_error_text(response)
             body_lower = body.lower()
-            relogin = any(m in body_lower for m in
-                          ("invalid_grant", "refresh_token_reused", "invalid_refresh_token"))
+            relogin = any(m in body_lower for m in ("invalid_grant", "refresh_token_reused", "invalid_refresh_token"))
             raise _minimax_err(
-                f"MiniMax OAuth refresh failed: {body or response.reason_phrase}",
-                "refresh_failed", relogin=relogin,
+                f"MiniMax OAuth refresh failed: {body or response.reason_phrase}", "refresh_failed", relogin=relogin,
             )
     payload = response.json()
     if payload.get("status") != "success":
-        raise _minimax_err(
-            "MiniMax OAuth refresh did not return success.",
-            "refresh_failed", relogin=True,
-        )
-    new_state = dict(state)
-    new_state.update({
+        raise _minimax_err("MiniMax OAuth refresh did not return success.", "refresh_failed", relogin=True)
+    new_state = {
+        **state,
         "access_token": payload["access_token"],
         "refresh_token": payload.get("refresh_token", state["refresh_token"]),
         **_minimax_expiry_fields(payload["expired_in"]),
-    })
+    }
     _minimax_save_auth_state(new_state)
     return new_state
 
 
 def _minimax_oauth_quarantine_on_terminal_refresh(state: Dict[str, Any], exc: AuthError) -> None:
-    """Wipe dead tokens from auth.json after a terminal refresh failure.
-
-    Shared by the eager-resolve path and the lazy per-request token provider. Mirrors the
-    Nous / xAI / Codex quarantine pattern so subsequent calls fail fast without a network retry.
-    """
+    """Wipe dead tokens from auth.json after a terminal refresh failure (fail fast, no network retry)."""
     from hermes_cli.auth import _minimax_save_auth_state, _quarantine_flat_oauth_state
     if not (exc.relogin_required and state.get("refresh_token")):
         return
@@ -383,9 +288,7 @@ def _minimax_fresh_state() -> Dict[str, Any]:
     state = get_provider_auth_state("minimax-oauth")
     if not state or not state.get("access_token"):
         raise _minimax_err(
-            "Not logged into MiniMax OAuth. Run `hermes model` and select "
-            "MiniMax (OAuth).",
-            "not_logged_in", relogin=True,
+            "Not logged into MiniMax OAuth. Run `hermes model` and select MiniMax (OAuth).", "not_logged_in", relogin=True,
         )
     try:
         return _refresh_minimax_oauth_state(state)
@@ -398,17 +301,13 @@ def build_minimax_oauth_token_provider() -> Callable[[], str]:
     """Return a zero-arg callable that yields a fresh MiniMax access token.
 
     The Anthropic SDK caches ``api_key`` as a static string at construction time, so a session that
-    resolves credentials once at startup will keep sending the same bearer until MiniMax's server
-    returns 401 — typically ~15 minutes in, because MiniMax issues short-lived access tokens.
+    resolves credentials once at startup would keep sending the same bearer until MiniMax returns
+    401 — typically ~15 minutes in, because MiniMax issues short-lived access tokens.
     """
     def _provide() -> str:
-        state = _minimax_fresh_state()
-        token = state.get("access_token")
+        token = _minimax_fresh_state().get("access_token")
         if not token:
-            raise _minimax_err(
-                "MiniMax OAuth state has no access_token after refresh.",
-                "no_access_token", relogin=True,
-            )
+            raise _minimax_err("MiniMax OAuth state has no access_token after refresh.", "no_access_token", relogin=True)
         return token
 
     return _provide
@@ -424,13 +323,9 @@ def resolve_minimax_oauth_runtime_credentials(
     like ``hermes status`` that just want to know whether a valid token exists right now.
     """
     state = _minimax_fresh_state()
-    if as_token_provider:
-        api_key: Any = build_minimax_oauth_token_provider()
-    else:
-        api_key = state["access_token"]
     return {
         "provider": "minimax-oauth",
-        "api_key": api_key,
+        "api_key": build_minimax_oauth_token_provider() if as_token_provider else state["access_token"],
         "base_url": state["inference_base_url"].rstrip("/"),
         "source": "oauth",
     }
@@ -439,12 +334,11 @@ def resolve_minimax_oauth_runtime_credentials(
 def _login_minimax_oauth(args, pconfig: ProviderConfig) -> None:
     """CLI entry for MiniMax OAuth login."""
     from hermes_cli.auth import format_auth_error
-    region = getattr(args, "region", None) or "global"
-    open_browser = not getattr(args, "no_browser", False)
-    timeout = getattr(args, "timeout", None) or 15.0
     try:
         _minimax_oauth_login(
-            region=region, open_browser=open_browser, timeout_seconds=timeout,
+            region=getattr(args, "region", None) or "global",
+            open_browser=not getattr(args, "no_browser", False),
+            timeout_seconds=getattr(args, "timeout", None) or 15.0,
         )
     except AuthError as exc:
         print(format_auth_error(exc))

@@ -25,9 +25,7 @@ _MAX_ACTIVE_TRANSPORT_WORKERS = 8
 _transport_worker_slots = threading.BoundedSemaphore(_MAX_ACTIVE_TRANSPORT_WORKERS)
 
 ApprovalChoice = Literal["once", "session", "always", "deny"]
-ApprovalPresentFn = Callable[
-    ["ApprovalRequest"], "ApprovalDecision | Awaitable[ApprovalDecision]"
-]
+ApprovalPresentFn = Callable[["ApprovalRequest"], "ApprovalDecision | Awaitable[ApprovalDecision]"]
 
 
 @dataclass(frozen=True)
@@ -56,16 +54,8 @@ class ApprovalRequest:
 
     @classmethod
     def create(
-        cls,
-        *,
-        command: str,
-        description: str,
-        pattern_key: str,
-        pattern_keys: tuple[str, ...],
-        session_key: str,
-        surface: str,
-        allow_session: bool,
-        allow_permanent: bool,
+        cls, *, command: str, description: str, pattern_key: str, pattern_keys: tuple[str, ...],
+        session_key: str, surface: str, allow_session: bool, allow_permanent: bool,
         timeout_seconds: float = 300,
     ) -> "ApprovalRequest":
         choices: list[ApprovalChoice] = ["once"]
@@ -81,9 +71,7 @@ class ApprovalRequest:
         )
         canonical = json.dumps({**fields, "session_key": session_key}, sort_keys=True, separators=(",", ":"))
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        return cls(
-            **{**fields, "pattern_keys": pattern_keys, "allowed_choices": tuple(choices)}, digest=digest
-        )
+        return cls(**{**fields, "pattern_keys": pattern_keys, "allowed_choices": tuple(choices)}, digest=digest)
 
     def respond(self, choice: ApprovalChoice | str) -> ApprovalDecision:
         """Build the correlated response a transport should return."""
@@ -108,13 +96,13 @@ class RegisteredApprovalTransport:
     profile_home: str
 
 
+def _deny(failure: str) -> ApprovalTransportResult:
+    return ApprovalTransportResult("deny", failure)
+
+
 def invoke_approval_transport(
-    present: ApprovalPresentFn,
-    request: ApprovalRequest,
-    *,
-    timeout_seconds: float,
-    poll_interval: float = 1.0,
-    on_poll: Callable[[], None] | None = None,
+    present: ApprovalPresentFn, request: ApprovalRequest, *, timeout_seconds: float,
+    poll_interval: float = 1.0, on_poll: Callable[[], None] | None = None,
     is_interrupted: Callable[[], bool] | None = None,
 ) -> ApprovalTransportResult:
     """Run a sync or async transport on a bounded daemon worker.
@@ -123,10 +111,9 @@ def invoke_approval_transport(
     loop. A callback must return before the host timeout; late results are discarded and cannot
     authorize another request.
     """
-
     if not _transport_worker_slots.acquire(blocking=False):
         logger.warning("Approval transport worker capacity exhausted")
-        return ApprovalTransportResult("deny", "busy")
+        return _deny("busy")
 
     results: queue.Queue[tuple[str, object, float]] = queue.Queue(maxsize=1)
     deadline = time.monotonic() + max(float(timeout_seconds), 0.0)
@@ -148,27 +135,23 @@ def invoke_approval_transport(
         finally:
             _transport_worker_slots.release()
 
-    worker = threading.Thread(
-        target=_run, name=f"approval-transport-{request.request_id[:8]}", daemon=True
-    )
+    worker = threading.Thread(target=_run, name=f"approval-transport-{request.request_id[:8]}", daemon=True)
     try:
         worker.start()
     except BaseException:
         _transport_worker_slots.release()
         logger.warning("Could not start approval transport worker")
-        return ApprovalTransportResult("deny", "error")
+        return _deny("error")
     while True:
         if is_interrupted is not None and is_interrupted():
             logger.info("Approval transport wait interrupted for %s", request.request_id)
-            return ApprovalTransportResult("deny", "interrupted")
+            return _deny("interrupted")
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             logger.warning("Approval transport timed out for request %s", request.request_id)
-            return ApprovalTransportResult("deny", "timeout")
+            return _deny("timeout")
         try:
-            kind, value, completed_at = results.get(
-                timeout=min(max(float(poll_interval), 0.001), remaining)
-            )
+            kind, value, completed_at = results.get(timeout=min(max(float(poll_interval), 0.001), remaining))
             break
         except queue.Empty:
             if on_poll is not None:
@@ -178,9 +161,7 @@ def invoke_approval_transport(
                     logger.debug("Approval transport poll callback failed", exc_info=True)
 
     failure = _validate_decision(kind, value, completed_at, deadline, request)
-    if failure is not None:
-        return ApprovalTransportResult("deny", failure)
-    return ApprovalTransportResult(value.choice)
+    return _deny(failure) if failure is not None else ApprovalTransportResult(value.choice)
 
 
 def _validate_decision(kind, value, completed_at, deadline, request) -> str | None:
