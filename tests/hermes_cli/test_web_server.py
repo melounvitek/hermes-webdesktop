@@ -4695,11 +4695,11 @@ class TestPtyWebSocket:
 
 
 def test_resolve_chat_argv_injects_gateway_ws_url(monkeypatch):
-    import hermes_cli.main as cli_main
+    import hermes_cli.main_tui_launch as tui_launch
     import hermes_cli.web_server as ws
 
     monkeypatch.setattr(
-        cli_main,
+        tui_launch,
         "_make_tui_argv",
         lambda *_args, **_kwargs: (["node", "fake-tui.js"], Path("/tmp")),
     )

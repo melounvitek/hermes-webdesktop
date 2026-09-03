@@ -203,7 +203,7 @@ class TestNousPrefetch:
 
     def test_nous_is_not_collected_for_prefetch(self, monkeypatch):
         import hermes_cli.auth as auth_mod
-        import hermes_cli.model_switch as ms
+        import hermes_cli.model_switch_providers as ms
 
         monkeypatch.setattr(
             auth_mod, "_load_auth_store",
