@@ -966,9 +966,7 @@ def _admit_api_agent_request(handler):
         try:
             return await handler(self, request, *args, **kwargs)
         finally:
-            if reservation["active"]:
-                reservation["active"] = False
-                self._pending_agent_requests = max(0, self._pending_agent_requests - 1)
+            _release_pending_api_work(self, reservation)
             _api_agent_request_reservation.reset(token)
     return _wrapped
 
@@ -978,6 +976,17 @@ def _release_pending_api_work(adapter, reservation: dict[str, bool]) -> None:
     if reservation["active"]:
         reservation["active"] = False
         adapter._pending_agent_requests = max(0, adapter._pending_agent_requests - 1)
+
+
+def _require_auth(handler):
+    """Run ``self._check_auth`` first and return its 401 instead of the handler."""
+    @wraps(handler)
+    async def _wrapped(self, request, *args, **kwargs):
+        auth_err = self._check_auth(request)
+        if auth_err:
+            return auth_err
+        return await handler(self, request, *args, **kwargs)
+    return _wrapped
 
 
 @contextmanager
@@ -1255,9 +1264,8 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _activate_admitted_request(self) -> None:
         """Transfer this request's drain reservation to agent bookkeeping."""
         reservation = _api_agent_request_reservation.get()
-        if reservation and reservation["active"]:
-            reservation["active"] = False
-            self._pending_agent_requests = max(0, self._pending_agent_requests - 1)
+        if reservation:
+            _release_pending_api_work(self, reservation)
 
     def _readiness_work_counts(self) -> tuple[int, int, int]:
         """Return bounded work counts from each subsystem's public state."""
@@ -2291,11 +2299,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         """GET /health — simple health check."""
         return web.json_response({"status": "ok", "platform": "hermes-agent", "version": _hermes_version()})
 
+    @_require_auth
     async def _handle_health_detailed(self, request: "web.Request") -> "web.Response":
         """GET /health/detailed — gateway state, platforms, PID for dashboard probing (Bearer auth)."""
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
         from gateway.status import (
             derive_gateway_busy, derive_gateway_drainable, normalize_updated_at, parse_active_agents,
             read_runtime_status)
@@ -2328,12 +2334,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "updated_at": normalize_updated_at(runtime.get("updated_at")),
             "pid": os.getpid()})
 
+    @_require_auth
     async def _handle_models(self, request: "web.Request") -> "web.Response":
         """GET /v1/models — hermes-agent plus configured model_routes aliases (alias + resolved
         model only, never credentials). Under /p/<profile>/ the primary id follows that profile."""
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
         now = int(time.time())
         # The middleware already entered the profile scope, so get_active_profile_name() resolves.
         model_name = self._resolve_model_name("") if _api_request_profile.get() else self._model_name
@@ -2347,12 +2351,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             for alias, route_cfg in self._model_routes.items() if alias != model_name)
         return web.json_response({"object": "list", "data": models})
 
+    @_require_auth
     async def _handle_model_options(self, request: "web.Request") -> "web.Response":
         """GET /api/model/options — the dashboard/TUI model-picker inventory, so external clients
         can sync to the configured provider catalog instead of scraping /v1/models."""
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
         refresh = _coerce_request_bool(request.query.get("refresh"), default=False)
         try:
             from hermes_cli.inventory import build_model_options_payload, load_picker_context
@@ -2367,11 +2369,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             logger.exception("[%s] GET /api/model/options failed", self.name)
             return _error_response("Failed to list model options.", 500, code="model_options_failed")
 
+    @_require_auth
     async def _handle_capabilities(self, request: "web.Request") -> "web.Response":
         """GET /v1/capabilities — the stable, machine-readable API surface for external UIs."""
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
         return web.json_response({
             "object": "hermes.api_server.capabilities",
             "platform": "hermes-agent",
@@ -2777,12 +2777,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "X-Artifact-Id": receipt.artifact_id,
                 "Content-Disposition": f'attachment; filename="{receipt.filename}"'})
 
+    @_require_auth
     async def _handle_skills(self, request: "web.Request") -> "web.Response":
         """GET /v1/skills — deterministic JSON listing of installed skills (name, description,
         category), the same set ``/skills list`` shows."""
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
         try:
             from tools.skills_tool import _find_all_skills, _sort_skills
             skills = _sort_skills(_find_all_skills(skip_disabled=False))
@@ -2791,12 +2789,10 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return _error_response("Failed to enumerate skills", 500, err_type="server_error")
         return web.json_response({"object": "list", "data": skills})
 
+    @_require_auth
     async def _handle_toolsets(self, request: "web.Request") -> "web.Response":
         """GET /v1/toolsets — each toolset the api_server agent exposes: enabled/configured state
         plus the concrete tool names it expands to."""
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
         try:
             from hermes_cli.config import load_config
             from hermes_cli.tools_config import (
@@ -2894,11 +2890,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             logger.warning("Failed to load session history for %s: %s", session_id, exc)
             return []
 
+    @_require_auth
     async def _handle_list_sessions(self, request: "web.Request") -> "web.Response":
         """GET /api/sessions — list persisted Hermes sessions."""
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
         db = await self._ensure_session_db_async()
         if db is None:
             return self._session_db_unavailable()
@@ -2944,15 +2938,13 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             "offset": offset,
             "has_more": windowed >= limit})
 
+    @_require_auth
     async def _handle_create_session(self, request: "web.Request") -> "web.Response":
         """POST /api/sessions -- create an empty Hermes session row.
 
         Existence check, insert, title handling and invalid-title rollback run as ONE
         off-loop write so concurrent same-id creates cannot both pass the check and 201.
         """
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
         body, err = await self._read_json_body(request)
         if err:
             return err
@@ -3019,21 +3011,17 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             return _error_response(err[len("title:"):], 400, code="invalid_title")
         return web.json_response({"object": "hermes.session", "session": self._session_response(session)}, status=201)
 
+    @_require_auth
     async def _handle_get_session(self, request: "web.Request") -> "web.Response":
         """GET /api/sessions/{session_id}."""
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
         session, err = await self._get_existing_session_or_404(request.match_info["session_id"])
         if err:
             return err
         return web.json_response({"object": "hermes.session", "session": self._session_response(session)})
 
+    @_require_auth
     async def _handle_patch_session(self, request: "web.Request") -> "web.Response":
         """PATCH /api/sessions/{session_id} — update client-safe session metadata."""
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
         session_id = request.match_info["session_id"]
         session, err = await self._get_existing_session_or_404(session_id)
         if err:
@@ -3069,11 +3057,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         session = await asyncio.to_thread(db.get_session, session_id) or session
         return web.json_response({"object": "hermes.session", "session": self._session_response(session)})
 
+    @_require_auth
     async def _handle_delete_session(self, request: "web.Request") -> "web.Response":
         """DELETE /api/sessions/{session_id}."""
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
         session_id = request.match_info["session_id"]
         session, err = await self._get_existing_session_or_404(session_id)
         if err:
@@ -3082,11 +3068,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         deleted = await asyncio.to_thread(db.delete_session, session_id)
         return web.json_response({"object": "hermes.session.deleted", "id": session_id, "deleted": bool(deleted)})
 
+    @_require_auth
     async def _handle_session_messages(self, request: "web.Request") -> "web.Response":
         """GET /api/sessions/{session_id}/messages."""
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
         session_id = request.match_info["session_id"]
         _, err = await self._get_existing_session_or_404(session_id)
         if err:
@@ -3121,11 +3105,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                 "order": order or ("latest" if default_page else "oldest"),
                 "returned": len(messages)}})
 
+    @_require_auth
     async def _handle_fork_session(self, request: "web.Request") -> "web.Response":
         """POST /api/sessions/{session_id}/fork — branch via current SessionDB primitives."""
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
         source_id = request.match_info["session_id"]
         source, err = await self._get_existing_session_or_404(source_id)
         if err:
@@ -3451,11 +3433,9 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             with suppress(Exception):
                 await (asyncio.shield(task) if shield_wait else task)
 
+    @_require_auth
     async def _handle_session_model_lock(self, request: "web.Request") -> "web.Response":
         """POST /api/sessions/{session_id}/model — backend-ack a Browser model lock."""
-        auth_err = self._check_auth(request)
-        if auth_err:
-            return auth_err
         session_id = request.match_info["session_id"]
         _, err = await self._get_existing_session_or_404(session_id)
         if err:
