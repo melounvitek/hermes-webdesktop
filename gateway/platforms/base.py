@@ -256,20 +256,22 @@ def _detect_macos_system_proxy() -> str | None:
 
 
 def _split_host_port(value: str) -> tuple[str, int | None]:
+    """``(host, port)`` from a URL, ``[v6]:port``, ``host:port`` or bare host; host lowercased."""
     raw = str(value or "").strip()
     if not raw:
         return "", None
     if "://" in raw:
         parsed = urlsplit(raw)
-        return (parsed.hostname or "").lower().rstrip("."), parsed.port
-    if raw.startswith("[") and "]" in raw:
+        host, port = parsed.hostname or "", parsed.port
+    elif raw.startswith("[") and "]" in raw:
         host, _, rest = raw[1:].partition("]")
         port = int(rest[1:]) if rest.startswith(":") and rest[1:].isdigit() else None
-        return host.lower().rstrip("."), port
-    host, _, maybe_port = raw.rpartition(":")
-    if raw.count(":") == 1 and maybe_port.isdigit():
-        return host.lower().rstrip("."), int(maybe_port)
-    return raw.lower().strip("[]").rstrip("."), None
+    elif raw.count(":") == 1 and raw.rpartition(":")[2].isdigit():
+        host, _, port_s = raw.rpartition(":")
+        port = int(port_s)
+    else:
+        host, port = raw.strip("[]"), None
+    return host.lower().rstrip("."), port
 
 
 def _no_proxy_entries() -> list[str]:
@@ -326,18 +328,12 @@ def resolve_proxy_url(
     ``gateway.trust_env`` is true. None when nothing is found or NO_PROXY matches a target."""
     value = (os.environ.get(platform_env_var) or "").strip() if platform_env_var else ""
     if not value:
-        if not gateway_trust_env():
-            # trust_env false: only the explicit per-platform var above is honored.
+        if not gateway_trust_env():  # only the explicit per-platform var is honored
             return None
-        for key in ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY",
-                    "https_proxy", "http_proxy", "all_proxy"):
-            value = (os.environ.get(key) or "").strip()
-            if value:
-                break
+        keys = ("HTTPS_PROXY", "HTTP_PROXY", "ALL_PROXY", "https_proxy", "http_proxy", "all_proxy")
+        value = next((v for k in keys if (v := (os.environ.get(k) or "").strip())), "")
     proxy = normalize_proxy_url(value or _detect_macos_system_proxy())
-    if proxy and should_bypass_proxy(target_hosts):
-        return None
-    return proxy
+    return None if proxy and should_bypass_proxy(target_hosts) else proxy
 
 
 def _aiohttp_socks_connector(proxy_url: str):
@@ -764,15 +760,12 @@ def _kanban_attachment_roots() -> List[Path]:
     home_override = os.environ.get("HERMES_KANBAN_HOME", "").strip()
     root = Path(home_override).expanduser() if home_override else _HERMES_ROOT
     roots = [root / "kanban" / "attachments"]
-    boards_root = root / "kanban" / "boards"
-    try:
-        board_dirs = [path for path in boards_root.iterdir()
+    with contextlib.suppress(OSError):
+        board_dirs = [path for path in (root / "kanban" / "boards").iterdir()
                       if path.is_dir() and not path.is_symlink()
                       and re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", path.name)
                       and (path / "kanban.db").is_file()]
-    except OSError:
-        return roots
-    roots.extend(path / "attachments" for path in board_dirs)
+        roots.extend(path / "attachments" for path in board_dirs)
     return roots
 
 
@@ -799,12 +792,10 @@ def _media_delivery_recency_seconds() -> float:
 
 def _media_delivery_denied_paths() -> List[Path]:
     """Return absolute denylist paths under which delivery is never allowed."""
-    denied = [Path(p) for p in _MEDIA_DELIVERY_DENIED_PREFIXES]
     home = Path(os.path.expanduser("~"))
-    denied.extend(home / sub for sub in _MEDIA_DELIVERY_DENIED_HOME_SUBPATHS)
-    for hermes_root in (_HERMES_HOME, _HERMES_ROOT):
-        denied.extend(hermes_root / rel for rel in _ROOT_CREDENTIAL_PATHS)
-    return denied
+    return [*map(Path, _MEDIA_DELIVERY_DENIED_PREFIXES),
+            *(home / sub for sub in _MEDIA_DELIVERY_DENIED_HOME_SUBPATHS),
+            *(r / rel for r in (_HERMES_HOME, _HERMES_ROOT) for rel in _ROOT_CREDENTIAL_PATHS)]
 
 
 def _resolve_path(path: Path, *, strict: bool = False, expand: bool = False) -> Optional[Path]:
@@ -893,25 +884,23 @@ def _docker_sandbox_dir_candidates(session_key: str = "") -> List[str]:
     ``_resolve_container_task_id`` (tools/terminal_tool.py): containers are PROFILE-scoped
     (``default``, else ``profile:<name>``); legacy ``session:<key>`` sandboxes stay as a fallback.
     The key is passed explicitly because delivery runs after the turn's contextvars were cleared."""
-    candidates: List[str] = []
     try:
         from tools.environments.path_utils import sanitize_task_id_for_path
     except Exception:
         return ["default"]
-    # Explicit trusted-profiles opt-in: one shared container identity.
-    shared = _tenv("TERMINAL_DOCKER_SHARED_CONTAINER_KEY", "").strip()
-    if shared:
-        candidates.append(sanitize_task_id_for_path(f"shared:{shared}"))
     try:
         from hermes_cli.profiles import get_active_profile_name
         profile = get_active_profile_name() or "default"
     except Exception:
         profile = "default"
+    candidates: List[str] = []
+    # Explicit trusted-profiles opt-in: one shared container identity.
+    if shared := _tenv("TERMINAL_DOCKER_SHARED_CONTAINER_KEY", "").strip():
+        candidates.append(sanitize_task_id_for_path(f"shared:{shared}"))
     if profile != "default":
         candidates.append(sanitize_task_id_for_path(f"profile:{profile}"))
     candidates.append("default")
-    if session_key:
-        # Bug-window legacy layout: per-session sandboxes.
+    if session_key:  # bug-window legacy layout: per-session sandboxes
         candidates.append(sanitize_task_id_for_path(f"session:{session_key}"))
     return candidates
 
