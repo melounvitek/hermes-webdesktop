@@ -2,6 +2,8 @@
 Origin helpers (``_row``, ``_first_env_value``, ...) are resolved through the ``hermes_cli.status``
 module object so tests that monkeypatch that module keep working."""
 
+from datetime import datetime, timezone
+
 from hermes_cli.auth import AuthError
 from hermes_cli.nous_account import (
     format_nous_portal_entitlement_message, get_nous_portal_account_info)
@@ -14,7 +16,6 @@ def _format_iso_timestamp(value) -> str:
     text = value.strip() if isinstance(value, str) else ""
     if not text:
         return "(unknown)"
-    from datetime import datetime, timezone
     try:
         parsed = datetime.fromisoformat(text[:-1] + "+00:00" if text.endswith("Z") else text)
     except Exception:
@@ -25,7 +26,6 @@ def _format_iso_timestamp(value) -> str:
 
 
 def _qwen_expiry(expires_at_ms) -> str:
-    from datetime import datetime, timezone
     return datetime.fromtimestamp(int(expires_at_ms) / 1000, tz=timezone.utc).isoformat()
 
 

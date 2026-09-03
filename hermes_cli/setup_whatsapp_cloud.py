@@ -132,9 +132,7 @@ def _prompt_validated(
 # --- Wizard
 
 def _header(title: str) -> None:
-    print("─" * 50)
-    print(title)
-    print("─" * 50)
+    _lines("─" * 50, title, "─" * 50)
 
 
 def _lines(*lines: str) -> None:

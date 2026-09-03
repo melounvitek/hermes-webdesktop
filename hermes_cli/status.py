@@ -40,12 +40,12 @@ def _row(name: str, ok: bool, text: str, width: int = 12, sep: str = "  ") -> No
 
 def _detail(label: str, value) -> None:
     """Print an indented ``label: value`` detail line under a status row."""
-    print(f"    {label:<12}{value}")
+    _kv(label, value, "    ", 12)
 
 
-def _kv(label: str, value) -> None:
+def _kv(label: str, value, indent: str = "  ", width: int = 14) -> None:
     """Print a ``  Label:        value`` line (label padded to the 14-col status layout)."""
-    print(f"  {label:<14}{value}")
+    print(f"{indent}{label:<{width}}{value}")
 
 
 def _kv_flag(label: str, ok, on: str, off: str) -> None:

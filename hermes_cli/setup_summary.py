@@ -204,10 +204,8 @@ def _print_cmd_rows(rows):
 
 
 def _print_section_header(title):
-    print(_setup.color("─" * 60, _setup.Colors.DIM))
-    print()
-    print(_setup.color(title, _setup.Colors.CYAN, _setup.Colors.BOLD))
-    print()
+    print(_setup.color("─" * 60, _setup.Colors.DIM), end="\n\n")
+    print(_setup.color(title, _setup.Colors.CYAN, _setup.Colors.BOLD), end="\n\n")
 
 
 def _print_setup_summary(config: dict, hermes_home):
@@ -251,8 +249,7 @@ def _print_setup_summary(config: dict, hermes_home):
     for line in _DONE_BANNER:
         print(_setup.color(line, _setup.Colors.GREEN))
     print()
-    print(_setup.color(f"📁 All your files are in {_dhh()}/:", _setup.Colors.CYAN, _setup.Colors.BOLD))
-    print()
+    print(_setup.color(f"📁 All your files are in {_dhh()}/:", _setup.Colors.CYAN, _setup.Colors.BOLD), end="\n\n")
     for label, value in (("Settings:", f"  {_setup.get_config_path()}"), ("API Keys:", f"  {_setup.get_env_path()}"),
                          ("Data:", f"      {hermes_home}/cron/, sessions/, logs/")):
         print(f"   {_setup.color(label, _setup.Colors.YELLOW)}{value}")
@@ -262,9 +259,7 @@ def _print_setup_summary(config: dict, hermes_home):
     _print_cmd_rows(_EDIT_WIZARD_ROWS)
     print()
     _print_cmd_rows(_EDIT_CONFIG_ROWS)
-    print("                          Set a specific value")
-    print()
-    print("   Or edit the files directly:")
+    print("                          Set a specific value\n\n   Or edit the files directly:")
     for path in (_setup.get_config_path(), _setup.get_env_path()):
         print(f"   {_setup.color(f'nano {path}', _setup.Colors.DIM)}")
     print()

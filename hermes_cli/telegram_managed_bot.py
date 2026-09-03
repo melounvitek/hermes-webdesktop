@@ -84,8 +84,7 @@ def print_qr_code(url: str, *, include_link: bool = True) -> None:
 def create_pairing(
     api_url: str | None = None, bot_name: str = DEFAULT_BOT_NAME, timeout: float = 10.0
 ) -> TelegramPairing | None:
-    """POST a pairing; returns deep link, QR payload, public id and the secret poll token (used
-    only as a bearer credential while polling)."""
+    """POST a pairing; the returned poll token is only used as a bearer credential while polling."""
     try:
         resp = httpx.post(f"{_api_url(api_url)}/v1/telegram/pairings", json={"bot_name": bot_name}, timeout=timeout)
         if resp.status_code not in (200, 201):
@@ -122,14 +121,6 @@ def poll_pairing_result_once(
         _parse_owner_user_id(data.get("owner_user_id")))
 
 
-def _try_poll(api_url: str | None, pairing: TelegramPairing) -> TelegramBotSetupResult | None:
-    """One poll attempt; transport/JSON errors count as 'not ready yet'."""
-    try:
-        return poll_pairing_result_once(api_url, pairing)
-    except (httpx.HTTPError, ValueError):
-        return None
-
-
 def poll_for_setup_result(
     api_url: str | None, pairing: TelegramPairing, timeout: float = DEFAULT_POLL_TIMEOUT,
     interval: float = POLL_INTERVAL, on_tick=None) -> Optional[TelegramBotSetupResult]:
@@ -140,8 +131,11 @@ def poll_for_setup_result(
     while time.monotonic() < deadline:
         if on_tick:
             on_tick(time.monotonic() - start)
-        if result := _try_poll(api_url, pairing):
-            return result
+        try:  # transport/JSON errors count as 'not ready yet'
+            if result := poll_pairing_result_once(api_url, pairing):
+                return result
+        except (httpx.HTTPError, ValueError):
+            pass
         time.sleep(interval)
     return None
 

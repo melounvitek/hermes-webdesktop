@@ -270,8 +270,7 @@ def _setup_backend_plugin(config: dict, backend: str) -> None:
 _BUILTIN_TERMINAL_BACKENDS = [
     ("local", "Local - run directly on this machine (default)"),
     ("docker", "Docker - isolated container with configurable resources"),
-    ("modal", "Modal - serverless cloud sandbox"),
-    ("ssh", "SSH - run on a remote machine"),
+    ("modal", "Modal - serverless cloud sandbox"), ("ssh", "SSH - run on a remote machine"),
     ("daytona", "Daytona - persistent cloud development environment"),
     ("vercel_sandbox", "Vercel Sandbox - cloud microVM with snapshot filesystem persistence")]
 _TERMINAL_BACKEND_SETUP = {
