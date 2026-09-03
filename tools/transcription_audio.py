@@ -65,11 +65,8 @@ _STT_M4A_ENCODE_ARGS = ("-vn", "-ac", "1", "-ar", "16000", "-c:a", "aac", "-b:a"
 
 def _run_ffmpeg_stt_encode(ffmpeg: str, input_path: str, output_path: str, *, audio_filter: Optional[str] = None) -> None:
     """Run the shared STT m4a encode, optionally with an ``-af`` filter. Raises on failure; callers own the semantics."""
-    command = [ffmpeg, "-y", "-i", input_path]
-    if audio_filter:
-        command += ["-af", audio_filter]
-    command += [*_STT_M4A_ENCODE_ARGS, output_path]
-    _run_quiet(command, timeout=120)
+    filter_args = ["-af", audio_filter] if audio_filter else []
+    _run_quiet([ffmpeg, "-y", "-i", input_path, *filter_args, *_STT_M4A_ENCODE_ARGS, output_path], timeout=120)
 
 
 def _transcode_audio_for_stt(file_path: str, work_dir: str) -> tuple[Optional[str], Optional[str]]:
@@ -121,13 +118,10 @@ def _validate_audio_source_file(file_path: str, *, enforce_size_limit: bool = Tr
 def _validate_audio_file(file_path: str, *, enforce_size_limit: bool = True) -> Optional[Dict[str, Any]]:
     """Validate a supported, decoder-safe audio file."""
     source_error = _validate_audio_source_file(file_path, enforce_size_limit=enforce_size_limit)
-    if source_error:
-        return source_error
-
     suffix = Path(file_path).suffix
-    if suffix.lower() not in SUPPORTED_FORMATS:
-        return _error_result(f"Unsupported format: {suffix}. Supported: {', '.join(sorted(SUPPORTED_FORMATS))}")
-    return None
+    if source_error or suffix.lower() in SUPPORTED_FORMATS:
+        return source_error
+    return _error_result(f"Unsupported format: {suffix}. Supported: {', '.join(sorted(SUPPORTED_FORMATS))}")
 
 
 def _prepare_audio_for_transcription(file_path: str) -> tuple[Optional[str], Optional[str], Optional[Dict[str, Any]]]:
@@ -143,12 +137,10 @@ def _prepare_audio_for_transcription(file_path: str) -> tuple[Optional[str], Opt
             return None, None, _error_result(
                 "Unsupported format: .silk. Install the optional 'pilk' dependency to enable WeChat voice transcription."
             )
-
     temp_dir = tempfile.mkdtemp(prefix="hermes-silk-")
     converted_path = os.path.join(temp_dir, f"{audio_path.stem}.wav")
     try:
         import pilk
-
         pilk.silk_to_wav(file_path, converted_path)
         if not Path(converted_path).is_file() or Path(converted_path).stat().st_size == 0:
             raise RuntimeError("pilk did not produce a readable WAV file")
@@ -165,11 +157,9 @@ def _prepare_local_audio(file_path: str, work_dir: str) -> tuple[Optional[str], 
     audio_path = Path(file_path)
     if audio_path.suffix.lower() in LOCAL_NATIVE_AUDIO_FORMATS:
         return file_path, None
-
     ffmpeg = _find_ffmpeg_binary()
     if not ffmpeg:
         return None, "Local STT fallback requires ffmpeg for non-WAV inputs, but ffmpeg was not found"
-
     converted_path = os.path.join(work_dir, f"{audio_path.stem}.wav")
     try:
         _run_quiet([ffmpeg, "-y", "-i", file_path, converted_path], timeout=300)
@@ -194,9 +184,7 @@ def _convert_caf_to_wav(file_path: str) -> Optional[str]:
         ("ffmpeg", [ffmpeg, "-y", "-i", file_path, wav_path] if ffmpeg else None),
         ("afconvert", [afconvert, file_path, wav_path, "-d", "LEI16", "-f", "WAVE"] if afconvert else None),
     )
-    for label, command in candidates:
-        if not command:
-            continue
+    for label, command in ((label, cmd) for label, cmd in candidates if cmd):
         try:
             _run_quiet(command, timeout=300)
             return wav_path
@@ -236,11 +224,9 @@ def _probe_audio_duration(file_path: str) -> Optional[float]:
     ffprobe = _find_ffprobe_binary()
     if not ffprobe:
         return None
-    command = [
-        ffprobe, "-v", "error", "-show_entries", "format=duration", "-of", "default=noprint_wrappers=1:nokey=1", file_path,
-    ]
     try:
-        return float(_run_quiet(command, timeout=30).stdout.strip())
+        return float(_run_quiet([ffprobe, "-v", "error", "-show_entries", "format=duration", "-of",
+                                 "default=noprint_wrappers=1:nokey=1", file_path], timeout=30).stdout.strip())
     except Exception:  # noqa: BLE001 - probe is best-effort
         return None
 
@@ -274,12 +260,9 @@ def _trim_silence_for_cloud_stt(file_path: str, stt_config: Dict[str, Any]) -> O
         return None
     name = Path(file_path).name
     if original_duration < _CLOUD_TRIM_MIN_INPUT_SECONDS:
-        logger.debug(
-            "Cloud STT silence trim skipped for %s: %.1fs is below the %.0fs gate",
-            name, original_duration, _CLOUD_TRIM_MIN_INPUT_SECONDS,
-        )
+        logger.debug("Cloud STT silence trim skipped for %s: %.1fs is below the %.0fs gate",
+                     name, original_duration, _CLOUD_TRIM_MIN_INPUT_SECONDS)
         return None
-
     keep_seconds = keep_ms / 1000.0
     # start_periods=1 strips leading silence; stop_periods=-1 collapses every interior/trailing silence.
     filter_expr = (
@@ -296,20 +279,15 @@ def _trim_silence_for_cloud_stt(file_path: str, stt_config: Dict[str, Any]) -> O
         _run_ffmpeg_stt_encode(ffmpeg, file_path, trimmed_path, audio_filter=filter_expr)
         trimmed_duration = _probe_audio_duration(trimmed_path)
         if not trimmed_duration or trimmed_duration < min_result_seconds:
-            logger.debug(
-                "Cloud STT silence trim discarded for %s: trimmed result ~empty (%.2fs)", name, trimmed_duration or 0.0,
-            )
+            logger.debug("Cloud STT silence trim discarded for %s: trimmed result ~empty (%.2fs)",
+                         name, trimmed_duration or 0.0)
             return None
         if trimmed_duration > original_duration * (1 - _CLOUD_TRIM_MIN_SAVING):
-            logger.debug(
-                "Cloud STT silence trim discarded for %s: saves <%.0f%% (%.1fs -> %.1fs)",
-                name, _CLOUD_TRIM_MIN_SAVING * 100, original_duration, trimmed_duration,
-            )
+            logger.debug("Cloud STT silence trim discarded for %s: saves <%.0f%% (%.1fs -> %.1fs)",
+                         name, _CLOUD_TRIM_MIN_SAVING * 100, original_duration, trimmed_duration)
             return None
-        logger.info(
-            "Trimmed silence from %s before cloud STT upload (%.1fs -> %.1fs, -%d%%)",
-            name, original_duration, trimmed_duration, round((1 - trimmed_duration / original_duration) * 100),
-        )
+        logger.info("Trimmed silence from %s before cloud STT upload (%.1fs -> %.1fs, -%d%%)",
+                    name, original_duration, trimmed_duration, round((1 - trimmed_duration / original_duration) * 100))
         keep_result = True
         return trimmed_path
     except Exception as exc:  # noqa: BLE001 - trim is best-effort
