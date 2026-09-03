@@ -175,10 +175,8 @@ def _detect_docker() -> bool:
 
 
 _ENV_DETECTORS: Dict[str, Callable[[], bool]] = {
-    "kanban": _detect_kanban,
-    "docker": _detect_docker,
-    # The Hermes Docker image runs s6-overlay as PID 1.
-    "s6": lambda: os.path.isdir("/run/s6") or os.path.isdir("/package/admin/s6-overlay"),
+    "kanban": _detect_kanban, "docker": _detect_docker,
+    "s6": lambda: os.path.isdir("/run/s6") or os.path.isdir("/package/admin/s6-overlay"),  # s6-overlay is PID 1 in the image
 }
 
 
@@ -521,9 +519,8 @@ def is_quarantined_project_skill(skill_md) -> bool:
     try:
         from tools.skills_guard import scan_skill_cached
         from hermes_constants import get_hermes_home
-        result, _prov = scan_skill_cached(
-            skill_dir, source=_PROJECT_SCAN_SOURCE, cache_dir=get_hermes_home() / "cache" / "project_skill_scans",
-        )
+        cache_dir = get_hermes_home() / "cache" / "project_skill_scans"
+        result, _prov = scan_skill_cached(skill_dir, source=_PROJECT_SCAN_SOURCE, cache_dir=cache_dir)
         quarantined = result.verdict == "dangerous"
         if quarantined:
             logger.warning("Project skill quarantined (verdict=dangerous): %s — %s", skill_dir, result.summary)
@@ -574,11 +571,8 @@ def normalize_skill_lookup_name(identifier: str) -> str:
     try:
         return str(identifier_path.resolve().relative_to(primary_root.resolve()))
     except Exception:
-        logger.debug(
-            "Skill identifier %r is an absolute path outside trusted skills "
-            "roots — passing through unchanged (skill_view will reject it)",
-            raw_identifier,
-        )
+        logger.debug("Skill identifier %r is an absolute path outside trusted skills "
+                     "roots — passing through unchanged (skill_view will reject it)", raw_identifier)
         return raw_identifier
 
 

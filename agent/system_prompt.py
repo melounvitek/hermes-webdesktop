@@ -30,8 +30,7 @@ from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
 _PLUGIN_SECTION_FRAME_RE = re.compile(
-    r"^## Plugin Context: (?P<id>[a-z0-9][a-z0-9._-]{0,127})\n"
-    r"<!-- hermes-plugin-section-chars:(?P<chars>[0-9]{1,4}) -->\n\n",
+    r"^## Plugin Context: (?P<id>[a-z0-9][a-z0-9._-]{0,127})\n<!-- hermes-plugin-section-chars:(?P<chars>[0-9]{1,4}) -->\n\n",
     re.MULTILINE,
 )
 _GATE_WORDS = {**dict.fromkeys(("true", "always", "yes", "on"), True), **dict.fromkeys(("false", "never", "no", "off"), False)}
@@ -163,9 +162,8 @@ def _restore_plugin_prompt_sections(prompt: str) -> tuple:
         content = framed[match.end() : match.end() + content_len]
         if content_len > MAX_SYSTEM_PROMPT_SECTION_CHARS or len(content) != content_len:
             continue
-        restored.append(RenderedPluginSystemPromptSection(
-            id=match.group("id"), content=content, position="after_memory", plugin="persisted-prompt",
-        ))
+        restored.append(RenderedPluginSystemPromptSection(id=match.group("id"), content=content,
+                                                          position="after_memory", plugin="persisted-prompt"))
     return tuple(restored) if format_system_prompt_sections(restored) == framed else ()
 
 
@@ -294,12 +292,8 @@ def _skills_prompt(agent: Any, _r: Any) -> str:
         _compact_cats = coding_compact_skill_categories(platform=agent.platform, cwd=resolve_context_cwd())
     except Exception:
         _compact_cats = frozenset()
-    return _r.build_skills_system_prompt(
-        available_tools=agent.valid_tool_names,
-        available_toolsets=avail_toolsets,
-        compact_categories=_compact_cats or None,
-        skills_dir_override=_agent_skills_dir(agent),
-    )
+    return _r.build_skills_system_prompt(available_tools=agent.valid_tool_names, available_toolsets=avail_toolsets,
+                                         compact_categories=_compact_cats or None, skills_dir_override=_agent_skills_dir(agent))
 
 
 def _bot_mode_parts(agent: Any) -> List[str]:
@@ -426,22 +420,13 @@ def _timestamp_line(agent: Any) -> str:
     _start = _session_start_like(agent, now)
     timestamp_line = f"Conversation started: {_start.strftime('%A, %B %d, %Y')}{_zone_suffix}"
     if now.strftime("%Y%m%d") != _start.strftime("%Y%m%d"):
-        timestamp_line += (
-            f"\nToday's date (as of the last context rebuild): "
-            f"{now.strftime('%A, %B %d, %Y')} — trust this over the start "
-            f"date for what day it is now; query tools for exact time."
-        )
+        timestamp_line += (f"\nToday's date (as of the last context rebuild): {now.strftime('%A, %B %d, %Y')} "
+                           "— trust this over the start date for what day it is now; query tools for exact time.")
     if getattr(agent, "_bot_chat_timeless_prompt", False):
         timestamp_line = f"Timezone: {', '.join(_bits)}" if _bits else ""
-    for label, value in (
-        ("Session ID", agent.session_id if agent.pass_session_id else None),
-        ("Model", agent.model),
-        ("Provider", agent.provider),
-        ("Platform", agent.platform),
-    ):
-        if value:
-            timestamp_line += f"\n{label}: {value}"
-    return timestamp_line
+    trailer = (("Session ID", agent.session_id if agent.pass_session_id else None), ("Model", agent.model),
+               ("Provider", agent.provider), ("Platform", agent.platform))
+    return timestamp_line + "".join(f"\n{label}: {value}" for label, value in trailer if value)
 
 
 def _memory_parts(agent: Any) -> List[str]:
@@ -527,10 +512,8 @@ def _coding_parts(agent: Any) -> Tuple[List[str], List[str], List[str]]:
     try:
         from agent.coding_context import coding_system_prompt_parts
         if agent.valid_tool_names:
-            return coding_system_prompt_parts(
-                platform=agent.platform, cwd=resolve_context_cwd(),
-                model=agent.model, valid_tool_names=agent.valid_tool_names,
-            )
+            return coding_system_prompt_parts(platform=agent.platform, cwd=resolve_context_cwd(),
+                                              model=agent.model, valid_tool_names=agent.valid_tool_names)
     except Exception:
         pass
     return [], [], []
@@ -620,11 +603,7 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     # a resumed process can reconstruct the stable prefix without re-running plugins.
     volatile_parts.extend(_plugin_section_blocks(_frozen_plugin_prompt_sections(agent), "after_memory"))
     volatile_parts.append(_timestamp_line(agent))
-    return {
-        "stable": _join_tier(stable_parts),
-        "context": _join_tier(context_parts),
-        "volatile": _join_tier(volatile_parts),
-    }
+    return {"stable": _join_tier(stable_parts), "context": _join_tier(context_parts), "volatile": _join_tier(volatile_parts)}
 
 
 def build_system_prompt(agent: Any, system_message: Optional[str] = None) -> str:
@@ -685,18 +664,11 @@ def format_tools_for_system_message(agent: Any) -> str:
     """JSON tool definitions in the trajectory format."""
     if not agent.tools:
         return "[]"
-    return json.dumps([{
-        "name": tool["function"]["name"],
-        "description": tool["function"].get("description", ""),
-        "parameters": tool["function"].get("parameters", {}),
-        "required": None,  # Match the format in the example
-    } for tool in agent.tools], ensure_ascii=False)
+    return json.dumps([{"name": t["function"]["name"], "description": t["function"].get("description", ""),
+                        "parameters": t["function"].get("parameters", {}),
+                        "required": None}  # Match the format in the example
+                       for t in agent.tools], ensure_ascii=False)
 
 
-__all__ = [
-    "build_system_prompt_parts",
-    "build_system_prompt",
-    "invalidate_system_prompt",
-    "restore_plugin_prompt_sections",
-    "format_tools_for_system_message",
-]
+__all__ = ["build_system_prompt_parts", "build_system_prompt", "invalidate_system_prompt",
+           "restore_plugin_prompt_sections", "format_tools_for_system_message"]

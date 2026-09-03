@@ -10,10 +10,7 @@ from typing import Any, Dict, Optional
 
 from hermes_constants import display_hermes_home
 from agent.prompt_cache_boundary import register_stable_prefix
-from agent.skill_preprocessing import (
-    load_skills_config as _load_skills_config,
-    preprocess_skill_content,
-)
+from agent.skill_preprocessing import load_skills_config as _load_skills_config, preprocess_skill_content
 
 logger = logging.getLogger(__name__)
 
@@ -181,6 +178,11 @@ def _inject_skill_config(loaded_skill: dict[str, Any], parts: list[str]) -> None
         pass
 
 
+_SKILL_DIR_NOTE = (
+    "Resolve any relative paths in this skill (e.g. `scripts/foo.js`, "
+    "`templates/config.yaml`) against that directory, then run them "
+    "with the terminal tool using the absolute path."
+)
 _SETUP_SKIPPED_NOTE = (
     "Required environment setup was skipped. Continue loading the skill "
     "and explain any reduced functionality if it matters."
@@ -197,19 +199,12 @@ def _setup_note(loaded_skill: dict[str, Any]) -> Optional[str]:
 
 def _supporting_files(loaded_skill: dict[str, Any], skill_dir: Path | None) -> list[str]:
     """Skill-relative support file paths: from ``linked_files`` or a disk walk."""
-    supporting = [
-        entry
-        for entries in (loaded_skill.get("linked_files") or {}).values()
-        if isinstance(entries, list)
-        for entry in entries
-    ]
+    linked = (loaded_skill.get("linked_files") or {}).values()
+    supporting = [entry for entries in linked if isinstance(entries, list) for entry in entries]
     if not supporting and skill_dir:
         for subdir in ("references", "templates", "scripts", "assets"):
-            supporting.extend(
-                str(f.relative_to(skill_dir))
-                for f in sorted((skill_dir / subdir).rglob("*"))
-                if f.is_file() and not f.is_symlink()
-            )
+            files = sorted((skill_dir / subdir).rglob("*"))
+            supporting += [str(f.relative_to(skill_dir)) for f in files if f.is_file() and not f.is_symlink()]
     return supporting
 
 
@@ -230,13 +225,7 @@ def _build_skill_message(
     parts = [activation_note, "", content.strip()]
     # Absolute skill dir lets the agent run bundled scripts without a skill_view() round-trip.
     if skill_dir:
-        parts += [
-            "",
-            f"[Skill directory: {skill_dir}]",
-            "Resolve any relative paths in this skill (e.g. `scripts/foo.js`, "
-            "`templates/config.yaml`) against that directory, then run them "
-            "with the terminal tool using the absolute path.",
-        ]
+        parts += ["", f"[Skill directory: {skill_dir}]", _SKILL_DIR_NOTE]
     _inject_skill_config(loaded_skill, parts)
     setup_note = _setup_note(loaded_skill)
     if setup_note:
@@ -333,26 +322,18 @@ def _scan_skill_md(skill_md: Path, disabled: set, seen_names: set, commands: Dic
     # A collision with a core command (name or alias, via resolve_command) skips
     # auto-registration; the skill stays loadable via /skill <name>.
     if resolve_command(cmd_name) is not None:
-        logger.warning(
-            "Skill %r generates slash command '/%s' which collides with a core Hermes command; "
-            "skipping auto-registration. Use '/skill %s' instead.", name, cmd_name, name,
-        )
+        logger.warning("Skill %r generates slash command '/%s' which collides with a core Hermes command; "
+                       "skipping auto-registration. Use '/skill %s' instead.", name, cmd_name, name)
         return
     # Dedup on the slug too: "git_helper" and "git-helper" normalize the same.
     # First-wins preserves project > local > external precedence.
     cmd_key = f"/{cmd_name}"
     if cmd_key in commands:
-        logger.warning(
-            "Skill %r maps to slash command %s already claimed by %r; keeping the first and skipping this one.",
-            name, cmd_key, commands[cmd_key]["name"],
-        )
+        logger.warning("Skill %r maps to slash command %s already claimed by %r; keeping the first and skipping this one.",
+                       name, cmd_key, commands[cmd_key]["name"])
         return
-    commands[cmd_key] = {
-        "name": name,
-        "description": description or f"Invoke the {name} skill",
-        "skill_md_path": str(skill_md),
-        "skill_dir": str(skill_md.parent),
-    }
+    commands[cmd_key] = {"name": name, "description": description or f"Invoke the {name} skill",
+                         "skill_md_path": str(skill_md), "skill_dir": str(skill_md.parent)}
 
 
 def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
@@ -377,10 +358,8 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
         # the launch home, but a multiplexed profile scope may have changed it.
         skills_dir = _skills_dir()
         iters = [iter_project_skill_files(d) for d in get_project_skills_dirs()]
-        iters += [
-            iter_skill_index_files(d, "SKILL.md")
-            for d in ([skills_dir] if skills_dir.exists() else []) + get_external_skills_dirs()
-        ]
+        local = [skills_dir] if skills_dir.exists() else []
+        iters += [iter_skill_index_files(d, "SKILL.md") for d in local + get_external_skills_dirs()]
         for _iter in iters:
             for skill_md in _iter:
                 try:
@@ -464,14 +443,9 @@ def build_skill_invocation_message(
     loaded = _load_skill_payload(skill_info["skill_dir"], task_id=task_id) if skill_info else None
     if not loaded:
         return None
-    return _render_skill_block(
-        loaded,
-        f'[IMPORTANT: The user has invoked the "{loaded[2]}" skill, indicating they want '
-        "you to follow its instructions. The full skill content is loaded below.]",
-        task_id,
-        user_instruction=user_instruction,
-        runtime_note=runtime_note,
-    )
+    note = (f'[IMPORTANT: The user has invoked the "{loaded[2]}" skill, indicating they want '
+            "you to follow its instructions. The full skill content is loaded below.]")
+    return _render_skill_block(loaded, note, task_id, user_instruction=user_instruction, runtime_note=runtime_note)
 
 
 # Stacked slash-skill invocations — `/skill-a /skill-b do XYZ` loads every
@@ -505,16 +479,16 @@ def build_stacked_skill_invocation_message(
     """Build the user message for a stacked multi-skill slash invocation:
     ``(message, loaded_skill_names, missing_skill_names)``, or ``None`` when no skill loaded."""
     commands = get_skill_commands()
+    keys = [k for k in cmd_keys if k]
     loaded_names, missing, _disabled, skill_blocks = _load_skill_blocks(
-        [k for k in cmd_keys if k],
+        keys,
         lambda cmd_key: _load_skill_payload(commands[cmd_key]["skill_dir"], task_id=task_id) if cmd_key in commands else None,
         lambda name: f'[Loaded as part of the stacked skill invocation "{name}".]',  # bundle block marker
-        task_id,
-        missing_label=lambda k: k.lstrip("/"),
+        task_id, missing_label=lambda k: k.lstrip("/"),
     )
     if not skill_blocks:
         return None
-    typed = " ".join(k for k in cmd_keys if k)
+    typed = " ".join(keys)
     header = _scaffold_header(f'"{typed}" stacked skill bundle', loaded_names, missing=missing, user_instruction=user_instruction)
     return ("\n\n".join([header, *skill_blocks]), loaded_names, missing)
 
@@ -569,13 +543,9 @@ def build_preloaded_skills_prompt(skill_identifiers: list[str], task_id: str | N
     loaded_names, missing, _disabled, prompt_parts = _load_skill_blocks(
         [(raw or "").strip() for raw in skill_identifiers],
         lambda identifier: _load_skill_payload(identifier, task_id=task_id),
-        lambda name: (
-            f'[IMPORTANT: The user launched this CLI session with the "{name}" skill '
-            "preloaded. Treat its instructions as active guidance for the duration of this "
-            "session unless the user overrides them.]"
-        ),
-        task_id,
-        disabled_names=_disabled_skill_names(),
-        disabled_as_missing=True,
+        lambda name: (f'[IMPORTANT: The user launched this CLI session with the "{name}" skill '
+                      "preloaded. Treat its instructions as active guidance for the duration of this "
+                      "session unless the user overrides them.]"),
+        task_id, disabled_names=_disabled_skill_names(), disabled_as_missing=True,
     )
     return "\n\n".join(prompt_parts), loaded_names, missing

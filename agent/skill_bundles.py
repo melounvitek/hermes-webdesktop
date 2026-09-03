@@ -16,12 +16,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import yaml
 
 from hermes_constants import get_hermes_home
-from agent.skill_commands import (
-    command_snapshot,
-    diff_command_snapshots,
-    resolve_slash_key,
-    slugify_skill_name as _slugify,
-)
+from agent.skill_commands import command_snapshot, diff_command_snapshots, resolve_slash_key, slugify_skill_name as _slugify
 
 logger = logging.getLogger(__name__)
 
@@ -78,12 +73,9 @@ def _load_bundle_file(path: Path) -> Optional[Dict[str, Any]]:
     if not slug:
         return _skip("yielded empty slug")
     return {
-        "name": name,
-        "slug": slug,
+        "name": name, "slug": slug, "skills": skills, "path": str(path),
         "description": str(data.get("description") or "").strip() or f"Load {len(skills)} skills as a bundle",
-        "skills": skills,
         "instruction": str(data.get("instruction") or "").strip(),
-        "path": str(path),
     }
 
 
@@ -154,13 +146,8 @@ def build_bundle_invocation_message(
     if not skill_blocks:
         return None
     header = _scaffold_header(
-        f'"{bundle_name}" skill bundle',
-        loaded_names,
-        lead_lines=[f"Bundle: {bundle_name}"],
-        missing=missing,
-        disabled=disabled,
-        extra_instruction=info.get("instruction") or "",
-        user_instruction=user_instruction,
+        f'"{bundle_name}" skill bundle', loaded_names, lead_lines=[f"Bundle: {bundle_name}"], missing=missing,
+        disabled=disabled, extra_instruction=info.get("instruction") or "", user_instruction=user_instruction,
     )
     return ("\n\n".join([header, *skill_blocks]), loaded_names, missing)
 
