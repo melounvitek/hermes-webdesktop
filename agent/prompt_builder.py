@@ -15,30 +15,15 @@ from pathlib import Path
 from typing import Optional
 
 from hermes_constants import (
-    get_hermes_home,
-    get_skills_dir,
-    is_wsl,
-    reset_hermes_home_override,
-    set_hermes_home_override,
+    get_hermes_home, get_skills_dir, is_wsl, reset_hermes_home_override, set_hermes_home_override,
 )
 
 from agent.runtime_cwd import resolve_agent_cwd
 from agent.skill_utils import (
-    EXCLUDED_SKILL_DIRS,
-    ORG_ACTIVE_MARKER,
-    ORG_MIRROR_DIR_NAME,
-    ORG_PROVENANCE_FILE,
-    SKILL_SUPPORT_DIRS,
-    extract_skill_conditions,
-    extract_skill_description,
-    get_all_skills_dirs,
-    get_disabled_skill_names,
-    iter_skill_index_files,
-    parse_frontmatter,
-    read_active_org_id,
-    skill_matches_environment,
-    skill_matches_platform,
-    skill_matches_platform_list,
+    EXCLUDED_SKILL_DIRS, ORG_ACTIVE_MARKER, ORG_MIRROR_DIR_NAME, ORG_PROVENANCE_FILE, SKILL_SUPPORT_DIRS,
+    extract_skill_conditions, extract_skill_description, get_all_skills_dirs, get_disabled_skill_names,
+    iter_skill_index_files, parse_frontmatter, read_active_org_id, skill_matches_environment,
+    skill_matches_platform, skill_matches_platform_list,
 )
 from tools.threat_patterns import scan_for_threats as _scan_for_threats
 from utils import atomic_json_write
@@ -176,8 +161,7 @@ SESSION_SEARCH_GUIDANCE = (
 # compaction-pruning contract lives here; the safety-rule heading is referenced
 # by tests and compaction summaries.
 SKILLS_GUIDANCE = (
-    "When you work out a non-trivial workflow, record it with skill_manage for future reuse.\n"
-    "\n"
+    "When you work out a non-trivial workflow, record it with skill_manage for future reuse.\n\n"
     "## Skill Safety Rule\n"
     "A skill placeholder containing `[SKILL_PRUNED]` lost its content in context compression and is inaccessible — "
     "reload it with skill_view(name='...') before acting on anything that depends on it. After reloading, ignore any "
@@ -191,8 +175,7 @@ KANBAN_GUIDANCE = (
     "primary coordination surface — they write directly to the shared SQLite DB and work regardless of terminal "
     "backend (local/docker/modal/ssh).\n"
     "\n"
-    "## Lifecycle\n"
-    "\n"
+    "## Lifecycle\n\n"
     "1. **Orient.** Call `kanban_show()` first (no args — it defaults to your task). The response includes title, "
     "body, parent-task handoffs (summary + metadata), any prior attempts on this task if you're a retry, the full "
     "comment thread, and a pre-formatted `worker_context` you can treat as ground truth.\n"
@@ -226,8 +209,7 @@ KANBAN_GUIDANCE = (
     "`kanban_comment` starting with `hotspot: <path> — <one-line reason>` on your card and repeat the flag in your "
     "completion metadata, so the orchestrator can decompose that file before more work lands on it.\n"
     "\n"
-    "## Orchestrator mode\n"
-    "\n"
+    "## Orchestrator mode\n\n"
     "If your task is itself a decomposition task (e.g. a planner profile given a high-level goal), use `kanban_create` "
     "to fan out into child tasks — one per specialist, each with an explicit `assignee` and `parents=[...]` to express "
     "dependencies. Then `kanban_complete` your own task with a summary of the decomposition. Do NOT execute the work "
@@ -238,8 +220,7 @@ KANBAN_GUIDANCE = (
     "if two tasks would each pick one, decide it yourself and write the decision into BOTH card bodies. Every child "
     "card body must carry the decisions it depends on, because workers cannot see sibling context.\n"
     "\n"
-    "## Reference details that change outcomes\n"
-    "\n"
+    "## Reference details that change outcomes\n\n"
     "- **Workspace.** `cd $HERMES_KANBAN_WORKSPACE` first. For a `worktree` kind with no `.git`, `git worktree add "
     "<path> ${HERMES_KANBAN_BRANCH:-wt/$HERMES_KANBAN_TASK}` from the main repo, then cd there. For a project-linked "
     "task the workspace is a fresh `<repo>/.worktrees/<task-id>` and `$HERMES_KANBAN_BRANCH` a deterministic "
@@ -255,8 +236,7 @@ KANBAN_GUIDANCE = (
     "sits in `ready` forever). Ground every assignee in a real profile (`hermes profile list`, or ask the user), and "
     "express dependencies via `parents=[...]` on `kanban_create`, not prose.\n"
     "\n"
-    "## Do NOT\n"
-    "\n"
+    "## Do NOT\n\n"
     "- Do not shell out to `hermes kanban <verb>` for board operations. Use the `kanban_*` tools — they work across "
     "all terminal backends.\n"
     "- Do not complete a task you didn't actually finish. Block it.\n"
@@ -332,8 +312,7 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "- If a tool returns empty, partial, or suspiciously narrow results, retry with a broader or different query or "
     "strategy before concluding.\n"
     "- Keep calling tools until: (1) the task is complete, AND (2) you have verified the result.\n"
-    "</tool_persistence>\n"
-    "\n"
+    "</tool_persistence>\n\n"
     "<mandatory_tool_use>\n"
     "NEVER answer these from memory or mental computation — ALWAYS use a tool:\n"
     "- Arithmetic, math, calculations → use terminal or execute_code\n"
@@ -345,8 +324,7 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "- Current facts (weather, news, versions) → use web_search\n"
     "Your memory and user profile describe the USER, not the system you are running on. The execution environment may "
     "differ from what the user profile says about their personal setup.\n"
-    "</mandatory_tool_use>\n"
-    "\n"
+    "</mandatory_tool_use>\n\n"
     "<act_dont_ask>\n"
     "When a question has an obvious default interpretation, act on it immediately instead of asking for clarification. "
     "Examples:\n"
@@ -354,14 +332,12 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "- 'What OS am I running?' → check the live system (don't use user profile)\n"
     "- 'What time is it?' → run `date` (don't guess)\n"
     "Only ask for clarification when the ambiguity genuinely changes what tool you would call.\n"
-    "</act_dont_ask>\n"
-    "\n"
+    "</act_dont_ask>\n\n"
     "<prerequisite_checks>\n"
     "- Before taking an action, check whether prerequisite discovery, lookup, or context-gathering steps are needed.\n"
     "- Do not skip prerequisite steps just because the final action seems obvious.\n"
     "- If a task depends on output from a prior step, resolve that dependency first.\n"
-    "</prerequisite_checks>\n"
-    "\n"
+    "</prerequisite_checks>\n\n"
     "<verification>\n"
     "Before finalizing your response:\n"
     "- Correctness: does the output satisfy every stated requirement?\n"
@@ -370,8 +346,7 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "- Safety: if the next step has side effects (file writes, commands, API calls), confirm scope before executing.\n"
     "- Completion: 'done' means every named acceptance criterion is verified — never a plausible subset. Completing "
     "your plan is not itself the answer; the requested output must appear in your response.\n"
-    "</verification>\n"
-    "\n"
+    "</verification>\n\n"
     "<external_state_verification>\n"
     "- After any state-changing write to an external system (API call, message post, record update), verify the effect "
     "by reading back the exact target before claiming success — a successful tool call is not a successful task. Do "
@@ -380,14 +355,12 @@ OPENAI_MODEL_EXECUTION_GUIDANCE = (
     "enumerated count disagrees, re-fetch or parse programmatically — never finalize on 'go with what I have'.\n"
     "- When building write payloads, set fields explicitly rather than relying on provider defaults that could "
     "contradict intent.\n"
-    "</external_state_verification>\n"
-    "\n"
+    "</external_state_verification>\n\n"
     "<literal_preservation>\n"
     "- Preserve identifiers, commands, and values exactly as given — never 'repair' or normalize a token that fails a "
     "stated format. A successful lookup does not validate a malformed source token; validate format first, then look "
     "up.\n"
-    "</literal_preservation>\n"
-    "\n"
+    "</literal_preservation>\n\n"
     "<missing_context>\n"
     "- If required context is missing, do NOT guess or hallucinate an answer.\n"
     "- Use the appropriate lookup tool when missing information is retrievable (search_files, web_search, read_file, "
@@ -708,10 +681,7 @@ WSL_ENVIRONMENT_HINT = (
 # Backends that run commands (and every file tool) in a separate container /
 # remote host: host OS/$HOME/cwd would mislead, so the agent only sees the
 # machine it can touch.
-_REMOTE_TERMINAL_BACKENDS = frozenset({
-    "docker", "singularity", "modal", "daytona", "ssh",
-    "vercel_sandbox", "managed_modal",
-})
+_REMOTE_TERMINAL_BACKENDS = frozenset({"docker", "singularity", "modal", "daytona", "ssh", "vercel_sandbox", "managed_modal"})
 
 # Used when the live probe fails: only what the backend choice itself implies
 # (container type, likely OS family) — never an invented cwd/user/$HOME.
@@ -794,28 +764,13 @@ def _tenv_read(name: str, default: str = "") -> str:
     return terminal_env(name, default)
 
 
-_BACKEND_IMAGE_KEYS = {
-    "docker": "docker_image",
-    "singularity": "singularity_image",
-    "modal": "modal_image",
-    "daytona": "daytona_image",
-}
+_BACKEND_IMAGE_KEYS = {b: f"{b}_image" for b in ("docker", "singularity", "modal", "daytona")}
 # (config key, default) pairs forwarded to _create_environment's container_config.
 _CONTAINER_CONFIG_DEFAULTS = (
-    ("container_cpu", 1),
-    ("container_memory", 5120),
-    ("container_disk", 51200),
-    ("container_persistent", True),
-    ("modal_mode", "auto"),
-    ("docker_volumes", []),
-    ("docker_mount_cwd_to_workspace", False),
-    ("docker_forward_env", []),
-    ("docker_env", {}),
-    ("docker_run_as_host_user", False),
-    ("docker_extra_args", []),
-    ("docker_shm_size", "1g"),
-    ("docker_persist_across_processes", True),
-    ("docker_shared_container_key", ""),
+    ("container_cpu", 1), ("container_memory", 5120), ("container_disk", 51200), ("container_persistent", True),
+    ("modal_mode", "auto"), ("docker_volumes", []), ("docker_mount_cwd_to_workspace", False),
+    ("docker_forward_env", []), ("docker_env", {}), ("docker_run_as_host_user", False), ("docker_extra_args", []),
+    ("docker_shm_size", "1g"), ("docker_persist_across_processes", True), ("docker_shared_container_key", ""),
     ("docker_orphan_reaper", True),
 )
 # Single-line POSIX probe; `2>/dev/null` keeps a missing binary from polluting output.
@@ -1129,14 +1084,11 @@ def _build_snapshot_entry(skill_file: Path, skills_dir: Path, frontmatter: dict,
     # org_id is recorded for labeling + fail-loud collisions.
     org_id: str | None = None
     if len(parts) >= 3 and parts[0] == ORG_MIRROR_DIR_NAME:
-        org_id = parts[1]
-        parts = parts[2:]
+        org_id, parts = parts[1], parts[2:]
     if len(parts) >= 2:
-        skill_name = parts[-2]
-        category = "/".join(parts[:-2]) if len(parts) > 2 else parts[0]
+        skill_name, category = parts[-2], ("/".join(parts[:-2]) if len(parts) > 2 else parts[0])
     else:
-        category = "general"
-        skill_name = skill_file.parent.name
+        skill_name, category = skill_file.parent.name, "general"
     platforms = frontmatter.get("platforms") or []
     platforms = [platforms] if isinstance(platforms, str) else platforms
     entry = {
@@ -1183,8 +1135,7 @@ def _skill_should_show(
         return False
     if available_tools is None and available_toolsets is None:
         return True  # no filtering info — show everything
-    at = available_tools or set()
-    ats = available_toolsets or set()
+    at, ats = available_tools or set(), available_toolsets or set()
     # fallback_for: hide when the primary IS available; requires: hide when a requirement is NOT.
     return not (
         any(ts in ats for ts in conditions.get("fallback_for_toolsets", []))
@@ -1233,9 +1184,7 @@ def build_skills_system_prompt(
         project_dirs = get_project_skills_dirs()
         if not skills_dir.exists() and not external_dirs and not project_dirs:
             return ""
-        return _build_skills_system_prompt_inner(
-            skills_dir, external_dirs, available_tools, available_toolsets, compact_categories, project_dirs=project_dirs,
-        )
+        return _build_skills_system_prompt_inner(skills_dir, external_dirs, available_tools, available_toolsets, compact_categories, project_dirs)
     finally:
         if _home_token is not None:
             reset_hermes_home_override(_home_token)
@@ -1250,13 +1199,10 @@ def _read_category_descriptions(root: Path, log_fmt: str) -> dict[str, str]:
     found: dict[str, str] = {}
     for desc_file in iter_skill_index_files(root, "DESCRIPTION.md"):
         try:
-            fm, _ = parse_frontmatter(desc_file.read_text(encoding="utf-8"))
-            cat_desc = fm.get("description")
-            if not cat_desc:
-                continue
-            rel = desc_file.relative_to(root)
-            cat = "/".join(rel.parts[:-1]) if len(rel.parts) > 1 else "general"
-            found[cat] = str(cat_desc).strip().strip("'\"")
+            cat_desc = parse_frontmatter(desc_file.read_text(encoding="utf-8"))[0].get("description")
+            if cat_desc:
+                rel = desc_file.relative_to(root)
+                found["/".join(rel.parts[:-1]) if len(rel.parts) > 1 else "general"] = str(cat_desc).strip().strip("'\"")
         except Exception as e:
             logger.debug(log_fmt, desc_file, e)
     return found
@@ -1276,16 +1222,12 @@ def _collect_extra_skills(
     for skill_file in skill_files:
         try:
             is_compatible, frontmatter, desc = _parse_skill_file(skill_file)
-            if not is_compatible:
-                continue
-            entry = _build_snapshot_entry(skill_file, root, frontmatter, desc)
-            fm_name = entry["frontmatter_name"]
-            if fm_name in claimed or hides(fm_name, entry["skill_name"], extract_skill_conditions(frontmatter)):
+            entry = _build_snapshot_entry(skill_file, root, frontmatter, desc) if is_compatible else None
+            fm_name = entry["frontmatter_name"] if entry else ""
+            if not entry or fm_name in claimed or hides(fm_name, entry["skill_name"], extract_skill_conditions(frontmatter)):
                 continue
             claimed.add(fm_name)
-            skills_by_category.setdefault(entry["category"], []).append(
-                (fm_name, f"{desc_prefix}{entry['description']}".strip())
-            )
+            skills_by_category.setdefault(entry["category"], []).append((fm_name, f"{desc_prefix}{entry['description']}".strip()))
         except Exception as e:
             logger.debug(log_fmt, skill_file, e)
 
@@ -1297,15 +1239,11 @@ def _label_visible_entries(visible_entries: list[dict], skills_by_category: dict
     for entry in visible_entries:
         name_owners.setdefault(_entry_name(entry), set()).add("org" if entry.get("org_id") else "personal")
     for entry in visible_entries:
-        fm = _entry_name(entry)
-        desc = entry.get("description", "")
-        org_id = entry.get("org_id")
+        fm, desc, org_id = _entry_name(entry), entry.get("description", ""), entry.get("org_id")
         if org_id:
             author = entry.get("org_author") or ""
             desc = f"[org-shared{': by ' + author if author else ''}] {desc}".strip()
-            category = f"org:{org_id}"
-        else:
-            category = entry.get("category") or "general"
+        category = f"org:{org_id}" if org_id else (entry.get("category") or "general")
         if len(name_owners[fm]) > 1:
             desc = f"[name collision — also exists {'personally' if org_id else 'in your org'}; load via category path] {desc}".strip()
         skills_by_category.setdefault(category, []).append((fm, desc))
@@ -1323,9 +1261,7 @@ def _render_skills_index(
     # Demoted categories collapse to one names-only line. NEVER drop entries —
     # agent-created skills are the model's project memory and it won't rediscover
     # them via skills_list. Nested categories follow their parent.
-    demoted = frozenset(
-        cat for cat in skills_by_category if cat.split("/", 1)[0] in (compact_categories or frozenset())
-    )
+    demoted = frozenset(cat for cat in skills_by_category if cat.split("/", 1)[0] in (compact_categories or frozenset()))
     hidden_note = (
         "\n(Categories marked [names only] are outside the current coding "
         "context, so their descriptions are omitted — the skills work "
@@ -1363,8 +1299,7 @@ def _render_skills_index(
         "\n"
         "<available_skills>\n"
         + "\n".join(index_lines) + "\n"
-        "</available_skills>\n"
-        "\n"
+        "</available_skills>\n\n"
         "Only proceed without loading a skill if genuinely none are relevant to the task."
         + hidden_note
     )
@@ -1414,8 +1349,7 @@ def _build_skills_system_prompt_inner(
     if snapshot is not None:
         candidates = [
             (entry, skill_matches_platform_list(entry.get("platforms") or []))
-            for entry in snapshot.get("skills", [])
-            if isinstance(entry, dict)
+            for entry in snapshot.get("skills", []) if isinstance(entry, dict)
         ]
         category_descriptions = {str(k): str(v) for k, v in (snapshot.get("category_descriptions") or {}).items()}
     else:
@@ -1424,8 +1358,7 @@ def _build_skills_system_prompt_inner(
             is_compatible, frontmatter, desc = _parse_skill_file(skill_file)
             candidates.append((_build_snapshot_entry(skill_file, skills_dir, frontmatter, desc), is_compatible))
     visible_entries: list[dict] = [
-        entry
-        for entry, is_compatible in candidates
+        entry for entry, is_compatible in candidates
         if is_compatible and not hides(_entry_name(entry), entry.get("skill_name") or "", entry.get("conditions") or {})
     ]
 
@@ -1438,9 +1371,8 @@ def _build_skills_system_prompt_inner(
         for proj_dir in project_dirs:
             if proj_dir.exists():
                 _collect_extra_skills(
-                    proj_dir, iter_project_skill_files(proj_dir), hides, project_names,
-                    skills_by_category, desc_prefix="[project] ",
-                    log_fmt="Error reading project skill %s: %s",
+                    proj_dir, iter_project_skill_files(proj_dir), hides, project_names, skills_by_category,
+                    desc_prefix="[project] ", log_fmt="Error reading project skill %s: %s",
                 )
     if project_names:
         # Drop shadowed profile-local entries BEFORE org labeling so collision
@@ -1460,9 +1392,8 @@ def _build_skills_system_prompt_inner(
         if not ext_dir.exists():
             continue
         _collect_extra_skills(
-            ext_dir, iter_skill_index_files(ext_dir, "SKILL.md"), hides, seen_skill_names,
-            skills_by_category, desc_prefix="",
-            log_fmt="Error reading external skill %s: %s",
+            ext_dir, iter_skill_index_files(ext_dir, "SKILL.md"), hides, seen_skill_names, skills_by_category,
+            desc_prefix="", log_fmt="Error reading external skill %s: %s",
         )
         for cat, cat_desc in _read_category_descriptions(ext_dir, "Could not read external skill description %s: %s").items():
             category_descriptions.setdefault(cat, cat_desc)
@@ -1639,9 +1570,7 @@ def _load_cursorrules(cwd_path: Path, context_length: Optional[int] = None) -> s
             cursorrules_content += f"## {label}\n\n{_scan_context_content(content, label)}\n\n"
     if not cursorrules_content:
         return ""
-    return _truncate_content(
-        cursorrules_content, ".cursorrules", context_length=context_length, read_path=str(cwd_path / ".cursorrules"),
-    )
+    return _truncate_content(cursorrules_content, ".cursorrules", context_length=context_length, read_path=str(cwd_path / ".cursorrules"))
 
 
 def build_context_files_prompt(
