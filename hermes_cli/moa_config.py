@@ -29,8 +29,7 @@ def _coerce_number(value: Any, cast, default=None, *, positive: bool = False):
     """Coerce ``value`` with ``cast`` (float/int); ``default`` when unset/blank/invalid.
 
     ``int`` also accepts float-looking strings ("3.0"). With ``positive`` the result must be > 0
-    (and finite for floats) or ``default`` is returned.
-    """
+    (and finite for floats) or ``default`` is returned."""
     if value is None or value == "":
         return default
     try:
@@ -50,20 +49,16 @@ def _coerce_number(value: Any, cast, default=None, *, positive: bool = False):
 def _coerce_reference_timeout(value: Any) -> float | None:
     """Finite positive advisor timeout, or None to inherit ``auxiliary.moa_reference.timeout``.
 
-    No artificial cap: long-thinking advisor models legitimately run far beyond five minutes.
-    """
+    No artificial cap: long-thinking advisor models legitimately run far beyond five minutes."""
     if isinstance(value, bool):
         return DEFAULT_MOA_REFERENCE_TIMEOUT
     return _coerce_number(value, float, DEFAULT_MOA_REFERENCE_TIMEOUT, positive=True)
 
 
 def _coerce_fanout(value: Any) -> str:
-    """Normalize the fan-out cadence to ``per_iteration`` | ``user_turn`` | ``every_n:<N>`` (N >= 2).
-
-    The mapping form ``{mode: every_n, n: N}`` from hand-edited YAML is normalized to the string;
-    ``every_n:1`` collapses to ``per_iteration``; anything unparseable falls back to ``user_turn``
-    (the cheapest cadence).
-    """
+    """Normalize the fan-out cadence to ``per_iteration`` | ``user_turn`` | ``every_n:<N>`` (N >= 2);
+    the mapping form ``{mode: every_n, n: N}`` becomes the string, ``every_n:1`` collapses to
+    ``per_iteration``, anything unparseable falls back to ``user_turn`` (the cheapest cadence)."""
     def _every_n(n: int) -> str:
         return f"every_n:{n}" if n >= 2 else ("per_iteration" if n == 1 else "user_turn")
 
@@ -87,8 +82,7 @@ def coerce_privacy_filter(value: Any) -> str:
 
     ``false``/``None``/unknown values land on '' so a hand-edited config degrades to prior
     behavior. 'display' redacts user-visible surfaces only (reference blocks in the UI and saved
-    MoA trace records).
-    """
+    MoA trace records)."""
     if value is True:
         return "full"
     if value is None or value is False:
@@ -121,8 +115,7 @@ def _slot_problem(slot: Any) -> str | None:
     """Human-readable problem for a slot ``_clean_slot`` would drop; None when complete and valid.
 
     Mirrors ``_clean_slot`` exactly so the write-boundary validator (``validate_moa_payload``) and
-    the tolerant runtime normalizer can never disagree about what is acceptable.
-    """
+    the tolerant runtime normalizer can never disagree about what is acceptable."""
     if not isinstance(slot, dict):
         return "must be an object with 'provider' and 'model'"
     provider = str(slot.get("provider") or "").strip()
@@ -172,13 +165,10 @@ def _reference_slots(raw_refs: Any) -> list:
 
 
 def validate_moa_payload(raw: Any) -> list[str]:
-    """Return the problems ``normalize_moa_config`` would silently paper over.
+    """Return the problems ``normalize_moa_config`` would silently paper over (empty = safe to save).
 
-    ``normalize_moa_config`` is deliberately tolerant: at *read* time a hand-edited config must
-    degrade to defaults rather than crash the agent. That same tolerance at *write* time is a
-    corruption engine — a client that sends a half-filled slot gets its whole preset silently
-    replaced with the hardcoded defaults. Empty list means safe to save.
-    """
+    Read-time tolerance (a hand-edited config degrades to defaults instead of crashing) is a
+    corruption engine at write time: a half-filled slot would silently replace the whole preset."""
     if not isinstance(raw, dict):
         return ["MoA config must be an object"]
 
@@ -225,16 +215,11 @@ def _normalize_preset(raw: Any) -> dict[str, Any]:
         # Failed-advisor disclosure policy; unknown values fail loud.
         "degraded_reference_policy": policy if policy in {"loud", "silent"} else "loud",
         "max_tokens": _coerce_number(raw.get("max_tokens"), int, 4096),
-        # Cap on each reference ADVISOR's output per turn. None (default) = uncapped. Advisor
-        # generation dominates MoA latency (~0.88 correlation with output tokens) and the
-        # aggregator only needs the gist, so e.g. 600 roughly halves wall time. Never caps the
-        # acting aggregator (its output is the user-visible answer).
+        # Per-turn cap on each reference ADVISOR (never the acting aggregator). None = uncapped;
+        # advisor generation dominates MoA latency, so e.g. 600 roughly halves wall time.
         "reference_max_tokens": _coerce_number(raw.get("reference_max_tokens"), int, positive=True),
-        # When the reference fan-out runs: "user_turn" (default, cheapest) runs advisors ONCE per
-        # user turn, then the aggregator acts alone; "per_iteration" re-runs them every tool
-        # iteration (advice tracks live state, spend multiplied by loop depth); "every_n:<N>"
-        # runs on the first iteration of each turn and every Nth after, reusing cached guidance
-        # in between.
+        # "user_turn" (default, cheapest): advisors run ONCE per user turn; "per_iteration": every
+        # tool iteration; "every_n:<N>": first iteration of each turn and every Nth after.
         "fanout": _coerce_fanout(raw.get("fanout"))}
 
 
@@ -295,8 +280,7 @@ def exact_moa_preset_name(config: Any, text: str) -> str | None:
     Used by the no-explicit-provider switch path for a bare ``/model <preset>``. Because the match
     is implicit it honors the per-preset ``enabled`` opt-out: a plain model switch that collides
     with a disabled preset's name must not silently pivot onto the MoA provider. Explicit
-    ``--provider moa`` / picker selection bypasses this, so disabled presets stay reachable.
-    """
+    ``--provider moa`` / picker selection bypasses this, so disabled presets stay reachable."""
     wanted = str(text or "").strip()
     if not wanted:
         return None
