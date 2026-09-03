@@ -120,7 +120,7 @@ class TestNamedCustomProviderCatalogs:
             }
         )
         with patch("hermes_cli.config.load_config", return_value=cfg), patch(
-            "hermes_cli.models.should_use_ollama_native_catalog",
+            "hermes_cli.models_local.should_use_ollama_native_catalog",
             return_value=True,
         ), patch(
             "hermes_cli.model_switch_providers._fetch_picker_live_models",
@@ -148,7 +148,7 @@ class TestNamedCustomProviderCatalogs:
             ]
         )
         with patch("hermes_cli.config.load_config", return_value=cfg), patch(
-            "hermes_cli.models.should_use_ollama_native_catalog",
+            "hermes_cli.models_local.should_use_ollama_native_catalog",
             return_value=True,
         ), patch(
             "hermes_cli.model_switch_providers._fetch_picker_live_models",
@@ -172,7 +172,7 @@ class TestNamedCustomProviderCatalogs:
         from hermes_cli.model_switch_providers import _NativePickerModelList
 
         with patch("hermes_cli.config.load_config", return_value=cfg), patch(
-            "hermes_cli.models.should_use_ollama_native_catalog",
+            "hermes_cli.models_local.should_use_ollama_native_catalog",
             return_value=True,
         ), patch(
             "hermes_cli.model_switch_providers._fetch_picker_live_models",

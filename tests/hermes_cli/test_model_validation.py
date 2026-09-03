@@ -3,24 +3,9 @@
 import pytest
 from unittest.mock import MagicMock, patch
 
-from hermes_cli.models import (
-    azure_foundry_model_api_mode,
-    copilot_model_api_mode,
-    fetch_github_model_catalog,
-    curated_models_for_provider,
-    fetch_api_models,
-    fetch_lmstudio_models,
-    github_model_reasoning_efforts,
-    normalize_copilot_model_id,
-    normalize_opencode_model_id,
-    normalize_provider,
-    opencode_model_api_mode,
-    parse_model_input,
-    probe_api_models,
-    provider_label,
-    provider_model_ids,
-    validate_requested_model,
-)
+from hermes_cli.models import azure_foundry_model_api_mode, copilot_model_api_mode, fetch_github_model_catalog, curated_models_for_provider, fetch_api_models, github_model_reasoning_efforts, normalize_copilot_model_id, normalize_opencode_model_id, normalize_provider, opencode_model_api_mode, parse_model_input, probe_api_models, provider_label, provider_model_ids
+from hermes_cli.models_local import fetch_lmstudio_models
+from hermes_cli.models_validate import validate_requested_model
 
 
 # -- helpers -----------------------------------------------------------------

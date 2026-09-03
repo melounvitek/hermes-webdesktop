@@ -249,9 +249,11 @@ def _reasoning_catalog_reader(slug: str):
     """Per-model reasoning-capability reader for aggregators that publish one. Cache-only — the picker
     must never block on HTTP; a cold cache warms in the background and reports no restriction until then."""
     try:
-        from hermes_cli.models import (
-            nous_model_reasoning_capabilities, openrouter_model_reasoning_capabilities,
-            warm_nous_reasoning_caps_async, warm_openrouter_reasoning_caps_async,
+        from hermes_cli.models_reasoning_caps import (
+            nous_model_reasoning_capabilities,
+            openrouter_model_reasoning_capabilities,
+            warm_nous_reasoning_caps_async,
+            warm_openrouter_reasoning_caps_async,
         )
     except Exception:
         return None
@@ -573,9 +575,15 @@ def _apply_pricing(rows: list[dict], *, force_fresh_nous_tier: bool = False, cac
     ``free_tier`` (account is free-tier) and ``unavailable_models`` (paid models a free user can't pick).
     ``cached_only`` never hits the network: unknown Nous entitlement fails closed (``free_tier_pending``,
     all models locked) and missing pricing is marked ``pricing_pending``."""
+    from hermes_cli.models_pricing import (
+        _format_price_per_mtok,
+        compute_sale_discount,
+        get_pricing_for_provider,
+    )
     from hermes_cli.models import (
-        _format_price_per_mtok, check_nous_free_tier, compute_sale_discount, get_cached_nous_free_tier,
-        get_pricing_for_provider, partition_nous_models_by_tier,
+        check_nous_free_tier,
+        get_cached_nous_free_tier,
+        partition_nous_models_by_tier,
     )
 
     nous_free_tier: Optional[bool] = None  # resolved once (cached in models.py for the TTL window)
@@ -686,7 +694,7 @@ def _prewarm_pricing_async(
     """Warm picker pricing caches without delaying the current payload (one worker per
     profile + endpoint scope; a live worker is reused)."""
     from hermes_constants import hermes_home_key
-    from hermes_cli.models import pricing_cache_scope
+    from hermes_cli.models_pricing import pricing_cache_scope
 
     slugs = {str(row.get("slug") or "").lower() for row in rows if row.get("slug")}
     endpoint_scope = tuple(sorted(

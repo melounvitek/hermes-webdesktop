@@ -1328,9 +1328,17 @@ def _pick_nous_model_after_login(
     if not isinstance(runtime_key, str) or not runtime_key:
         raise _nous_err("No runtime API key available to fetch models", "invalid_token")
     from hermes_cli.models import (
-        get_curated_nous_model_ids, get_pricing_for_provider, check_nous_free_tier,
-        partition_nous_models_by_tier, nous_policy_allowed_ids, restrict_to_nous_policy,
-        union_with_portal_free_recommendations, union_with_portal_paid_recommendations)
+        get_curated_nous_model_ids,
+        check_nous_free_tier,
+        partition_nous_models_by_tier,
+        union_with_portal_free_recommendations,
+        union_with_portal_paid_recommendations,
+    )
+    from hermes_cli.models_pricing import (
+        get_pricing_for_provider,
+        nous_policy_allowed_ids,
+        restrict_to_nous_policy,
+    )
     model_ids = get_curated_nous_model_ids()
     _portal = auth_state.get("portal_base_url", "")
     print()

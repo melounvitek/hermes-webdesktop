@@ -59,7 +59,7 @@ class _ModelPickerRows:
         self, all_models: List[str], pricing: Optional[Dict[str, Dict[str, str]]], *,
         current_model: str, sale_chrome: bool,
     ) -> None:
-        from hermes_cli.models import _format_price_per_mtok, compute_sale_discount
+        from hermes_cli.models_pricing import _format_price_per_mtok, compute_sale_discount
         self.current_model = current_model
         self.has_pricing = bool(pricing and any(pricing.get(m) for m in all_models))
         # Leave room for a leading "★ " on sale rows (Nous only).

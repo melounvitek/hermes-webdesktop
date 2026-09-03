@@ -4,7 +4,7 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from hermes_cli.models import LMStudioLoadResult
+from hermes_cli.models_local import LMStudioLoadResult
 from run_agent import AIAgent
 from hermes_cli.route_identity import normalize_route_base_url
 from agent.context_compressor import ContextCompressor

@@ -26,12 +26,10 @@ if TYPE_CHECKING:
 
 from hermes_cli import __version__ as _HERMES_VERSION
 from hermes_cli.urllib_security import open_credentialed_url
-from hermes_cli.models_catalog_static import (  # noqa: F401  (re-exported; tests patch hermes_cli.models.<name>)
+from hermes_cli.models_catalog_static import (
     CANONICAL_PROVIDERS,
     OPENROUTER_MODELS,
     PREFERRED_SILENT_DEFAULT_MODEL,
-    PROVIDER_GROUPS,
-    ProviderEntry,
     VERCEL_AI_GATEWAY_MODELS,
     _AGGREGATOR_PROVIDERS,
     _AZURE_FOUNDRY_RESPONSES_PREFIXES,
@@ -47,78 +45,21 @@ from hermes_cli.models_catalog_static import (  # noqa: F401  (re-exported; test
     _PROVIDER_MODELS,
     _PROVIDER_RETIRED_ALIASES,
     _SILENT_DEFAULT_PROVIDERS,
-    _xai_finalize_catalog,
-    group_providers,
-    provider_group_for_slug)
-from hermes_cli.models_reasoning_caps import (  # noqa: F401  (re-exported; tests patch hermes_cli.models.<name>)
+    _xai_finalize_catalog)
+from hermes_cli.models_reasoning_caps import (
     _OPENROUTER_CATALOG_URL,
-    _read_reasoning_caps_disk,
-    _reasoning_caps_disk_path,
-    _save_reasoning_caps_disk,
-    _seed_reasoning_caps,
-    nous_catalog_url,
-    nous_model_reasoning_capabilities,
-    # Live-catalog metadata first (ported from PrimeIntellect-ai/prime-agent#1258): OpenRouter's /v1/models
-    # entries advertise reasoning support via supported_parameters + a reasoning object, which covers every
-    # routed vendor without a hand-maintained prefix list. The static prefix allowlist below repeatedly went
-    # stale one vendor at a time (nvidia/ missing → #75386; same class as tencent/, xiaomi/ additions before
-    # it) — metadata makes new vendors work without a code change. One catalog fetch per process, cached;
-    # unknown (catalog unreachable / unlisted model) falls back to the static list.
-    openrouter_model_reasoning_capabilities,
-    parse_openrouter_reasoning_capabilities,
-    refresh_reasoning_caps_async,
-    warm_nous_reasoning_caps_async,
-    warm_openrouter_reasoning_caps_async)
-from hermes_cli.models_local import (  # noqa: F401  (re-exported; tests patch hermes_cli.models.<name>)
-    LMStudioLoadResult,
+    _seed_reasoning_caps)
+from hermes_cli.models_local import (
     _OLLAMA_LOCAL_MODELS_CACHE,
     _OLLAMA_LOCAL_MODELS_CACHE_TTL,
     _OLLAMA_LOCAL_PROBE_FAILURE_CACHE,
     _OLLAMA_LOCAL_PROBE_REACHABLE,
     _get_ollama_base_url,
     _get_ollama_native_headers,
-    _get_ollama_request_headers,
-    _lmstudio_fetch_raw_models,
-    _lmstudio_server_root,
-    _normalize_openai_base_url,
     _ollama_local_catalog,
     _ollama_probe_cache_key,
     _root_for_ollama_native_api,
-    _same_ollama_native_root,
-    _strip_ollama_cloud_suffix,
-    ensure_lmstudio_model_loaded,
-    fetch_lmstudio_models,
-    fetch_ollama_cloud_models,
-    fetch_ollama_local_models,
-    lmstudio_model_reasoning_options,
-    ollama_model_supports_thinking,
-    probe_lmstudio_models,
-    probe_ollama_local_models,
-    should_use_ollama_native_catalog)
-from hermes_cli.models_pricing import (  # noqa: F401  (re-exported; tests patch hermes_cli.models.<name>)
-    _FAILED_CATALOG_TTL_SECONDS,
-    _NOUS_CATALOG_TTL_SECONDS,
-    _NOUS_POLICY_APPEND_MAX,
-    _cache_catalog,
-    _cached_catalog,
-    _fetch_deepinfra_pricing,
-    _fetch_novita_pricing,
-    _format_price_per_mtok,
-    _pricing_auth_fingerprint,
-    _pricing_cache,
-    _pricing_cache_retry_after,
-    _resolve_nous_pricing_credentials,
-    compute_sale_discount,
-    fetch_ai_gateway_pricing,
-    fetch_models_with_pricing,
-    _pricing_provider_cache_keys,
-    get_cached_nous_inference_base_url,
-    get_pricing_for_provider,
-    nous_policy_allowed_ids,
-    peek_cached_pricing,
-    pricing_cache_scope,
-    restrict_to_nous_policy)
-from hermes_cli.models_validate import validate_requested_model  # noqa: F401  (re-exported)
+    fetch_ollama_cloud_models)
 
 logger = logging.getLogger(__name__)
 

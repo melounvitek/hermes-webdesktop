@@ -500,6 +500,7 @@ class TestLoginNousSkipKeepsCurrent:
         """Patch OAuth + model-list + prompt so _login_nous doesn't hit network."""
         import hermes_cli.auth as auth_mod
         import hermes_cli.models as models_mod
+        from hermes_cli import models_pricing
         import hermes_cli.nous_subscription as ns
 
         fake_auth_state = {
@@ -518,7 +519,7 @@ class TestLoginNousSkipKeepsCurrent:
             auth_mod, "_prompt_model_selection",
             lambda *a, **kw: prompt_returns,
         )
-        monkeypatch.setattr(models_mod, "get_pricing_for_provider", lambda p: {})
+        monkeypatch.setattr(models_pricing, "get_pricing_for_provider", lambda p: {})
         free_tier_calls = []
 
         def _check_nous_free_tier(**kwargs):

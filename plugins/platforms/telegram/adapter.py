@@ -3958,7 +3958,7 @@ class TelegramAdapter(BasePlatformAdapter):
         """Paginated top-level provider keyboard folding provider families (Kimi/Moonshot, MiniMax, xAI…)
         into one ``mpg:<gid>`` button via the shared ``group_providers`` fold; singles are ``mp:<slug>``."""
         try:
-            from hermes_cli.models import group_providers
+            from hermes_cli.models_catalog_static import group_providers
         except Exception:
             group_providers = None
         by_slug = {p.get("slug"): p for p in providers}
@@ -4117,7 +4117,7 @@ class TelegramAdapter(BasePlatformAdapter):
         elif data.startswith("mpg:"):  # provider group selected: show member providers
             group_id = data[4:]
             try:
-                from hermes_cli.models import PROVIDER_GROUPS
+                from hermes_cli.models_catalog_static import PROVIDER_GROUPS
                 _label, _desc, member_slugs = PROVIDER_GROUPS.get(group_id, ("", "", []))
             except Exception:
                 _label, member_slugs = "", []

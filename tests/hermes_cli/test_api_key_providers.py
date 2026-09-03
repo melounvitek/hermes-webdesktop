@@ -902,9 +902,10 @@ class TestNovitaProvider:
     def test_novita_pricing_cache(self, monkeypatch):
         """_fetch_novita_pricing should cache results in _pricing_cache."""
         from hermes_cli import models as models_mod
+        from hermes_cli import models_pricing
         monkeypatch.setenv("NOVITA_API_KEY", "sk-test-key")
         monkeypatch.setenv("NOVITA_BASE_URL", "https://api.novita.ai/openai/v1")
-        models_mod._pricing_cache.pop("https://api.novita.ai/openai/v1", None)
+        models_pricing._pricing_cache.pop("https://api.novita.ai/openai/v1", None)
 
         call_count = {"n": 0}
         fake_payload = {
@@ -937,17 +938,17 @@ class TestNovitaProvider:
         )
 
         # First call hits the network.
-        first = models_mod._fetch_novita_pricing()
+        first = models_pricing._fetch_novita_pricing()
         assert "x/y" in first
         assert call_count["n"] == 1
 
         # Second call returns cached result without re-hitting the network.
-        second = models_mod._fetch_novita_pricing()
+        second = models_pricing._fetch_novita_pricing()
         assert second == first
         assert call_count["n"] == 1
 
         # force_refresh bypasses the cache.
-        models_mod._fetch_novita_pricing(force_refresh=True)
+        models_pricing._fetch_novita_pricing(force_refresh=True)
         assert call_count["n"] == 2
 
 
@@ -1004,6 +1005,7 @@ def _deepinfra_cache_isolation(monkeypatch):
     a later test's fetch within the failure TTL.
     """
     import hermes_cli.models as _models_mod
+    from hermes_cli import models_pricing
     monkeypatch.setattr(_models_mod, "_deepinfra_catalog_cache", {})
     monkeypatch.setattr(_models_mod, "_deepinfra_catalog_neg_cache", {})
     yield
@@ -1030,6 +1032,7 @@ class TestFetchDeepInfraModels:
                 ]}).encode()
 
         import hermes_cli.models as models
+        from hermes_cli import models_pricing
         monkeypatch.setattr(
             models, "_urlopen_model_catalog_request", lambda *a, **kw: _Resp()
         )
@@ -1047,6 +1050,7 @@ class TestFetchDeepInfraModels:
 
     def test_catalog_uses_credential_safe_opener(self, monkeypatch):
         import hermes_cli.models as models
+        from hermes_cli import models_pricing
 
         seen = {}
 
@@ -1119,6 +1123,7 @@ class TestDeepInfraTagFiltering:
         ]}
         from hermes_cli.models import _fetch_deepinfra_models_by_tag
         import hermes_cli.models as _m
+        from hermes_cli import models_pricing
 
         for surface in ("chat", "image-gen", "tts", "stt", "embed"):
             monkeypatch.setattr(
@@ -1171,12 +1176,13 @@ class TestDeepInfraPricingFetcher:
             {"id": "vendor/model-image", "metadata": {"tags": ["image-gen"], "pricing": {"per_image_unit": 0.05}}},
         ]}
         import hermes_cli.models as models
+        from hermes_cli import models_pricing
         monkeypatch.setattr(
             models,
             "_urlopen_model_catalog_request",
             _make_urlopen_returning(payload),
         )
-        from hermes_cli.models import get_pricing_for_provider
+        from hermes_cli.models_pricing import get_pricing_for_provider
 
         # get_pricing_for_provider → _fetch_deepinfra_pricing dispatch path
         result = get_pricing_for_provider("deepinfra")

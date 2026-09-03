@@ -1,8 +1,7 @@
 """Static provider/model catalog tables (data only — no network).
 
 Curated per-provider model lists, the canonical provider registry, display groups and alias
-maps. Split out of ``hermes_cli.models``, which re-imports every name so
-``hermes_cli.models.<name>`` keeps resolving (and monkeypatching) as before.
+maps. Split out of ``hermes_cli.models``.
 """
 
 from __future__ import annotations

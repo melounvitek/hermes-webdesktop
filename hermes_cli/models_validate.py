@@ -1,8 +1,8 @@
 """Validate a requested ``/model`` value against the active provider's catalog.
 
-Split out of ``hermes_cli.models``; :func:`validate_requested_model` is re-imported there. Every
-catalog fetcher this module calls is looked up on ``hermes_cli.models`` at call time (``_m.<name>``)
-so existing ``patch("hermes_cli.models.<name>")`` mocks keep intercepting.
+Split out of ``hermes_cli.models``. Catalog fetchers defined in ``hermes_cli.models`` are looked up
+there at call time (``_m.<name>``) so ``patch("hermes_cli.models.<name>")`` mocks keep intercepting;
+local-server probes are looked up on ``hermes_cli.models_local`` (``_ml.<name>``) the same way.
 
 Every provider branch returns a verdict dict (see :func:`_verdict`) or ``None`` for "not decided
 here — keep walking the ladder". The ladder ORDER is behavior (see ``_LADDER``).
@@ -170,13 +170,13 @@ def _parse_openrouter_preset(req: _Request) -> Optional[dict[str, Any]]:
 
 
 def _validate_lmstudio(req: _Request) -> dict[str, Any]:
-    from hermes_cli import models as _m
+    from hermes_cli import models_local as _ml
     from hermes_cli.auth import AuthError
 
     # probe_lmstudio_models distinguishes None (unreachable / malformed) from [] (reachable,
     # nothing chat-capable loaded); fetch_lmstudio_models collapses both to [].
     try:
-        models = _m.probe_lmstudio_models(api_key=req.api_key, base_url=req.base_url)
+        models = _ml.probe_lmstudio_models(api_key=req.api_key, base_url=req.base_url)
     except AuthError as exc:
         return _reject(f"{exc} Set `LM_API_KEY` (or update it) to match the server's bearer token.")
     if models is None:
@@ -194,10 +194,11 @@ def _ollama_probe_headers(req: _Request) -> dict[str, str]:
     when the probed endpoint is the configured one (never leak them to a different host). Caller
     headers win; a caller ``api_key`` becomes the Authorization header unless the caller sent one."""
     from hermes_cli import models as _m
+    from hermes_cli import models_local as _ml
     from hermes_cli.models_local import _configured_ollama_base_url, _drop_authorization
 
     configured_base = _configured_ollama_base_url()
-    configured_allowed = not configured_base or _m._same_ollama_native_root(req.base_url or "", configured_base)
+    configured_allowed = not configured_base or _ml._same_ollama_native_root(req.base_url or "", configured_base)
     configured = _m._get_ollama_native_headers(req.base_url, api_key=req.api_key) if configured_allowed else {}
     if req.headers is None:
         return configured
@@ -215,17 +216,18 @@ def _validate_ollama_native(req: _Request) -> Optional[dict[str, Any]]:
     looks like a local Ollama server. Also resolves ``base_url`` for the raw ``ollama`` provider,
     which later branches (custom) rely on."""
     from hermes_cli import models as _m
+    from hermes_cli import models_local as _ml
 
     if str(req.provider or "").strip().lower() == "ollama" and not req.base_url:
         req.base_url = _m._get_ollama_base_url()
     headers = _ollama_probe_headers(req)
-    if not _m.should_use_ollama_native_catalog(req.provider, req.base_url, headers=headers):
+    if not _ml.should_use_ollama_native_catalog(req.provider, req.base_url, headers=headers):
         return None
-    models = _m.probe_ollama_local_models(req.base_url, headers=headers)
+    models = _ml.probe_ollama_local_models(req.base_url, headers=headers)
     if models is None:
         # A failed native probe is not authoritative; fall back to the OpenAI-compatible catalog.
         models = _m.probe_api_models(
-            req.api_key, _m._normalize_openai_base_url(req.base_url), request_headers=headers,
+            req.api_key, _ml._normalize_openai_base_url(req.base_url), request_headers=headers,
         ).get("models")
     if models is None:
         return _soft_accept(

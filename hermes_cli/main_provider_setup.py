@@ -260,7 +260,7 @@ def _aux_flow_provider_model(task: str, provider_slug: str, curated_models: list
                              current_model: str = "") -> None:
     """Prompt for a model under an already-authenticated provider, save to aux."""
     from hermes_cli.auth import _prompt_model_selection
-    from hermes_cli.models import get_pricing_for_provider
+    from hermes_cli.models_pricing import get_pricing_for_provider
     display_name = _aux_task_display_name(task)
     try:
         pricing = get_pricing_for_provider(provider_slug) or {}
@@ -780,7 +780,8 @@ def _build_provider_picker_rows(config: dict, active: str, provider_labels: dict
     fold into display groups (PROVIDER_GROUPS): a group row's ``members`` drive a sub-picker, leaf
     rows have ``members == []``; saved custom providers and trailing actions stay flat. Honors
     ``model_catalog.excluded_providers`` (slug or alias, case-insensitive) like the gateway/TUI."""
-    from hermes_cli.models import CANONICAL_PROVIDERS, _PROVIDER_ALIASES, group_providers, provider_group_for_slug
+    from hermes_cli.models import CANONICAL_PROVIDERS, _PROVIDER_ALIASES
+    from hermes_cli.models_catalog_static import group_providers, provider_group_for_slug
     canonical_descs = {p.slug: p.tui_desc for p in CANONICAL_PROVIDERS}
     _cli_excluded = {
         str(p).strip().lower()

@@ -39,7 +39,7 @@ class NousProfile(ProviderProfile):
         """True when ``reasoning: {enabled: false}`` would 400 on *model*. Cache-only catalog
         lookup; unknown/cold (warmer kicked) and no-reasoning routes both answer True (omit > 400)."""
         try:
-            from hermes_cli.models import nous_model_reasoning_capabilities, warm_nous_reasoning_caps_async
+            from hermes_cli.models_reasoning_caps import nous_model_reasoning_capabilities, warm_nous_reasoning_caps_async
 
             caps = nous_model_reasoning_capabilities(model)
             if caps is None:

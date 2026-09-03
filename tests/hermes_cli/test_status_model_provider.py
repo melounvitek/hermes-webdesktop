@@ -72,7 +72,7 @@ def test_show_status_reports_empty_lmstudio_listing_as_reachable(monkeypatch, ca
     monkeypatch.setattr(status_mod, "resolve_provider", lambda requested=None, **kwargs: "lmstudio", raising=False)
     monkeypatch.setattr(status_mod, "provider_label", lambda provider: "LM Studio", raising=False)
     monkeypatch.setattr(
-        "hermes_cli.models.probe_lmstudio_models",
+        "hermes_cli.models_local.probe_lmstudio_models",
         lambda api_key=None, base_url=None, timeout=5.0: [],
     )
 

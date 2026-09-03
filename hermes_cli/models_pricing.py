@@ -2,9 +2,9 @@
 
 OpenRouter-compatible ``/v1/models`` pricing fetch with a per-endpoint/per-credential cache,
 Nous Portal sale chrome and org-policy filtering, and the Vercel AI Gateway / Novita / Fireworks /
-DeepInfra pricing adapters. Split out of ``hermes_cli.models``, which re-imports every name;
-origin helpers and the cache dicts are looked up on ``hermes_cli.models`` at call time so
-``patch("hermes_cli.models.<name>")`` mocks keep intercepting.
+DeepInfra pricing adapters. Split out of ``hermes_cli.models``; helpers still defined there are
+looked up on ``hermes_cli.models`` at call time so ``patch("hermes_cli.models.<name>")`` mocks keep
+intercepting.
 """
 
 from __future__ import annotations
@@ -33,7 +33,6 @@ _pricing_cache_retry_after: dict[str, float] = {}
 
 def _cached_catalog(cache_key: str) -> Optional[dict[str, dict[str, Any]]]:
     """The cached catalog for *cache_key*, or None to go fetch it."""
-    from hermes_cli.models import _pricing_cache, _pricing_cache_retry_after
     cached = _pricing_cache.get(cache_key)
     if cached is None:
         return None
@@ -53,7 +52,6 @@ def _cache_catalog(
     """Cache a catalog result, giving an empty one an expiry. *ttl_seconds* expires a non-empty
     result too — only for a catalog whose contents depend on server-side state the client cannot
     observe (an org's model policy can change while a long-lived process holds the entry)."""
-    from hermes_cli.models import _pricing_cache, _pricing_cache_retry_after
     _pricing_cache[cache_key] = result
     if not result:
         _pricing_cache_retry_after[cache_key] = time.monotonic() + _FAILED_CATALOG_TTL_SECONDS
@@ -84,7 +82,6 @@ def peek_cached_pricing(base_url: str) -> dict[str, dict[str, Any]]:
     """Pricing already cached for *base_url* (with or without ``/v1``), or ``{}``; never fetches.
     Prefers an authenticated catalog, scanning newest first (callers hold no credential) and
     skipping expired entries so a rotated credential does not answer from its predecessor's."""
-    from hermes_cli.models import _pricing_cache
     root = _strip_v1((base_url or "").rstrip("/"))
     authed_prefix = root + _PRICING_AUTH_KEY_PREFIX
     for key in reversed(list(_pricing_cache)):
@@ -317,7 +314,6 @@ _NOUS_CATALOG_TTL_SECONDS = 300.0
 
 def _fetch_nous_pricing(api_key: str, base_url: str, *, force_refresh: bool) -> dict[str, dict[str, Any]]:
     """Shared by pricing and policy lookups so both read one cache entry."""
-    from hermes_cli.models import fetch_models_with_pricing
     return fetch_models_with_pricing(
         api_key=api_key,
         base_url=base_url,
@@ -332,7 +328,6 @@ def nous_policy_allowed_ids(*, force_refresh: bool = False) -> Optional[set[str]
     which omits policy-blocked rows), or ``None`` to not filter: no policy (or a token too old to
     say), an anonymous read (unfiltered catalog), or an empty read (a fetch failure, not an org
     that may reach nothing)."""
-    from hermes_cli.models import _resolve_nous_pricing_credentials
     try:
         from hermes_cli.nous_account import nous_policy_present
 
@@ -373,12 +368,11 @@ def restrict_to_nous_policy(
 
 
 def _remember_provider_cache_key(provider: str, cache_key: str) -> None:
-    from hermes_cli.models import _pricing_profile_key, _pricing_provider_cache_keys
+    from hermes_cli.models import _pricing_profile_key
     _pricing_provider_cache_keys[(_pricing_profile_key(), provider)] = cache_key
 
 
 def _fetch_openrouter_pricing(*, force_refresh: bool = False) -> dict[str, dict[str, Any]]:
-    from hermes_cli.models import fetch_models_with_pricing
     _remember_provider_cache_key("openrouter", _OPENROUTER_PRICING_BASE)
     return fetch_models_with_pricing(
         api_key=_resolve_openrouter_api_key(),
@@ -388,13 +382,11 @@ def _fetch_openrouter_pricing(*, force_refresh: bool = False) -> dict[str, dict[
 
 
 def _fetch_ai_gateway_pricing_for_provider(*, force_refresh: bool = False) -> dict[str, dict[str, Any]]:
-    from hermes_cli.models import fetch_ai_gateway_pricing
     _remember_provider_cache_key("ai-gateway", _ai_gateway_pricing_scope())
     return fetch_ai_gateway_pricing(force_refresh=force_refresh)
 
 
 def _fetch_novita_pricing_for_provider(*, force_refresh: bool = False) -> dict[str, dict[str, Any]]:
-    from hermes_cli.models import _fetch_novita_pricing
     _remember_provider_cache_key("novita", _novita_pricing_scope())
     return _fetch_novita_pricing(force_refresh=force_refresh)
 
@@ -405,7 +397,6 @@ def _fetch_fireworks_pricing_for_provider(*, force_refresh: bool = False) -> dic
 
 
 def _fetch_nous_pricing_for_provider(*, force_refresh: bool = False) -> dict[str, dict[str, Any]]:
-    from hermes_cli.models import _resolve_nous_pricing_credentials
     api_key, base_url = _resolve_nous_pricing_credentials()
     if not base_url:
         return {}
@@ -453,9 +444,7 @@ def pricing_cache_scope(provider: str, *, current_provider: str = "", current_ba
     """The current endpoint identity a provider's pricing cache is keyed on. Resolves local configuration
     only, never fetches: picker prewarm single-flight uses it so an endpoint rotation can start a new
     worker while the previous endpoint is still slow or unreachable."""
-    from hermes_cli.models import (
-        _deepinfra_catalog_url, _pricing_profile_key, _pricing_provider_cache_keys, normalize_provider,
-    )
+    from hermes_cli.models import _deepinfra_catalog_url, _pricing_profile_key, normalize_provider
     normalized = normalize_provider(provider)
     static = _STATIC_PRICING_SCOPES.get(normalized)
     if static:
@@ -473,12 +462,7 @@ def pricing_cache_scope(provider: str, *, current_provider: str = "", current_ba
             return env_base.rstrip("/").removesuffix("/v1")
         if normalize_provider(current_provider) == "nous" and current_base_url:
             return current_base_url.rstrip("/").removesuffix("/v1")
-        # Call-time lookup through the facade: tests (and plugins) patch
-        # ``hermes_cli.models.get_cached_nous_inference_base_url``; a bare module-global read here would
-        # silently bypass the patch and fall back to the default endpoint.
-        from hermes_cli.models import get_cached_nous_inference_base_url as _persisted_nous_base
-
-        persisted_base = _persisted_nous_base()
+        persisted_base = get_cached_nous_inference_base_url()
         if persisted_base:
             return persisted_base
         return _pricing_provider_cache_keys.get((_pricing_profile_key(), normalized), _DEFAULT_NOUS_INFERENCE_BASE)
@@ -487,10 +471,7 @@ def pricing_cache_scope(provider: str, *, current_provider: str = "", current_ba
 
 def _cached_only_pricing(normalized: str) -> dict[str, dict[str, str]]:
     """Process-resident pricing for *normalized* without any provider I/O."""
-    from hermes_cli.models import (
-        _deepinfra_catalog_cache, _deepinfra_catalog_url, _fetch_deepinfra_pricing, _pricing_profile_key,
-        _pricing_provider_cache_keys,
-    )
+    from hermes_cli.models import _deepinfra_catalog_cache, _deepinfra_catalog_url, _pricing_profile_key
     if normalized == "deepinfra":
         cache_key, _url = _deepinfra_catalog_url()
         return _fetch_deepinfra_pricing() if cache_key in _deepinfra_catalog_cache else {}

@@ -2,9 +2,8 @@
 
 Ollama (native ``/api/tags`` probe, request headers, base-url resolution), LM Studio
 (``/api/v1/models``, load-on-demand) and Ollama Cloud (live + models.dev merged catalog with a
-disk cache). Split out of ``hermes_cli.models``, which re-imports every name; origin helpers are
-looked up on ``hermes_cli.models`` at call time so ``patch("hermes_cli.models.<name>")`` mocks
-keep intercepting.
+disk cache). Split out of ``hermes_cli.models``; helpers still defined there are looked up on
+``hermes_cli.models`` at call time so ``patch("hermes_cli.models.<name>")`` mocks keep intercepting.
 """
 
 from __future__ import annotations
@@ -96,7 +95,7 @@ def _get_ollama_base_url() -> str:
     the active provider is ollama, or custom AND the endpoint actually serves ``/api/tags``
     (otherwise the picker would probe an unrelated endpoint and hide the local catalog) →
     ``OLLAMA_HOST`` → Ollama's local default."""
-    from hermes_cli.models import _get_model_config_dict, should_use_ollama_native_catalog
+    from hermes_cli.models import _get_model_config_dict
     configured = _configured_ollama_base_url()
     if configured:
         return configured
@@ -152,7 +151,6 @@ def _get_ollama_native_headers(base_url: Optional[str], *, api_key: Optional[str
     """Ollama credentials and headers for one endpoint origin. Configured headers apply only when
     *base_url* shares the configured Ollama root; an explicit *api_key* replaces any configured
     Authorization variant rather than inheriting it."""
-    from hermes_cli.models import _get_ollama_request_headers
     configured_base = _configured_ollama_base_url()
     explicit_key = str(api_key or "").strip()
     configured_matches = bool(configured_base and base_url and _same_ollama_native_root(base_url, configured_base))
@@ -260,7 +258,6 @@ def fetch_ollama_local_models(
     headers: Optional[dict[str, str]] = None,
 ) -> Optional[list[str]]:
     """Fetch local Ollama-compatible models, preserving probe failure as ``None``."""
-    from hermes_cli.models import probe_ollama_local_models
     return probe_ollama_local_models(base_url, timeout, headers=headers)
 
 
@@ -295,7 +292,6 @@ def should_use_ollama_native_catalog(
     Ollama's default port actually serves ``/api/tags``. (Bare ``ollama`` is normalized to
     ``custom`` elsewhere so runtime paths share the OpenAI client, but ``/api/tags`` is the
     authoritative local list; other custom endpoints keep the ``/models`` probe.)"""
-    from hermes_cli.models import probe_ollama_local_models
     requested = str(provider or "").strip().lower()
     root = _root_for_ollama_native_api(base_url or "")
     if root:
@@ -342,7 +338,7 @@ def _ollama_local_catalog(force_refresh: bool) -> list[str]:
     """Catalog for the raw ``ollama`` provider: native ``/api/tags`` when the endpoint is a real
     Ollama server, else the OpenAI-style ``/v1/models`` of the configured gateway (incl. Ollama
     Cloud)."""
-    from hermes_cli.models import _get_ollama_base_url, _get_ollama_native_headers, _get_provider_config_dict, fetch_api_models, fetch_ollama_local_models, should_use_ollama_native_catalog
+    from hermes_cli.models import _get_provider_config_dict, fetch_api_models
     if force_refresh:
         _OLLAMA_LOCAL_MODELS_CACHE.clear()
         _OLLAMA_LOCAL_PROBE_FAILURE_CACHE.clear()
@@ -413,7 +409,6 @@ def _lmstudio_fetch_raw_models(
 
 def _lmstudio_raw_models_or_none(api_key, base_url, timeout) -> Optional[list[dict]]:
     """``_lmstudio_fetch_raw_models`` with every failure (incl. AuthError) collapsed to None."""
-    from hermes_cli.models import _lmstudio_fetch_raw_models
     try:
         return _lmstudio_fetch_raw_models(api_key=api_key, base_url=base_url, timeout=timeout)
     except Exception:
@@ -435,7 +430,6 @@ def probe_lmstudio_models(
     """Chat-capable LM Studio model keys — a valid empty list when the server is reachable but has
     no non-embedding models; ``None`` on network errors, malformed responses, or bad base URLs.
     Raises ``AuthError`` on HTTP 401/403 so token issues surface separately from reachability."""
-    from hermes_cli.models import _lmstudio_fetch_raw_models
     raw_models = _lmstudio_fetch_raw_models(api_key=api_key, base_url=base_url, timeout=timeout)
     if raw_models is None:
         return None
@@ -457,7 +451,6 @@ def fetch_lmstudio_models(
 ) -> list[str]:
     """LM Studio chat-capable model keys; ``[]`` when unreachable/malformed. Raises ``AuthError`` on
     HTTP 401/403 so callers can tell a wrong ``LM_API_KEY`` from an unreachable server."""
-    from hermes_cli.models import probe_lmstudio_models
     return probe_lmstudio_models(api_key=api_key, base_url=base_url, timeout=timeout) or []
 
 

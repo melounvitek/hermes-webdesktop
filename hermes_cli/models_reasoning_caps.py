@@ -1,6 +1,6 @@
 """Per-model reasoning capabilities from OpenRouter-schema ``/v1/models`` catalogs.
 
-Split out of ``hermes_cli.models``; every public/patched name is re-imported there. OpenRouter and
+Split out of ``hermes_cli.models``. OpenRouter and
 Nous Portal share one implementation parametrized by :class:`_CapsSource`; the per-source module
 globals (``_openrouter_reasoning_caps_cache``, ``_nous_caps_disk_checked``, ...) stay defined on
 ``hermes_cli.models`` — tests reset them there — and are read/written by attribute name.
@@ -81,7 +81,7 @@ def _read_reasoning_caps_disk() -> dict[str, Any]:
 
 def _load_reasoning_caps_disk(url: str) -> tuple[Optional[Caps], float]:
     """Return ``(caps, age_seconds)`` for *url*, or ``(None, 0.0)``."""
-    entry = _origin()._read_reasoning_caps_disk().get(url)
+    entry = _read_reasoning_caps_disk().get(url)
     caps = entry.get("caps") if isinstance(entry, dict) else None
     if not isinstance(caps, dict) or not caps:
         return None, 0.0
@@ -96,7 +96,7 @@ def _save_reasoning_caps_disk(url: str, caps: Caps) -> None:
     """Merge *url*'s catalog into the shared disk mirror, atomically."""
     from hermes_cli.models import _write_json_cache
     try:
-        data = _origin()._read_reasoning_caps_disk()
+        data = _read_reasoning_caps_disk()
         data[url] = {"ts": time.time(), "caps": caps}
         _write_json_cache(_reasoning_caps_disk_path(), data, indent=0, separators=(",", ":"))
     except Exception as exc:
@@ -250,16 +250,23 @@ _OPENROUTER_CAPS = _CapsSource(
 _NOUS_CAPS = _CapsSource(
     "_nous_reasoning_caps_cache", "_nous_reasoning_caps_failed_at",
     "_nous_caps_disk_checked", "_nous_caps_warm_started",
-    lambda: _origin().nous_catalog_url(),
+    lambda: nous_catalog_url(),
 )
 
 
 def nous_catalog_url() -> str:
     """The Portal ``/v1/models`` URL for the endpoint we actually talk to (``NOUS_INFERENCE_BASE_URL``
     → resolved credential base → prod), so a staging profile reads staging's capabilities."""
-    return f"{_origin()._resolve_nous_pricing_credentials()[1]}/v1/models"
+    from hermes_cli.models_pricing import _resolve_nous_pricing_credentials
+    return f"{_resolve_nous_pricing_credentials()[1]}/v1/models"
 
 
+# Live-catalog metadata first (ported from PrimeIntellect-ai/prime-agent#1258): OpenRouter's /v1/models
+# entries advertise reasoning support via supported_parameters + a reasoning object, which covers every
+# routed vendor without a hand-maintained prefix list. The static prefix allowlist repeatedly went
+# stale one vendor at a time (nvidia/ missing → #75386; same class as tencent/, xiaomi/ additions before
+# it) — metadata makes new vendors work without a code change. One catalog fetch per process, cached;
+# unknown (catalog unreachable / unlisted model) falls back to the static list.
 def openrouter_model_reasoning_capabilities(
     model_id: Optional[str], *, timeout: float = 6.0, allow_fetch: bool = False,
 ) -> Optional[dict[str, Any]]:

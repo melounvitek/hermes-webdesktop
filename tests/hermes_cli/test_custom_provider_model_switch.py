@@ -459,7 +459,7 @@ class TestCustomProviderDiscoverModels:
         }
 
         with patch("hermes_cli.models.fetch_api_models") as mock_fetch, \
-             patch("hermes_cli.models.fetch_ollama_local_models") as mock_ollama, \
+             patch("hermes_cli.models_local.fetch_ollama_local_models") as mock_ollama, \
              patch("hermes_cli.curses_ui.curses_radiolist", side_effect=ImportError), \
              patch("builtins.input", return_value="1"), \
              patch("builtins.print"):

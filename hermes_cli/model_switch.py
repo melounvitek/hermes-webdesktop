@@ -976,7 +976,7 @@ def _apply_direct_alias_endpoint(st: "_Switch", da: DirectAlias) -> None:
     own endpoint decides: its declared key; else the session key only for the SAME ORIGIN; else a
     fresh resolution against the alias base_url (env-key fallbacks are host-gated: OLLAMA_API_KEY
     resolves for ollama.com, OPENROUTER_API_KEY never reaches an unrelated host)."""
-    from hermes_cli.models import _same_ollama_native_root
+    from hermes_cli.models_local import _same_ollama_native_root
     from hermes_cli.runtime_provider import resolve_runtime_provider
     alias_key = direct_alias_api_key(da)
     same_host = _may_reuse_session_credential(st.base_url, da.base_url)
@@ -1282,12 +1282,12 @@ def _creds_for_current_provider(st: _Switch) -> None:
     """Credentials when staying on the current provider. Mid-session ``/model <name>`` on a local
     Ollama-compatible endpoint keeps the endpoint in use; re-resolving bare ``custom`` from config
     can fall through to an unrelated default provider."""
-    from hermes_cli.models import _get_ollama_request_headers, _same_ollama_native_root
+    from hermes_cli.models_local import _get_ollama_request_headers, _same_ollama_native_root
     keep_current_ollama_endpoint = False
     ollama_headers: dict[str, str] = {}
     if st.current_provider == "custom" and st.current_base_url:
         try:
-            from hermes_cli.models import should_use_ollama_native_catalog
+            from hermes_cli.models_local import should_use_ollama_native_catalog
             ollama_headers = _get_ollama_request_headers()
             _, configured_ollama_base = _ollama_configured_base()
             # Provider-level Ollama headers only belong to the configured native root; without
@@ -1343,7 +1343,8 @@ def _resolve_switch_credentials(st: _Switch) -> Optional[ModelSwitchResult]:
 def _validate_switch(st: _Switch) -> Optional[ModelSwitchResult]:
     """COMMON PATH part 2: normalize the model name for the target provider, validate it, and
     accept config-declared models the remote catalog lacks."""
-    from hermes_cli.models import _get_ollama_request_headers, validate_requested_model
+    from hermes_cli.models_local import _get_ollama_request_headers
+    from hermes_cli.models_validate import validate_requested_model
     st.new_model = _resolve_named_custom_model_id(st.new_model, st.target_provider, st.custom_providers)
     st.new_model = normalize_model_for_provider(st.new_model, st.target_provider)
 

@@ -689,7 +689,7 @@ def _fast_model_from_catalog(provider_id: str) -> str:
     is_nous = provider_id.strip().lower() == "nous"
     try:
         from hermes_cli.auth import resolve_api_key_provider_credentials
-        from hermes_cli.models import fetch_models_with_pricing
+        from hermes_cli.models_pricing import fetch_models_with_pricing
         from providers import get_provider_profile
         # Most /v1/models endpoints are authenticated; an anonymous 401 would read as "no small
         # model" and pin the curated default forever.
@@ -704,7 +704,7 @@ def _fast_model_from_catalog(provider_id: str) -> str:
         if not api_key and is_nous:
             # Nous is OAuth (resolver raises); anonymous reads return the full catalog.
             try:
-                from hermes_cli.models import _resolve_nous_pricing_credentials
+                from hermes_cli.models_pricing import _resolve_nous_pricing_credentials
                 api_key, base_url = _resolve_nous_pricing_credentials()
             except Exception:
                 logger.debug("No Nous credentials for catalog", exc_info=True)
@@ -719,7 +719,7 @@ def _fast_model_from_catalog(provider_id: str) -> str:
         # policy-catalog expiry.
         _nous_kwargs = {}
         if is_nous:
-            from hermes_cli.models import _NOUS_CATALOG_TTL_SECONDS
+            from hermes_cli.models_pricing import _NOUS_CATALOG_TTL_SECONDS
             _nous_kwargs = {"include_sale_original": True, "cache_ttl_seconds": _NOUS_CATALOG_TTL_SECONDS}
         catalog = fetch_models_with_pricing(
             api_key=api_key or None, base_url=base_url, timeout=3.0, **_nous_kwargs) or {}
@@ -730,7 +730,7 @@ def _fast_model_from_catalog(provider_id: str) -> str:
     if is_nous:
         # Narrow catalog ids by org policy, as the pickers do.
         try:
-            from hermes_cli.models import nous_policy_allowed_ids, restrict_to_nous_policy
+            from hermes_cli.models_pricing import nous_policy_allowed_ids, restrict_to_nous_policy
             ids = restrict_to_nous_policy(ids, nous_policy_allowed_ids())
         except Exception:
             logger.debug("Nous policy filter unavailable", exc_info=True)
@@ -770,7 +770,7 @@ def _get_aux_model_for_provider(provider_id: str, *, prefer_fast: bool = False) 
     # let the caller keep the main model.
     if picked and provider_id.strip().lower() == "nous":
         try:
-            from hermes_cli.models import nous_policy_allowed_ids, restrict_to_nous_policy
+            from hermes_cli.models_pricing import nous_policy_allowed_ids, restrict_to_nous_policy
             allowed = nous_policy_allowed_ids()
             if allowed and not restrict_to_nous_policy([picked], allowed):
                 return ""

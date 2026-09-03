@@ -89,9 +89,12 @@ def _fetch_picker_live_models(
     headers: dict[str, str] | None = None, timeout: float = 5.0,
     api_mode: str | None = None) -> list[str] | None:
     """Fetch picker models with native Ollama and cached generic discovery."""
-    from hermes_cli.models import (
-        _get_ollama_native_headers, _normalize_openai_base_url, cached_fetch_api_models,
-        fetch_ollama_local_models, should_use_ollama_native_catalog)
+    from hermes_cli.models import _get_ollama_native_headers, cached_fetch_api_models
+    from hermes_cli.models_local import (
+        _normalize_openai_base_url,
+        fetch_ollama_local_models,
+        should_use_ollama_native_catalog,
+    )
 
     candidate_headers = _get_ollama_native_headers(api_url, api_key=api_key)
 
@@ -395,9 +398,12 @@ def _nous_picker_model_ids(curated: dict, force_fresh_nous_tier: bool) -> list:
     recommendation fetch still yields a policy-filtered curated list."""
     model_ids = curated.get("nous", [])
     try:
+        from hermes_cli.models_pricing import get_pricing_for_provider
         from hermes_cli.models import (
-            get_pricing_for_provider, check_nous_free_tier, union_with_portal_free_recommendations,
-            union_with_portal_paid_recommendations)
+            check_nous_free_tier,
+            union_with_portal_free_recommendations,
+            union_with_portal_paid_recommendations,
+        )
         from hermes_cli.auth import get_provider_auth_state
         pricing = get_pricing_for_provider("nous") or {}
         try:
@@ -411,7 +417,7 @@ def _nous_picker_model_ids(curated: dict, force_fresh_nous_tier: bool) -> list:
     except Exception:
         pass
     try:
-        from hermes_cli.models import nous_policy_allowed_ids, restrict_to_nous_policy
+        from hermes_cli.models_pricing import nous_policy_allowed_ids, restrict_to_nous_policy
         model_ids = restrict_to_nous_policy(model_ids, nous_policy_allowed_ids(), rescue_empty=True)
     except Exception:
         pass
@@ -996,7 +1002,7 @@ def _build_curated_lists(current_provider: str, current_base_url: str, current_m
     # unreachable, fall back to the current model so the picker still shows something offline.
     is_current_lmstudio = current_provider.strip().lower() == "lmstudio"
     if "lmstudio" not in curated and (os.environ.get("LM_API_KEY") or os.environ.get("LM_BASE_URL") or is_current_lmstudio):
-        from hermes_cli.models import fetch_lmstudio_models
+        from hermes_cli.models_local import fetch_lmstudio_models
         from hermes_cli.auth import AuthError
         lm_base = (
             os.environ.get("LM_BASE_URL")

@@ -340,7 +340,7 @@ class TestOllamaCloudSuffixStripping:
 
     def test_strip_suffix_helper(self):
         """Unit test for the _strip_ollama_cloud_suffix helper."""
-        from hermes_cli.models import _strip_ollama_cloud_suffix
+        from hermes_cli.models_local import _strip_ollama_cloud_suffix
 
         assert _strip_ollama_cloud_suffix("kimi-k2.6:cloud") == "kimi-k2.6"
         assert _strip_ollama_cloud_suffix("glm-5.1:cloud") == "glm-5.1"
