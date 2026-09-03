@@ -60,7 +60,7 @@ def managed_model_supports_vision(model_id: str) -> "bool | None":
 
     with suppress(Exception):
         from hermes_cli.local_runtime.bootstrap import assets_dir, staged_model_ids
-        from hermes_cli.local_runtime.catalog import find_entry_for_model
+        from hermes_cli.local_runtime.catalog import entry_for_model
 
         # Only answer for models actually staged with us.
         if model_id not in staged_model_ids():
@@ -71,11 +71,9 @@ def managed_model_supports_vision(model_id: str) -> "bool | None":
         # Staged but not loaded (or an older server build): the catalog knows whether this model
         # ships a vision projector. Capability requires the projector to actually be on disk — a
         # model downloaded before its mmproj (partial delete, old layout) genuinely cannot see.
-        hit = find_entry_for_model(model_id)
-        if hit is None:
+        entry = entry_for_model(model_id)
+        if entry is None:
             return None
-        entry = hit[0]
-        if entry.mmproj is None:
-            return False
-        return (assets_dir() / entry.mmproj.local_name).exists()
+        return (entry.mmproj is not None
+                and (assets_dir() / entry.mmproj.local_name).exists())
     return None

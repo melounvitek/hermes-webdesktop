@@ -345,3 +345,8 @@ def find_entry_for_model(model_id: str) -> "tuple[CatalogEntry, QuantVariant] | 
             if variant.model_id == model_id:
                 return entry, variant
     return None
+
+
+def entry_for_model(model_id: str) -> "CatalogEntry | None":
+    hit = find_entry_for_model(model_id)
+    return hit[0] if hit is not None else None

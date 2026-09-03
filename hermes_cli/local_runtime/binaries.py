@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import platform
 import shutil
 import subprocess
@@ -87,19 +88,14 @@ def installed_tags() -> list[str]:
 
 
 def _host_os_arch() -> tuple[str, str]:
-    """(os, arch) normalized to release-asset vocabulary.
-
-    PITFALL: PROCESSOR_ARCHITECTURE lies under x64 emulation on ARM64 Windows, and
-    platform.machine() reads the same env on some Pythons — so on Windows prefer
-    PROCESSOR_IDENTIFIER's text when present.
-    """
+    """(os, arch) normalized to release-asset vocabulary. PITFALL: PROCESSOR_ARCHITECTURE lies
+    under x64 emulation on ARM64 Windows, and platform.machine() reads the same env on some
+    Pythons — so on Windows prefer PROCESSOR_IDENTIFIER's text when present."""
     system = platform.system().lower()
     os_name = {"windows": "win", "darwin": "macos", "linux": "ubuntu"}.get(system, system)
-    machine = platform.machine().lower()
-    arch = "arm64" if machine in ("arm64", "aarch64") else "x64"
+    arch = "arm64" if platform.machine().lower() in ("arm64", "aarch64") else "x64"
     if os_name == "win":
-        import os as _os
-        ident = _os.environ.get("PROCESSOR_IDENTIFIER", "").lower()
+        ident = os.environ.get("PROCESSOR_IDENTIFIER", "").lower()
         if "armv8" in ident or "arm " in ident:
             arch = "arm64"
     return os_name, arch
@@ -257,12 +253,10 @@ def prune_old_tags(keep: list[str]) -> None:
 def ensure_runtime_installed(tag: str, backend: str,
                              expected_sha256: dict[str, str] | None = None,
                              progress: "Callable[[str, int, int, str], None] | None" = None) -> Path:
-    """Idempotent: resolve, download, verify, extract, version-check. Returns the install dir.
-
+    """Idempotent: resolve, download, verify, extract, version-check; returns the install dir.
     ``expected_sha256`` pins hashes per asset; without pins the computed hash is recorded in the
     manifest (trust on first download, verified on every reinstall). ``progress(stage, done,
-    total, label)`` ticks through download/extract/verify.
-    """
+    total, label)`` ticks through download/extract/verify."""
     plan = resolve_assets(tag, backend)
     install_dir = plan.install_dir
     manifest_path = install_dir / "manifest.json"

@@ -112,7 +112,7 @@ def _restore_grown_window(model_id: str, profile: ModelProfile, budget: Hardware
 def _preset_for(gguf: Path, budget: HardwareBudget,
                 mtp_capable: set[str]) -> PresetEntry | None:
     """The launch decision for one staged model, or None when its header is unreadable."""
-    from hermes_cli.local_runtime.catalog import find_entry_for_model
+    from hermes_cli.local_runtime.catalog import entry_for_model
 
     model_id = model_id_from_stem(gguf.stem)
     try:
@@ -121,8 +121,7 @@ def _preset_for(gguf: Path, budget: HardwareBudget,
     except (ValueError, OSError) as exc:
         logger.warning("preset skip %s: %s", gguf.name, exc)
         return None
-    hit = find_entry_for_model(model_id)
-    entry = hit[0] if hit is not None else None
+    entry = entry_for_model(model_id)
     is_mtp = entry.mtp if entry is not None else model_id in mtp_capable
     if is_mtp and profile.kv_scale == 1.0:
         # Header-derived profiles don't know about MTP's draft context; apply the calibrated KV

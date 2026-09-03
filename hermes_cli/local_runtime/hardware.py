@@ -71,9 +71,8 @@ def _ram_bytes() -> tuple[int, int]:
         class MEMORYSTATUSEX(ctypes.Structure):
             _fields_ = ([("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong)]
                         + [(name, ctypes.c_ulonglong) for name in (
-                            "ullTotalPhys", "ullAvailPhys", "ullTotalPageFile",
-                            "ullAvailPageFile", "ullTotalVirtual", "ullAvailVirtual",
-                            "ullAvailExtendedVirtual")])
+                            "ullTotalPhys", "ullAvailPhys", "ullTotalPageFile", "ullAvailPageFile",
+                            "ullTotalVirtual", "ullAvailVirtual", "ullAvailExtendedVirtual")])
 
         stat = MEMORYSTATUSEX()
         stat.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
