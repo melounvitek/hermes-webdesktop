@@ -62,13 +62,10 @@ def slugify_skill_name(name: str) -> str:
 
 
 def append_user_instruction(parts: list, instruction: str) -> str:
-    """Append the instruction line to ``parts``; return the stable prefix.
-
-    The prefix ends exactly at the instruction marker so, registered with
-    ``agent.prompt_cache_boundary``, the cache planner can break on the scaffold
-    instead of caching the whole message as one atomic block. Single
-    construction site guarantees the prefix is a byte-prefix of the message.
-    """
+    """Append the instruction line to ``parts``; return the stable prefix, which
+    ends exactly at the instruction marker so (registered with
+    ``agent.prompt_cache_boundary``) the cache planner can break on the scaffold.
+    Single construction site guarantees the prefix is a byte-prefix of the message."""
     stable_prefix = "\n".join(parts) + "\n" + _SINGLE_SKILL_INSTRUCTION
     parts.append(f"{_SINGLE_SKILL_INSTRUCTION}{instruction}")
     return stable_prefix
@@ -94,9 +91,8 @@ def extract_user_instruction_from_skill_message(content: Any) -> Optional[str]:
 def describe_skill_invocation(content: Any, separator: str = " — ") -> Optional[str]:
     """Render a slash-skill-expanded turn the way the user typed it:
     ``"/work — fix the title leak"``, ``"/work"`` for a bare invocation, or
-    ``None`` when *content* is not scaffolding. Pass ``separator=" "`` for the
-    literal invocation as typed (chat transcripts).
-    """
+    ``None`` when *content* is not scaffolding. ``separator=" "`` gives the
+    literal invocation as typed (chat transcripts)."""
     if not isinstance(content, str) or not content.startswith(_SKILL_INVOCATION_PREFIX):
         return None
     match = _SKILL_NAME_RE.match(content)
@@ -149,7 +145,6 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
     raw_identifier = (skill_identifier or "").strip()
     if not raw_identifier:
         return None
-
     try:
         from tools.skills_tool import _skills_dir, skill_view
         from agent.skill_utils import normalize_skill_lookup_name
@@ -160,8 +155,6 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
         return None
     if not loaded_skill.get("success"):
         return None
-
-    skill_name = str(loaded_skill.get("name") or normalized)
     skill_path = str(loaded_skill.get("path") or "")
     skill_dir = None
     # Prefer the absolute skill_dir from skill_view() (correct for external
@@ -173,7 +166,7 @@ def _load_skill_payload(skill_identifier: str, task_id: str | None = None) -> tu
             skill_dir = _skills_dir() / Path(skill_path).parent
         except Exception:
             skill_dir = None
-    return loaded_skill, skill_dir, skill_name
+    return loaded_skill, skill_dir, str(loaded_skill.get("name") or normalized)
 
 
 def _inject_skill_config(loaded_skill: dict[str, Any], parts: list[str]) -> None:
@@ -374,11 +367,9 @@ def _scan_skill_md(skill_md: Path, disabled: set, seen_names: set, commands: Dic
 
 def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
     """Scan skill dirs and return {"/skill-name": {name, description, skill_md_path, skill_dir}}.
-
-    Builds into a local map and publishes once at the end: writing straight into
-    the global exposed partial results to overlapping scans, which then logged
-    bogus "already claimed" collisions against their own incumbents.
-    """
+    Builds a local map and publishes once at the end: writing straight into the
+    global exposed partial results to overlapping scans, which then logged
+    bogus "already claimed" collisions against their own incumbents."""
     global _skill_commands, _skill_commands_platform, _skill_commands_home
     platform = _resolve_skill_commands_platform()
     home = _resolve_skill_commands_home()
@@ -420,12 +411,10 @@ def scan_skill_commands() -> Dict[str, Dict[str, Any]]:
 
 
 def get_skill_commands() -> Dict[str, Dict[str, Any]]:
-    """Return the current skill commands mapping (scan first if empty).
-
-    Rescans when the platform scope changes (one gateway serving Telegram and
-    Discord) or the active profile's home changes (Desktop profile switch), so
-    each sees its own ``platform_disabled`` / ``external_dirs`` view.
-    """
+    """Return the current skill commands mapping (scan first if empty). Rescans
+    when the platform scope (one gateway serving Telegram and Discord) or the
+    active profile's home (Desktop profile switch) changes, so each sees its
+    own ``platform_disabled`` / ``external_dirs`` view."""
     current_platform = _resolve_skill_commands_platform()
     current_home = _resolve_skill_commands_home()
     with _publish_lock:
@@ -453,13 +442,10 @@ def command_snapshot(cmds: Dict[str, Dict[str, Any]]) -> Dict[str, str]:
 
 
 def reload_skills() -> Dict[str, Any]:
-    """Re-scan skill dirs and return a diff of the slash-command map.
-
-    Does NOT invalidate the skills system-prompt cache: skills are called by
-    name, so ``/reload-skills`` costs no cache reset.  Returns ``{"added":
-    [{name, description}], "removed": [...], "unchanged": [names], "total":
-    int, "commands": int}``; ``description`` is the full frontmatter field.
-    """
+    """Re-scan skill dirs and return a diff of the slash-command map (``added``
+    / ``removed`` / ``unchanged`` / ``total`` / ``commands``; descriptions are the
+    full frontmatter field). Does NOT invalidate the skills system-prompt cache:
+    skills are called by name, so ``/reload-skills`` costs no cache reset."""
     before = command_snapshot(_skill_commands)
     new_commands = scan_skill_commands()
     result = diff_command_snapshots(before, command_snapshot(new_commands))
@@ -559,13 +545,10 @@ def _load_skill_blocks(
     identifiers: list[str], load, activation_note, task_id: str | None, *,
     missing_label=lambda ident: ident, disabled_names: set | None = None, disabled_as_missing: bool = False,
 ) -> tuple[list[str], list[str], list[str], list[str]]:
-    """Load each distinct identifier via *load* and render its block.
-
-    Returns ``(loaded_names, missing, disabled, blocks)``. With *disabled_names*,
-    members whose canonical (LOADED — identifiers may be paths) name or
-    identifier is disabled are skipped into ``disabled`` (or ``missing`` when
-    *disabled_as_missing*).
-    """
+    """Load each distinct identifier via *load* and render its block; returns
+    ``(loaded_names, missing, disabled, blocks)``. With *disabled_names*, members
+    whose canonical (LOADED — identifiers may be paths) name or identifier is
+    disabled go to ``disabled`` (or ``missing`` when *disabled_as_missing*)."""
     loaded_names: list[str] = []
     missing: list[str] = []
     disabled: list[str] = []
@@ -592,12 +575,10 @@ def _load_skill_blocks(
 
 
 def build_preloaded_skills_prompt(skill_identifiers: list[str], task_id: str | None = None) -> tuple[str, list[str], list[str]]:
-    """Load skills for session-wide CLI/TUI preloading.
-
-    Returns (prompt_text, loaded_skill_names, missing_identifiers). Disabled
-    skills count as missing: this path bypasses the scan-time disabled filter,
-    so ``hermes -s <skill>`` must not force-load an operator-disabled skill.
-    """
+    """Load skills for session-wide CLI/TUI preloading; returns (prompt_text,
+    loaded_skill_names, missing_identifiers). Disabled skills count as missing:
+    this path bypasses the scan-time filter, and ``hermes -s <skill>`` must not
+    force-load an operator-disabled skill."""
     loaded_names, missing, _disabled, prompt_parts = _load_skill_blocks(
         [(raw or "").strip() for raw in skill_identifiers],
         lambda identifier: _load_skill_payload(identifier, task_id=task_id),

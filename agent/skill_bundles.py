@@ -1,10 +1,9 @@
 """Skill bundles — aliases that load multiple skills under one slash command.
 
-Bundles are YAML files in ``<HERMES_HOME>/skill-bundles/`` (``name``,
-``description``, ``skills: [...]``, optional ``instruction``; the file stem is
-the fallback name). ``/<bundle>`` loads every member skill into one user
-message. If a bundle and a skill share a slug, the bundle wins — slash dispatch
-checks bundles first, on purpose.
+YAML files in ``<HERMES_HOME>/skill-bundles/`` (``name``, ``description``,
+``skills: [...]``, optional ``instruction``; file stem = fallback name).
+``/<bundle>`` loads every member skill into one user message. If a bundle and a
+skill share a slug, the bundle wins — slash dispatch checks bundles first, on purpose.
 """
 
 from __future__ import annotations
@@ -141,14 +140,11 @@ def build_bundle_invocation_message(
     task_id: str | None = None,
     platform: str | None = None,
 ) -> Optional[Tuple[str, List[str], List[str]]]:
-    """Build the user message for a bundle invocation.
-
-    Returns ``(message, loaded_skill_names, missing_skill_names)`` or ``None``
-    if the bundle wasn't found. Uninstalled members are skipped with a note.
-    Disabled members are skipped too: bundles load via ``_load_skill_payload``,
-    bypassing the scan-time disabled filter, so the list is re-applied here.
-    ``platform`` scopes that check (gateway passes it; None resolves from env).
-    """
+    """Build the user message for a bundle invocation: ``(message,
+    loaded_skill_names, missing_skill_names)`` or ``None`` if the bundle wasn't
+    found. Uninstalled members are skipped with a note; disabled ones too, since
+    ``_load_skill_payload`` bypasses the scan-time filter (``platform`` scopes
+    that check — gateway passes it, None resolves from env)."""
     info = get_skill_bundles().get(cmd_key)
     if not info:
         return None
@@ -197,11 +193,8 @@ def save_bundle(
     instruction: str = "",
     overwrite: bool = False,
 ) -> Path:
-    """Write a bundle to disk and refresh the cache.
-
-    Raises ``FileExistsError`` if the target exists and not ``overwrite``;
-    ``ValueError`` for unusable inputs.
-    """
+    """Write a bundle to disk and refresh the cache. Raises ``FileExistsError``
+    if the target exists and not ``overwrite``; ``ValueError`` for unusable inputs."""
     name = (name or "").strip()
     if not name:
         raise ValueError("Bundle name is required")

@@ -191,14 +191,12 @@ def _plugin_section_blocks(sections: tuple, position: str) -> List[str]:
 
 def _session_start_like(agent: Any, now: Any) -> Any:
     """Best-known conversation start time, or ``now`` as a fallback.
-
     ``Conversation started:`` must be byte-stable across rebuilds (compression,
     resume, fresh gateway turns), so prefer immutable sources in order: the
     lineage-root session id's embedded stamp (compaction rotates ids, each with
     its own mint time), the current session id's stamp, ``agent.session_start``,
     then ``now``.  Stamps are box-local wall-clock: attach that zone first, then
-    convert to ``now``'s zone so the date matches the per-turn clock.
-    """
+    convert to ``now``'s zone so the date matches the per-turn clock."""
     from datetime import datetime
 
     def _to_display_tz(dt: Any) -> Any:
@@ -579,14 +577,11 @@ def _post_workspace_parts(agent: Any) -> List[str]:
 
 
 def _context_files_part(agent: Any, _r: Any, ctx_len: Optional[int], soul_loaded: bool) -> List[str]:
-    """Project context files (AGENTS.md etc.) for the context tier.
-
-    TERMINAL_CWD when set (gateway); None lets discovery fall back to the
-    launch dir.  The install-tree fallback is only legitimate for cli/tui where
-    the launch dir IS the user's shell cwd; desktop-pinned launch dirs are
-    treated as the fallback they really are so the guard can reject Hermes's
-    bundled contributor AGENTS.md.
-    """
+    """Project context files (AGENTS.md etc.) for the context tier. TERMINAL_CWD
+    when set (gateway); None lets discovery fall back to the launch dir.  The
+    install-tree fallback is only legitimate for cli/tui where the launch dir
+    IS the user's shell cwd; desktop-pinned launch dirs are treated as the
+    fallback they really are so the guard can reject Hermes's bundled AGENTS.md."""
     if agent.skip_context_files:
         return []
     launch_artifact = getattr(agent, "_context_cwd_is_launch_artifact", False)
@@ -651,9 +646,8 @@ def build_system_prompt_parts(agent: Any, system_message: Optional[str] = None) 
     context_parts.extend(_context_files_part(agent, _r, _ctx_len, _soul_loaded))
 
     # ── Volatile tier (most likely to differ on a rebuild; kept last so the stable prefix stays reusable) ──
-    # Skills are runtime-mutable, so the index leads the volatile band: on a
-    # longest-prefix backend an unchanged index still falls inside the reused
-    # prefix and a changed one only re-prefills from here on.
+    # Skills are runtime-mutable, so the index leads the volatile band: on a longest-prefix
+    # backend an unchanged index stays inside the reused prefix; a changed one re-prefills from here.
     volatile_parts: List[str] = [skills_prompt] if skills_prompt else []
     volatile_parts.extend(_memory_parts(agent))
     # Plugin sections are confined to one coarse anchor in the volatile tail so
@@ -682,9 +676,9 @@ def build_system_prompt(agent: Any, system_message: Optional[str] = None) -> str
 
 
 def invalidate_system_prompt(agent: Any) -> None:
-    """Force a rebuild on the next turn (after compression).  Reloads memory
-    from disk and clears the frozen plugin snapshot so plugins re-render at the
-    same boundary; the previous bytes are stashed as the fail-open fallback."""
+    """Force a rebuild on the next turn (after compression): reload memory from
+    disk and clear the frozen plugin snapshot (previous bytes stashed as the
+    fail-open fallback) so plugins re-render at the same boundary."""
     agent._cached_system_prompt = None
     agent._cached_system_prompt_static = None
     if hasattr(agent, "_plugin_system_prompt_sections_snapshot"):
@@ -696,14 +690,12 @@ def invalidate_system_prompt(agent: Any) -> None:
 
 def reconstruct_static_prefix(agent: Any, system_message: Optional[str] = None, *, log_label: str = "restore") -> None:
     """Reconstruct ``_cached_system_prompt_static`` for a stored prompt.
-
     Only the full prompt is persisted, so restore / keep-prompt compression /
     mid-turn failover to a cache-on provider must rebuild the stable tier to
     regain the ``[static, volatile]`` layout.  The rebuilt tier is used ONLY
     when the stored prompt literally starts with it; otherwise static stays
     None and the stored bytes are sent untouched.  A failed rebuild is memoized
-    per stored prompt so the retry-loop hot path doesn't redo the file I/O.
-    """
+    per stored prompt so the retry-loop hot path doesn't redo the file I/O."""
     stored = getattr(agent, "_cached_system_prompt", None)
     existing = getattr(agent, "_cached_system_prompt_static", None)
     if (

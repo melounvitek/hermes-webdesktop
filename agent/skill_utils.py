@@ -1,7 +1,5 @@
 """Lightweight skill metadata utilities shared by prompt_builder and skills_tool.
-
-Import-light by design: no tool registry, CLI config, or provider resolution.
-"""
+Import-light by design: no tool registry, CLI config, or provider resolution."""
 
 import ast
 import logging
@@ -73,11 +71,8 @@ def is_excluded_skill_path(path, *, root: Optional[Path] = None) -> bool:
 
 
 def is_skill_support_path(path, *, root: Optional[Path] = None) -> bool:
-    """True if *path* is under a support dir sitting directly inside a skill root.
-
-    ``skills/scripts/foo`` stays discoverable: its ``scripts`` component is not
-    directly under a directory containing ``SKILL.md``.
-    """
+    """True if *path* is under a support dir sitting directly inside a skill root
+    (``skills/scripts/foo`` stays discoverable: no ``SKILL.md`` above ``scripts``)."""
     path_obj = path if isinstance(path, Path) else Path(str(path))
     parts = path_obj.parts
     base = root if root is not None and not path_obj.is_absolute() else Path()
@@ -105,11 +100,8 @@ def yaml_load(content: str):
 
 def parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
     """Parse YAML frontmatter from markdown; returns (frontmatter_dict, body).
-
     Malformed YAML falls back to key:value line splitting. A leading UTF-8 BOM
-    (Windows editors) is stripped first or it would defeat the ``---`` fence
-    check and silently drop the frontmatter.
-    """
+    (Windows editors) is stripped first or it would defeat the ``---`` fence check."""
     content = content.removeprefix("\ufeff")
     end_match = re.search(r"\n---\s*\n", content[3:]) if content.startswith("---") else None
     if not end_match:
@@ -168,9 +160,10 @@ def _detect_kanban() -> bool:
         try:
             from agent.delegation_context import is_dispatcher_owned_worker_context
 
-            if is_dispatcher_owned_worker_context():
-                return True
+            owned = is_dispatcher_owned_worker_context()
         except Exception:
+            owned = True
+        if owned:
             return True
     try:
         from tools.kanban_tools import _profile_has_kanban_toolset
@@ -199,11 +192,9 @@ _ENV_DETECTORS: Dict[str, Callable[[], bool]] = {
 
 def _detect_environment(env: str) -> bool:
     """True when the named runtime environment is active (unknown => True).
-
     Cached per process EXCEPT ``kanban``: that verdict is context-dependent
     (delegate children / in-process cron see the worker's vars), so a
-    process-wide cache would leak the first asker's answer to the others.
-    """
+    process-wide cache would leak the first asker's answer to the others."""
     if env != "kanban" and env in _ENV_DETECT_CACHE:
         return _ENV_DETECT_CACHE[env]
     detector = _ENV_DETECTORS.get(env)
@@ -293,10 +284,8 @@ ESSENTIAL_SKILLS: frozenset = frozenset({"hermes-agent"})
 
 
 def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
-    """Disabled skill names from config.yaml: global list ∪ platform list.
-
-    *platform* defaults to ``HERMES_PLATFORM`` / ``HERMES_SESSION_PLATFORM``.
-    """
+    """Disabled skill names from config.yaml: global list ∪ platform list
+    (*platform* defaults to ``HERMES_PLATFORM`` / ``HERMES_SESSION_PLATFORM``)."""
     skills_cfg = _skills_cfg()
     if skills_cfg is None:
         return set()
@@ -312,11 +301,9 @@ def get_disabled_skill_names(platform: str | None = None) -> Set[str]:
 
 def parse_config_string_list(value) -> List[str]:
     """Normalize a config value that may hold a JSON-array string into a list.
-
     ``hermes config set`` stores lists as quoted JSON/Python-literal strings;
     treating one as a single name would silently filter nothing. A scalar
-    string still means one name.
-    """
+    string still means one name."""
     if isinstance(value, str):
         if value.strip().startswith("["):
             try:
@@ -354,11 +341,8 @@ def _config_str_list(raw) -> List[str]:
 
 
 def get_external_skills_dirs() -> List[Path]:
-    """Validated, deduplicated ``skills.external_dirs`` (existing dirs only).
-
-    Entries are expanded (``~``, ``${VAR}``); relative paths resolve against
-    HERMES_HOME; the local ``~/.hermes/skills/`` is skipped.
-    """
+    """Validated, deduplicated ``skills.external_dirs`` (existing dirs only). Entries
+    are ``~``/``${VAR}`` expanded, relative to HERMES_HOME; the local skills dir is skipped."""
     config_path = get_config_path()
     if not config_path.exists():
         return []
@@ -387,11 +371,8 @@ def get_external_skills_dirs() -> List[Path]:
 
 
 def get_skill_create_dir() -> Optional[Path]:
-    """Configured ``skills.create_dir`` (need not exist yet), or None when unset.
-
-    Relative paths resolve against HERMES_HOME; a value equal to the local
-    skills dir counts as unset.
-    """
+    """Configured ``skills.create_dir`` (need not exist yet), or None when unset;
+    relative to HERMES_HOME; a value equal to the local skills dir counts as unset."""
     raw = _skills_cfg_get("create_dir")
     entry = str(raw).strip() if raw and isinstance(raw, (str, os.PathLike)) else ""
     if not entry:
@@ -434,13 +415,11 @@ def get_all_skills_dirs() -> List[Path]:
     return dirs
 
 
-# Project-local skills live at <root>/.hermes/skills/ or <root>/.agents/skills/
-# (root = nearest ancestor with .git). TRUST GATE: skills are procedure docs an
-# agent will follow, so auto-sourcing them from any cloned repo is a prompt-
-# injection vector — they load only when the root is in
-# ``skills.trusted_project_dirs``, and then override same-named profile/bundled
-# skills. cwd and the trust list are session-fixed so the skills index stays
-# byte-stable.
+# Project-local skills (<root>/.hermes/skills, <root>/.agents/skills; root = nearest
+# .git ancestor) are a prompt-injection vector if auto-sourced from any clone, so
+# they load only when the root is in ``skills.trusted_project_dirs``; then they
+# override same-named profile/bundled skills. cwd + trust list are session-fixed
+# so the skills index stays byte-stable.
 
 PROJECT_SKILLS_SUBDIRS = (os.path.join(".hermes", "skills"), os.path.join(".agents", "skills"))
 
@@ -449,11 +428,8 @@ _PROJECT_ROOT_MAX_DEPTH = 64  # walk-up bound for pathological cwds
 
 def find_project_root(start: Optional[Path] = None) -> Optional[Path]:
     """Nearest ancestor containing ``.git`` (dir or worktree file), or None.
-
     Without *start*, the surface's ``TERMINAL_CWD`` wins over process cwd so
-    cron/API surfaces inherit an interactive trust decision by project identity;
-    a surface with no workdir resolves no project.
-    """
+    cron/API surfaces inherit an interactive trust decision by project identity."""
     try:
         if start is None:
             from agent.runtime_cwd import scope_terminal_cwd
@@ -464,17 +440,17 @@ def find_project_root(start: Optional[Path] = None) -> Optional[Path]:
     except OSError:
         return None
     home = Path.home().resolve()
-    for _ in range(_PROJECT_ROOT_MAX_DEPTH):
-        try:
+    try:
+        for _ in range(_PROJECT_ROOT_MAX_DEPTH):
             if (cur / ".git").exists():
                 # A dotfiles checkout AT home would make every session
                 # project-scoped; treat home itself as non-project.
                 return None if cur == home else cur
-        except OSError:
-            return None
-        if cur.parent == cur:
-            return None
-        cur = cur.parent
+            if cur.parent == cur:
+                return None
+            cur = cur.parent
+    except OSError:
+        pass
     return None
 
 
@@ -768,12 +744,10 @@ def is_skill_description_truncated_for_prompt(frontmatter: Dict[str, Any]) -> bo
 
 
 def iter_skill_index_files(skills_dir: Path, filename: str):
-    """Walk skills_dir yielding sorted paths matching *filename*.
-
-    Prunes EXCLUDED_SKILL_DIRS and support dirs of skill roots. Org mirrors
-    (``_org/``) are TOKEN-GATED: only the active org's subdir is walked, so
-    leaving an org stops its skills resolving without manual cleanup.
-    """
+    """Walk skills_dir yielding sorted paths matching *filename*; prunes
+    EXCLUDED_SKILL_DIRS and support dirs of skill roots. Org mirrors are
+    TOKEN-GATED: only the active org's subdir is walked, so leaving an org
+    stops its skills resolving without manual cleanup."""
     skills_dir_str = str(skills_dir)
     active_org = read_active_org_id(skills_dir)
     org_root = os.path.join(skills_dir_str, ORG_MIRROR_DIR_NAME)
