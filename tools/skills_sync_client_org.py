@@ -202,7 +202,6 @@ def pull_org_skills(client: Optional[SyncClient] = None, *, identity: Optional[D
     _write_active_org_marker(org_id)
     if not head:
         return {"ok": True, "org_id": org_id, "head": None, "updated": []}
-
     head_commit = client.get_commit_json(head, org_scope=True)
     skill_trees = skill_trees_of_root(client, head_commit["tree"], org_scope=True)
     dest_root = _mirror_root(org_id)
@@ -247,14 +246,12 @@ def propose_skill(skill_name: str, client: Optional[SyncClient] = None, *,
     ssc = _ssc()
     identity, client, max_bytes = _org_client(identity, client)
     org_id = identity["org_id"]
-
     rel = ssc._skill_rel_path(skill_name)
     if rel is None:
         raise SyncError(f"skill '{skill_name}' not found under the skills dir")
     skill_dir = ssc._skills_dir() / rel
     if not (skill_dir / "SKILL.md").exists():
         raise SyncError(f"skill '{skill_name}' has no SKILL.md")
-
     objects = ObjectSet()
     skill_tree = build_tree(skill_dir, objects, max_object_bytes=max_bytes)
     for attempt in range(1, _ORG_CAS_MAX_ATTEMPTS + 1):
@@ -278,7 +275,6 @@ def propose_skill(skill_name: str, client: Optional[SyncClient] = None, *,
                                 "the race — run the command again", status=409) from conflict
             logger.debug("propose_skill: org HEAD moved (actual=%r), re-splicing (attempt %d)",
                          conflict.actual, attempt)
-
     if result.get("proposal_pending"):
         return {"ok": True, "proposal_pending": True, "proposal_id": result.get("proposal_id"),
                 "ref": result.get("ref"), "commit": commit_hash, "org_id": org_id}

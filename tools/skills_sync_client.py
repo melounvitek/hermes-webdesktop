@@ -357,7 +357,6 @@ def push_skills(client: Optional[SyncClient] = None, *, skill_names: Optional[Li
     skill_names = list_synced_skill_names() if skill_names is None else skill_names
     if not skill_names:
         return {"ok": True, "reason": "no skills opted into sync", "noop": True}
-
     _caps, max_bytes = checked_capabilities(client)
     objects, root_hash, _ = snapshot_profile(skill_names, max_object_bytes=max_bytes)
     state = read_sync_state()
@@ -365,7 +364,6 @@ def push_skills(client: Optional[SyncClient] = None, *, skill_names: Optional[Li
     # Idempotency: objects are immutable, so an unchanged root hash means identical content.
     if base_head and state.get("root") == root_hash:
         return {"ok": True, "head": base_head, "reason": "unchanged", "noop": True}
-
     commit_hash = build_commit(root_hash, [base_head] if base_head else [], owner=owner,
                                device=stable_device_id(), message=message, objects=objects)
     client.put_objects(objects.objects)
@@ -392,7 +390,6 @@ def _resolve_push_conflict(client: SyncClient, identity: Dict[str, Any], actual_
     ours_trees = skill_trees_of_root(client, our_root)
     theirs_trees = skill_trees_of_root(client, root_tree_of_commit(client, actual_head))
     base_trees = skill_trees_of_root(client, root_tree_of_commit(client, base_head)) if base_head else {}
-
     merged: Dict[str, str] = {}
     overlaps: List[str] = []
     for path in set(ours_trees) | set(theirs_trees) | set(base_trees):
@@ -405,7 +402,6 @@ def _resolve_push_conflict(client: SyncClient, identity: Dict[str, Any], actual_
         pick = {"overlap": o, "ours": o, "theirs": t, "either": o if o is not None else t}.get(decision)
         if pick is not None:
             merged[path] = pick
-
     if overlaps:
         conflict_ref = f"refs/user/{owner}/conflict/{_next_conflict_index(client, owner)}"
         with suppress(SyncConflict):  # someone else grabbed this index; the head still exists
@@ -416,7 +412,6 @@ def _resolve_push_conflict(client: SyncClient, identity: Dict[str, Any], actual_
             "message": (
                 f"{len(overlaps)} skill(s) changed on both sides; wrote "
                 f"{conflict_ref}. Resolve out-of-band (hermes sync / NAS UI).")}
-
     # Merge commit (parents: actual, ours); re-add our objects so the merge push is self-contained.
     merge_objects = ObjectSet()
     merge_objects.objects.update(objects.objects)
@@ -459,7 +454,6 @@ def pull_skills(client: Optional[SyncClient] = None, *, identity: Optional[Dict[
     state = read_sync_state()
     if head == state.get("head"):
         return {"ok": True, "reason": "already up to date", "head": head, "noop": True}
-
     root_tree = root_tree_of_commit(client, head)
     remote_trees = skill_trees_of_root(client, root_tree)
     adopted = _adopt_manifest_opt_ins(read_manifest_of_root(client, root_tree))
@@ -510,11 +504,8 @@ def sync_status() -> Dict[str, Any]:
         pass
     except Exception as e:
         logger.debug("skills_sync_client: sync_status identity failed: %s", e)
-    try:
-        status["opted_in_skills"] = list_synced_skill_names()
-        status["local_head"] = read_sync_state().get("head")
-    except Exception:
-        pass
+    with suppress(Exception):
+        status.update(opted_in_skills=list_synced_skill_names(), local_head=read_sync_state().get("head"))
     try:
         org_identity = resolve_org_identity()
         status.update(org_available=True, org_id=org_identity.get("org_id"), org_role=org_identity.get("org_role"),

@@ -116,15 +116,14 @@ def scan_for_threats(content: str, scope: str = "context") -> List[str]:
     reported as ``"invisible_unicode_U+XXXX"``. Raises ValueError on an unknown scope."""
     if not content:
         return []
+    if (patterns := _COMPILED.get(scope)) is None:
+        raise ValueError(f"scan_for_threats: unknown scope {scope!r}")
     content = content[:MAX_SCAN_CHARS]
     # Invisible unicode is checked on the RAW content: NFKC below can strip these codepoints.
     findings: List[str] = [f"invisible_unicode_U+{ord(ch):04X}" for ch in set(content) & INVISIBLE_CHARS]
     # NFKC folds full-width / compatibility variants (ｃａｔ → cat) against homograph bypass.
     # It does NOT fold cross-script confusables (Cyrillic ``а``) — that needs a TR#39 database.
     normalised = unicodedata.normalize("NFKC", content)
-    patterns = _COMPILED.get(scope)
-    if patterns is None:
-        raise ValueError(f"scan_for_threats: unknown scope {scope!r}")
     findings.extend(pid for compiled, pid in patterns if compiled.search(normalised))
     return findings
 
@@ -138,10 +137,9 @@ def first_threat_message(content: str, scope: str = "strict") -> Optional[str]:
     if pid.startswith("invisible_unicode_"):
         codepoint = pid.replace("invisible_unicode_", "")
         return f"Blocked: content contains invisible unicode character {codepoint} (possible injection)."
-    return (
-        f"Blocked: content matches threat pattern '{pid}'. "
-        f"Content is injected into the system prompt and must not contain "
-        f"injection or exfiltration payloads.")
+    return (f"Blocked: content matches threat pattern '{pid}'. "
+            f"Content is injected into the system prompt and must not contain "
+            f"injection or exfiltration payloads.")
 
 
 __all__ = ["INVISIBLE_CHARS", "MAX_SCAN_CHARS", "scan_for_threats", "first_threat_message"]

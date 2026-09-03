@@ -507,7 +507,6 @@ def check_command_security(command: str) -> dict:
     except subprocess.TimeoutExpired:
         _warn_once(f"tirith_timeout:{timeout}", "tirith timed out after %ds", timeout)
         return _crash(fail_open, f"tirith timed out ({timeout}s)", "tirith timed out (fail-closed)")
-
     exit_code = result.returncode
     if (action := _EXIT_ACTIONS.get(exit_code)) is None:
         # Unknown exit code (includes signal-killed, e.g. -11): respect fail_open.

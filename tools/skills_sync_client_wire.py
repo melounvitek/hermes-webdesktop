@@ -303,7 +303,6 @@ def root_tree_of_commit(client: SyncClient, commit_hash: str, *, org_scope: bool
 def skill_trees_of_root(client: SyncClient, root_tree_hash: str, *, org_scope: bool = False) -> Dict[str, str]:
     """``{posix_rel_path: skill_tree_hash}`` for every subtree containing a ``SKILL.md`` blob."""
     result: Dict[str, str] = {}
-
     def _walk(tree_hash: str, prefix: str) -> None:
         entries = client.get_tree_json(tree_hash, org_scope=org_scope).get("entries", [])
         if prefix and any(e.get("name") == "SKILL.md" and e.get("kind") == KIND_BLOB for e in entries):
