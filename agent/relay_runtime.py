@@ -71,23 +71,22 @@ def _run_on_daemon_thread(
     With ``timeout`` a still-running worker is abandoned with ``TimeoutError`` (daemon:
     cannot block interpreter exit).
     """
-    result: list[Any] = []
-    error: list[BaseException] = []
+    outcome: dict[str, Any] = {}
 
     def _target() -> None:
         try:
-            result.append(fn())
+            outcome["result"] = fn()
         except BaseException as exc:  # noqa: BLE001 - propagated below
-            error.append(exc)
+            outcome["error"] = exc
 
     worker = threading.Thread(target=_target, daemon=True, name=name)
     worker.start()
     worker.join(timeout)
     if worker.is_alive():
         raise TimeoutError(timeout_message)
-    if error:
-        raise error[0]
-    return result[0] if result else None
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("result")
 
 
 def pop_relay_scope(
@@ -115,10 +114,8 @@ def _current_top(relay: Any) -> Any:
     # object that scope.pop rejects, so never treat it as a handle.
     get_handle = getattr(getattr(relay, "scope", None), "get_handle", None)
     if callable(get_handle):
-        try:
+        with contextlib.suppress(Exception):
             return get_handle()
-        except Exception:
-            pass
     top = relay.get_scope_stack()
     # Some builds return the live stack (list), others the top handle: only unwrap real lists.
     return (top[-1] if top else None) if isinstance(top, list) else top
@@ -174,12 +171,10 @@ _SEGMENTS_CONFIG_LOCK = threading.Lock()
 
 def _load_segments_config() -> dict[str, Any]:
     segments: dict[str, Any] = {}
-    try:
+    with contextlib.suppress(Exception):  # config absence must not crash
         from gateway.run import _load_gateway_config  # late import
         telemetry = (_load_gateway_config().get("gateway") or {}).get("telemetry") or {}
         segments = telemetry.get("session_segments") or {}
-    except Exception:  # noqa: BLE001 - config absence must not crash
-        pass
     try:
         max_turns = max(0, int(segments.get("max_turns", 0) or 0))
     except (TypeError, ValueError):
@@ -627,26 +622,22 @@ class RelayRuntime:
 
         if timeout is None:
             return context.run(invoke)
+        exceeded = f"Relay scope operation exceeded {timeout}s"
         try:
             future = _scope_op_executor().submit(context.run, invoke)
         except RuntimeError:
             # Interpreter shutdown: the executor refuses new futures, but the atexit close
             # path must still flush — still bounded so a wedged call cannot block exit.
             return _run_on_daemon_thread(
-                lambda: context.run(invoke),
-                name="relay-scope-op-exit",
-                timeout=timeout,
-                timeout_message=(
-                    f"Relay scope operation exceeded {timeout}s during interpreter "
-                    "shutdown; abandoning the native call so process exit can proceed"
-                ),
+                lambda: context.run(invoke), name="relay-scope-op-exit", timeout=timeout,
+                timeout_message=f"{exceeded} during interpreter shutdown; abandoning the native "
+                "call so process exit can proceed",
             )
         try:
             return future.result(timeout=timeout)
         except FuturesTimeoutError as exc:
             raise TimeoutError(
-                f"Relay scope operation exceeded {timeout}s "
-                f"(session={session.session_id}); abandoning the native call "
+                f"{exceeded} (session={session.session_id}); abandoning the native call "
                 "so the agent can continue — the span for this scope is lost"
             ) from exc
 
@@ -714,18 +705,16 @@ class RelayRuntime:
         Returns the retry's error (None on success). Must run inside ONE ``run_in_session``
         callback so ContextVar stack views stay consistent.
         """
-        try:
+        with contextlib.suppress(Exception):
             pop_relay_scope(self.relay, handle, output=output, metadata=metadata)
             return None
-        except Exception:
-            pass
         drained = 0
         for _ in range(drain_limit):
             top = _current_top(self.relay)
             if top is None or _same_handle(top, handle):
                 break
             # Never pop the session root while draining for a nested handle.
-            if (session_root is not None and _same_handle(top, session_root) and handle is not session_root):
+            if session_root is not None and _same_handle(top, session_root) and handle is not session_root:
                 break
             try:
                 orphan_output = {"outcome": "cancelled", "hermes.orphan_drain": True}
@@ -812,23 +801,19 @@ class RelayRuntime:
             self._shutdown_started = True
             self._closing = True
             has_active_operations = self._active_operations > 0
-        if has_active_operations:
-            thread = threading.Thread(
-                target=self._finish_shutdown_after_operations,
-                name=f"hermes-nemo-relay-shutdown-{self.runtime_id[:8]}", daemon=True,
-            )
-            try:
-                thread.start()
-            except Exception:
-                with self._sessions_lock:
-                    self._shutdown_started = False
-                logger.warning("Hermes Relay deferred shutdown could not start", exc_info=True)
+        if not has_active_operations:
+            self._finish_shutdown()
             return
-        self._finish_shutdown()
-
-    def _finish_shutdown_after_operations(self) -> None:
-        self._operations_idle.wait()
-        self._finish_shutdown()
+        thread = threading.Thread(
+            target=lambda: (self._operations_idle.wait(), self._finish_shutdown()),
+            name=f"hermes-nemo-relay-shutdown-{self.runtime_id[:8]}", daemon=True,
+        )
+        try:
+            thread.start()
+        except Exception:
+            with self._sessions_lock:
+                self._shutdown_started = False
+            logger.warning("Hermes Relay deferred shutdown could not start", exc_info=True)
 
     def _finish_shutdown(self) -> None:
         try:
@@ -1111,13 +1096,11 @@ class RelaySessionCoordinator:
                 if host is not None:
                     self._close_turn_scope(host, turn, outcome=outcome)
             finally:
-                try:
+                with contextlib.suppress(Exception):  # accounting must never block
                     # Segment turn accounting (max_turns rotation trigger).
                     if turn._active_registered and host is not None:
                         with lease.session.lock:
                             lease.session.segment_turns += 1
-                except Exception:  # noqa: BLE001 - accounting must never block
-                    pass
                 try:
                     # Delegated agents own one turn: close their conversation while the
                     # active-turn guard is held so a parent timeout fallback cannot race it.
