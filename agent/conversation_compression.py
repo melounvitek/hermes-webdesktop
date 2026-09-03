@@ -2955,6 +2955,22 @@ def _resolve_lock_api(lock_db: Any) -> Tuple[Any, Optional[Exception]]:
         return None, exc
 
 
+def _abort_lease(
+    agent: Any,
+    lifecycle: _CompactionLifecycle,
+    system_message: str,
+    attempt_started_at: float,
+    failure_class: str,
+    prompt: Optional[str] = None,
+) -> Tuple[None, str]:
+    """Sit-out return for lease acquisition: prompt, aborted telemetry, terminal status edge."""
+    if prompt is None:
+        prompt = _existing_system_prompt(agent, system_message)
+    _emit_aborted_attempt_telemetry(agent, attempt_started_at, failure_class)
+    lifecycle.complete(force_terminal=True)
+    return None, prompt
+
+
 def _acquire_compression_lease(
     agent: Any,
     *,
@@ -3026,10 +3042,7 @@ def _acquire_compression_lease(
                     agent.session_id or "none",
                 )
                 agent._last_compaction_in_place = False
-                _existing_sp = _existing_system_prompt(agent, system_message)
-                _emit_aborted_attempt_telemetry(agent, attempt_started_at, "commit_fence_cancelled")
-                lifecycle.complete(force_terminal=True)
-                return None, _existing_sp
+                return _abort_lease(agent, lifecycle, system_message, attempt_started_at, "commit_fence_cancelled")
             try:
                 _lock_acquired = _try_acquire_lock(
                     _lock_sid, lease.holder, ttl_seconds=_lock_ttl
@@ -3107,9 +3120,7 @@ def _acquire_compression_lease(
                     agent.context_compressor._begin_compression_telemetry(current_tokens=approx_tokens)
             except Exception:
                 pass
-            _emit_aborted_attempt_telemetry(agent, attempt_started_at, "lock_contended")
-            lifecycle.complete(force_terminal=True)
-            return None, _existing_sp
+            return _abort_lease(agent, lifecycle, system_message, attempt_started_at, "lock_contended", _existing_sp)
 
     if lease.holder is not None:
         agent._active_compression_lock_holder = lease.holder
@@ -4448,6 +4459,40 @@ def _run_summary_phase(
     )
 
 
+def _begin_compression_attempt(
+    agent: Any, *, force: bool, defer_notification: bool
+) -> Tuple[dict, int, float]:
+    """Snapshot + claim the compressor, reset per-attempt agent signals, seed telemetry.
+
+    Returns ``(attempt_snapshot, attempt_generation, attempt_started_at)``. The claim
+    stops a late-unwinding sibling (stall-fallback overlap) from restoring its snapshot
+    over ours or clearing our cancellation consult. Signals are cleared at the VERY TOP,
+    before codex/breaker early-returns, so a stale value cannot make a later no-op look
+    like lock contention; ``_last_compression_attempt_in_place=None`` means aborted/no
+    boundary for ``conversation_history_after_compression()``.
+    """
+    snapshot = _snapshot_compressor_attempt_state(agent.context_compressor)
+    generation = _claim_compressor_attempt(agent.context_compressor)
+    if defer_notification and callable(getattr(agent, _PENDING_CONTEXT_ENGINE_NOTIFICATION, None)):
+        raise RuntimeError("a compression notification is already pending")
+    agent._last_compression_attempt_recorded = True
+    agent._last_compression_attempt_in_place = None
+    agent._compression_skipped_due_to_lock = None
+    agent._compression_blocked_transient = None
+    started_at = time.monotonic()
+    attempt_id = uuid.uuid4().hex
+    try:
+        agent._compression_attempt_id = attempt_id
+        setattr(agent.context_compressor, "_compression_telemetry_seed", {
+            "attempt_id": attempt_id,
+            "session_id": agent.session_id or "",
+            "trigger_source": "manual" if force else "auto",
+        })
+    except Exception:
+        pass
+    return snapshot, generation, started_at
+
+
 def compress_context(
     agent: Any,
     messages: list,
@@ -4468,43 +4513,13 @@ def compress_context(
     apply. ``commit_fence`` stops a timed-out worker mutating session state.
     Returns ``(messages, system_prompt)``; on abort input is unchanged, NOT split.
     """
-    _compressor_attempt_snapshot = _snapshot_compressor_attempt_state(
-        agent.context_compressor
+    _compressor_attempt_snapshot, _attempt_generation, _attempt_started_at = (
+        _begin_compression_attempt(
+            agent, force=force, defer_notification=defer_context_engine_notification
+        )
     )
-    # Claim attempt ownership so a late-unwinding sibling (stall-fallback overlap)
-    # cannot restore its snapshot over ours or clear our cancellation consult.
-    _attempt_generation = _claim_compressor_attempt(agent.context_compressor)
     _durable_cooldown_authoritative: Optional[bool] = None
     _durable_cooldown_state: Optional[dict[str, Any]] = None
-    if (
-        defer_context_engine_notification
-        and callable(getattr(agent, _PENDING_CONTEXT_ENGINE_NOTIFICATION, None))
-    ):
-        raise RuntimeError("a compression notification is already pending")
-
-    # Per-attempt outcome for conversation_history_after_compression(); None means
-    # aborted/no boundary, so the previous flush baseline stays authoritative.
-    agent._last_compression_attempt_recorded = True
-    agent._last_compression_attempt_in_place = None
-    # Clear at the VERY TOP, before codex/breaker early-returns: a stale value must
-    # not make a later no-op look like lock contention to automatic-path consumers.
-    agent._compression_skipped_due_to_lock = None
-    # Per-attempt transient-block signal, set when a cooldown/backoff guard no-ops
-    # this pass.
-    agent._compression_blocked_transient = None
-
-    _attempt_started_at = time.monotonic()
-    _attempt_id = uuid.uuid4().hex
-    _trigger_source = "manual" if force else "auto"
-    try:
-        agent._compression_attempt_id = _attempt_id
-        setattr(agent.context_compressor, "_compression_telemetry_seed", {
-            "attempt_id": _attempt_id,
-            "session_id": agent.session_id or "",
-            "trigger_source": _trigger_source,
-        })
-    except Exception:
-        pass
 
     # Codex owns the real thread; route compaction to its own compact (config
     # compression.codex_app_server_auto). Memory handoff is Hermes-only: no native
@@ -4868,10 +4883,8 @@ def _compress_context_via_codex_app_server(
             _activity_heartbeat.stop("context compression failed")
         raise
 
-    if getattr(result, "interrupted", False) or getattr(result, "error", None):
-        _activity_heartbeat.stop("context compression failed")
-    else:
-        _activity_heartbeat.stop("context compression completed")
+    failed = bool(getattr(result, "interrupted", False) or getattr(result, "error", None))
+    _activity_heartbeat.stop("context compression failed" if failed else "context compression completed")
 
     if getattr(result, "should_retire", False):
         try:
@@ -4880,7 +4893,7 @@ def _compress_context_via_codex_app_server(
             pass
         agent._codex_session = None
 
-    if getattr(result, "interrupted", False) or getattr(result, "error", None):
+    if failed:
         try:
             agent._emit_warning(
                 f"⚠ Codex app-server compaction failed: {result.error}"
