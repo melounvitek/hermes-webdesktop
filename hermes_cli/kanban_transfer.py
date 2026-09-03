@@ -272,9 +272,8 @@ def _relocate_imported_rows(conn: sqlite3.Connection, slug: str) -> tuple[dict[s
         if parked:
             conn.execute(f"UPDATE tasks SET status = 'triage' WHERE id IN ({_placeholders(parked)})", parked)
             warnings.append(
-                f"{len(parked)} task(s) moved to triage — their workspace was a "
-                f"directory or git worktree on the exporting machine and needs "
-                f"to be pointed somewhere on this one"
+                f"{len(parked)} task(s) moved to triage — their workspace was a directory or git "
+                f"worktree on the exporting machine and needs to be pointed somewhere on this one"
             )
 
         for row in conn.execute("SELECT id FROM tasks").fetchall():

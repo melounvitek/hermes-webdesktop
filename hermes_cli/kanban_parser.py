@@ -115,11 +115,10 @@ _BOARD_SPECS = [
         _arg("--include-logs", action="store_true", help="Include per-task worker logs"),
         _json_flag(),
     ], help="Export a board to a portable .tar.gz archive", description=(
-        "Package a board's tasks, comments, links, history, and file "
-        "attachments into one archive that can be imported on another "
-        "machine. Claims, worker PIDs, chat subscriptions, and paths "
-        "belonging to this machine are stripped. Workspaces are never "
-        "included — they are rebuilt on demand."
+        "Package a board's tasks, comments, links, history, and file attachments into one archive "
+        "that can be imported on another machine. Claims, worker PIDs, chat subscriptions, and "
+        "paths belonging to this machine are stripped. Workspaces are never included — they are "
+        "rebuilt on demand."
     )),
     _cmd("import", [
         _arg("archive", help="Path to the .tar.gz archive"),
@@ -127,9 +126,8 @@ _BOARD_SPECS = [
         _arg("--switch", action="store_true", help="Switch to the imported board afterwards"),
         _json_flag(),
     ], help="Import a board archive as a new board", description=(
-        "Import a .tar.gz produced by `hermes kanban boards export`. "
-        "The board always lands as a NEW board — the slug gains a "
-        "numeric suffix if it is already taken — so an import can "
+        "Import a .tar.gz produced by `hermes kanban boards export`. The board always lands as a "
+        "NEW board — the slug gains a numeric suffix if it is already taken — so an import can "
         "never overwrite or merge into a board you already have."
     )),
 ]
@@ -140,11 +138,10 @@ _SPECS = [
     _cmd("boards", children=("boards_action", _BOARD_SPECS),
          help="Manage kanban boards (one board per project / workstream)",
          description=(
-             "Boards let you separate unrelated streams of work "
-             "(projects, repos, domains) into isolated queues. Each "
-             "board has its own DB, workspaces directory, and dispatcher "
-             "loop — tasks on one board cannot collide with tasks on "
-             "another. The first board is 'default' and always exists."
+             "Boards let you separate unrelated streams of work (projects, repos, domains) into "
+             "isolated queues. Each board has its own DB, workspaces directory, and dispatcher "
+             "loop — tasks on one board cannot collide with tasks on another. The first board is "
+             "'default' and always exists."
          )),
     _cmd("create", [
         _arg("title", help="Task title"),
@@ -176,11 +173,10 @@ _SPECS = [
                   "translation --skill github-code-review"),
         _arg("--max-retries", type=int, default=None, metavar="N",
              help="Per-task override for the consecutive-failure "
-                  "circuit breaker. Trip on the Nth failure — "
-                  "e.g. --max-retries 1 blocks on the first "
-                  "failure (no retries), --max-retries 3 allows "
-                  "two retries. Omit to use the dispatcher's kanban.failure_limit config "
-                  f"(default {kb.DEFAULT_FAILURE_LIMIT})."),
+                  f"circuit breaker. Trip on the Nth failure — e.g. --max-retries 1 blocks on the "
+                  f"first failure (no retries), --max-retries 3 allows two retries. Omit to use "
+                  f"the dispatcher's kanban.failure_limit config (default "
+                  f"{kb.DEFAULT_FAILURE_LIMIT})."),
         _arg("--model", default=None, dest="model_override",
              help="Pin the worker to this model (passed as -m <model>) without "
                   "changing the profile's configured model. Combine with --provider "
@@ -416,15 +412,13 @@ _SPECS = [
     _cmd("repair", [_json_flag(help="Emit the repair report as JSON")],
          help="Check kanban.db integrity and auto-repair index-only corruption",
          description=(
-             "Runs PRAGMA integrity_check on the board's DB and reports the "
-             "result. When the failure consists only of index-scoped errors "
-             "('wrong # of entries in index <name>' / 'row N missing from "
-             "index <name>'), the corrupt file is quarantined to a "
-             ".corrupt.<hash>.bak sibling first and the damaged indexes are "
-             "rebuilt with REINDEX — the same narrow auto-repair the "
-             "connect-time guard applies. Any other corruption class is "
-             "reported and left untouched (fail-closed). Exits 0 when the DB "
-             "is healthy or was repaired, non-zero when it is still corrupt."
+             "Runs PRAGMA integrity_check on the board's DB and reports the result. When the "
+             "failure consists only of index-scoped errors ('wrong # of entries in index <name>' / "
+             "'row N missing from index <name>'), the corrupt file is quarantined to a "
+             ".corrupt.<hash>.bak sibling first and the damaged indexes are rebuilt with REINDEX — "
+             "the same narrow auto-repair the connect-time guard applies. Any other corruption "
+             "class is reported and left untouched (fail-closed). Exits 0 when the DB is healthy "
+             "or was repaired, non-zero when it is still corrupt."
          )),
 ]
 

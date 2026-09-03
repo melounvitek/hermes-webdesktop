@@ -178,9 +178,8 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
 
     verbose = bool(getattr(args, "verbose", False))
     print(
-        f"Kanban dispatcher running STANDALONE via --force "
-        f"(interval={args.interval}s, pid={os.getpid()}). "
-        f"Ctrl-C to stop. NOTE: if a gateway is also running with "
+        f"Kanban dispatcher running STANDALONE via --force (interval={args.interval}s, "
+        f"pid={os.getpid()}). Ctrl-C to stop. NOTE: if a gateway is also running with "
         f"dispatch_in_gateway=true (default), you have two dispatchers racing for claims.",
         file=sys.stderr,
     )
@@ -208,12 +207,11 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
             now = int(time.time())
             if now - health_state["last_warn_at"] >= 300:
                 print(
-                    f"[{_fmt_ts(now)}] WARN dispatcher stuck: "
-                    f"ready queue non-empty for {health_state['bad_ticks']} "
-                    f"consecutive ticks but 0 workers spawned successfully. "
-                    f"Check profile health (venv, PATH, credentials) and "
-                    f"`hermes kanban list --status ready` / "
-                    f"`hermes kanban list --status blocked` for recent spawn_failed tasks.",
+                    f"[{_fmt_ts(now)}] WARN dispatcher stuck: ready queue non-empty for "
+                    f"{health_state['bad_ticks']} consecutive ticks but 0 workers spawned "
+                    f"successfully. Check profile health (venv, PATH, credentials) and `hermes "
+                    f"kanban list --status ready` / `hermes kanban list --status blocked` for "
+                    f"recent spawn_failed tasks.",
                     file=sys.stderr, flush=True,
                 )
                 health_state["last_warn_at"] = now
@@ -225,9 +223,8 @@ def _cmd_daemon(args: argparse.Namespace) -> int:
         )
         if did_work:
             print(
-                f"[{_fmt_ts(int(time.time()))}] "
-                f"reclaimed={res.reclaimed} crashed={len(res.crashed)} "
-                f"timed_out={len(res.timed_out)} stale={len(res.stale)} "
+                f"[{_fmt_ts(int(time.time()))}] reclaimed={res.reclaimed} "
+                f"crashed={len(res.crashed)} timed_out={len(res.timed_out)} stale={len(res.stale)} "
                 f"promoted={res.promoted} spawned={len(res.spawned)} "
                 f"auto_blocked={len(res.auto_blocked)}",
                 flush=True,

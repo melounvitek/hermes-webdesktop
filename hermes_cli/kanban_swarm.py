@@ -60,11 +60,10 @@ def _require_text(value: str, field_name: str) -> str:
 
 def _swarm_context(root_id: str, goal: str) -> str:
     return (
-        f"\n\n## Swarm protocol\n- Swarm root / shared blackboard: `{root_id}`.\n"
-        "- Read sibling/parent handoffs from Kanban context before working.\n"
-        "- Put machine-readable facts in completion metadata.\n"
-        "- Put cross-worker notes on the root task using structured comments.\n"
-        f"- Goal: {goal.strip()}\n"
+        f"\n\n## Swarm protocol\n- Swarm root / shared blackboard: `{root_id}`.\n- Read "
+        f"sibling/parent handoffs from Kanban context before working.\n- Put machine-readable "
+        f"facts in completion metadata.\n- Put cross-worker notes on the root task using "
+        f"structured comments.\n- Goal: {goal.strip()}\n"
     )
 
 

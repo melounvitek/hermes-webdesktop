@@ -254,11 +254,10 @@ def _rule_hallucinated_cards(task, events, runs, now, cfg) -> list[Diagnostic]:
         kind="hallucinated_cards", severity="error",
         title="Worker claimed cards that don't exist",
         detail=(
-            "The completing worker declared created_cards that either didn't "
-            "exist or weren't created by its profile. The completion was "
-            "blocked and the task stayed in its prior state. "
-            "Usually means the worker hallucinated ids instead of capturing "
-            "return values from kanban_create."
+            "The completing worker declared created_cards that either didn't exist or weren't "
+            "created by its profile. The completion was blocked and the task stayed in its prior "
+            "state. Usually means the worker hallucinated ids instead of capturing return values "
+            "from kanban_create."
         ),
         actions=actions,
         first_seen_at=_event_ts(hits[0]), last_seen_at=_event_ts(hits[-1]), count=len(hits),
@@ -270,9 +269,8 @@ def _rule_hallucinated_cards(task, events, runs, now, cfg) -> list[Diagnostic]:
 _TRIAGE_SLOTS = {
     True: (
         "auxiliary.kanban_decomposer", "auxiliary.triage_specifier", "decomposer",
-        "Auto-decompose is on, so the dispatcher needs "
-        "auxiliary.kanban_decomposer (with auxiliary.triage_specifier as "
-        "a fallback for non-fan-out tasks).",
+        "Auto-decompose is on, so the dispatcher needs auxiliary.kanban_decomposer (with "
+        "auxiliary.triage_specifier as a fallback for non-fan-out tasks).",
     ),
     False: (
         "auxiliary.triage_specifier", "auxiliary.kanban_decomposer", "specifier",
@@ -323,11 +321,10 @@ def _rule_triage_aux_unavailable(task, events, runs, now, cfg) -> list[Diagnosti
         kind="triage_aux_unavailable", severity="warning",
         title=f"Triage {primary_desc} has no usable model",
         detail=(
-            f"This task is still in triage and no working auxiliary model is "
-            f"visible to the dispatcher. {detail_path} The default slot uses "
-            f"`provider: auto` which falls back to the main model, but no main "
-            f"model is configured either. Configure the slot directly or set a "
-            f"main model so the auto fallback can take over."
+            f"This task is still in triage and no working auxiliary model is visible to the "
+            f"dispatcher. {detail_path} The default slot uses `provider: auto` which falls back to "
+            f"the main model, but no main model is configured either. Configure the slot directly "
+            f"or set a main model so the auto fallback can take over."
         ),
         actions=actions,
         first_seen_at=now, last_seen_at=now, count=1,
@@ -350,10 +347,9 @@ def _rule_prose_phantom_refs(task, events, runs, now, cfg) -> list[Diagnostic]:
         kind="prose_phantom_refs", severity="warning",
         title="Completion summary references unknown task ids",
         detail=(
-            "The completion summary mentions task ids that don't resolve "
-            "in this board's database. The completion itself succeeded, "
-            "but downstream consumers parsing the summary may be pointed "
-            "at cards that never existed."
+            "The completion summary mentions task ids that don't resolve in this board's database. "
+            "The completion itself succeeded, but downstream consumers parsing the summary may be "
+            "pointed at cards that never existed."
         ),
         actions=_generic_recovery_actions(task, running=_is_running(task)),
         first_seen_at=_event_ts(hits[0]), last_seen_at=_event_ts(hits[-1]), count=len(hits),
@@ -414,18 +410,16 @@ def _rule_repeated_failures(task, events, runs, now, cfg) -> list[Diagnostic]:
     if err_snippet:
         title = f"Agent {outcome_label} x{failures}: {err_snippet.splitlines()[0][:160]}"
         detail = (
-            f"This task has failed {failures} times in a row "
-            f"(most recent: {outcome_label}). Full last error:\n\n{err_snippet}\n\n"
-            f"The dispatcher circuit breaker is configured for "
-            f"{failure_limit} consecutive non-success attempts. Fix the "
-            f"root cause and reclaim or unblock the task to retry."
+            f"This task has failed {failures} times in a row (most recent: {outcome_label}). Full "
+            f"last error:\n\n{err_snippet}\n\nThe dispatcher circuit breaker is configured for "
+            f"{failure_limit} consecutive non-success attempts. Fix the root cause and reclaim or "
+            f"unblock the task to retry."
         )
     else:
         title = f"Agent {outcome_label} x{failures} (no error recorded)"
         detail = (
-            f"This task has failed {failures} times in a row "
-            f"(most recent: {outcome_label}) but no error text was "
-            f"captured. Check the suggested command or the worker log."
+            f"This task has failed {failures} times in a row (most recent: {outcome_label}) but no "
+            f"error text was captured. Check the suggested command or the worker log."
         )
     return [Diagnostic(
         kind="repeated_failures", severity=severity,
@@ -539,11 +533,10 @@ def _rule_review_dependency_deadlock(task, events, runs, now, cfg) -> list[Diagn
         kind="review_dependency_deadlock", severity="error",
         title=f"Review handoff blocks {len(child_ids)} dependent task(s)",
         detail=(
-            "This implementation is sticky-blocked for review while its "
-            "downstream task(s) require the implementation to be done or "
-            "archived before they can run. Complete the finished phase, unlink "
-            "the incorrect dependency, or migrate this workflow to the "
-            "first-class review lifecycle."
+            "This implementation is sticky-blocked for review while its downstream task(s) require "
+            "the implementation to be done or archived before they can run. Complete the finished "
+            "phase, unlink the incorrect dependency, or migrate this workflow to the first-class "
+            "review lifecycle."
         ),
         actions=actions,
         first_seen_at=blocked_at, last_seen_at=blocked_at, count=len(child_ids),
@@ -575,10 +568,9 @@ def _rule_stuck_in_blocked(task, events, runs, now, cfg) -> list[Diagnostic]:
         kind="stuck_in_blocked", severity="warning",
         title=f"Task has been blocked for {int(age_hours)}h",
         detail=(
-            f"This task transitioned to blocked {int(age_hours)}h ago and "
-            f"has had no comments or unblock attempts since. Blocked tasks "
-            f"are waiting for human input — check the block reason and "
-            f"either unblock with feedback or answer with a comment."
+            f"This task transitioned to blocked {int(age_hours)}h ago and has had no comments or "
+            f"unblock attempts since. Blocked tasks are waiting for human input — check the block "
+            f"reason and either unblock with feedback or answer with a comment."
         ),
         actions=[DiagnosticAction(kind="comment", label="Add a comment / unblock the task", suggested=True)],
         first_seen_at=last_blocked_ts, last_seen_at=last_blocked_ts, count=1,
@@ -629,11 +621,10 @@ def _rule_block_unblock_cycling(task, events, runs, now, cfg) -> list[Diagnostic
         kind="block_unblock_cycling", severity="warning",
         title=f"Task block→unblock cycled {cycles}x in {int(window_seconds/3600)}h",
         detail=(
-            f"This task has been blocked {cycles} times after being "
-            "unblocked, suggesting the unblock is not addressing the "
-            "root cause and the worker keeps hitting the same wall. "
-            "Review the block reasons in the event history; a different "
-            "intervention (reassign, change scope, archive) may be needed."
+            f"This task has been blocked {cycles} times after being unblocked, suggesting the "
+            f"unblock is not addressing the root cause and the worker keeps hitting the same wall. "
+            f"Review the block reasons in the event history; a different intervention (reassign, "
+            f"change scope, archive) may be needed."
         ),
         actions=actions,
         first_seen_at=int(initial_blocked_ts) if initial_blocked_ts else int(now),
@@ -690,11 +681,10 @@ def _rule_stranded_in_ready(task, events, runs, now, cfg) -> list[Diagnostic]:
         kind="stranded_in_ready", severity=severity,
         title=f"Ready for {age_str} with no worker",
         detail=(
-            f"This task has been ready for {age_str} but nothing has "
-            f"claimed it. Common causes: assignee {assignee!r} is "
-            f"misspelled, the profile was deleted, or the external "
-            f"worker pool for this lane is down. Confirm the assignee "
-            f"is correct and that a worker is actually polling for it."
+            f"This task has been ready for {age_str} but nothing has claimed it. Common causes: "
+            f"assignee {assignee!r} is misspelled, the profile was deleted, or the external worker "
+            f"pool for this lane is down. Confirm the assignee is correct and that a worker is "
+            f"actually polling for it."
         ),
         actions=actions,
         first_seen_at=last_ready_ts, last_seen_at=last_ready_ts, count=1,
