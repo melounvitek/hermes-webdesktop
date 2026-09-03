@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 from pathlib import Path
 from typing import Any, Optional
@@ -18,17 +19,12 @@ def read_json(path: Path) -> Optional[Any]:
 
 
 def write_json_atomic(path: Path, data: Any, mode: Optional[int] = None) -> None:
-    """Write ``json.dumps(data, indent=2)`` via a ``.json.tmp`` sibling + rename.
-
-    *mode* (e.g. ``0o600``) is applied to the temp file before the rename so
-    the final file never exists with looser permissions.
-    """
+    """Write ``json.dumps(data, indent=2)`` via a ``.json.tmp`` sibling + rename; *mode* (e.g.
+    ``0o600``) is applied to the temp file so the final file never exists with looser perms."""
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(".json.tmp")
     tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
     if mode is not None:
-        try:
+        with contextlib.suppress(OSError, NotImplementedError):  # best-effort on non-POSIX filesystems
             tmp.chmod(mode)
-        except (OSError, NotImplementedError):  # best-effort on non-POSIX filesystems
-            pass
     tmp.replace(path)

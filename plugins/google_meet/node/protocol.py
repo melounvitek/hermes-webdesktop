@@ -1,14 +1,11 @@
-"""Wire protocol for gateway ↔ node RPC.
-
-Everything is a JSON object with the same envelope shape:
+"""Wire protocol for gateway ↔ node RPC (JSON envelopes).
 
     Request:   {"type": <str>, "id": <str>, "token": <str>, "payload": <dict>}
     Response:  {"type": "response", "id": <req-id>, "payload": <dict>}
     Error:     {"type": "error", "id": <req-id>, "error": <str>}
 
-Requests must carry the shared bearer token (set up via ``hermes meet node
-approve`` on the gateway and read off disk on the server). Mismatched tokens
-are rejected before dispatch.
+Requests carry the shared bearer token (``hermes meet node approve`` on the gateway, read off
+disk on the server); mismatched tokens are rejected before dispatch.
 """
 
 from __future__ import annotations
@@ -55,11 +52,8 @@ def encode(msg: Dict[str, Any]) -> str:
 
 
 def decode(raw) -> Dict[str, Any]:
-    """Parse a JSON envelope (object with string ``type`` + ``id``), raising ValueError otherwise.
-
-    Accepts ``str`` or UTF-8 ``bytes``. Token match and payload shape are
-    checked server-side in :func:`validate_request`.
-    """
+    """Parse a JSON envelope (object with string ``type`` + ``id``) from str/bytes; ValueError otherwise.
+    Token match and payload shape are checked server-side in :func:`validate_request`."""
     if isinstance(raw, (bytes, bytearray)):
         raw = raw.decode("utf-8")
     try:
@@ -78,18 +72,12 @@ def validate_request(msg: Dict[str, Any], expected_token: str) -> Tuple[bool, st
     """Return ``(True, "")`` or ``(False, <reason>)``; reasons are safe to send back to the client."""
     if not isinstance(msg, dict):
         return False, "envelope must be a dict"
-    t = msg.get("type")
-    if not _nonempty_str(t):
-        return False, "missing or non-string 'type'"
-    if t not in VALID_REQUEST_TYPES:
-        return False, f"unknown request type: {t!r}"
-    if not _nonempty_str(msg.get("id")):
-        return False, "missing or non-string 'id'"
-    token = msg.get("token")
-    if not _nonempty_str(token):
-        return False, "missing token"
-    if token != expected_token:
-        return False, "token mismatch"
-    if not isinstance(msg.get("payload"), dict):
-        return False, "payload must be a dict"
-    return True, ""
+    t, token = msg.get("type"), msg.get("token")
+    checks = (  # ordered, lazily evaluated: first failing check wins
+        (lambda: _nonempty_str(t), "missing or non-string 'type'"),
+        (lambda: t in VALID_REQUEST_TYPES, f"unknown request type: {t!r}"),
+        (lambda: _nonempty_str(msg.get("id")), "missing or non-string 'id'"),
+        (lambda: _nonempty_str(token), "missing token"),
+        (lambda: token == expected_token, "token mismatch"),
+        (lambda: isinstance(msg.get("payload"), dict), "payload must be a dict"))
+    return next(((False, reason) for ok, reason in checks if not ok()), (True, ""))

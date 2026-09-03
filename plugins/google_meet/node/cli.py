@@ -15,23 +15,17 @@ from plugins.google_meet.node.server import NodeServer
 def register_cli(subparser: argparse.ArgumentParser) -> None:
     """Add ``run / list / approve / remove / status / ping`` subparsers to the ``node`` parser."""
     sp = subparser.add_subparsers(dest="node_cmd", required=True)
-
     run = sp.add_parser("run", help="Start a node server on this machine.")
     run.add_argument("--host", default="0.0.0.0")
     run.add_argument("--port", type=int, default=18789)
     run.add_argument("--display-name", default="hermes-meet-node")
-
     sp.add_parser("list", help="List approved remote nodes.")
-
     app = sp.add_parser("approve", help="Register a remote node on the gateway.")
     for arg in ("name", "url", "token"):
         app.add_argument(arg)
-
-    for name, help_ in (("remove", "Forget a registered node."),
-                        ("status", "Ping a registered node."),
+    for name, help_ in (("remove", "Forget a registered node."), ("status", "Ping a registered node."),
                         ("ping", "Alias for status.")):
         sp.add_parser(name, help=help_).add_argument("name")
-
     for p in sp.choices.values():
         p.set_defaults(func=node_command)
 
@@ -41,8 +35,7 @@ def _cmd_run(args: argparse.Namespace, reg: NodeRegistry) -> int:
     token = server.ensure_token()
     print(f"[meet-node] display_name={server.display_name}\n"
           f"[meet-node] listening on ws://{args.host}:{args.port}\n"
-          f"[meet-node] token (copy to gateway): {token}\n"
-          "[meet-node] approve with:\n"
+          f"[meet-node] token (copy to gateway): {token}\n[meet-node] approve with:\n"
           f"             hermes meet node approve <name> ws://<host>:{args.port} {token}")
     try:
         asyncio.run(server.serve())
@@ -85,8 +78,6 @@ def _cmd_ping(args: argparse.Namespace, reg: NodeRegistry) -> int:
     except Exception as exc:  # noqa: BLE001 — surface any connection error
         print(json.dumps({"ok": False, "error": str(exc)}))
         return 1
-    if not isinstance(result, dict):
-        result = {"result": result}
     print(json.dumps({"ok": True, "node": args.name, **result}))
     return 0
 
@@ -97,8 +88,7 @@ _COMMANDS = {
     "approve": _cmd_approve,
     "remove": _cmd_remove,
     "status": _cmd_ping,
-    "ping": _cmd_ping,
-}
+    "ping": _cmd_ping}
 
 
 def node_command(args: argparse.Namespace) -> int:

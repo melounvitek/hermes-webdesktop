@@ -17,34 +17,22 @@ from plugins.google_meet import process_manager as pm
 
 def check_meet_requirements() -> bool:
     """True when the plugin can run LOCALLY: Linux/macOS + importable ``playwright``.
-
-    Remote-node operation only needs ``websockets`` on the gateway side; the
-    handlers relax this gate themselves when a node is addressed.
-    """
+    Remote-node operation only needs ``websockets``; handlers relax this gate when a node is addressed."""
+    import importlib.util
     import platform as _p
-    if _p.system().lower() not in {"linux", "darwin"}:
-        return False
-    try:
-        import playwright  # noqa: F401
-    except ImportError:
-        return False
-    return True
+    return (_p.system().lower() in {"linux", "darwin"}
+            and importlib.util.find_spec("playwright") is not None)
 
 
 def resolve_node(node: str):
     """``(NodeClient, node_name)`` for *node* (``'auto'`` = the sole registered node), or ``(None, None)``."""
     from plugins.google_meet.node.registry import NodeRegistry
     from plugins.google_meet.node.client import NodeClient
-
     entry = NodeRegistry().resolve(node if node != "auto" else None)
     if entry is None:
         return None, None
     return NodeClient(url=entry["url"], token=entry["token"]), entry.get("name")
 
-
-# ---------------------------------------------------------------------------
-# Schemas
-# ---------------------------------------------------------------------------
 
 _NODE_PROP = {"type": "string"}
 
@@ -64,29 +52,22 @@ MEET_JOIN_SCHEMA: Dict[str, Any] = {
         "properties": {
             "url": {"type": "string", "description": "Full https://meet.google.com/... URL. Required."},
             "mode": {
-                "type": "string",
-                "enum": ["transcribe", "realtime"],
+                "type": "string", "enum": ["transcribe", "realtime"],
                 "description": (
                     "transcribe (default): listen-only, scrape captions. "
                     "realtime: also enable agent speech via meet_say "
-                    "(requires OpenAI Realtime key + platform audio bridge)."
-                ),
+                    "(requires OpenAI Realtime key + platform audio bridge)."),
             },
             "guest_name": {
                 "type": "string",
-                "description": "Display name to use when joining as guest. Defaults to 'Hermes Agent'.",
-            },
+                "description": "Display name to use when joining as guest. Defaults to 'Hermes Agent'."},
             "duration": {
                 "type": "string",
-                "description": (
-                    "Optional max duration before auto-leave (e.g. '30m', "
-                    "'2h', '90s'). Omit to stay until meet_leave is called."
-                ),
-            },
+                "description": ("Optional max duration before auto-leave (e.g. '30m', "
+                                "'2h', '90s'). Omit to stay until meet_leave is called.")},
             "headed": {
                 "type": "boolean",
-                "description": "Run Chromium headed instead of headless (debug only). Default false.",
-            },
+                "description": "Run Chromium headed instead of headless (debug only). Default false."},
             "node": {
                 "type": "string",
                 "description": (
@@ -95,8 +76,7 @@ MEET_JOIN_SCHEMA: Dict[str, Any] = {
                     "but the user's Chrome with a signed-in Google profile "
                     "lives on their Mac). Pass 'auto' to use the single "
                     "registered node. Default: run locally. Nodes are "
-                    "approved via `hermes meet node approve`."
-                ),
+                    "approved via `hermes meet node approve`."),
             },
         },
         "required": ["url"],
@@ -118,21 +98,16 @@ MEET_TRANSCRIPT_SCHEMA: Dict[str, Any] = {
     "name": "meet_transcript",
     "description": (
         "Read the scraped transcript for the active Meet session. Returns "
-        "full transcript unless 'last' is set, in which case returns the last "
-        "N lines only."
+        "full transcript unless 'last' is set, in which case returns the last N lines only."
     ),
     "parameters": {
         "type": "object",
         "properties": {
             "last": {
                 "type": "integer",
-                "description": (
-                    "Optional: return only the last N caption lines. Useful "
-                    "for polling during a meeting without re-reading the "
-                    "whole transcript."
-                ),
-                "minimum": 1,
-            },
+                "description": ("Optional: return only the last N caption lines. Useful "
+                                "for polling during a meeting without re-reading the whole transcript."),
+                "minimum": 1},
             "node": _NODE_PROP,
         },
         "additionalProperties": False,
@@ -168,10 +143,6 @@ MEET_SAY_SCHEMA: Dict[str, Any] = {
 }
 
 
-# ---------------------------------------------------------------------------
-# Handlers
-# ---------------------------------------------------------------------------
-
 def _json(obj: Any) -> str:
     return json.dumps(obj, ensure_ascii=False)
 
@@ -187,10 +158,8 @@ def _dispatch(node: Optional[str], op: str, remote, local) -> str:
         return _json({"success": bool(res.get("ok")), **res})
     client, node_name = resolve_node(node)
     if client is None:
-        return _err(
-            f"no registered meet node matches {node!r} — "
-            "run `hermes meet node approve <name> <url> <token>` first"
-        )
+        return _err(f"no registered meet node matches {node!r} — "
+                    "run `hermes meet node approve <name> <url> <token>` first")
     try:
         res = remote(client)
     except Exception as e:
@@ -205,25 +174,17 @@ def handle_meet_join(args: Dict[str, Any], **_kw) -> str:
     mode = (args.get("mode") or "transcribe").strip().lower()
     if mode not in {"transcribe", "realtime"}:
         return _err(f"mode must be 'transcribe' or 'realtime' (got {mode!r})")
-
     common: Dict[str, Any] = dict(
-        url=url,
-        guest_name=str(args.get("guest_name") or "Hermes Agent"),
+        url=url, guest_name=str(args.get("guest_name") or "Hermes Agent"),
         duration=str(args.get("duration")) if args.get("duration") else None,
-        headed=bool(args.get("headed", False)),
-        mode=mode,
-    )
+        headed=bool(args.get("headed", False)), mode=mode)
 
     def _local():
         if not check_meet_requirements():
-            return {
-                "ok": False,
-                "error": (
-                    "google_meet plugin prerequisites missing — install with "
-                    "`pip install playwright && python -m playwright install "
-                    "chromium`. Plugin is supported on Linux and macOS only."
-                ),
-            }
+            return {"ok": False, "error": (
+                "google_meet plugin prerequisites missing — install with "
+                "`pip install playwright && python -m playwright install "
+                "chromium`. Plugin is supported on Linux and macOS only.")}
         return pm.start(**common)
 
     return _dispatch(args.get("node"), "start_bot", lambda c: c.start_bot(**common), _local)
@@ -240,17 +201,13 @@ def handle_meet_transcript(args: Dict[str, Any], **_kw) -> str:
         last = None
     if last is not None and last < 1:
         last = None
-    return _dispatch(
-        args.get("node"), "transcript",
-        lambda c: c.transcript(last=last), lambda: pm.transcript(last=last),
-    )
+    return _dispatch(args.get("node"), "transcript", lambda c: c.transcript(last=last),
+                     lambda: pm.transcript(last=last))
 
 
 def handle_meet_leave(args: Dict[str, Any], **_kw) -> str:
-    return _dispatch(
-        args.get("node"), "stop",
-        lambda c: c.stop(), lambda: pm.stop(reason="agent called meet_leave"),
-    )
+    return _dispatch(args.get("node"), "stop", lambda c: c.stop(),
+                     lambda: pm.stop(reason="agent called meet_leave"))
 
 
 def handle_meet_say(args: Dict[str, Any], **_kw) -> str:

@@ -1,18 +1,13 @@
 """Virtual audio bridge for feeding generated speech into Chrome's mic.
 
-Provisions a platform-specific virtual audio device the Meet bot's Chromium
-can use as its input; the OpenAI Realtime client writes PCM into it.
-
-Linux: pactl creates a null-sink plus a virtual source whose master is the
-sink's monitor. Callers set ``PULSE_SOURCE=<source_name>`` in Chrome's env.
-
-macOS: only verifies BlackHole 2ch is installed and returns its name; the
-default-input switch is left to the user so we never surprise their system
-audio state. Windows: unsupported.
+Linux: pactl creates a null-sink plus a virtual source on the sink's monitor; callers set
+``PULSE_SOURCE=<source_name>`` in Chrome's env. macOS: only verifies BlackHole 2ch is installed
+(the default-input switch is left to the user). Windows: unsupported.
 """
 
 from __future__ import annotations
 
+import contextlib
 import platform
 import subprocess
 from typing import Optional
@@ -22,21 +17,12 @@ _BLACKHOLE_DEVICE = "BlackHole 2ch"
 
 
 def _pactl(*args: str, check: bool) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["pactl", *args],
-        check=check,
-        capture_output=True,
-        text=True, encoding='utf-8', errors='replace',
-        stdin=subprocess.DEVNULL,
-    )
+    return subprocess.run(["pactl", *args], check=check, capture_output=True, text=True,
+                          encoding='utf-8', errors='replace', stdin=subprocess.DEVNULL)
 
 
 class AudioBridge:
-    """Manages a virtual audio device for Chrome fake-mic input.
-
-    Call ``setup()`` once before launching the Meet bot and ``teardown()``
-    when the session ends (idempotent).
-    """
+    """Virtual audio device for Chrome fake-mic input: ``setup()`` before launch, ``teardown()`` after."""
 
     def __init__(self, name_prefix: str = "hermes_meet") -> None:
         self._name_prefix = name_prefix
@@ -44,7 +30,6 @@ class AudioBridge:
         self._device_name: Optional[str] = None
         self._write_target: Optional[str] = None
         self._module_ids: list[int] = []
-        self._torn_down = False
 
     def _ready(self, value: Optional[str]) -> str:
         if not value:
@@ -61,77 +46,57 @@ class AudioBridge:
             return self._setup_linux()
         if system == "Darwin":
             return self._setup_darwin()
-        if system == "Windows":
-            raise RuntimeError("windows not supported in v2")
-        raise RuntimeError(f"unsupported platform: {system}")
+        raise RuntimeError("windows not supported in v2" if system == "Windows"
+                           else f"unsupported platform: {system}")
 
     def teardown(self) -> None:
         """Release the virtual audio device. Idempotent; never raises."""
-        if self._torn_down:
-            return
-        if self._platform == "linux":
-            # Unload in reverse order (virtual-source before null-sink).
-            for mod_id in reversed(self._module_ids):
-                try:
-                    _pactl("unload-module", str(mod_id), check=False)
-                except Exception:
-                    pass
-            self._module_ids = []
-        self._torn_down = True
+        for mod_id in reversed(self._module_ids):  # linux only; virtual-source before null-sink
+            with contextlib.suppress(Exception):
+                _pactl("unload-module", str(mod_id), check=False)
+        self._module_ids = []
 
     def _finish(self, tag: str, device: str, write_target: str, module_ids: list[int]) -> dict:
         self._platform = tag
         self._device_name = device
         self._write_target = write_target
         self._module_ids = module_ids
-        self._torn_down = False
         return {"platform": tag, "device_name": device, "sample_rate": 48000, "channels": 2,
                 "module_ids": list(module_ids), "write_target": write_target}
 
     def _setup_linux(self) -> dict:
         sink_name = f"{self._name_prefix}_sink"
         src_name = f"{self._name_prefix}_src"
-
         try:
             sink_out = _pactl(
                 "load-module", "module-null-sink", f"sink_name={sink_name}",
-                "sink_properties=device.description=HermesMeetSink", check=True,
-            )
+                "sink_properties=device.description=HermesMeetSink", check=True)
         except FileNotFoundError as exc:
             raise RuntimeError("pactl not found — install PulseAudio/pipewire-pulse") from exc
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(f"pactl load-module null-sink failed: {exc.stderr or exc}") from exc
         sink_mod_id = self._parse_module_id(sink_out.stdout)
-
         try:
             src_out = _pactl(
                 "load-module", "module-virtual-source", f"source_name={src_name}",
-                f"master={sink_name}.monitor", check=True,
-            )
+                f"master={sink_name}.monitor", check=True)
         except subprocess.CalledProcessError as exc:
             # Roll back the null-sink we just created so we don't leak it.
             _pactl("unload-module", str(sink_mod_id), check=False)
             raise RuntimeError(f"pactl load-module virtual-source failed: {exc.stderr or exc}") from exc
-
         return self._finish("linux", src_name, sink_name, [sink_mod_id, self._parse_module_id(src_out.stdout)])
 
     def _setup_darwin(self) -> dict:
         try:
-            out = subprocess.check_output(
-                ["system_profiler", "SPAudioDataType"],
-                text=True, encoding='utf-8', errors='replace',
-                stderr=subprocess.STDOUT,
-            )
+            out = subprocess.check_output(["system_profiler", "SPAudioDataType"], text=True,
+                                          encoding='utf-8', errors='replace', stderr=subprocess.STDOUT)
         except FileNotFoundError as exc:
             raise RuntimeError("system_profiler not found (macOS-only command)") from exc
         except subprocess.CalledProcessError as exc:
             raise RuntimeError(f"system_profiler failed: {exc.output}") from exc
-
         if "BlackHole" not in out:
-            raise RuntimeError(
-                "BlackHole virtual audio device not installed. "
-                "Install via: brew install blackhole-2ch"
-            )
+            raise RuntimeError("BlackHole virtual audio device not installed. "
+                               "Install via: brew install blackhole-2ch")
         return self._finish("darwin", _BLACKHOLE_DEVICE, _BLACKHOLE_DEVICE, [])
 
     @staticmethod
