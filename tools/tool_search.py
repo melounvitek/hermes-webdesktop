@@ -73,8 +73,8 @@ _TRI_STATE_ALIASES = {"true": "on", "1": "on", "yes": "on", "false": "off", "0":
 
 def _tri_state(value: Any) -> str:
     """Normalize an ``auto``/``on``/``off`` setting (bool-ish aliases accepted)."""
-    text = _TRI_STATE_ALIASES.get(str(value).strip().lower(), str(value).strip().lower())
-    return text if text in ("auto", "on", "off") else "auto"
+    text = str(value).strip().lower()
+    return _TRI_STATE_ALIASES.get(text, text if text in ("auto", "on", "off") else "auto")
 
 
 def _clamped_int(value: Any, fallback: int, lo: int, hi: int) -> int:
@@ -109,8 +109,7 @@ def load_config() -> ToolSearchConfig:
     return _config_from_loader("load_config")
 
 
-def load_config_readonly() -> ToolSearchConfig:
-    """Same as ``load_config`` without copying the cached full config."""
+def load_config_readonly() -> ToolSearchConfig:  # no copy of the cached full config
     return _config_from_loader("load_config_readonly")
 
 
@@ -497,13 +496,12 @@ def resolve_underlying_call(args: Dict[str, Any]) -> Tuple[Optional[str], Dict[s
     if name in BRIDGE_TOOL_NAMES:
         return None, {}, f"tool_call cannot invoke '{name}' (it is itself a bridge tool)"
     raw_args = args.get("arguments")
-    if raw_args is None:
-        raw_args = {}
     if isinstance(raw_args, str):
         try:
             raw_args = json.loads(raw_args)
         except json.JSONDecodeError as e:
             return None, {}, f"tool_call 'arguments' is not valid JSON: {e}"
+    raw_args = {} if raw_args is None else raw_args
     if not isinstance(raw_args, dict):
         return None, {}, "tool_call 'arguments' must be an object"
     if not is_deferrable_tool_name(name, load_config_readonly().effective_defer_tools):

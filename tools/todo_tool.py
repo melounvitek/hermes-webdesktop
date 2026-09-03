@@ -82,14 +82,13 @@ class TodoStore:
         self._items = self._normalize_order(rebuilt)
 
     def read(self) -> List[Dict[str, str]]:
-        """Return a copy of the current list."""
         return [item.copy() for item in self._items]
 
     def has_items(self) -> bool:
         return bool(self._items)
 
     def snapshot(self) -> Dict[str, Any]:
-        """Return the full state clients can reconcile atomically."""
+        """Full state clients can reconcile atomically."""
         return {"todos": self.read(), "revision": self._revision}
 
     def restore(self, todos: List[Dict[str, Any]], *, revision: Any = 0) -> List[Dict[str, str]]:
@@ -148,11 +147,10 @@ class TodoStore:
             return {"id": "?", "content": "(invalid item)", "status": "pending"}
         item_id = str(item.get("id", "")).strip() or "?"
         content = str(item.get("content", "")).strip()
-        content = TodoStore._cap_content(content) if content else "(no description)"
         status = str(item.get("status", "pending")).strip().lower()
-        if status not in VALID_STATUSES:
-            status = "pending"
-        result = {"id": item_id, "content": content, "status": status}
+        result = {"id": item_id,
+                  "content": TodoStore._cap_content(content) if content else "(no description)",
+                  "status": status if status in VALID_STATUSES else "pending"}
         parent = str(item.get("parent") or "").strip()
         if parent and parent != item_id:
             result["parent"] = parent
@@ -166,8 +164,7 @@ class TodoStore:
             if item.get("parent") and item["parent"] not in by_id:
                 item.pop("parent", None)
         for item in items:
-            seen = {item["id"]}
-            node = item
+            seen, node = {item["id"]}, item
             while node.get("parent"):
                 if node["parent"] in seen:
                     item.pop("parent", None)
@@ -179,21 +176,17 @@ class TodoStore:
     def _dedupe_by_id(todos: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
         """Collapse duplicate ids, keeping the last occurrence in its position."""
         last_index: Dict[str, int] = {}
-        for i, item in enumerate(todos):
-            if not isinstance(item, dict):  # synthetic key so _validate can handle them
-                last_index[f"__invalid_{i}"] = i
-                continue
-            last_index[str(item.get("id", "")).strip() or "?"] = i
+        for i, item in enumerate(todos):  # non-dicts get a synthetic key; _validate handles them
+            key = str(item.get("id", "")).strip() if isinstance(item, dict) else f"__invalid_{i}"
+            last_index[key or "?"] = i
         return [todos[i] for i in sorted(last_index.values())]
 
     @staticmethod
     def _normalize_order(items: List[Dict[str, str]]) -> List[Dict[str, str]]:
         """Lift the in_progress step ahead of any earlier pending placeholder. Nested lists
         keep authored order — reordering would tear a subtask from its siblings."""
-        if any(item.get("parent") for item in items):
-            return items
         statuses = [item["status"] for item in items]
-        if "in_progress" not in statuses:
+        if any(item.get("parent") for item in items) or "in_progress" not in statuses:
             return items
         active_index = statuses.index("in_progress")
         if "pending" not in statuses[:active_index]:
