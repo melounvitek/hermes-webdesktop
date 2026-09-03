@@ -7,26 +7,13 @@ import re
 from typing import Any, Dict, List, Optional, Union
 from urllib.parse import quote, urljoin, urlparse, urlunparse
 
-import httpx
-
 from tools.skills_hub_models import (
-    GuardedFetchMixin, SkillBundle, SkillMeta, SkillSource, _hermes_tags, _matches_query,
-    _parse_frontmatter, _referenced_support_paths, _validate_bundle_rel_path,
-    _validate_skill_name, hub,
+    GuardedFetchMixin, SkillBundle, SkillMeta, SkillSource, _first_matching, _get_json, _get_text,
+    _hermes_tags, _matches_query, _memo_json, _parse_frontmatter, _referenced_support_paths,
+    _validate_bundle_rel_path, _validate_skill_name, hub,
 )
 
 logger = logging.getLogger("tools.skills_hub")
-
-
-def _get_json(url: str, *, timeout: int = 20, **kwargs) -> Optional[Any]:
-    """Plain (unguarded) GET + JSON decode; None on non-200 or transport/decode error."""
-    try:
-        resp = httpx.get(url, timeout=timeout, **kwargs)
-        if resp.status_code != 200:
-            return None
-        return resp.json()
-    except (httpx.HTTPError, json.JSONDecodeError):
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -36,20 +23,23 @@ def _get_json(url: str, *, timeout: int = 20, **kwargs) -> Optional[Any]:
 class WellKnownSkillSource(GuardedFetchMixin, SkillSource):
     """Read skills from a domain exposing /.well-known/skills/index.json."""
 
+    SOURCE_ID = "well-known"
     BASE_PATH = "/.well-known/skills"
 
-    def source_id(self) -> str:
-        return "well-known"
-
-    def trust_level_for(self, identifier: str) -> str:
-        return "community"
+    def _meta(self, parsed: dict, skill_name: str, description: str, files: Any, **extra) -> SkillMeta:
+        return SkillMeta(
+            name=skill_name,
+            description=description,
+            source="well-known",
+            identifier=self._wrap_identifier(parsed["base_url"], skill_name),
+            trust_level="community",
+            path=skill_name,
+            extra={"index_url": parsed["index_url"], "base_url": parsed["base_url"], "files": files, **extra},
+        )
 
     def search(self, query: str, limit: int = 10) -> List[SkillMeta]:
         index_url = self._query_to_index_url(query)
-        if not index_url:
-            return []
-
-        parsed = self._parse_index(index_url)
+        parsed = self._parse_index(index_url) if index_url else None
         if not parsed:
             return []
 
@@ -59,18 +49,9 @@ class WellKnownSkillSource(GuardedFetchMixin, SkillSource):
             if not isinstance(name, str) or not name:
                 continue
             files = entry.get("files", ["SKILL.md"])
-            results.append(SkillMeta(
-                name=name,
-                description=str(entry.get("description", "")),
-                source="well-known",
-                identifier=self._wrap_identifier(parsed["base_url"], name),
-                trust_level="community",
-                path=name,
-                extra={
-                    "index_url": parsed["index_url"],
-                    "base_url": parsed["base_url"],
-                    "files": files if isinstance(files, list) else ["SKILL.md"],
-                },
+            results.append(self._meta(
+                parsed, name, str(entry.get("description", "")),
+                files if isinstance(files, list) else ["SKILL.md"],
             ))
         return results
 
@@ -78,7 +59,6 @@ class WellKnownSkillSource(GuardedFetchMixin, SkillSource):
         parsed = self._parse_identifier(identifier)
         if not parsed:
             return None
-
         entry = self._index_entry(parsed["index_url"], parsed["skill_name"])
         if not entry:
             return None
@@ -88,19 +68,10 @@ class WellKnownSkillSource(GuardedFetchMixin, SkillSource):
             return None
 
         fm = _parse_frontmatter(skill_md)
-        return SkillMeta(
-            name=str(fm.get("name") or parsed["skill_name"]),
-            description=str(fm.get("description") or entry.get("description") or ""),
-            source="well-known",
-            identifier=self._wrap_identifier(parsed["base_url"], parsed["skill_name"]),
-            trust_level="community",
-            path=parsed["skill_name"],
-            extra={
-                "index_url": parsed["index_url"],
-                "base_url": parsed["base_url"],
-                "files": entry.get("files", ["SKILL.md"]),
-                "endpoint": parsed["skill_url"],
-            },
+        return self._meta(
+            parsed, str(fm.get("name") or parsed["skill_name"]),
+            str(fm.get("description") or entry.get("description") or ""),
+            entry.get("files", ["SKILL.md"]), endpoint=parsed["skill_url"],
         )
 
     def fetch(self, identifier: str) -> Optional[SkillBundle]:
@@ -196,30 +167,23 @@ class WellKnownSkillSource(GuardedFetchMixin, SkillSource):
         }
 
     def _parse_index(self, index_url: str) -> Optional[dict]:
-        cache_key = f"well_known_index_{hashlib.md5(index_url.encode()).hexdigest()}"
-        cached = hub()._read_index_cache(cache_key)
-        if isinstance(cached, dict) and isinstance(cached.get("skills"), list):
-            return cached
+        def compute():
+            resp = hub()._guarded_http_get(index_url, timeout=20)
+            if resp is None or resp.status_code != 200:
+                return None
+            try:
+                data = resp.json()
+            except json.JSONDecodeError:
+                return None
+            skills = data.get("skills", []) if isinstance(data, dict) else []
+            if not isinstance(skills, list):
+                return None
+            return {"index_url": index_url, "base_url": index_url[:-len("/index.json")], "skills": skills}
 
-        resp = hub()._guarded_http_get(index_url, timeout=20)
-        if resp is None or resp.status_code != 200:
-            return None
-        try:
-            data = resp.json()
-        except json.JSONDecodeError:
-            return None
-
-        skills = data.get("skills", []) if isinstance(data, dict) else []
-        if not isinstance(skills, list):
-            return None
-
-        parsed = {
-            "index_url": index_url,
-            "base_url": index_url[:-len("/index.json")],
-            "skills": skills,
-        }
-        hub()._write_index_cache(cache_key, parsed)
-        return parsed
+        return _memo_json(
+            f"well_known_index_{hashlib.md5(index_url.encode()).hexdigest()}", compute,
+            valid=lambda c: isinstance(c, dict) and isinstance(c.get("skills"), list),
+        )
 
     def _index_entry(self, index_url: str, skill_name: str) -> Optional[dict]:
         parsed = self._parse_index(index_url)
@@ -248,16 +212,11 @@ class UrlSource(GuardedFetchMixin, SkillSource):
     frontmatter ``name:`` (URL-slug fallback); trust is always ``community``.
     """
 
+    SOURCE_ID = "url"
     # Skill names must look like identifiers: lowercase letters/digits with
     # optional hyphens/underscores. Blocks dangerous (``../evil``) AND useless
     # (``SKILL``, ``README``, empty) candidates before they hit the disk.
     _VALID_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
-
-    def source_id(self) -> str:
-        return "url"
-
-    def trust_level_for(self, identifier: str) -> str:
-        return "community"
 
     def search(self, query: str, limit: int = 10) -> List[SkillMeta]:
         return []  # search is meaningless for a direct URL
@@ -278,7 +237,8 @@ class UrlSource(GuardedFetchMixin, SkillSource):
             return False
         return path.lower().endswith(".md")
 
-    def inspect(self, identifier: str) -> Optional[SkillMeta]:
+    def _load(self, identifier: str):
+        """``(url, text, frontmatter, resolved name)`` for a claimed identifier, else None."""
         if not self._matches(identifier):
             return None
         url = identifier.strip()
@@ -286,7 +246,13 @@ class UrlSource(GuardedFetchMixin, SkillSource):
         if text is None:
             return None
         fm = _parse_frontmatter(text)
-        name = self._resolve_skill_name(fm, url)
+        return url, text, fm, self._resolve_skill_name(fm, url)
+
+    def inspect(self, identifier: str) -> Optional[SkillMeta]:
+        loaded = self._load(identifier)
+        if loaded is None:
+            return None
+        url, _text, fm, name = loaded
         raw_tags = _hermes_tags(fm)
         return SkillMeta(
             name=name or "",
@@ -300,15 +266,10 @@ class UrlSource(GuardedFetchMixin, SkillSource):
         )
 
     def fetch(self, identifier: str) -> Optional[SkillBundle]:
-        if not self._matches(identifier):
+        loaded = self._load(identifier)
+        if loaded is None:
             return None
-        url = identifier.strip()
-        text = self._fetch_text(url)
-        if text is None:
-            return None
-
-        fm = _parse_frontmatter(text)
-        name = self._resolve_skill_name(fm, url)
+        url, text, _fm, name = loaded
         referenced = _referenced_support_paths(text)
         if referenced is None:
             return None
@@ -392,13 +353,8 @@ class LobeHubSource(SkillSource):
     """LobeHub agent marketplace (14,500+ system-prompt agents, converted to
     SKILL.md on fetch). Data lives in GitHub: lobehub/lobe-chat-agents."""
 
+    SOURCE_ID = "lobehub"
     INDEX_URL = "https://chat-agents.lobehub.com/index.json"
-
-    def source_id(self) -> str:
-        return "lobehub"
-
-    def trust_level_for(self, identifier: str) -> str:
-        return "community"
 
     def _agents(self) -> Optional[list]:
         index = self._fetch_index()
@@ -411,34 +367,36 @@ class LobeHubSource(SkillSource):
     def _agent_id(identifier: str) -> str:
         return identifier.split("/", 1)[-1] if identifier.startswith("lobehub/") else identifier
 
+    @staticmethod
+    def _agent_meta(agent: dict, name: str, description: str) -> SkillMeta:
+        tags = agent.get("meta", agent).get("tags", [])
+        return SkillMeta(
+            name=name,
+            description=description,
+            source="lobehub",
+            identifier=f"lobehub/{name}",
+            trust_level="community",
+            tags=tags if isinstance(tags, list) else [],
+        )
+
     def search(self, query: str, limit: int = 10) -> List[SkillMeta]:
         agents = self._agents()
         if agents is None:
             return []
 
-        query_lower = query.lower()
-        results: List[SkillMeta] = []
-        for agent in agents:
+        def fields(agent):
+            meta = agent.get("meta", agent)
+            tags = meta.get("tags", [])
+            return (meta.get("title", agent.get("identifier", "")), meta.get("description", ""),
+                    tags if isinstance(tags, list) else "")
+
+        def to_meta(agent):
             meta = agent.get("meta", agent)
             title = meta.get("title", agent.get("identifier", ""))
-            desc = meta.get("description", "")
-            tags = meta.get("tags", [])
+            identifier = agent.get("identifier", title.lower().replace(" ", "-"))
+            return self._agent_meta(agent, identifier, meta.get("description", "")[:200])
 
-            if _matches_query(query_lower, title, desc, tags if isinstance(tags, list) else ""):
-                identifier = agent.get("identifier", title.lower().replace(" ", "-"))
-                results.append(SkillMeta(
-                    name=identifier,
-                    description=desc[:200],
-                    source="lobehub",
-                    identifier=f"lobehub/{identifier}",
-                    trust_level="community",
-                    tags=tags if isinstance(tags, list) else [],
-                ))
-
-            if len(results) >= limit:
-                break
-
-        return results
+        return _first_matching(query.lower(), agents, fields, to_meta, limit)
 
     def fetch(self, identifier: str) -> Optional[SkillBundle]:
         agent_id = self._agent_id(identifier)
@@ -456,46 +414,18 @@ class LobeHubSource(SkillSource):
 
     def inspect(self, identifier: str) -> Optional[SkillMeta]:
         agent_id = self._agent_id(identifier)
-        agents = self._agents()
-        if agents is None:
-            return None
-
-        for agent in agents:
+        for agent in self._agents() or []:
             if agent.get("identifier") == agent_id:
-                meta = agent.get("meta", agent)
-                return SkillMeta(
-                    name=agent_id,
-                    description=meta.get("description", ""),
-                    source="lobehub",
-                    identifier=f"lobehub/{agent_id}",
-                    trust_level="community",
-                    tags=meta.get("tags", []) if isinstance(meta.get("tags"), list) else [],
-                )
+                return self._agent_meta(agent, agent_id, agent.get("meta", agent).get("description", ""))
         return None
 
     def _fetch_index(self) -> Optional[Any]:
         """Fetch the LobeHub agent index (cached for 1 hour)."""
-        cache_key = "lobehub_index"
-        cached = hub()._read_index_cache(cache_key)
-        if cached is not None:
-            return cached
-
-        data = _get_json(self.INDEX_URL, timeout=30)
-        if data is None:
-            return None
-        hub()._write_index_cache(cache_key, data)
-        return data
+        return _memo_json("lobehub_index", lambda: _get_json(self.INDEX_URL, timeout=30))
 
     def _fetch_agent(self, agent_id: str) -> Optional[dict]:
         """Fetch a single agent's JSON file."""
-        url = f"https://chat-agents.lobehub.com/{agent_id}.json"
-        try:
-            resp = httpx.get(url, timeout=15)
-            if resp.status_code == 200:
-                return resp.json()
-        except (httpx.HTTPError, json.JSONDecodeError) as e:
-            logger.debug("LobeHub agent fetch failed: %s", e)
-        return None
+        return _get_json(f"https://chat-agents.lobehub.com/{agent_id}.json", timeout=15)
 
     @staticmethod
     def _convert_to_skill_md(agent_data: dict) -> str:
@@ -545,28 +475,18 @@ class BrowseShSource(SkillSource):
     whose repo is not always public, so it is not used for content.
     """
 
+    SOURCE_ID = "browse-sh"
     CATALOG_URL = "https://browse.sh/api/skills"
     SKILL_DETAIL_URL = "https://browse.sh/api/skills/{slug}"
     _CACHE_KEY = "browse_sh_catalog"
 
-    def source_id(self) -> str:
-        return "browse-sh"
-
-    def trust_level_for(self, identifier: str) -> str:
-        return "community"
-
     def _fetch_catalog(self) -> List[Dict]:
-        cached = hub()._read_index_cache(self._CACHE_KEY)
-        if cached is not None:
-            return cached
-        data = _get_json(self.CATALOG_URL)
-        if data is None:
-            return []
-        skills = data.get("skills", []) if isinstance(data, dict) else []
-        if not isinstance(skills, list):
-            return []
-        hub()._write_index_cache(self._CACHE_KEY, skills)
-        return skills
+        def compute():
+            data = _get_json(self.CATALOG_URL)
+            skills = data.get("skills", []) if isinstance(data, dict) else []
+            return skills if isinstance(skills, list) else None
+
+        return _memo_json(self._CACHE_KEY, compute) or []
 
     def _item_to_meta(self, item: Dict) -> Optional[SkillMeta]:
         slug = item.get("slug", "")
@@ -596,19 +516,11 @@ class BrowseShSource(SkillSource):
         )
 
     def search(self, query: str, limit: int = 10) -> List[SkillMeta]:
-        query_lower = query.lower()
-        results = []
-        for item in self._fetch_catalog():
-            if _matches_query(
-                query_lower, item.get("name", ""), item.get("title", ""), item.get("description", ""),
-                item.get("hostname", ""), item.get("category", ""), item.get("tags", []),
-            ):
-                meta = self._item_to_meta(item)
-                if meta:
-                    results.append(meta)
-            if len(results) >= limit:
-                break
-        return results
+        def fields(item):
+            return (item.get("name", ""), item.get("title", ""), item.get("description", ""),
+                    item.get("hostname", ""), item.get("category", ""), item.get("tags", []))
+
+        return _first_matching(query.lower(), self._fetch_catalog(), fields, self._item_to_meta, limit)
 
     def _catalog_item(self, identifier: str) -> Optional[Dict]:
         slug = self._slug_from_identifier(identifier)
@@ -627,14 +539,8 @@ class BrowseShSource(SkillSource):
         slug = item["slug"]
 
         md_url = self._resolve_skill_md_url(slug, item)
-        if not md_url:
-            return None
-        try:
-            resp = httpx.get(md_url, timeout=20, follow_redirects=True)
-            if resp.status_code != 200:
-                return None
-            content = resp.text
-        except httpx.HTTPError:
+        content = _get_text(md_url, follow_redirects=True) if md_url else None
+        if content is None:
             return None
 
         meta = self._item_to_meta(item)

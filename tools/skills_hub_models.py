@@ -4,14 +4,19 @@ Leaf module (no imports from tools.skills_hub) so every source adapter module
 can import it at top level without cycles.
 """
 
+import json
+import logging
 import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import PurePosixPath
-from typing import Any, Dict, Iterable, List, Optional, Union
+from typing import Any, Callable, Dict, Iterable, List, Optional, Union
 from urllib.parse import unquote, urlsplit
 
+import httpx
 import yaml
+
+logger = logging.getLogger("tools.skills_hub")
 
 
 def hub():
@@ -65,11 +70,57 @@ def _cache_metas(key: str, metas: List[SkillMeta]) -> None:
     hub()._write_index_cache(key, [_skill_meta_to_dict(m) for m in metas])
 
 
+def _memo_json(key: str, compute: Callable[[], Any], valid: Callable[[Any], bool] = lambda c: c is not None) -> Any:
+    """Shared-index-cache memo: a cached value passing ``valid`` is returned as-is;
+    otherwise ``compute()`` runs and a non-None result is written back."""
+    cached = hub()._read_index_cache(key)
+    if valid(cached):
+        return cached
+    data = compute()
+    if data is not None:
+        hub()._write_index_cache(key, data)
+    return data
+
+
+def _get_json(url: str, *, timeout: int = 20, **kwargs) -> Optional[Any]:
+    """Plain (unguarded) GET + JSON decode; None on non-200 or transport/decode error."""
+    try:
+        resp = httpx.get(url, timeout=timeout, **kwargs)
+        if resp.status_code != 200:
+            return None
+        return resp.json()
+    except (httpx.HTTPError, json.JSONDecodeError):
+        return None
+
+
+def _get_text(url: str, *, timeout: int = 20, **kwargs) -> Optional[str]:
+    """Plain (unguarded) GET; body text on 200, None on any other status or transport error."""
+    try:
+        resp = httpx.get(url, timeout=timeout, **kwargs)
+    except httpx.HTTPError:
+        return None
+    return resp.text if resp.status_code == 200 else None
+
+
 def _matches_query(query_lower: str, *fields: Any) -> bool:
     """Case-insensitive substring match of ``query_lower`` against joined fields
     (lists are space-joined; an empty query matches everything)."""
     parts = [" ".join(str(t) for t in f) if isinstance(f, list) else str(f) for f in fields]
     return query_lower in " ".join(parts).lower()
+
+
+def _first_matching(query_lower: str, items: Iterable[Any], fields_of: Callable[[Any], tuple],
+                    to_meta: Callable[[Any], Optional[SkillMeta]], limit: int) -> List[SkillMeta]:
+    """Substring-search ``items`` in order, converting hits with ``to_meta`` until ``limit``."""
+    results: List[SkillMeta] = []
+    for item in items:
+        if _matches_query(query_lower, *fields_of(item)):
+            meta = to_meta(item)
+            if meta:
+                results.append(meta)
+        if len(results) >= limit:
+            break
+    return results
 
 
 TRUST_RANK = {"builtin": 2, "trusted": 1, "community": 0}
@@ -90,7 +141,14 @@ def _dedupe_by_trust(results: Iterable[SkillMeta]) -> List[SkillMeta]:
 
 
 class SkillSource(ABC):
-    """Abstract base for all skill registry adapters."""
+    """Abstract base for all skill registry adapters.
+
+    ``SOURCE_ID`` is the unique source id (e.g. 'github', 'clawhub'); ``TRUST_LEVEL``
+    the trust every identifier gets unless ``trust_level_for`` is overridden.
+    """
+
+    SOURCE_ID: str = ""
+    TRUST_LEVEL: str = "community"
 
     @abstractmethod
     def search(self, query: str, limit: int = 10) -> List[SkillMeta]:
@@ -104,12 +162,11 @@ class SkillSource(ABC):
     def inspect(self, identifier: str) -> Optional[SkillMeta]:
         """Fetch metadata for a skill without downloading all files."""
 
-    @abstractmethod
     def source_id(self) -> str:
-        """Unique identifier for this source (e.g. 'github', 'clawhub')."""
+        return self.SOURCE_ID
 
     def trust_level_for(self, identifier: str) -> str:
-        return "community"
+        return self.TRUST_LEVEL
 
 
 class GuardedFetchMixin:
