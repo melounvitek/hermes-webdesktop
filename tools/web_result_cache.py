@@ -63,6 +63,13 @@ def normalize_query(query: str) -> str:
     return re.sub(r"\s+", " ", (query or "").strip().lower())
 
 
+def _host_slug(url: str) -> str:
+    """Filesystem-safe hostname slug for cache filenames (``"page"`` when hostless). Shared with
+    tools.web_tools_truncate."""
+    host = (urlparse(url).hostname or "page").replace(":", "_")
+    return re.sub(r"[^A-Za-z0-9._-]", "-", host)[:60].strip("-") or "page"
+
+
 def _deep_copy(response: dict) -> dict:
     """Defensive copy so callers mutating a hit never corrupt the cached entry."""
     return json.loads(json.dumps(response))
@@ -195,10 +202,9 @@ def _entry_file_path(url: str, format: Optional[str], provider: str) -> Optional
     (keyed on URL alone), which html/markdown or two providers' copies of one URL would overwrite."""
     if (d := _cache_dir()) is None:
         return None
-    slug = "page"  # filesystem-safe hostname slug; "page" when hostless/unparseable
+    slug = "page"
     with suppress(Exception):
-        host = (urlparse(url).hostname or "page").replace(":", "_")
-        slug = re.sub(r"[^A-Za-z0-9._-]", "-", host)[:60].strip("-") or "page"
+        slug = _host_slug(url)
     return d / f"{slug}-{_url_digest(url, format, provider)}.cache.md"
 
 
