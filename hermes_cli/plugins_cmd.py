@@ -271,12 +271,6 @@ def _load_yaml_manifest(manifest_file: Path):
         return yaml.safe_load(f) or {}
 
 
-def _read_portable_manifest(plugin_dir: Path) -> dict:
-    """Validated Agent Plugins v1 ``plugin.json`` manifest (diagnostics dropped); raises on failure."""
-    from hermes_cli.agent_plugins import read_agent_plugin_manifest
-    return read_agent_plugin_manifest(plugin_dir)[0]
-
-
 def _read_manifest(plugin_dir: Path) -> dict:
     """Read a native or portable manifest, preferring native YAML."""
     manifest_file = _native_manifest_file(plugin_dir)
@@ -284,7 +278,8 @@ def _read_manifest(plugin_dir: Path) -> dict:
         if not _has_portable_manifest(plugin_dir):
             return {}
         try:
-            return _read_portable_manifest(plugin_dir)
+            from hermes_cli.agent_plugins import read_agent_plugin_manifest
+            return read_agent_plugin_manifest(plugin_dir)[0]
         except Exception as e:
             logger.warning("Failed to read plugin.json in %s: %s", plugin_dir, e)
             return {}
@@ -794,7 +789,12 @@ def _pull_plugin_update(target: Path, pinned_msg, not_git_msg, before_pull=None)
     ok, output = _git_pull_plugin_dir(target)
     if not ok:
         raise PluginOperationError(output)
-    _record_pulled_revision(target, metadata, install_record)
+    # Store the new HEAD in the plugin's install-metadata record (if it has one).
+    git_exe = _resolve_git_executable() if install_record else None
+    if git_exe:
+        install_record["revision"] = _git_head_revision(target, git_exe)
+        metadata[target.name] = install_record
+        _write_install_metadata(metadata)
     return output
 
 
@@ -861,15 +861,6 @@ def _post_pull_housekeeping(target: Path, console) -> None:
     """After ``git pull``: drop stale ``__pycache__`` and copy any new ``.example`` files."""
     _clear_plugin_bytecode(target)
     _copy_example_files(target, console)
-
-
-def _record_pulled_revision(target: Path, metadata: dict, install_record: dict) -> None:
-    """After a pull, store the new HEAD in the plugin's install-metadata record (if it has one)."""
-    git_exe = _resolve_git_executable() if install_record else None
-    if git_exe:
-        install_record["revision"] = _git_head_revision(target, git_exe)
-        metadata[target.name] = install_record
-        _write_install_metadata(metadata)
 
 
 def _remove_plugin_core(target: Path) -> None:
@@ -1221,7 +1212,8 @@ def _read_manifest_info(d: Path, prefix: str):
         if not _has_portable_manifest(d):
             return None
         try:
-            manifest = _read_portable_manifest(d)
+            from hermes_cli.agent_plugins import read_agent_plugin_manifest
+            manifest = read_agent_plugin_manifest(d)[0]
             name = manifest["name"]
         except Exception:
             return None
@@ -1290,22 +1282,16 @@ def _discover_all_plugins() -> list:
     seen: dict = {}
     # memory/, context_engine/ and model-providers/ load through dedicated registries, not the
     # PluginManager opt-in surface, so listing them as toggleable plugins would mislead.
-    from hermes_cli.plugins import get_bundled_plugins_dir
+    from hermes_cli.plugins import discover_entrypoint_manifests, get_bundled_plugins_dir
     for base, source, skip in (
         (get_bundled_plugins_dir(), "bundled", {"memory", "context_engine", "model-providers"}),
         (_plugins_dir(), "user", set()),
     ):
         _scan_level(base, source, skip, "", 0, seen)
-    for name, version, description, path in _discover_entrypoint_plugins():
-        seen[name] = (name, version, description, "entrypoint", path, name)
+    # Entry-point plugins are installed as Python packages, so they have no plugin directory.
+    for m in discover_entrypoint_manifests():
+        seen[m.name] = (m.name, m.version, m.description, "entrypoint", m.path, m.name)
     return list(seen.values())
-
-
-def _discover_entrypoint_plugins() -> list[tuple[str, str, str, str]]:
-    """``(name, version, summary, target)`` for ``hermes_agent.plugins`` entry points — installed
-    as Python packages, so they have no plugin directory."""
-    from hermes_cli.plugins import discover_entrypoint_manifests
-    return [(m.name, m.version, m.description, m.path) for m in discover_entrypoint_manifests()]
 
 
 def _plugin_status(name: str, enabled: set, disabled: set, key: str = "") -> str:
@@ -1461,10 +1447,7 @@ def _configure_category_spec(spec) -> bool:
 
 def _provider_categories() -> list:
     """``[(title, current_label, configure_fn), ...]`` rows for the composite UI."""
-    return [
-        (spec[0], spec[3]() or spec[1], functools.partial(_configure_category_spec, spec))
-        for spec in _PROVIDER_CATEGORY_SPECS
-    ]
+    return [(s[0], s[3]() or s[1], functools.partial(_configure_category_spec, s)) for s in _PROVIDER_CATEGORY_SPECS]
 
 
 # ── Composite plugins UI ────────────────────────────────────────────────────────────────────
