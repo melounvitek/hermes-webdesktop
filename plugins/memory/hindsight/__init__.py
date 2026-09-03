@@ -136,8 +136,7 @@ def _fetch_hindsight_api_version(api_url: str, api_key: str | None = None,
     return str(version) if version else None
 
 
-def _check_api_supports_update_mode_append(api_url: str,
-                                           api_key: str | None = None) -> bool:
+def _check_api_supports_update_mode_append(api_url: str, api_key: str | None = None) -> bool:
     """Cached ``update_mode='append'`` check for *api_url*. False on any probe failure
     (safe default: per-process document_id, no update_mode = resume-overwrite fix intact)."""
     if not api_url:
@@ -150,19 +149,17 @@ def _check_api_supports_update_mode_append(api_url: str,
     with _append_capability_lock:
         # A concurrent probe may have filled the cache meanwhile; its answer wins.
         supported = _append_capability_cache.setdefault(api_url, supported)
-    if not supported:
+    if supported:
+        logger.debug("Hindsight API %s version %s supports update_mode='append'", api_url, version)
+    else:
         logger.warning(
             "Hindsight API at %s reports version %r, older than %s. "
             "Falling back to per-process document_id — retains across "
             "processes/sessions create separate documents instead of "
             "appending to a session-scoped one. Upgrade Hindsight to "
             "%s+ to enable update_mode='append' deduplication.",
-            api_url, version, _MIN_VERSION_FOR_UPDATE_MODE_APPEND,
-            _MIN_VERSION_FOR_UPDATE_MODE_APPEND,
+            api_url, version, _MIN_VERSION_FOR_UPDATE_MODE_APPEND, _MIN_VERSION_FOR_UPDATE_MODE_APPEND,
         )
-    else:
-        logger.debug("Hindsight API %s version %s supports update_mode='append'",
-                     api_url, version)
     return supported
 
 
@@ -970,8 +967,7 @@ class HindsightMemoryProvider(MemoryProvider):
 
     def _finish_prefetch(self, result: str, count: int) -> str:
         """Record indicator state (cleared on empty turns, never a stale count); format the block."""
-        self._last_recall_returned = bool(result)
-        self._last_recall_count = count if result else 0
+        self._last_recall_returned, self._last_recall_count = bool(result), count if result else 0
         if not result:
             logger.debug("Prefetch: no results available")
             return ""
@@ -1111,8 +1107,7 @@ class HindsightMemoryProvider(MemoryProvider):
             self._session_id = str(session_id).strip()
 
         self._session_turns.append(json.dumps(self._build_turn_messages(user_content, assistant_content), ensure_ascii=False))
-        self._turn_counter += 1
-        self._turn_index = self._turn_counter
+        self._turn_counter = self._turn_index = self._turn_counter + 1
         remainder = self._turn_counter % self._retain_every_n_turns
         if remainder:
             logger.debug("sync_turn: buffered turn %d (will retain at turn %d)",

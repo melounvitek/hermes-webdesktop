@@ -127,16 +127,18 @@ def _describe_content(value: Any) -> Any:
     if value is None or isinstance(value, bool):
         return value
     if isinstance(value, (int, float)):
-        return {"omitted": True, "type": "number"}
-    if isinstance(value, bytes):
-        return {"omitted": True, "type": "bytes", "length": len(value)}
-    if isinstance(value, str):
-        return {"omitted": True, "type": "text", "chars": len(value)}
-    if isinstance(value, dict):
-        return {"omitted": True, "type": "object", "keys": [str(k) for k in list(value.keys())[:20]]}
-    if isinstance(value, (list, tuple, set)):
-        return {"omitted": True, "type": "array", "items": len(value)}
-    return {"omitted": True, "type": type(value).__name__}
+        shape = {"type": "number"}
+    elif isinstance(value, bytes):
+        shape = {"type": "bytes", "length": len(value)}
+    elif isinstance(value, str):
+        shape = {"type": "text", "chars": len(value)}
+    elif isinstance(value, dict):
+        shape = {"type": "object", "keys": [str(k) for k in list(value.keys())[:20]]}
+    elif isinstance(value, (list, tuple, set)):
+        shape = {"type": "array", "items": len(value)}
+    else:
+        shape = {"type": type(value).__name__}
+    return {"omitted": True, **shape}
 
 
 def _capture_content(value: Any, *, parse_json_strings: bool = False) -> Any:
@@ -639,14 +641,10 @@ def _end_observation(observation: Any, *, output: Any = None, metadata: Optional
 
 
 def _end_children(state: TraceState, *, include_subagents: bool = False) -> None:
-    for observation in (*state.generations.values(), *state.tools.values()):
+    pending = [obs for queue in state.pending_tools_by_name.values() for obs in queue]
+    subagents = state.subagents.values() if include_subagents else ()
+    for observation in (*state.generations.values(), *state.tools.values(), *pending, *subagents):
         _end_observation(observation)
-    for queue in state.pending_tools_by_name.values():
-        for observation in queue:
-            _end_observation(observation)
-    if include_subagents:
-        for observation in state.subagents.values():
-            _end_observation(observation)
 
 
 def _exit_root_ctx(state: TraceState) -> None:
