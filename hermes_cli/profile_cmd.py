@@ -120,12 +120,8 @@ def _profile_list(args):
     if not profiles:
         print("No profiles found.")
         return
-    print(
-        f"\n {'Profile':<16} {'Model':<28} {'Gateway':<12} {'Alias':<12} {'Distribution'}"
-    )
-    print(
-        f" {'─' * 15}    {'─' * 27}    {'─' * 11}    {'─' * 11}    {'─' * 20}"
-    )
+    print(f"\n {'Profile':<16} {'Model':<28} {'Gateway':<12} {'Alias':<12} {'Distribution'}")
+    print(f" {'─' * 15}    {'─' * 27}    {'─' * 11}    {'─' * 11}    {'─' * 20}")
     for p in profiles:
         marker = " ◆" if _is_active(p, active) else "  "
         name = format_profile_label(p.name, p.display_name)
@@ -185,9 +181,7 @@ def _profile_create(args):
         # Fresh profiles only: clones already carry the source's (user-curated) skills.
         result = seed_profile_skills(profile_dir)
         if result and result.get("skipped_opt_out"):
-            print(
-                "No bundled skills seeded (--no-skills). Delete .no-bundled-skills in the profile to opt back in."
-            )
+            print("No bundled skills seeded (--no-skills). Delete .no-bundled-skills in the profile to opt back in.")
         elif result:
             print(f"{len(result.get('copied', []))} bundled skills synced.")
         else:
@@ -278,9 +272,7 @@ def _profile_describe(args):
     # --text path: just write the user-authored description.
     if text_value:
         try:
-            _profiles_mod.write_profile_meta(
-                _describe_target_dir(name), description=text_value, description_auto=False
-            )
+            _profiles_mod.write_profile_meta(_describe_target_dir(name), description=text_value, description_auto=False)
             print(f"Description updated for '{name}'.")
         except Exception as exc:
             _die(f"Error: {exc}", err=True)

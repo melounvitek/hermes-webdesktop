@@ -16,12 +16,8 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from agent.skill_utils import is_excluded_skill_path
-from hermes_cli.archive_safe import (
-    archive_root_dirs, make_targz, normalize_archive_parts, safe_extract_targz
-)
-from hermes_constants import (
-    clear_named_profile_deleted, mark_named_profile_deleted, named_profile_is_deleted
-)
+from hermes_cli.archive_safe import archive_root_dirs, make_targz, normalize_archive_parts, safe_extract_targz
+from hermes_constants import clear_named_profile_deleted, mark_named_profile_deleted, named_profile_is_deleted
 
 logger = logging.getLogger(__name__)
 
@@ -164,9 +160,7 @@ def _is_our_wrapper(path: Path) -> bool:
 
 
 def _missing_profile_error(canon: str) -> FileNotFoundError:
-    return FileNotFoundError(
-        f"Profile '{canon}' does not exist. Create it with: hermes profile create {canon}"
-    )
+    return FileNotFoundError(f"Profile '{canon}' does not exist. Create it with: hermes profile create {canon}")
 
 
 # Validation
@@ -191,9 +185,7 @@ def validate_profile_name(name: str) -> None:
     if name == "default":
         return  # special alias for ~/.hermes
     if not _PROFILE_ID_RE.match(name):
-        raise ValueError(
-            f"Invalid profile name {name!r}. Must match [a-z0-9][a-z0-9_-]{{0,63}}"
-        )
+        raise ValueError(f"Invalid profile name {name!r}. Must match [a-z0-9][a-z0-9_-]{{0,63}}")
     if name in _RESERVED_NAMES:
         raise ValueError(
             f"Profile name {name!r} is reserved — it collides with either "
@@ -206,9 +198,7 @@ def validate_alias_name(name: str) -> None:
     """Raise ``ValueError`` unless *name* is a safe wrapper filename: it is used verbatim
     under ``~/.local/bin``, so ``../../.bashrc`` must never escape the wrapper dir."""
     if not _PROFILE_ID_RE.match(name):
-        raise ValueError(
-            f"Invalid alias name {name!r}. Must match [a-z0-9][a-z0-9_-]{{0,63}}"
-        )
+        raise ValueError(f"Invalid alias name {name!r}. Must match [a-z0-9][a-z0-9_-]{{0,63}}")
 
 
 def _canon_valid(name: str) -> str:
@@ -255,9 +245,7 @@ def profile_matches_home(name: str, home: "Path | None" = None) -> bool:
         if home is None:
             from hermes_constants import get_hermes_home
             home = get_hermes_home()
-        return (
-            Path(target).expanduser().resolve(strict=False) == Path(home).expanduser().resolve(strict=False)
-        )
+        return Path(target).expanduser().resolve(strict=False) == Path(home).expanduser().resolve(strict=False)
     except Exception:
         return False
 
@@ -533,9 +521,7 @@ def _check_gateway_running(profile_dir: Path) -> bool:
     gateways with no live PID file); fallback validates the PID in ``gateway_state.json``
     against the process table, matching ``/api/status``."""
     try:
-        from gateway.status import (
-            get_running_pid, get_runtime_status_running_pid, read_runtime_status
-        )
+        from gateway.status import get_running_pid, get_runtime_status_running_pid, read_runtime_status
         if get_running_pid(profile_dir / "gateway.pid", cleanup_stale=False) is not None:
             return True
     except Exception:
@@ -595,9 +581,7 @@ def _count_skills(profile_dir: Path) -> int:
     signature = _skills_dir_signature(skills_dir)
     now = time.time()
     cached = _SKILL_COUNT_CACHE.get(key)
-    if (
-        cached is not None and cached[0] == signature and (now - cached[1]) < _SKILL_COUNT_TTL_SECONDS
-    ):
+    if cached is not None and cached[0] == signature and (now - cached[1]) < _SKILL_COUNT_TTL_SECONDS:
         return cached[2]
     count = sum(1 for md in skills_dir.rglob("SKILL.md") if not is_excluded_skill_path(md))
     _SKILL_COUNT_CACHE[key] = (signature, now, count)
@@ -703,9 +687,7 @@ def list_profiles() -> List[ProfileInfo]:
     return profiles
 
 
-def profiles_to_serve(
-    multiplex: bool, profile_allowlist: Optional[List[str]] = None
-) -> List[Tuple[str, Path]]:
+def profiles_to_serve(multiplex: bool, profile_allowlist: Optional[List[str]] = None) -> List[Tuple[str, Path]]:
     """``(profile_name, hermes_home)`` pairs a gateway should serve — the single chokepoint
     for "which profiles does the inbound gateway handle".
 
@@ -736,9 +718,7 @@ def profiles_to_serve(
         missing = tuple(sorted(allowed - {name for name, _ in serve}))
         if missing and missing not in _WARNED_MISSING_ALLOWLIST_ENTRIES:
             _WARNED_MISSING_ALLOWLIST_ENTRIES.add(missing)
-            logger.warning(
-                "Skipping missing gateway.multiplex_profile_allowlist profile(s): %s", ", ".join(missing)
-            )
+            logger.warning("Skipping missing gateway.multiplex_profile_allowlist profile(s): %s", ", ".join(missing))
     return serve
 
 
@@ -751,9 +731,7 @@ def _resolve_clone_source(clone_from: Optional[str]) -> Path:
         clone_from = _canon_valid(clone_from)
         source_dir = get_profile_dir(clone_from)
     if not source_dir.is_dir():
-        raise FileNotFoundError(
-            f"Source profile '{clone_from or 'active'}' does not exist at {source_dir}"
-        )
+        raise FileNotFoundError(f"Source profile '{clone_from or 'active'}' does not exist at {source_dir}")
     return source_dir
 
 
@@ -784,9 +762,7 @@ def _clone_file(source_dir: Path, profile_dir: Path, relpath: str) -> None:
 def _clone_all_into(source_dir: Path, profile_dir: Path, canon: str) -> None:
     """--clone-all: full copytree minus infrastructure/history, then strip runtime files
     and cloned single-use OAuth grants."""
-    shutil.copytree(
-        source_dir, profile_dir, symlinks=True, ignore=_clone_all_copytree_ignore(source_dir)
-    )
+    shutil.copytree(source_dir, profile_dir, symlinks=True, ignore=_clone_all_copytree_ignore(source_dir))
     for stale in _CLONE_ALL_STRIP:
         (profile_dir / stale).unlink(missing_ok=True)
     # auth.json / .anthropic_oauth.json copied verbatim fork single-use OAuth grants
@@ -838,9 +814,7 @@ def create_profile(
         )
     canon = _canon_valid(name)
     if canon == "default":
-        raise ValueError(
-            "Cannot create a profile named 'default' — it is the built-in profile (~/.hermes)."
-        )
+        raise ValueError("Cannot create a profile named 'default' — it is the built-in profile (~/.hermes).")
     profile_dir = get_profile_dir(canon)
     if profile_dir.exists() and named_profile_is_deleted(profile_dir):
         # Empty shells left by post-delete mkdir may be replaced. Identity files mean the
@@ -1027,9 +1001,7 @@ def _profile_bound_backend_pids(canon: str, profile_dir: Path) -> list[int]:
                 continue
 
             # Bound to THIS profile by selector flag, or by HERMES_HOME pointing at its dir.
-            bound = any(
-                normalize_profile_name(sel) == canon for sel in _argv_profile_selectors(argv)
-            )
+            bound = any(normalize_profile_name(sel) == canon for sel in _argv_profile_selectors(argv))
             if not bound:
                 with contextlib.suppress(Exception):  # environ() can raise AccessDenied even same-user
                     env_home = (proc.environ() or {}).get("HERMES_HOME", "")
@@ -1143,9 +1115,7 @@ def delete_profile(name: str, yes: bool = False) -> Path:
     to prevent auto-restart, gateway stopped if running)."""
     canon = normalize_profile_name(name)
     if canon == "default":
-        raise ValueError(
-            "Cannot delete the default profile (~/.hermes).\nTo remove everything, use: hermes uninstall"
-        )
+        raise ValueError("Cannot delete the default profile (~/.hermes).\nTo remove everything, use: hermes uninstall")
     canon, profile_dir = _existing_profile_dir(canon)
     gw_running = _check_gateway_running(profile_dir)
     wrapper_path = _get_wrapper_dir() / canon
@@ -1294,9 +1264,7 @@ def _stop_gateway_process(profile_dir: Path) -> None:
         # Cross-profile kill refusal: the record's hermes_home stamp names the gateway's TRUE
         # owner. A poisoned gateway.pid in this dir can point at another profile's live
         # gateway — killing it starts a mutual SIGTERM restart loop.
-        from gateway.status import (
-            get_process_start_time, recorded_gateway_home_conflicts, terminate_pid
-        )
+        from gateway.status import get_process_start_time, recorded_gateway_home_conflicts, terminate_pid
         if recorded_gateway_home_conflicts(data, expected_home=profile_dir):
             print(
                 f"✗ Refusing to stop PID {pid}: its recorded HERMES_HOME "
@@ -1381,9 +1349,7 @@ def _inside_git_checkout(path: Path) -> bool:
         resolved = path.resolve()
     except (OSError, RuntimeError):  # RuntimeError: symlink loops on Python <= 3.12
         return True
-    return any(
-        (candidate / ".git").exists() for candidate in (resolved, *resolved.parents)
-    )
+    return any((candidate / ".git").exists() for candidate in (resolved, *resolved.parents))
 
 
 def _profile_export_directory() -> Path:
@@ -1449,9 +1415,7 @@ def _default_export_ignore(root_dir: Path):
             or entry in {"package.json", "package-lock.json"}
         }
         if Path(directory) == root_dir:
-            ignored.update(
-                entry for entry in contents if entry not in _DEFAULT_EXPORT_INCLUDE_ROOT
-            )
+            ignored.update(entry for entry in contents if entry not in _DEFAULT_EXPORT_INCLUDE_ROOT)
         return ignored
 
     return _ignore
@@ -1545,9 +1509,7 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
             "Specify it explicitly: hermes profile import <archive> --name <name>"
         )
     if archive_root is None:
-        raise ValueError(
-            "Profile archive must contain exactly one top-level directory."
-        )
+        raise ValueError("Profile archive must contain exactly one top-level directory.")
 
     # Default-profile archives have "default/" at top level; importing as "default" would
     # target ~/.hermes itself.
@@ -1566,9 +1528,7 @@ def import_profile(archive_path: str, name: Optional[str] = None) -> Path:
         safe_extract_targz(archive, staging_root)
         extracted = staging_root / archive_root
         if not extracted.is_dir():
-            raise ValueError(
-                f"Profile archive root is missing or invalid: {archive_root}"
-            )
+            raise ValueError(f"Profile archive root is missing or invalid: {archive_root}")
         final_source = extracted
         if archive_root != canon:
             final_source = staging_root / canon

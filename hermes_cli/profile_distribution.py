@@ -58,9 +58,7 @@ class DistributionError(Exception):
     """Raised for distribution install/update failures."""
 
 
-# ---------------------------------------------------------------------------
 # Manifest
-# ---------------------------------------------------------------------------
 
 def _str(data: dict, key: str, default: str = "") -> str:
     return str(data.get(key) or default)
@@ -76,9 +74,7 @@ class EnvRequirement:
     @classmethod
     def from_dict(cls, data: Any) -> "EnvRequirement":
         if not isinstance(data, dict):
-            raise DistributionError(
-                f"env_requires entry must be a mapping, got {type(data).__name__}"
-            )
+            raise DistributionError(f"env_requires entry must be a mapping, got {type(data).__name__}")
         name = _str(data, "name").strip()
         if not name:
             raise DistributionError("env_requires entry missing 'name'")
@@ -114,9 +110,7 @@ class DistributionManifest:
     @classmethod
     def from_dict(cls, data: Any) -> "DistributionManifest":
         if not isinstance(data, dict):
-            raise DistributionError(
-                f"{MANIFEST_FILENAME} must be a mapping, got {type(data).__name__}"
-            )
+            raise DistributionError(f"{MANIFEST_FILENAME} must be a mapping, got {type(data).__name__}")
         name = _str(data, "name").strip()
         if not name:
             raise DistributionError(f"{MANIFEST_FILENAME} missing 'name'")
@@ -171,15 +165,11 @@ def write_manifest(profile_dir: Path, manifest: DistributionManifest) -> Path:
     # distribution.yaml, _copy_dist_payload reaches here with no manifest on disk. It is a
     # shareable descriptor, not a secret — don't leave it at mkstemp's 0600. An existing
     # file's mode is preserved.
-    atomic_yaml_write(
-        mf_path, manifest.to_dict(), sort_keys=False, default_flow_style=False, create_mode=0o644
-    )
+    atomic_yaml_write(mf_path, manifest.to_dict(), sort_keys=False, default_flow_style=False, create_mode=0o644)
     return mf_path
 
 
-# ---------------------------------------------------------------------------
 # Version check
-# ---------------------------------------------------------------------------
 
 _VERSION_OP_RE = re.compile(r"^\s*(>=|<=|==|!=|>|<)\s*(.+?)\s*$")
 _VERSION_OPS = {">=": operator.ge, "<=": operator.le, "==": operator.eq, "!=": operator.ne, ">": operator.gt, "<": operator.lt}
@@ -190,7 +180,7 @@ def _parse_semver(v: str) -> Tuple[int, int, int]:
     parts = re.split(r"[-+]", str(v).strip().lstrip("v"), 1)[0].split(".")
     parts += ["0"] * (3 - len(parts))
     try:
-        return (int(parts[0]), int(parts[1]), int(parts[2]))
+        return int(parts[0]), int(parts[1]), int(parts[2])
     except ValueError as exc:
         raise DistributionError(f"Unparseable version: {v!r}") from exc
 
@@ -202,9 +192,7 @@ def check_hermes_requires(spec: str, current_version: str) -> None:
     m = _VERSION_OP_RE.match(spec)
     op, target = m.groups() if m else (">=", spec.strip())
     if not _VERSION_OPS[op](_parse_semver(current_version), _parse_semver(target)):
-        raise DistributionError(
-            f"This distribution requires Hermes {op}{target}, but you have {current_version}."
-        )
+        raise DistributionError(f"This distribution requires Hermes {op}{target}, but you have {current_version}.")
 
 
 def _env_template_from_manifest(manifest: DistributionManifest) -> str:
@@ -224,9 +212,7 @@ def _env_template_from_manifest(manifest: DistributionManifest) -> str:
     return "\n".join(lines).rstrip() + "\n"
 
 
-# ---------------------------------------------------------------------------
 # Source staging — git clone or local directory
-# ---------------------------------------------------------------------------
 
 _GITHUB_SHORTHAND_RE = re.compile(r"^github\.com/[\w.-]+/[\w.-]+/?$")
 
@@ -294,14 +280,10 @@ def _reject_distribution_symlinks(staged: Path) -> None:
             rel = entry.relative_to(staged)
         except ValueError:
             rel = entry
-        raise DistributionError(
-            f"Profile distributions cannot contain symlinks: {rel}"
-        )
+        raise DistributionError(f"Profile distributions cannot contain symlinks: {rel}")
 
 
-# ---------------------------------------------------------------------------
 # Install
-# ---------------------------------------------------------------------------
 
 @dataclass
 class InstallPlan:
@@ -317,18 +299,12 @@ class InstallPlan:
 
 def _has_cron_jobs(staged: Path) -> bool:
     cron_dir = staged / "cron"
-    return cron_dir.is_dir() and (
-        any(cron_dir.rglob("*.json")) or any(cron_dir.rglob("*.yaml"))
-    )
+    return cron_dir.is_dir() and (any(cron_dir.rglob("*.json")) or any(cron_dir.rglob("*.yaml")))
 
 
-def plan_install(
-    source: str, workdir: Path, override_name: Optional[str] = None
-) -> InstallPlan:
+def plan_install(source: str, workdir: Path, override_name: Optional[str] = None) -> InstallPlan:
     """Stage *source* and produce a plan describing what install would do."""
-    from hermes_cli.profiles import (
-        get_profile_dir, normalize_profile_name, validate_profile_name
-    )
+    from hermes_cli.profiles import _canon_valid, get_profile_dir
     from hermes_cli import __version__ as hermes_version
     staged, provenance = _stage_source(source, workdir)
     _reject_distribution_symlinks(staged)
@@ -338,8 +314,7 @@ def plan_install(
             f"No {MANIFEST_FILENAME} found at the distribution root — this source is not a Hermes distribution."
         )
     check_hermes_requires(manifest.hermes_requires, hermes_version)  # fail fast
-    canon = normalize_profile_name(override_name or manifest.name)
-    validate_profile_name(canon)
+    canon = _canon_valid(override_name or manifest.name)
     if canon == "default":
         raise DistributionError(
             "Cannot install a distribution as 'default' — that is the built-in "
@@ -380,9 +355,7 @@ def _owned_entries(staged: Path, manifest: DistributionManifest):
             yield src, rel_parts
 
 
-def _copy_dist_payload(
-    staged: Path, target: Path, manifest: DistributionManifest, preserve_config: bool
-) -> None:
+def _copy_dist_payload(staged: Path, target: Path, manifest: DistributionManifest, preserve_config: bool) -> None:
     """Copy distribution-owned files (see ``_owned_entries``) from *staged* into *target*.
 
     User-owned paths are never touched. ``config.yaml`` is replaced only when
@@ -414,9 +387,7 @@ def _copy_dist_payload(
 
     # Emit .env.EXAMPLE from manifest if the staged tree didn't ship one
     if manifest.env_requires and not (target / ENV_EXAMPLE_FILENAME).exists():
-        (target / ENV_EXAMPLE_FILENAME).write_text(
-            _env_template_from_manifest(manifest), encoding="utf-8"
-        )
+        (target / ENV_EXAMPLE_FILENAME).write_text(_env_template_from_manifest(manifest), encoding="utf-8")
 
     # Make sure the manifest on disk reflects resolved name + source
     write_manifest(target, manifest)
@@ -434,9 +405,7 @@ def install_distribution(
 ) -> InstallPlan:
     """Install a distribution from *source* into a new profile; returns the resolved plan.
     Use :func:`plan_install` first to preview + prompt."""
-    from hermes_cli.profiles import (
-        check_alias_collision, create_wrapper_script
-    )
+    from hermes_cli.profiles import check_alias_collision, create_wrapper_script
     with tempfile.TemporaryDirectory(prefix="hermes_dist_install_") as tmp:
         plan = plan_install(source, Path(tmp), override_name=name)
         if plan.existing and not force:
@@ -455,20 +424,15 @@ def install_distribution(
 
 def _existing_profile(profile_name: str) -> Tuple[str, Path]:
     """Return ``(canonical_name, profile_dir)`` or raise if the profile doesn't exist."""
-    from hermes_cli.profiles import (
-        get_profile_dir, normalize_profile_name, validate_profile_name
-    )
-    canon = normalize_profile_name(profile_name)
-    validate_profile_name(canon)
-    target = get_profile_dir(canon)
-    if not target.is_dir():
-        raise DistributionError(f"Profile '{canon}' does not exist.")
-    return canon, target
+    from hermes_cli.profiles import _existing_profile_dir
+
+    try:
+        return _existing_profile_dir(profile_name)
+    except FileNotFoundError as exc:
+        raise DistributionError(str(exc)) from exc
 
 
-def update_distribution(
-    profile_name: str, force_config: bool = False
-) -> InstallPlan:
+def update_distribution(profile_name: str, force_config: bool = False) -> InstallPlan:
     """Re-pull from the installed manifest's ``source:`` and apply: dist-owned files
     overwritten, user data never touched, ``config.yaml`` preserved unless ``force_config``."""
     canon, target = _existing_profile(profile_name)

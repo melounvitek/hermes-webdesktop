@@ -109,9 +109,7 @@ def _extract_json_blob(raw: str) -> Optional[dict]:
     return _extract(raw, _FENCE_RE)
 
 
-def describe_profile(
-    profile_name: str, *, overwrite: bool = False, timeout: Optional[int] = None
-) -> DescribeOutcome:
+def describe_profile(profile_name: str, *, overwrite: bool = False, timeout: Optional[int] = None) -> DescribeOutcome:
     """Auto-generate a description for one profile. Expected failures (profile missing, no aux
     client, API error, malformed response) return ``ok=False`` so a sweep continues.
 
@@ -153,9 +151,7 @@ def describe_profile(
         # extra_body, reasoning_effort, retries); the direct-create path dropped extra_body.
         resp = call_llm(
             task="profile_describer",
-            messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT}, {"role": "user", "content": user_msg}
-            ],
+            messages=[{"role": "system", "content": _SYSTEM_PROMPT}, {"role": "user", "content": user_msg}],
             temperature=0.3,
             max_tokens=400,
             timeout=timeout or 60,
@@ -177,14 +173,10 @@ def describe_profile(
     else:
         val = parsed.get("description")
         if not isinstance(val, str) or not val.strip():
-            return DescribeOutcome(
-                canon, False, "LLM response missing 'description' field"
-            )
+            return DescribeOutcome(canon, False, "LLM response missing 'description' field")
         description = val.strip()[:280]
     try:
-        profiles_mod.write_profile_meta(
-            profile_dir, description=description, description_auto=True
-        )
+        profiles_mod.write_profile_meta(profile_dir, description=description, description_auto=True)
     except Exception as exc:
         return DescribeOutcome(canon, False, f"failed to write profile.yaml: {exc}")
     return DescribeOutcome(canon, True, "described", description=description)
