@@ -1,15 +1,12 @@
 """Structured logging with steady-state silence for the LSP layer.
 
-LSP fires on every write_file/patch, so the level model keeps ``agent.log``
-greppable (``rg 'lsp\\['``) without noise: DEBUG for steady-state events with
-no novel signal (clean, skipped, repeat "no project root" / "server
-unavailable"); INFO for once-per-session transitions (first ``active for
-<root>``, first ``no project root`` per file) and every diagnostic event;
-WARNING for action-required failures (first ``server unavailable`` per
-(server_id, binary), every timeout / unexpected error).  Dedup uses
-module-level sets bounded by the distinct pairs touched in one process — a
-bounded LRU was rejected because evicting an entry would re-fire the line
-we explicitly want suppressed.
+LSP fires on every write_file/patch, so the level model keeps ``agent.log`` greppable
+(``rg 'lsp\\['``) without noise: DEBUG for steady-state events with no novel signal (clean,
+skipped, repeat "no project root" / "server unavailable"); INFO for once-per-session
+transitions (first ``active for <root>``, first ``no project root`` per file) and every
+diagnostic event; WARNING for action-required failures (first ``server unavailable`` per
+(server_id, binary), every timeout / unexpected error).  Dedup uses module-level sets bounded
+by the distinct pairs touched in one process — a bounded LRU would re-fire suppressed lines.
 """
 from __future__ import annotations
 

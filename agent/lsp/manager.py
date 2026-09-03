@@ -1,13 +1,11 @@
 """Service-level orchestration for LSP clients.
 
 :class:`LSPService` bridges the synchronous file_operations layer and the async
-:class:`agent.lsp.client.LSPClient`: one asyncio loop in a background thread
-(``get_diagnostics_sync`` opens + waits + drains in one blocking call), one lazily
-spawned client per ``(server_id, workspace_root)``, a **broken-set** of pairs that
-failed to spawn/initialize (never retried for the life of the service), and a
-**delta baseline** per file (``snapshot_baseline()`` runs BEFORE a write; the next
-``get_diagnostics_sync()`` returns only diagnostics not in it).  Off unless config
-enables it — file_operations falls back to in-process syntax checks.
+:class:`agent.lsp.client.LSPClient`: one asyncio loop in a background thread, one lazily
+spawned client per ``(server_id, workspace_root)``, a **broken-set** of pairs that failed
+to spawn/initialize (never retried for the life of the service), and a **delta baseline**
+per file (``snapshot_baseline()`` runs BEFORE a write; the next ``get_diagnostics_sync()``
+returns only diagnostics not in it).  Off unless config enables it.
 """
 from __future__ import annotations
 
@@ -66,8 +64,7 @@ class _BackgroundLoop:
             if asyncio.iscoroutine(coro):
                 coro.close()
             raise RuntimeError("background loop not started")
-        fut = safe_schedule_threadsafe(coro, self._loop)
-        if fut is None:
+        if (fut := safe_schedule_threadsafe(coro, self._loop)) is None:
             raise RuntimeError("background loop not running")
         try:
             return fut.result(timeout=timeout)
@@ -77,15 +74,15 @@ class _BackgroundLoop:
 
     def stop(self) -> None:
         loop, self._loop = self._loop, None
+        thread, self._thread = self._thread, None
         if loop is None:
             return
         try:
             loop.call_soon_threadsafe(loop.stop)
         except RuntimeError:
             pass
-        if self._thread is not None:
-            self._thread.join(timeout=2.0)
-        self._thread = None
+        if thread is not None:
+            thread.join(timeout=2.0)
 
 
 class LSPService:
@@ -135,17 +132,15 @@ class LSPService:
         except Exception as e:  # noqa: BLE001
             logger.debug("LSP config load failed: %s", e)
             return None
-        lsp_cfg = (cfg.get("lsp") or {}) if isinstance(cfg, dict) else {}
-        if not isinstance(lsp_cfg, dict):
-            lsp_cfg = {}
+        lsp_cfg = cfg.get("lsp") if isinstance(cfg, dict) else None
+        lsp_cfg = lsp_cfg if isinstance(lsp_cfg, dict) else {}
         try:
             idle_timeout = float(lsp_cfg.get("idle_timeout", DEFAULT_IDLE_TIMEOUT))
         except (TypeError, ValueError):
             idle_timeout = DEFAULT_IDLE_TIMEOUT
         if 0 < idle_timeout < MIN_IDLE_TIMEOUT:
-            # Below the per-op wait budget the reaper could kill a client mid-flight and
-            # the outer timeout would then mark the pair broken for the process lifetime.
-            # Clamp (0 still disables).
+            # Below the per-op wait budget the reaper could kill a client mid-flight and the outer
+            # timeout would then mark the pair broken for the process lifetime.  Clamp (0 still disables).
             idle_timeout = MIN_IDLE_TIMEOUT
         servers_cfg = lsp_cfg.get("servers") or {}
         servers = {n: c for n, c in servers_cfg.items() if isinstance(c, dict)} if isinstance(servers_cfg, dict) else {}
@@ -195,10 +190,7 @@ class LSPService:
 
     def snapshot_baseline(self, file_path: str) -> None:
         """Snapshot current diagnostics for ``file_path`` as the delta baseline (call BEFORE a write).
-
-        Best-effort: failures are swallowed so a flaky server can't break a
-        write, but outer timeouts mark the pair broken so later edits skip it.
-        """
+        Best-effort: failures are swallowed so a flaky server can't break a write, but they mark the pair broken."""
         if not self.enabled_for(file_path):
             return
         try:
@@ -217,11 +209,10 @@ class LSPService:
     ) -> _Diags:
         """Synchronously open ``file_path``, wait for diagnostics, return them.  Never raises.
 
-        With ``delta`` (default) the result excludes the :meth:`snapshot_baseline`;
-        ``line_shift`` (from :func:`agent.lsp.range_shift.build_line_shift`) remaps
-        that baseline into post-edit coordinates first, so pre-existing diagnostics
-        that merely moved don't look introduced by this edit.  ``[]`` when LSP is
-        disabled, nothing matches, or the server can't be spawned.
+        With ``delta`` (default) the result excludes the :meth:`snapshot_baseline`; ``line_shift`` (from
+        :func:`agent.lsp.range_shift.build_line_shift`) remaps that baseline into post-edit coordinates
+        first, so pre-existing diagnostics that merely moved don't look introduced by this edit.
+        ``[]`` when LSP is disabled, nothing matches, or the server can't be spawned.
         """
         if not self.enabled_for(file_path):
             return []
@@ -239,9 +230,9 @@ class LSPService:
             self._mark_broken_for_file(file_path, e)
             return []
         if diags is None:
-            # Server alive but no verdict on the post-edit content in budget (common for
-            # tsserver on big projects).  Report "no data" rather than stale stores — that
-            # would be the ghost-diagnostics bug.  Not marked broken: slow is not dead.
+            # Server alive but no verdict on the post-edit content in budget (common for tsserver on big
+            # projects).  Report "no data" rather than stale stores — that would be the ghost-diagnostics
+            # bug.  Not marked broken: slow is not dead.
             eventlog.log_timeout(server_id, file_path, kind="fresh diagnostics")
             return []
         if delta:
@@ -274,11 +265,9 @@ class LSPService:
 
     def _mark_broken_for_file(self, file_path: str, exc: BaseException) -> None:
         """Mark the file's ``(server_id, root)`` pair broken after an outer timeout/error.
-
-        The outer ``_loop.run`` timeout cancels the in-flight spawn before ``_get_or_spawn``
-        could record the failure; without this every later write would re-pay the full
-        timeout.  Also kills any half-initialized client and logs the failure once.
-        """
+        The outer ``_loop.run`` timeout cancels the in-flight spawn before ``_get_or_spawn`` could record
+        the failure; without this every later write would re-pay the full timeout.  Also kills any
+        half-initialized client and logs the failure once."""
         srv = find_server_for_file(file_path)
         key = self._broken_key(srv, file_path) if srv is not None else None
         if key is None:
@@ -453,8 +442,7 @@ class LSPService:
             except asyncio.CancelledError:
                 raise
             except Exception as e:  # noqa: BLE001
-                # A transient sweep error must not kill the reaper, or the
-                # unbounded-accumulation leak it exists to fix comes back.
+                # A transient sweep error must not kill the reaper, or the accumulation leak it fixes comes back.
                 logger.debug("LSP idle reaper sweep error: %s", e)
 
     async def _reap_idle_once(self) -> None:
@@ -469,8 +457,8 @@ class LSPService:
             await asyncio.gather(*(client.shutdown() for client in clients), return_exceptions=True)
 
     async def _shutdown_async(self) -> None:
-        reaper, self._idle_reaper_task = self._idle_reaper_task, None
-        if reaper is not None:
+        if (reaper := self._idle_reaper_task) is not None:
+            self._idle_reaper_task = None
             reaper.cancel()
             await asyncio.gather(reaper, return_exceptions=True)
         with self._state_lock:

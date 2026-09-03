@@ -83,15 +83,12 @@ def hermes_lsp_bin_dir() -> Path:
 
 def _native_binary_candidates(base: Path) -> list[Path]:
     """Return platform-native executable candidates for a staged binary (``base`` plus Windows wrappers)."""
-    candidates = [base]
-    if _is_windows():
-        seen = {str(base).lower()}
-        for suffix in _WINDOWS_WRAPPER_SUFFIXES:
-            candidate = Path(str(base) + suffix)
-            if str(candidate).lower() not in seen:
-                candidates.append(candidate)
-                seen.add(str(candidate).lower())
-    return candidates
+    if not _is_windows():
+        return [base]
+    cands: Dict[str, Path] = {}
+    for c in (base, *(Path(str(base) + s) for s in _WINDOWS_WRAPPER_SUFFIXES)):
+        cands.setdefault(str(c).lower(), c)
+    return list(cands.values())
 
 
 def _first_existing(*bases: Path) -> Optional[Path]:
@@ -132,8 +129,7 @@ def _do_install(pkg: str) -> Optional[str]:
         return shutil.which(pkg)  # not in our registry — best-effort: just probe PATH
     strategy = recipe.get("strategy", "manual")
     bin_name = recipe.get("bin", pkg)
-    existing = _existing_binary(bin_name)
-    if existing:
+    if existing := _existing_binary(bin_name):
         return existing
     if strategy == "manual":
         logger.debug("[install] %s requires manual install (recipe=%s)", pkg, recipe)

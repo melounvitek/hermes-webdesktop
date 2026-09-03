@@ -71,8 +71,7 @@ async def _read_headers(reader: asyncio.StreamReader) -> Optional[dict]:
 async def read_message(reader: asyncio.StreamReader) -> Optional[dict]:
     """Read one framed message.
 
-    Returns ``None`` on clean EOF between messages (typical shutdown);
-    raises :class:`LSPProtocolError` on malformed framing.
+    ``None`` on clean EOF between messages (typical shutdown); :class:`LSPProtocolError` on malformed framing.
     """
     headers = await _read_headers(reader)
     if headers is None:
@@ -121,10 +120,8 @@ def make_error_response(req_id: Any, code: int, message: str, data: Any = None) 
 
 
 def classify_message(msg: dict) -> Tuple[str, Any]:
-    """Return ``(kind, key)``: kind ∈ request/response/notification/invalid.
-
-    Key is the id for request/response, the method for notifications, ``None`` for invalid.
-    """
+    """Return ``(kind, key)``: kind ∈ request/response/notification/invalid; key is the id (request/response),
+    the method (notification) or ``None`` (invalid)."""
     if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
         return "invalid", None
     if "id" in msg:

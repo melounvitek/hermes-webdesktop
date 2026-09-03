@@ -26,10 +26,9 @@ MAX_SOURCE_CHARS = 80
 def _sanitize_field(value: Any, *, limit: int) -> str:
     """Make a language-server field safe to embed in a tool-result block.
 
-    ``message``/``code``/``source`` come from a server that just parsed
-    user-controlled code, so a hostile repo can smuggle instruction-shaped
-    text through identifier names.  We collapse CR/LF, drop control chars,
-    cap the length, and HTML-escape ``< > &`` so the text can't close
+    ``message``/``code``/``source`` come from a server that just parsed user-controlled code, so a
+    hostile repo can smuggle instruction-shaped text through identifier names.  We collapse CR/LF,
+    drop control chars, cap the length, and HTML-escape ``< > &`` so the text can't close
     ``<diagnostics>`` early.  ``None``/empty → ``""`` so callers can omit the part.
     """
     if value is None:

@@ -89,7 +89,6 @@ class ServerContext:
 
 # ---- helpers ----
 
-
 def _file_ext_or_basename(path: str) -> str:
     """Lower-cased extension, or the full basename for extensionless files (``Dockerfile``)."""
     base = os.path.basename(path)
@@ -148,7 +147,6 @@ def _simple_spawn(server_id: str, which: Sequence[str], args: Sequence[str] = ()
 
 # ---- bespoke spawn builders ----
 
-
 def _spawn_pyright(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
     bin_path = _find_binary(ctx, "pyright", ("pyright-langserver", "pyright"), "pyright")
     if bin_path is None:
@@ -173,6 +171,7 @@ _warned_once: set = set()
 
 
 def _warn_once(key: str, message: str) -> None:
+    """Log ``message`` at WARNING the first time ``key`` is seen in this process."""
     if key not in _warned_once:
         _warned_once.add(key)
         logger.warning(message)
@@ -191,12 +190,9 @@ def _spawn_bash_ls(root: str, ctx: ServerContext) -> Optional[SpawnSpec]:
 
 
 def _find_pses_bundle(ctx: ServerContext) -> Optional[str]:
-    """Locate the PowerShellEditorServices bundle dir (release zip, manual install).
-
-    Resolution order: ``lsp.servers.powershell.command[0]`` when a directory,
-    ``init_overrides["powershell"]["bundlePath"]``, ``PSES_BUNDLE_PATH`` env,
-    then ``<HERMES_HOME>/lsp/PowerShellEditorServices``.
-    """
+    """Locate the PowerShellEditorServices bundle dir (release zip, manual install).  Resolution order:
+    ``lsp.servers.powershell.command[0]`` when a directory, ``init_overrides["powershell"]["bundlePath"]``,
+    ``PSES_BUNDLE_PATH`` env, then ``<HERMES_HOME>/lsp/PowerShellEditorServices``."""
     from hermes_constants import get_hermes_home
     override = ctx.binary_overrides.get("powershell")
     init = ctx.init_overrides.get("powershell", {})

@@ -21,17 +21,8 @@ from urllib.parse import quote, unquote
 from hermes_cli._subprocess_compat import windows_hide_flags
 
 from agent.lsp.protocol import (
-    ERROR_CONTENT_MODIFIED,
-    ERROR_METHOD_NOT_FOUND,
-    LSPProtocolError,
-    LSPRequestError,
-    classify_message,
-    encode_message,
-    make_error_response,
-    make_notification,
-    make_request,
-    make_response,
-    read_message,
+    ERROR_CONTENT_MODIFIED, ERROR_METHOD_NOT_FOUND, LSPProtocolError, LSPRequestError, classify_message,
+    encode_message, make_error_response, make_notification, make_request, make_response, read_message,
 )
 
 logger = logging.getLogger("agent.lsp.client")
@@ -102,14 +93,10 @@ def _end_position(text: str) -> Dict[str, int]:
 
 @dataclass
 class _DocState:
-    """Per-document state.
-
-    ``version`` is the LSP document version last sent (didOpen=0, +1 per didChange)
-    and doubles as the freshness token: ``push_version`` / ``pull_version`` tag stored
-    results, fresh iff tag >= version; -1 means "no data yet".  Servers that echo a
-    version in publishDiagnostics get exact tagging; others are credited with the
-    current version at receipt.
-    """
+    """Per-document state.  ``version`` is the LSP document version last sent (didOpen=0, +1 per
+    didChange) and doubles as the freshness token: ``push_version`` / ``pull_version`` tag stored
+    results, fresh iff tag >= version; -1 means "no data yet".  Servers that echo a version in
+    publishDiagnostics get exact tagging; others are credited with the current version at receipt."""
     version: int = 0
     text: str = ""
     push: List[Dict[str, Any]] = field(default_factory=list)
@@ -151,9 +138,8 @@ class LSPClient:
         self._next_id: int = 0
         self._pending: Dict[int, asyncio.Future] = {}
 
-        # Server → client requests; anything else gets method-not-found.  Capability
-        # (un)registration and diagnostic refresh are acknowledged but not acted on:
-        # we re-pull on every touch anyway.
+        # Server → client requests; anything else gets method-not-found.  Capability (un)registration
+        # and diagnostic refresh are acknowledged but not acted on: we re-pull on every touch anyway.
         self._request_handlers: Dict[str, Callable[[Any], Awaitable[Any]]] = {
             "window/workDoneProgress/create": self._handle_null,
             "workspace/configuration": self._handle_workspace_configuration,
@@ -171,8 +157,8 @@ class LSPClient:
         self._state: str = "stopped"
         self._sync_kind: int = 1  # 1=Full, 2=Incremental
         self._stopping: bool = False
-        # Waiters snapshot ``_push_counter`` and treat any increase as "recheck
-        # the predicate" — avoids the asyncio.Event sticky-state trap.
+        # Waiters snapshot ``_push_counter`` and treat any increase as "recheck the
+        # predicate" — avoids the asyncio.Event sticky-state trap.
         self._push_event = asyncio.Event()
         self._push_counter = 0
 
@@ -216,11 +202,10 @@ class LSPClient:
         if sys.platform == "win32" and cmd[0].lower().endswith((".cmd", ".bat")):
             cmd = ["cmd.exe", "/c", *cmd]  # CreateProcess can't run .cmd/.bat shims directly
         try:
-            # start_new_session=True gives the server its own process group;
-            # otherwise it inherits the gateway's pgid and mcp_tool's orphan
-            # sweeper can killpg() the TUI parent along with it.
-            # windows_hide_flags() suppresses the console window a .cmd shim
-            # would flash from a console-less host (CREATE_NO_WINDOW; 0 on POSIX).
+            # start_new_session=True gives the server its own process group; otherwise it inherits
+            # the gateway's pgid and mcp_tool's orphan sweeper can killpg() the TUI parent with it.
+            # windows_hide_flags() suppresses the console window a .cmd shim would flash from a
+            # console-less host (CREATE_NO_WINDOW; 0 on POSIX).
             self._proc = await asyncio.create_subprocess_exec(
                 cmd[0], *cmd[1:],
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
@@ -243,20 +228,23 @@ class LSPClient:
         except (asyncio.CancelledError, OSError):
             pass
 
+    def _dispatch(self, msg: dict) -> None:
+        kind, key = classify_message(msg)
+        if kind == "response":
+            self._dispatch_response(key, msg)
+        elif kind == "request":
+            asyncio.create_task(self._dispatch_request(key, msg))
+        elif kind == "notification":
+            self._dispatch_notification(key, msg)
+        else:
+            logger.warning("[%s] dropping invalid message: %r", self.server_id, msg)
+
     async def _reader_loop(self) -> None:
         if self._proc is None or self._proc.stdout is None:
             return
         try:
             while (msg := await read_message(self._proc.stdout)) is not None:
-                kind, key = classify_message(msg)
-                if kind == "response":
-                    self._dispatch_response(key, msg)
-                elif kind == "request":
-                    asyncio.create_task(self._dispatch_request(key, msg))
-                elif kind == "notification":
-                    self._dispatch_notification(key, msg)
-                else:
-                    logger.warning("[%s] dropping invalid message: %r", self.server_id, msg)
+                self._dispatch(msg)
             logger.debug("[%s] server closed stdout cleanly", self.server_id)
         except LSPProtocolError as e:
             logger.warning("[%s] protocol error in reader loop: %s", self.server_id, e)
@@ -288,9 +276,7 @@ class LSPClient:
             sync = sync.get("change")
         self._sync_kind = sync if isinstance(sync, int) else 1  # default to Full
         await self._send_notification("initialized", {})
-        if self._init_options:
-            # Some servers (vtsls, eslint) only pick config up via
-            # didChangeConfiguration even when it was in initializationOptions.
+        if self._init_options:  # vtsls/eslint only pick config up via didChangeConfiguration
             await self._send_notification("workspace/didChangeConfiguration", {"settings": self._init_options})
 
     async def shutdown(self) -> None:
@@ -312,20 +298,15 @@ class LSPClient:
             self._state = "stopped"
             await self._cleanup_process()
 
-    @staticmethod
-    async def _cancel_task(task: Optional[asyncio.Task]) -> None:
-        if task is not None and not task.done():
-            task.cancel()
-            await asyncio.gather(task, return_exceptions=True)
-
     async def _cleanup_process(self) -> None:
         async with self._cleanup_lock:
-            reader_task, self._reader_task = self._reader_task, None
-            stderr_task, self._stderr_task = self._stderr_task, None
+            tasks = [self._reader_task, self._stderr_task]
+            self._reader_task = self._stderr_task = None
             proc, self._proc = self._proc, None
-            if reader_task is not asyncio.current_task():
-                await self._cancel_task(reader_task)
-            await self._cancel_task(stderr_task)
+            live = [t for t in tasks if t is not None and not t.done() and t is not asyncio.current_task()]
+            for t in live:
+                t.cancel()
+            await asyncio.gather(*live, return_exceptions=True)
             if proc is None or proc.returncode is not None:
                 return
             try:
@@ -490,8 +471,7 @@ class LSPClient:
             "workspace/didChangeWatchedFiles", {"changes": [{"uri": uri, "type": 1 if doc is None else 2}]}
         )
         if doc is None:
-            # Fresh state: anything a pre-open push stashed under this path
-            # (relatedDocuments spillover) is discarded.
+            # Fresh state: anything a pre-open push stashed under this path (relatedDocuments spillover) is discarded.
             self._docs[abs_path] = _DocState(version=0, text=text)
             await self._send_notification(
                 "textDocument/didOpen",
@@ -520,11 +500,9 @@ class LSPClient:
     # ---- diagnostics: pull + wait ----
 
     async def _pull_document_diagnostics(self, path: str) -> None:
-        """Send ``textDocument/diagnostic`` for one file into the pull store.
-
-        Results are tagged with the version captured at send time, so a didChange racing
-        past the request makes them stale automatically.  Silently no-ops on errors.
-        """
+        """Send ``textDocument/diagnostic`` for one file into the pull store.  Results are tagged with the
+        version captured at send time, so a didChange racing past the request makes them stale
+        automatically.  Silently no-ops on errors (server may not support pull)."""
         abs_path = os.path.abspath(path)
         doc = self._docs.get(abs_path)
         sent_version = doc.version if doc else -1
@@ -554,10 +532,9 @@ class LSPClient:
                                    timeout: Optional[float] = None) -> bool:
         """Wait for fresh diagnostics for ``path`` at ``version``; True iff fresh data arrived in budget.
 
-        ``mode`` is ``"document"`` (5s) or ``"full"`` (10s); ``timeout`` overrides the
-        budget (how ``lsp.wait_timeout`` reaches the loop).  Callers must treat False
-        as "no data", NOT "no errors" — the stores may still hold stale entries.
-        Never throws for servers lacking pull support; the push side still works.
+        ``mode`` is ``"document"`` (5s) or ``"full"`` (10s); ``timeout`` overrides the budget (how
+        ``lsp.wait_timeout`` reaches the loop).  Callers must treat False as "no data", NOT "no errors" —
+        the stores may still hold stale entries.  Never throws for servers lacking pull support.
         """
         if not (timeout is not None and timeout > 0):
             timeout = DIAGNOSTICS_FULL_WAIT if mode == "full" else DIAGNOSTICS_DOCUMENT_WAIT
@@ -588,9 +565,9 @@ class LSPClient:
         self._push_event.clear()
         try:
             await asyncio.wait_for(self._push_event.wait(), timeout=timeout)
-            return True
         except asyncio.TimeoutError:
             return False
+        return True
 
     async def _wait_for_fresh_push(self, path: str, version: int, timeout: float) -> None:
         """Wait until a fresh publishDiagnostics arrives for ``path`` at ``version``+."""
@@ -619,11 +596,9 @@ class LSPClient:
             await self._await_push(min(remaining, 0.5))
 
     def diagnostics_for(self, path: str, *, fresh_only: bool = False) -> List[Dict[str, Any]]:
-        """Merged + deduped push/pull diagnostics for one file.
-
-        With ``fresh_only=True`` a store only contributes once its version tag has caught
-        up to the document's — report paths must use this so "stale" and "clean" aren't conflated.
-        """
+        """Merged + deduped push/pull diagnostics for one file.  With ``fresh_only=True`` a store only
+        contributes once its version tag has caught up to the document's — report paths must use this
+        so "stale" and "clean" aren't conflated."""
         doc = self._docs.get(os.path.abspath(path))
         if doc is None:
             return []
@@ -643,12 +618,9 @@ def _dedupe(*lists: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def _diagnostic_key(d: Dict[str, Any]) -> str:
-    """Content-equality key: severity + code + source + message + range.
-
-    Shared with the manager's cross-edit delta filter (as ``_diag_key``) so both layers
-    agree on identity.  Range is included so an identical error at a second site still
-    surfaces as new; the manager line-shifts its baseline into post-edit coordinates first.
-    """
+    """Content-equality key: severity + code + source + message + range.  Shared with the manager's
+    cross-edit delta filter (``_diag_key``) so both layers agree on identity.  Range is included so an
+    identical error at a second site still surfaces as new (the manager line-shifts its baseline first)."""
     rng = d.get("range") or {}
     start = rng.get("start") or {}
     end = rng.get("end") or {}
