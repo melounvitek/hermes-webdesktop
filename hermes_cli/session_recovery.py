@@ -356,23 +356,11 @@ def inspect_session_database(source_path: Path, *, work_dir: Optional[Path] = No
         temp_dir.cleanup()
 
 
-def _ensure_auxiliary_destination_schema(destination: sqlite3.Connection, table: str) -> None:
-    """Create a lazy gateway-owned table on the destination; without it the copy would report
-    ``missing``/``no compatible columns`` and drop the rows."""
-    initialize = _AUXILIARY_TABLE_SCHEMAS.get(table)
-    if initialize is None:
-        raise SessionRecoverySafetyError(f"no destination schema initializer registered for table {table!r}")
-    initialize(destination)
-
-
 def _fresh_destination(output: Path, *, topic_tables: bool = False) -> sqlite3.Connection:
     """Initialize a current-schema database at ``output`` and open it with foreign keys off."""
-    destination_db = SessionDB(db_path=output)
-    try:
+    with SessionDB(db_path=output) as destination_db:
         if topic_tables:
             destination_db.apply_telegram_topic_migration()
-    finally:
-        destination_db.close()
     conn = _connect(output)
     conn.execute("PRAGMA foreign_keys=OFF")
     return conn
@@ -1053,8 +1041,8 @@ def recover_session_database(
                 if table not in _CANONICAL_TABLES and not inspection["tables"][table].get("available"):
                     copy_report[table] = {"status": "missing", "copied_rows": 0}
                     continue
-                if table in _AUXILIARY_TABLES:
-                    _ensure_auxiliary_destination_schema(destination_conn, table)
+                if table in _AUXILIARY_TABLES:  # lazy gateway table: create it or the copy reports "missing"
+                    _AUXILIARY_TABLE_SCHEMAS[table](destination_conn)
                 copy_report[table] = _copy_table(
                     source_conn, destination_conn, table, salvage=allow_partial, chunk_size=chunk_size,
                     progress_cb=progress_cb, source_rows=inspection["tables"][table].get("rows"),
