@@ -21,10 +21,8 @@ def tip_tool(text: str, selector: str, title: str = "", side: str = "") -> str:
     """Show one tip bubble anchored to ``selector``."""
     text = (text or "").strip()
     selector = (selector or "").strip()
-
     if not text:
         return tool_error("tip needs text — the one line the bubble says.")
-
     if not selector:
         return tool_error(
             "tip needs a selector to point at. Call tour(action='targets') to see "
@@ -33,17 +31,14 @@ def tip_tool(text: str, selector: str, title: str = "", side: str = "") -> str:
 
     if side and side not in SIDES:
         return tool_error(f"side must be one of: {', '.join(SIDES)}.")
-
     payload = {"selector": selector, "text": text}
     payload.update({k: v for k, v in (("title", title), ("side", side)) if v})
-
     try:
         ok = desktop_ui.emit("tip.show", payload)
     except Exception as exc:
         return tool_error(f"Failed to show the tip: {exc}")
     if not ok:
         return tool_error("tip is only available in the Hermes desktop app.")
-
     return json.dumps({"success": True, "selector": selector}, ensure_ascii=False)
 
 
@@ -93,11 +88,7 @@ registry.register(
     toolset="desktop_ui",
     schema=TIP_SCHEMA,
     handler=lambda args, **kw: tip_tool(
-        text=args.get("text", ""),
-        selector=args.get("selector", ""),
-        title=args.get("title", ""),
-        side=args.get("side", ""),
-    ),
+        **{k: args.get(k, "") for k in ("text", "selector", "title", "side")}),
     check_fn=check_tips_enabled,
     emoji="💡",
 )

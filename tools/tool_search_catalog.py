@@ -42,8 +42,7 @@ _thread_local = threading.local()
 def _stemmer() -> Any:
     st = getattr(_thread_local, "stemmer", None)
     if st is None:
-        st = snowballstemmer.stemmer("english")
-        _thread_local.stemmer = st
+        st = _thread_local.stemmer = snowballstemmer.stemmer("english")
     return st
 
 
@@ -54,10 +53,8 @@ def _stem(token: str) -> str:
 
 
 def _tokenize(text: str) -> List[str]:
-    """Lowercase alphanumeric tokens, Snowball-stemmed (English).
-
-    Shared by the index path and the query path so "issues" matches ``create_issue``.
-    """
+    """Lowercase alphanumeric tokens, Snowball-stemmed (English). Shared by the
+    index and query paths so "issues" matches ``create_issue``."""
     if not text:
         return []
     return [_stem(token.lower()) for token in _TOKEN_RE.findall(text)]
@@ -84,8 +81,7 @@ def _entry_search_text(td: Dict[str, Any], source_label: str = "") -> str:
     top-level parameter names. Schema bodies are excluded (noise, no recall
     gain). The ``mcp__`` prefix is dropped — it is in every MCP document, so
     its IDF is ~0. The source label lets a service-name query ("linear") reach
-    a tool whose own name omits the vendor.
-    """
+    a tool whose own name omits the vendor."""
     fn = _fn(td)
     name = fn.get("name", "")
     if name.startswith("mcp__"):
@@ -135,8 +131,8 @@ def _bm25_score(query_tokens: List[str], doc_tokens: List[str],
                 doc_lengths: List[int], avg_dl: float,
                 doc_freq: Dict[str, int], n_docs: int,
                 k1: float = 1.5, b: float = 0.75) -> float:
-    """Standard BM25 score for one query against one document (inlined; the
-    catalog is bounded — typically < 500 tools — so a dependency is not worth it)."""
+    """Standard BM25 for one query against one document (inlined; the catalog
+    is bounded — typically < 500 tools — so a dependency is not worth it)."""
     if not doc_tokens:
         return 0.0
     score = 0.0
@@ -144,12 +140,10 @@ def _bm25_score(query_tokens: List[str], doc_tokens: List[str],
     doc_tf = Counter(doc_tokens)
     for q in query_tokens:
         df = doc_freq.get(q, 0)
-        if df == 0:
+        tf = doc_tf.get(q, 0)
+        if df == 0 or tf == 0:
             continue
         idf = math.log(1 + (n_docs - df + 0.5) / (df + 0.5))
-        tf = doc_tf.get(q, 0)
-        if tf == 0:
-            continue
         norm = tf * (k1 + 1) / (tf + k1 * (1 - b + b * dl / max(avg_dl, 1.0)))
         score += idf * norm
     return score
@@ -178,17 +172,14 @@ def search_catalog(
     """Top-``limit`` catalog entries for ``query`` by BM25 (exact name match
     ranks first). Falls back to a name-substring match only when NO query
     token appears in any document (e.g. "hub" vs ``github_*``); the IDF
-    variant is strictly positive, so a hit anywhere suppresses the fallback.
-    """
+    variant is strictly positive, so a hit anywhere suppresses the fallback."""
     if not catalog or limit <= 0:
         return []
     query_tokens = _tokenize(query)
     if not query_tokens:
         return []
-
     if corpus_stats is None:
         corpus_stats = _corpus_stats(catalog)
-    doc_lengths, avg_dl, doc_freq, n_docs = corpus_stats
 
     scored: List[Tuple[float, CatalogEntry]] = []
     exact_name = query.strip().lower()
@@ -196,17 +187,12 @@ def search_catalog(
         if entry.name.lower() == exact_name:
             scored.append((float("inf"), entry))
             continue
-        s = _bm25_score(query_tokens, entry._tokens, doc_lengths, avg_dl,
-                        doc_freq, n_docs)
+        s = _bm25_score(query_tokens, entry._tokens, *corpus_stats)
         if s > 0:
             scored.append((s, entry))
-
     if not scored:
         ql = query.lower()
-        for entry in catalog:
-            if ql in entry.name.lower():
-                scored.append((0.1, entry))
-
+        scored = [(0.1, entry) for entry in catalog if ql in entry.name.lower()]
     scored.sort(key=lambda x: x[0], reverse=True)
     return [e for _, e in scored[:limit]]
 
@@ -239,16 +225,6 @@ def _listing_group_label(source_name: str) -> str:
     return label[4:] if label.startswith("mcp-") else label
 
 
-def build_catalog_listing(
-    deferrable: List[Dict[str, Any]],
-    *,
-    max_tokens: int = 4000,
-) -> Optional[str]:
-    """Render the deferred-catalog manifest; text only (see
-    :func:`build_catalog_listing_with_form` for the degradation ladder)."""
-    return build_catalog_listing_with_form(deferrable, max_tokens=max_tokens)[0]
-
-
 def build_catalog_listing_with_form(
     deferrable: List[Dict[str, Any]],
     *,
@@ -267,9 +243,6 @@ def build_catalog_listing_with_form(
     Degradation is PER SERVER (largest first): one huge server must not cost
     a small co-attached server its listing.
     """
-    if not deferrable:
-        return None, "none"
-
     groups: Dict[str, List[Tuple[str, str]]] = {}
     for td in deferrable:
         fn = _fn(td)
@@ -280,7 +253,6 @@ def build_catalog_listing_with_form(
         # ``_listing_group_label("")`` is "other", so one call covers both.
         label = _listing_group_label(_classify_source(name)[1])
         groups.setdefault(label, []).append((name, _short_desc(fn.get("description", ""))))
-
     if not groups:
         return None, "none"
 
@@ -310,10 +282,8 @@ def build_catalog_listing_with_form(
         text = assemble_if_fits(modes)
         if text is not None:
             return text, mode
-
     # 3. Per-server degradation: collapse the LARGEST rendered groups first
-    #    (deterministic: size then label) so one oversized server does not
-    #    cost a small co-attached server its per-tool names.
+    #    (deterministic: size then label).
     by_size = sorted(groups, key=lambda lbl: (-len(render_group(lbl, "names")), lbl))
     for lbl in by_size:
         modes[lbl] = "summary"
@@ -321,5 +291,4 @@ def build_catalog_listing_with_form(
         if text is not None:
             form = "groups" if all(m == "summary" for m in modes.values()) else "mixed"
             return text, form
-
     return None, "none"

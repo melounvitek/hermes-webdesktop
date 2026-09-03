@@ -22,20 +22,13 @@ def _schema_for_local_validation(node: Any) -> Any:
         return [_schema_for_local_validation(item) for item in node]
     if not isinstance(node, dict):
         return node
-
-    normalized = {}
-    for key, value in node.items():
-        if key == "nullable":
-            continue
-        # Literal keywords hold instance data, not schemas: copy byte-for-byte.
-        normalized[key] = (
-            copy.deepcopy(value)
-            if key in _SCHEMA_LITERAL_KEYS
-            else _schema_for_local_validation(value)
-        )
+    # Literal keywords hold instance data, not schemas: copy byte-for-byte.
+    normalized = {
+        key: copy.deepcopy(value) if key in _SCHEMA_LITERAL_KEYS else _schema_for_local_validation(value)
+        for key, value in node.items() if key != "nullable"
+    }
     if node.get("nullable") is not True:
         return normalized
-
     schema_type = normalized.get("type")
     if isinstance(schema_type, str):
         if schema_type != "null":
@@ -45,7 +38,6 @@ def _schema_for_local_validation(node: Any) -> Any:
         if "null" not in schema_type:
             normalized["type"] = [*schema_type, "null"]
         return normalized
-
     # No ``type`` to extend ($ref/combinator): wrap so local refs still resolve
     # from the root while null stays an explicit alternative.
     return {"anyOf": [normalized, {"type": "null"}]}
@@ -83,10 +75,7 @@ def _validation_path(error: Any) -> str:
 
 def _validation_error(message: str, *, path: str, constraint: str, parameters: Any) -> str:
     return tool_error(
-        message,
-        path=path,
-        constraint=constraint,
-        parameters=parameters,
+        message, path=path, constraint=constraint, parameters=parameters,
         hint="Retry tool_call with 'arguments' matching the parameters schema above.",
     )
 
@@ -122,18 +111,14 @@ def validate_deferred_call_args(name: str, args: Dict[str, Any]) -> Optional[str
 
         validation_schema = _schema_for_local_validation(params)
         if _schema_has_external_ref(validation_schema):
-            logger.debug(
-                "Skipping local deferred-argument validation for %s: external $ref",
-                name,
-            )
+            logger.debug("Skipping local deferred-argument validation for %s: external $ref", name)
             return None
 
         # Validate the repaired shape dispatch will see; copy because
         # coerce_tool_args may normalize in place (dispatch re-coerces canonically).
-        candidate_args = dict(args)
         try:
             from model_tools import coerce_tool_args
-            candidate_args = coerce_tool_args(name, candidate_args)
+            candidate_args = coerce_tool_args(name, dict(args))
         except Exception:
             logger.debug("Deferred-argument coercion failed for %s", name, exc_info=True)
             candidate_args = dict(args)
@@ -142,20 +127,14 @@ def validate_deferred_call_args(name: str, args: Dict[str, Any]) -> Optional[str
             from jsonschema.exceptions import best_match
             from jsonschema.validators import validator_for
         except ImportError:
-            logger.debug(
-                "jsonschema unavailable; keeping required-only validation for %s",
-                name,
-            )
+            logger.debug("jsonschema unavailable; keeping required-only validation for %s", name)
             return None
 
         validator_cls = validator_for(validation_schema)
         validator_cls.check_schema(validation_schema)
-        validation_error = best_match(
-            validator_cls(validation_schema).iter_errors(candidate_args)
-        )
+        validation_error = best_match(validator_cls(validation_schema).iter_errors(candidate_args))
         if validation_error is None:
             return None
-
         path = _validation_path(validation_error)
         constraint = str(getattr(validation_error, "validator", None) or "schema")
         detail = re.sub(r"\s+", " ", str(validation_error.message)).strip()

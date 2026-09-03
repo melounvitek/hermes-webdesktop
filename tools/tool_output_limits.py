@@ -1,10 +1,9 @@
 """Configurable tool-output truncation limits (``tool_output`` in config.yaml).
 
-Centralises the caps previously hardcoded in ``terminal_tool`` (``max_bytes``)
-and ``file_operations`` (``max_lines`` / ``max_line_length``). Defaults equal
-the old constants, so behaviour is unchanged when the section is absent, and
-the reader never raises — any config error falls back to the defaults.
-Ported from anomalyco/opencode PR #23770. Example::
+Centralises the caps once hardcoded in ``terminal_tool`` (``max_bytes``) and
+``file_operations`` (``max_lines`` / ``max_line_length``). Defaults equal the
+old constants and the reader never raises, so behaviour is unchanged when the
+section is absent or malformed::
 
     tool_output:
       max_bytes: 100000        # terminal output cap (chars)
@@ -39,11 +38,8 @@ def _coerce_positive_int(value: Any, default: int) -> int:
 
 
 def get_tool_output_limits() -> Dict[str, int]:
-    """Return resolved limits ``{max_bytes, max_lines, max_line_length}``; never raises.
-
-    Cached for the process lifetime — ``_reset_tool_output_limits_cache()``
-    forces a fresh read after config changes.
-    """
+    """Resolved ``{max_bytes, max_lines, max_line_length}``; never raises. Cached
+    for the process — ``_reset_tool_output_limits_cache()`` forces a fresh read."""
     global _cached_limits
     if _cached_limits is not None:
         return _cached_limits
@@ -55,13 +51,10 @@ def get_tool_output_limits() -> Dict[str, int]:
             section = {}
     except Exception:
         section = {}
-
     _cached_limits = {
         "max_bytes": _coerce_positive_int(section.get("max_bytes"), DEFAULT_MAX_BYTES),
         "max_lines": _coerce_positive_int(section.get("max_lines"), DEFAULT_MAX_LINES),
-        "max_line_length": _coerce_positive_int(
-            section.get("max_line_length"), DEFAULT_MAX_LINE_LENGTH
-        ),
+        "max_line_length": _coerce_positive_int(section.get("max_line_length"), DEFAULT_MAX_LINE_LENGTH),
     }
     return _cached_limits
 

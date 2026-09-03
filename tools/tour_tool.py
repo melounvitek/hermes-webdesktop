@@ -1,16 +1,13 @@
 #!/usr/bin/env python3
 """Guided tour (highlight + narrate UI elements) in the Hermes desktop GUI.
 
-Generic, no baked-in tours: the agent discovers targets (``action="targets"``)
+Generic, no baked-in tours: the agent discovers targets (``action="targets"``),
 then highlights by CSS selector one step at a time (``show``) or hands over a
-step list the user pages with Next/Prev (``start``). Surfaces ``app`` (Hermes'
-own DOM) and ``preview`` (the in-app browser page) share the renderer's driver.js.
-Round-trips through the gateway blocking-prompt bridge (``tour.request`` /
-``tour.respond``) so the agent learns whether the selector matched.
-
-Lives in ``desktop_ui`` (GUI sessions only) and withdraws itself when the user
-turns tours off: a tour takes the whole screen, so "off" must mean the model is
-never told the tool exists rather than being offered a call that fails.
+step list the user pages with Next/Prev (``start``). Round-trips through the
+gateway blocking-prompt bridge (``tour.request``/``tour.respond``) so the agent
+learns whether the selector matched. Lives in ``desktop_ui`` and withdraws itself
+when the user turns tours off: a tour takes the whole screen, so "off" must mean
+the model is never told the tool exists rather than offered a call that fails.
 """
 
 import json
@@ -170,13 +167,7 @@ registry.register(
     schema=TOUR_SCHEMA,
     handler=lambda args, **kw: tour_tool(
         action=args.get("action", ""),
-        surface=args.get("surface"),
-        selector=args.get("selector"),
-        title=args.get("title"),
-        text=args.get("text"),
-        side=args.get("side"),
-        steps=args.get("steps"),
-        step_index=args.get("step_index"),
+        **{k: args.get(k) for k in ("surface", "selector", "title", "text", "side", "steps", "step_index")},
         callback=kw.get("callback"),
     ),
     check_fn=check_tours_enabled,
