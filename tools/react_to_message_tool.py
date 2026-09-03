@@ -1,13 +1,8 @@
 #!/usr/bin/env python3
-"""Let the agent react to a message with an emoji in the Hermes desktop app.
-
-The conversational counterpart to the user's tapback: same reaction store,
-same one-per-author semantics, written with ``author="agent"``. Lives in the
-``desktop_ui`` toolset so it costs nothing on other surfaces (platform adapters
-expose reactions via ``send_message(action="react")``). Defaults to the message
-that triggered this turn so the model needn't thread row ids through tool calls,
-and emits ``message.reaction`` so the renderer paints it without a resume.
-"""
+"""Agent emoji reaction in the Hermes desktop app: the counterpart to the user's tapback
+(same store, one-per-author, ``author="agent"``). Lives in the ``desktop_ui`` toolset so it
+costs nothing elsewhere (adapters expose reactions via ``send_message(action="react")``);
+defaults to the triggering message and emits ``message.reaction`` for live painting."""
 
 import json
 
@@ -20,7 +15,6 @@ def _open_session_db():
     """Open the SessionDB for the profile owning this turn, or ``None``."""
     try:
         from hermes_state import get_shared_session_db
-
         return get_shared_session_db()
     except Exception:
         return None
@@ -30,15 +24,13 @@ def _react(emoji: str, message_row_id, messages_back, *, db, session_key: str) -
     row_id = message_row_id
     target_role = "user"
     if row_id is None:
-        # Default target: the latest user message. `messages_back` steps to earlier
-        # user turns (1 = the one before) — ids aren't visible to the model and
-        # quoting text is ambiguous, but "two messages ago" is how a person thinks.
+        # Default: the latest user message; `messages_back` steps to earlier user turns
+        # (ids aren't visible to the model; "two messages ago" is how a person thinks).
         back = max(0, int(messages_back or 0))
         row_id = db.latest_message_row_id(session_key, role="user", offset=back)
         if row_id is None:
             return tool_error(
-                f"No user message found {back} back." if back else "No user message to react to yet."
-            )
+                f"No user message found {back} back." if back else "No user message to react to yet.")
     else:
         target_role = db.get_message_role(session_key, int(row_id)) or "user"
 
@@ -49,28 +41,21 @@ def _react(emoji: str, message_row_id, messages_back, *, db, session_key: str) -
     if reactions is None:
         return tool_error(f"Message {row_id} is not part of this conversation.")
 
-    # Paint it live. A missing bridge (non-desktop surface) is not an error — the
-    # reaction is persisted and shows on next load. `role` lets the renderer match
-    # a live message that doesn't know its durable row id yet (learned on resume).
+    # Paint it live; a missing bridge (non-desktop) is not an error — the reaction is
+    # persisted. `role` lets the renderer match a live message without a durable row id.
     try:
         desktop_ui.emit(
-            "message.reaction",
-            {"row_id": int(row_id), "reactions": reactions, "role": target_role},
-        )
+            "message.reaction", {"row_id": int(row_id), "reactions": reactions, "role": target_role})
     except Exception:
         pass
 
-    return json.dumps(
-        {"success": True, "row_id": int(row_id), "reactions": reactions}, ensure_ascii=False
-    )
+    return json.dumps({"success": True, "row_id": int(row_id), "reactions": reactions}, ensure_ascii=False)
 
 
 def react_to_message_tool(emoji: str, message_row_id=None, messages_back=None) -> str:
     """Attach (or with an empty ``emoji`` retract) the agent's reaction."""
     emoji = (emoji or "").strip()
-    session_key = get_session_env("HERMES_SESSION_KEY", "") or get_session_env(
-        "HERMES_SESSION_ID", ""
-    )
+    session_key = get_session_env("HERMES_SESSION_KEY", "") or get_session_env("HERMES_SESSION_ID", "")
     if not session_key:
         return tool_error("No active session — reactions need a persisted conversation.")
 
@@ -139,14 +124,9 @@ REACT_TO_MESSAGE_SCHEMA = {
 
 
 registry.register(
-    name="react_to_message",
-    toolset="desktop_ui",
-    schema=REACT_TO_MESSAGE_SCHEMA,
+    name="react_to_message", toolset="desktop_ui", schema=REACT_TO_MESSAGE_SCHEMA,
     handler=lambda args, **kw: react_to_message_tool(
-        emoji=args.get("emoji", ""),
-        message_row_id=args.get("message_row_id"),
-        messages_back=args.get("messages_back"),
-    ),
-    check_fn=check_react_requirements,
-    emoji="💛",
+        emoji=args.get("emoji", ""), message_row_id=args.get("message_row_id"),
+        messages_back=args.get("messages_back")),
+    check_fn=check_react_requirements, emoji="💛",
 )
