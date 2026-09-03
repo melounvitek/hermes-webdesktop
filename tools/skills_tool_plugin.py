@@ -1,10 +1,9 @@
 """Plugin-provided skill serving for ``skill_view`` (``plugin:skill`` names) plus
 the JSON / file-serving helpers shared with the local-skill path.
 
-Split out of ``tools.skills_tool``; every name is re-imported there. Helpers
-that tests patch on the origin module (``_is_skill_disabled``,
-``_parse_frontmatter``, ``skill_matches_platform``) are looked up lazily via
-``tools.skills_tool`` at call time so those patches keep working.
+Every name is re-imported by ``tools.skills_tool``. Helpers tests patch on the
+origin module (``_is_skill_disabled``, ``_parse_frontmatter``,
+``skill_matches_platform``) are looked up lazily via ``tools.skills_tool``.
 """
 
 import json
@@ -24,8 +23,7 @@ MAX_DESCRIPTION_LENGTH = 1024
 _INJECTION_PATTERNS: list = [
     "ignore previous instructions", "ignore all previous", "you are now",
     "disregard your", "forget your instructions", "new instructions:",
-    "system prompt:", "<system>", "]]>",
-]
+    "system prompt:", "<system>", "]]>"]
 _SUPPORT_DIRS = ("references", "templates", "assets", "scripts")
 _SKILL_FILE_EXTS = {".md", ".py", ".yaml", ".yml", ".json", ".tex", ".sh"}
 
@@ -39,10 +37,8 @@ def _fail(error: str, **extra) -> str:
 
 
 def _read_skill_text(path: Path) -> str:
-    """utf-8-sig + errors="replace": SKILL.md files are user-authored and may carry
-    a Notepad BOM or stray non-UTF-8 bytes. Pinning UTF-8 with replacement keeps
-    skill_view deterministic across platforms — falling back to the machine locale
-    (cp1252/GBK) would render the same skill differently per host (PR #51701)."""
+    """utf-8-sig + errors="replace": user-authored SKILL.md may carry a Notepad BOM
+    or stray bytes; pinning UTF-8 keeps skill_view deterministic across host locales."""
     return path.read_text(encoding="utf-8-sig", errors="replace")
 
 
@@ -76,14 +72,12 @@ def _serve_skill_file(
     hint: str | None = None,
     list_available: bool = False,
     read_error_prefix: bool = False,
-    mark_read: bool = False,
-) -> str:
+    mark_read: bool = False) -> str:
     """Serve one linked file from a skill directory as a skill_view JSON result.
 
-    ``hint`` is attached to traversal/containment errors (local skills only);
-    ``list_available`` adds the available-files listing on not-found (local);
-    ``read_error_prefix`` wraps non-decode read errors (plugin) instead of letting
-    them propagate to the caller's generic handler (local)."""
+    ``hint`` decorates traversal/containment errors and ``list_available`` adds the
+    available-files listing on not-found (local skills); ``read_error_prefix`` wraps
+    non-decode read errors (plugin) instead of propagating to the caller's handler."""
     from tools.path_security import has_traversal_component, validate_within_dir
 
     extra = {"hint": hint} if hint else {}
@@ -93,16 +87,14 @@ def _serve_skill_file(
     path_error = validate_within_dir(target, skill_root)
     if path_error:
         return _fail(path_error, **extra)
-    # is_file(), not exists(): a directory (e.g. requesting 'references' bare)
-    # must take the not-found branch, not surface a raw [Errno 21] from read_text().
+    # is_file(), not exists(): a bare directory must take the not-found branch.
     if not target.is_file():
         not_found = f"File '{file_path}' not found in skill '{label}'."
         if list_available:
             return _fail(
                 not_found,
                 available_files=_available_skill_files(skill_root),
-                hint="Use one of the available file paths listed above",
-            )
+                hint="Use one of the available file paths listed above")
         return _fail(not_found)
     try:
         content = _read_skill_text(target)
@@ -110,8 +102,7 @@ def _serve_skill_file(
         return _json({
             "success": True, "name": label, "file": file_path,
             "content": f"[Binary file: {target.name}, size: {target.stat().st_size} bytes]",
-            "is_binary": True,
-        })
+            "is_binary": True})
     except Exception as exc:
         if not read_error_prefix:
             raise
@@ -122,8 +113,7 @@ def _serve_skill_file(
         "success": True, "name": label, "file": file_path, "content": content,
         "file_type": target.suffix,
         # Internal: absolute source path for the repeat-view dedup fingerprint.
-        "_source_path": str(target),
-    })
+        "_source_path": str(target)})
 
 
 def _mark_background_review_read(path: Path) -> None:
@@ -151,8 +141,7 @@ def _serve_plugin_skill(
     file_path: str | None = None,
     *,
     preprocess: bool = True,
-    session_id: str | None = None,
-) -> str:
+    session_id: str | None = None) -> str:
     """Read a plugin-provided skill, apply guards, return JSON."""
     from hermes_cli.plugins import _get_disabled_plugins, get_plugin_manager
     from tools import skills_tool as _st
@@ -174,26 +163,21 @@ def _serve_plugin_skill(
     if not _st.skill_matches_platform(parsed_frontmatter):
         return _fail(
             f"Skill '{qualified_name}' is not supported on this platform.",
-            readiness_status=SkillReadinessStatus.UNSUPPORTED.value,
-        )
+            readiness_status=SkillReadinessStatus.UNSUPPORTED.value)
     if file_path:
         return _serve_skill_file(skill_md.parent, file_path, qualified_name, read_error_prefix=True)
 
-    # Injection scan — log but still serve (matches local-skill behaviour)
     if any(p in content.lower() for p in _INJECTION_PATTERNS):
         logger.warning(
             "Plugin skill '%s:%s' contains patterns that may indicate prompt injection",
-            namespace, bare,
-        )
-    # Bundle context banner — tells the agent about sibling skills
-    try:
+            namespace, bare)
+    try:  # bundle-context banner: sibling skills of the same plugin
         siblings = [s for s in get_plugin_manager().list_plugin_skills(namespace) if s != bare]
         banner = f"[Bundle context: This skill is part of the '{namespace}' plugin."
         if siblings:
             banner += (
                 f"\nSibling skills: {', '.join(siblings)}.\n"
-                f"Use qualified form to invoke siblings (e.g. {namespace}:{siblings[0]})."
-            )
+                f"Use qualified form to invoke siblings (e.g. {namespace}:{siblings[0]}).")
         banner += "]\n\n"
     except Exception:
         banner = ""
@@ -201,16 +185,14 @@ def _serve_plugin_skill(
     if preprocess:
         rendered_content = _preprocess_skill(
             content, skill_md.parent, session_id,
-            "Could not preprocess plugin skill %s:%s", namespace, bare,
-        )
+            "Could not preprocess plugin skill %s:%s", namespace, bare)
     return _json({
         "success": True,
         "name": qualified_name,
         "content": f"{banner}{rendered_content}" if banner else rendered_content,
         "description": _truncate_description(str(parsed_frontmatter.get("description", ""))),
         "linked_files": _plugin_skill_linked_files(skill_md.parent),
-        "readiness_status": SkillReadinessStatus.AVAILABLE.value,
-    })
+        "readiness_status": SkillReadinessStatus.AVAILABLE.value})
 
 
 def _plugin_skill_linked_files(skill_root: Path) -> Dict[str, List[str]] | None:
@@ -224,8 +206,7 @@ def _plugin_skill_linked_files(skill_root: Path) -> Dict[str, List[str]] | None:
         files = [
             str(path.relative_to(skill_root))
             for path in sorted(base.rglob("*"))
-            if path.is_file() and validate_within_dir(path, skill_root) is None
-        ]
+            if path.is_file() and validate_within_dir(path, skill_root) is None]
         if files:
             linked[category] = files
     return linked or None

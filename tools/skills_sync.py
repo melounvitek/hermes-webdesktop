@@ -179,8 +179,7 @@ def _discover_bundled_skills(bundled_dir: Path) -> List[Tuple[str, Path]]:
     return [
         (_read_skill_name(md, md.parent.name), md.parent)
         for md in bundled_dir.rglob("SKILL.md")
-        if not is_excluded_skill_path(md.relative_to(bundled_dir), root=bundled_dir)
-    ]
+        if not is_excluded_skill_path(md.relative_to(bundled_dir), root=bundled_dir)]
 
 
 def _compute_relative_dest(skill_dir: Path, bundled_dir: Path) -> Path:
@@ -254,8 +253,7 @@ def _recover_renamed_skill(st: "_SyncState", skill_name: str, dest: Path) -> Opt
             st.say(
                 f"  ⚠ {skill_name}: upstream moved this skill to {_rel_skills_posix(dest)}, but your "
                 f"modified copy at {rel} was kept — it will not receive updates. "
-                f"Run `hermes skills reset {skill_name} --restore` to move to the new location."
-            )
+                f"Run `hermes skills reset {skill_name} --restore` to move to the new location.")
             continue
         try:
             _move_dir(candidate, dest)
@@ -504,13 +502,11 @@ def _rmtree_writable(path: Path) -> None:
 # Re-exported so ``from tools.skills_sync import X`` / ``patch("tools.skills_sync.X")`` keep working.
 from tools.skills_sync_bundled_ops import (  # noqa: E402,F401
     _is_tracked_user_modification, _read_for_diff, diff_bundled_skill, list_user_modified_bundled_skills,
-    remove_pristine_bundled_skills, reset_bundled_skill, set_bundled_skills_opt_out,
-)
+    remove_pristine_bundled_skills, reset_bundled_skill, set_bundled_skills_opt_out)
 from tools.skills_sync_optional import (  # noqa: E402,F401
     _backfill_optional_provenance, _content_hash, _index_installed_skill_dirs_by_name, _move_to_restore_backup,
     _optional_skill_index, _read_hub_install_paths, _safe_rel_install_path, _skill_file_list,
-    restore_official_optional_skill,
-)
+    restore_official_optional_skill)
 
 
 if __name__ == "__main__":

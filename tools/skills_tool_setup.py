@@ -1,10 +1,8 @@
 """Skill readiness: required env vars, secret capture, and setup notes.
 
-Split out of ``tools.skills_tool``; every name is re-imported there so
-``from tools.skills_tool import X`` / ``patch("tools.skills_tool.X")`` keep
-working. Module state (``_secret_capture_callback``, ``load_env``) stays in
-``tools.skills_tool`` and is read lazily at call time so test patches on the
-origin module are honored.
+Split out of ``tools.skills_tool``; every name is re-imported there. Module
+state (``_secret_capture_callback``, ``load_env``) stays in ``tools.skills_tool``
+and is read lazily at call time so test patches on the origin module are honored.
 """
 
 import logging
@@ -56,8 +54,7 @@ def _collect_prerequisite_values(frontmatter: Dict[str, Any]) -> Tuple[List[str]
         return [], []
     return (
         _normalize_prerequisite_values(prereqs.get("env_vars")),
-        _normalize_prerequisite_values(prereqs.get("commands")),
-    )
+        _normalize_prerequisite_values(prereqs.get("commands")))
 
 
 def _as_dict_list(raw: Any) -> list:
@@ -86,8 +83,7 @@ def _normalize_setup_metadata(frontmatter: Dict[str, Any]) -> Dict[str, Any]:
         entry: Dict[str, Any] = {
             "env_var": env_var,
             "prompt": str(item.get("prompt") or f"Enter value for {env_var}").strip(),
-            "secret": bool(item.get("secret", True)),
-        }
+            "secret": bool(item.get("secret", True))}
         provider_url = str(item.get("provider_url") or item.get("url") or "").strip()
         if provider_url:
             entry["provider_url"] = provider_url
@@ -96,9 +92,7 @@ def _normalize_setup_metadata(frontmatter: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _get_required_environment_variables(
-    frontmatter: Dict[str, Any],
-    legacy_env_vars: List[str] | None = None,
-) -> List[Dict[str, Any]]:
+    frontmatter: Dict[str, Any], legacy_env_vars: List[str] | None = None) -> List[Dict[str, Any]]:
     """Merge required_environment_variables, setup.collect_secrets and legacy
     prerequisites.env_vars into one deduped, validated list (first entry wins)."""
     setup = _normalize_setup_metadata(frontmatter)
@@ -111,11 +105,9 @@ def _get_required_environment_variables(
             return
         normalized: Dict[str, Any] = {
             "name": env_name,
-            "prompt": str(entry.get("prompt") or f"Enter value for {env_name}").strip(),
-        }
+            "prompt": str(entry.get("prompt") or f"Enter value for {env_name}").strip()}
         help_text = _clean_str(
-            entry.get("help") or entry.get("provider_url") or entry.get("url") or setup.get("help")
-        )
+            entry.get("help") or entry.get("provider_url") or entry.get("url") or setup.get("help"))
         if help_text:
             normalized["help"] = help_text
         required_for = _clean_str(entry.get("required_for"))
@@ -135,8 +127,7 @@ def _get_required_environment_variables(
         _append_required({
             "name": item.get("env_var"),
             "prompt": item.get("prompt"),
-            "help": item.get("provider_url") or setup.get("help"),
-        })
+            "help": item.get("provider_url") or setup.get("help")})
     if legacy_env_vars is None:
         legacy_env_vars, _ = _collect_prerequisite_values(frontmatter)
     for env_var in legacy_env_vars:
@@ -145,28 +136,21 @@ def _get_required_environment_variables(
 
 
 def _capture_result(missing_names, setup_skipped=False, gateway_setup_hint=None):
-    return {
-        "missing_names": missing_names,
-        "setup_skipped": setup_skipped,
-        "gateway_setup_hint": gateway_setup_hint,
-    }
+    return {"missing_names": missing_names, "setup_skipped": setup_skipped, "gateway_setup_hint": gateway_setup_hint}
 
 
 def _capture_required_environment_variables(
-    skill_name: str,
-    missing_entries: List[Dict[str, Any]],
-) -> Dict[str, Any]:
+    skill_name: str, missing_entries: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Prompt for missing secrets via the registered capture callback (if any)."""
     from tools import skills_tool as _st
 
     if not missing_entries:
         return _capture_result([])
     missing_names = [entry["name"] for entry in missing_entries]
-    # Most gateway surfaces (messaging platforms) can't prompt for a secret, so
-    # they short-circuit to the "unsupported" hint. Interactive gateway surfaces
-    # (desktop app / TUI) set HERMES_INTERACTIVE — the same flag tools/approval.py
-    # uses — and register a callback routing to a secure secret.request overlay,
-    # so they fall through and actually prompt.
+    # Messaging-platform gateway surfaces can't prompt for a secret, so they get
+    # the "unsupported" hint. Interactive gateway surfaces (desktop app / TUI) set
+    # HERMES_INTERACTIVE (same flag tools/approval.py uses) and register a callback
+    # routing to a secure secret.request overlay, so they fall through and prompt.
     if _is_gateway_surface() and not env_var_enabled("HERMES_INTERACTIVE"):
         return _capture_result(missing_names, gateway_setup_hint=_gateway_setup_hint())
     callback = _st._secret_capture_callback
@@ -223,16 +207,14 @@ def _remaining_required_environment_names(
     required_env_vars: List[Dict[str, Any]],
     capture_result: Dict[str, Any],
     *,
-    env_snapshot: Dict[str, str] | None = None,
-) -> List[str]:
+    env_snapshot: Dict[str, str] | None = None) -> List[str]:
     missing_names = set(capture_result["missing_names"])
     env_snapshot = _env_snapshot_or_load(env_snapshot)
     return [
         e["name"]
         for e in required_env_vars
         if not e.get("optional")
-        and (e["name"] in missing_names or not _is_env_var_persisted(e["name"], env_snapshot))
-    ]
+        and (e["name"] in missing_names or not _is_env_var_persisted(e["name"], env_snapshot))]
 
 
 def _gateway_setup_hint() -> str:
@@ -245,9 +227,7 @@ def _gateway_setup_hint() -> str:
 
 
 def _build_setup_note(
-    readiness_status: SkillReadinessStatus,
-    missing: List[str],
-    setup_help: str | None = None,
+    readiness_status: SkillReadinessStatus, missing: List[str], setup_help: str | None = None
 ) -> str | None:
     if readiness_status != SkillReadinessStatus.SETUP_NEEDED:
         return None

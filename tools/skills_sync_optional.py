@@ -172,8 +172,7 @@ def restore_official_optional_skill(name: str, *, restore: bool = False) -> dict
     return {
         "ok": True, "message": "Official optional skill repair complete.", "restored": restored,
         "backfilled": _backfill_optional_provenance(quiet=True), "backed_up": backed_up,
-        "backup_dir": str(backup_root) if backed_up else "",
-    }
+        "backup_dir": str(backup_root) if backed_up else ""}
 
 
 def _index_installed_skill_dirs_by_name() -> Dict[str, List[Path]]:
@@ -250,8 +249,7 @@ def _backfill_optional_provenance(quiet: bool = False) -> List[str]:
             "files": _skill_file_list(dest),
             "metadata": {"backfilled_from": "optional-skills"},
             "installed_at": timestamp,
-            "updated_at": timestamp,
-        }
+            "updated_at": timestamp}
         existing_paths.add(install_path)
         backfilled.append(lock_name)
         if not quiet:

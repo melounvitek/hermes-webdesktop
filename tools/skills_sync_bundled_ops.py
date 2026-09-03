@@ -149,8 +149,7 @@ def diff_bundled_skill(name: str) -> dict:
             elif user_text != stock_text:
                 text = "".join(difflib.unified_diff(
                     stock_text.splitlines(keepends=True), user_text.splitlines(keepends=True),
-                    fromfile=f"stock/{rel}", tofile=f"yours/{rel}",
-                ))
+                    fromfile=f"stock/{rel}", tofile=f"yours/{rel}"))
                 diffs.append({"path": rel, "status": "modified", "diff": text})
 
     message = (f"'{name}' differs from the stock version in {len(diffs)} file(s)." if diffs
@@ -162,8 +161,7 @@ _OPT_OUT_MESSAGES = {  # (enabled, changed) -> message
     (True, True): "Opted out of bundled skills. Future install / update / sync runs will not seed bundled skills into this profile.",
     (True, False): "Already opted out — marker was already present.",
     (False, True): "Opted back in. The next `hermes update` (or `hermes skills opt-in --sync`) will re-seed bundled skills.",
-    (False, False): "Not opted out — no marker to remove.",
-}
+    (False, False): "Not opted out — no marker to remove."}
 
 
 def set_bundled_skills_opt_out(enabled: bool) -> dict:
@@ -180,8 +178,7 @@ def set_bundled_skills_opt_out(enabled: bool) -> dict:
             marker.write_text(
                 "This profile opted out of bundled-skill seeding (`hermes skills opt-out`).\n"
                 "Delete this file to re-enable sync on the next `hermes update`.\n",
-                encoding="utf-8",
-            )
+                encoding="utf-8")
         elif existed:
             marker.unlink()
     except OSError as e:
@@ -236,5 +233,4 @@ def remove_pristine_bundled_skills(dry_run: bool = False) -> dict:
     verb = "Would remove" if dry_run else "Removed"
     return {
         "ok": True, "removed": removed, "skipped": skipped, "dry_run": dry_run,
-        "message": f"{verb} {len(removed)} pristine bundled skill(s); kept {len(skipped)}.",
-    }
+        "message": f"{verb} {len(removed)} pristine bundled skill(s); kept {len(skipped)}."}
