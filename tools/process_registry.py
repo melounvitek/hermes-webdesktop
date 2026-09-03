@@ -356,8 +356,6 @@ class ProcessRegistry:
     """
 
     _SHELL_NOISE_SUBSTRINGS = (
-        "bash: cannot set terminal process group",
-        "bash: no job control in this shell",
         "no job control in this shell",
         "cannot set terminal process group",
         "tcsetattr: Inappropriate ioctl for device",
@@ -446,49 +444,42 @@ class ProcessRegistry:
             return
 
         now = time.time()
-        should_disable = False
-        lifetime_exhausted = False
         with session._lock:
-            # Inside the cooldown: drop, count one strike per window, disable + promote
-            # once the strike limit is hit.
             if session._watch_cooldown_until and now < session._watch_cooldown_until:
+                # Inside the cooldown: drop, count one strike per window, disable +
+                # promote once the strike limit is hit.
                 session._watch_suppressed += len(matched_lines)
-                if not session._watch_strike_candidate:
-                    session._watch_strike_candidate = True
-                    session._watch_consecutive_strikes += 1
-                    if session._watch_consecutive_strikes >= WATCH_STRIKE_LIMIT:
-                        session._watch_disabled = True
-                        # Promote so the agent still gets exactly one notification on exit.
-                        session.notify_on_complete = True
-                        should_disable = True
-                return_early = True
-            else:
-                # Cooldown expired. A prior window with no drops resets the
-                # consecutive-strike counter (healthy cadence again).
-                if session._watch_cooldown_until and not session._watch_strike_candidate:
-                    session._watch_consecutive_strikes = 0
-                session._watch_strike_candidate = False
-                # Emit and start a new cooldown window.
-                session._watch_cooldown_until = now + WATCH_MIN_INTERVAL_SECONDS
-                session._watch_hits += 1
-                suppressed = session._watch_suppressed
-                session._watch_suppressed = 0
-                return_early = False
-                # Lifetime cap: this match is still delivered, but no further ones.
-                lifetime_exhausted = session._watch_hits >= WATCH_LIFETIME_MAX_HITS
-                if lifetime_exhausted:
-                    session._watch_disabled = True
-                    session.notify_on_complete = True
-
-        if return_early:
-            if should_disable:
-                # Exactly one summary so the agent/user sees why things went quiet.
+                if session._watch_strike_candidate:
+                    return
+                session._watch_strike_candidate = True
+                session._watch_consecutive_strikes += 1
+                if session._watch_consecutive_strikes < WATCH_STRIKE_LIMIT:
+                    return
+                session._watch_disabled = True
+                # Promote so the agent still gets exactly one notification on exit,
+                # plus exactly one summary so it sees why things went quiet.
+                session.notify_on_complete = True
                 self._emit_watch_disabled(
                     session, session._watch_suppressed,
                     f"{WATCH_STRIKE_LIMIT} consecutive rate-limit windows triggered "
                     f"(min spacing {WATCH_MIN_INTERVAL_SECONDS}s). ",
                 )
-            return
+                return
+            # Cooldown expired. A prior window with no drops resets the
+            # consecutive-strike counter (healthy cadence again).
+            if session._watch_cooldown_until and not session._watch_strike_candidate:
+                session._watch_consecutive_strikes = 0
+            session._watch_strike_candidate = False
+            # Emit and start a new cooldown window.
+            session._watch_cooldown_until = now + WATCH_MIN_INTERVAL_SECONDS
+            session._watch_hits += 1
+            suppressed = session._watch_suppressed
+            session._watch_suppressed = 0
+            # Lifetime cap: this match is still delivered, but no further ones.
+            lifetime_exhausted = session._watch_hits >= WATCH_LIFETIME_MAX_HITS
+            if lifetime_exhausted:
+                session._watch_disabled = True
+                session.notify_on_complete = True
 
         output = "\n".join(matched_lines[:20])
         if len(output) > 2000:
@@ -714,6 +705,7 @@ class ProcessRegistry:
             return
 
         import psutil
+        gone = (psutil.NoSuchProcess, psutil.AccessDenied, OSError)
         try:
             parent = psutil.Process(pid)
         except psutil.NoSuchProcess:
@@ -724,13 +716,13 @@ class ProcessRegistry:
         # Snapshot the whole tree (children before parent) and SIGTERM each.
         try:
             targets = parent.children(recursive=True)
-        except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+        except gone:
             targets = []
         targets.append(parent)
         for proc in targets:
             try:
                 proc.terminate()
-            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+            except gone:
                 pass
         # Escalate to SIGKILL for anything that ignored SIGTERM within the grace window.
         # ``psutil.wait_procs``' gone/alive partition is deliberately NOT trusted: it
@@ -745,17 +737,21 @@ class ProcessRegistry:
             time.sleep(0.05)
         for proc in targets:
             try:
-                if not cls._proc_alive(proc):
-                    continue
-                proc.kill()  # SIGKILL on POSIX
-                logger.info(
-                    "Escalated to SIGKILL for pid %d (ignored SIGTERM within "
-                    "%.1fs grace)", proc.pid, grace,
-                )
-            except (psutil.NoSuchProcess, psutil.AccessDenied, OSError):
+                if cls._proc_alive(proc):
+                    proc.kill()  # SIGKILL on POSIX
+                    logger.info("Escalated to SIGKILL for pid %d (ignored SIGTERM within %.1fs grace)", proc.pid, grace)
+            except gone:
                 pass
 
     # ----- Spawn -----
+
+    @staticmethod
+    def _new_session(command, task_id, owner_task_id, session_key, cwd, **extra) -> ProcessSession:
+        return ProcessSession(
+            id=f"proc_{uuid.uuid4().hex[:12]}", command=command, task_id=task_id,
+            owner_task_id=owner_task_id or task_id, session_key=session_key, cwd=cwd,
+            started_at=time.time(), **extra,
+        )
 
     @staticmethod
     def _env_temp_dir(env: Any) -> str:
@@ -836,11 +832,7 @@ class ProcessRegistry:
         from tools.terminal_tool import _rewrite_compound_background as _rewrite_bg
 
         safe_command = _rewrite_bg(command)
-        session = ProcessSession(
-            id=f"proc_{uuid.uuid4().hex[:12]}", command=command, task_id=task_id,
-            owner_task_id=owner_task_id or task_id, session_key=session_key,
-            cwd=_resolve_safe_cwd(cwd or os.getcwd()), started_at=time.time(),
-        )
+        session = self._new_session(command, task_id, owner_task_id, session_key, _resolve_safe_cwd(cwd or os.getcwd()))
 
         pty_scope_attempted = False
         if use_pty:
@@ -918,11 +910,7 @@ class ProcessRegistry:
         log file that later execute() calls poll. No live pipe or stdin, but it runs in
         the correct sandbox context.
         """
-        session = ProcessSession(
-            id=f"proc_{uuid.uuid4().hex[:12]}", command=command, task_id=task_id,
-            owner_task_id=owner_task_id or task_id, session_key=session_key, cwd=cwd,
-            started_at=time.time(), env_ref=env, pid_scope="sandbox",
-        )
+        session = self._new_session(command, task_id, owner_task_id, session_key, cwd, env_ref=env, pid_scope="sandbox")
         temp_dir = self._env_temp_dir(env)
         log_path, pid_path, exit_path = (f"{temp_dir}/hermes_bg_{session.id}.{ext}" for ext in ("log", "pid", "exit"))
         q = shlex.quote
@@ -1368,8 +1356,7 @@ class ProcessRegistry:
             self.completion_queue.put(evt)
         return results
 
-    # Minimum characters of the random suffix required for prefix resolution.
-    # Short prefixes ("p", "pr", "proc_1") are too collision-prone to act on.
+    # Minimum suffix chars for prefix resolution; "p"/"proc_1" are too collision-prone.
     _MIN_PREFIX_CHARS = 4
 
     def get(self, session_id: str) -> Optional[ProcessSession]:
@@ -1382,11 +1369,9 @@ class ProcessRegistry:
         return self._refresh_detached_session(session)
 
     def _resolve_prefix(self, session_id: str) -> Optional[ProcessSession]:
-        """Resolve a unique session-ID prefix (prefix-only, unique hit; a bare hex
-        tail is normalized to ``proc_<tail>``). :meth:`get` tries exact first."""
-        if not session_id or not isinstance(session_id, str):
-            return None
-        query = session_id.strip()
+        """Resolve a unique session-ID prefix (a bare hex tail is normalized to
+        ``proc_<tail>``); :meth:`get` tries exact first."""
+        query = session_id.strip() if isinstance(session_id, str) else ""
         if not query:
             return None
         if not query.startswith("proc_"):
@@ -1442,11 +1427,9 @@ class ProcessRegistry:
                         pass
             except Exception as e:
                 logger.debug("Non-blocking drain failed for %s: %s", session.id, e)
+        if drained:
+            session.append_output(drained)
         with session._lock:
-            if drained:
-                session.output_buffer += drained
-                if len(session.output_buffer) > session.max_output_chars:
-                    session.output_buffer = session.output_buffer[-session.max_output_chars:]
             session.mark_exited(rc)
         logger.info(
             "Reconciled session %s: direct child exited with code %s but reader "
@@ -1987,8 +1970,7 @@ class ProcessRegistry:
             fields = {f: entry.get(f, _CHECKPOINT_DEFAULTS[f]) for f in _CHECKPOINT_FIELDS}
             fields.update(
                 command=entry.get("command", "unknown"),
-                owner_task_id=entry.get("owner_task_id", "") or entry.get("task_id", ""), pid=pid,
-                host_start_time=recorded_start, pid_scope=pid_scope,
+                owner_task_id=entry.get("owner_task_id", "") or entry.get("task_id", ""),
                 started_at=entry.get("started_at", time.time()),
             )
             # detached: can't read output, but can report status + kill
