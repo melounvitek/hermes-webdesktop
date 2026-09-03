@@ -7,10 +7,12 @@ Origin helpers are imported lazily per function (no cycle; test patches on the o
 import logging
 from contextlib import contextmanager, suppress
 import os
+import re
+import shlex
 import subprocess
 import sys
 import time as _time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from hermes_cli.update_cmd_common import _best_effort
@@ -31,8 +33,6 @@ def _abort_on_error(prefix: str):
 def _write_update_planned_stop_marker(profile_path: Path, pid: int) -> bool:
     """Write a planned-stop marker into a specific profile home."""
     try:
-        from datetime import timezone
-
         from gateway.status import _get_process_start_time
         from utils import atomic_json_write
 
@@ -218,8 +218,6 @@ def _hermes_holder_subcommand(cmdline: str) -> str | None:
     ``hermes(.exe)`` entry token, return the first following token that isn't a flag or a flag's value.
     """
     try:
-        import shlex
-
         tokens = shlex.split(cmdline, posix=False)
     except Exception:
         tokens = cmdline.split()
@@ -352,9 +350,7 @@ def _refuse_gateway_ancestor_tree_kill(pids: list[int], *, gateway_mode: bool) -
     return True
 
 
-def _ledger_manual_serve_holders(
-    matches: list[tuple[int, str, str]],
-) -> list[dict]:
+def _ledger_manual_serve_holders(matches: list[tuple[int, str, str]]) -> list[dict]:
     """Full ledger entries for venv holders that are MANUAL serve/dashboard backends.
 
     Positive identity only: self-registered purpose serve/dashboard, live (pid, create_time), recorded spawner
@@ -559,9 +555,7 @@ def _handoff_reapable_backend_pids(matches: list[tuple[int, str, str]]) -> list[
     return roots or None
 
 
-def _stop_process_trees(
-    pids: list[int] | list[tuple[int, int]],
-) -> None:
+def _stop_process_trees(pids: list[int] | list[tuple[int, int]]) -> None:
     """Force-stop each PID with its full child tree (Windows); best effort, never raises.
 
     ``taskkill /T /F``: stopping only the parent can leave a ``.hermes-runtime`` child holding the install open.
@@ -570,11 +564,7 @@ def _stop_process_trees(
     from hermes_cli._subprocess_compat import pid_is_hermes, windows_hide_flags
 
     for entry in pids:
-        if isinstance(entry, tuple):
-            pid, expected_start_time = entry
-        else:
-            pid = int(entry)
-            expected_start_time = get_process_start_time(pid)
+        pid, expected_start_time = entry if isinstance(entry, tuple) else (int(entry), get_process_start_time(int(entry)))
         try:
             if expected_start_time is None:
                 logger.debug("Skipping taskkill of PID %s: process identity unavailable", pid)
@@ -799,13 +789,9 @@ def _pause_windows_gateway_services(service_gateways, token: dict, profiles: dic
             paused_services.append(current_service_name)
             current_service_name = None
         if paused_services:
-            token["services"] = paused_services
-            token["expected_services"] = list(paused_services)
-            token["restarted_services"] = []
+            token.update(services=paused_services, expected_services=list(paused_services), restarted_services=[])
             token["service_profiles"] = {
-                str(service.name): str(service.profile)
-                for service in service_gateways
-                if str(service.name) in paused_services
+                str(s.name): str(s.profile) for s in service_gateways if str(s.name) in paused_services
             }
             print("  ✓ Paused Windows gateway service(s): " + ", ".join(paused_services))
         return token
@@ -917,34 +903,32 @@ def _pause_windows_gateways_for_update() -> dict | None:
     survivors = _m()._wait_for_windows_update_gateway_exit(mapped_pids, timeout=drain_timeout)
     unmapped_pids = [pid for pid in running_pids if pid not in profile_processes and pid not in service_gateway_pids]
 
-    # Snapshot unmapped gateways' argv *before* force-killing so resume can replay it.
-    # Unmapped = no profile->PID-file mapping (e.g. Scheduled Task ``pythonw.exe -m ...``).
-    unmapped: list[dict] = []
-    for pid in unmapped_pids:
-        argv = None
+    def _argv_or_none(pid: int):
         try:
-            argv = _capture_gateway_argv(int(pid))
+            return _capture_gateway_argv(pid)
         except Exception as exc:
             logger.debug("Could not capture argv for unmapped gateway %s: %s", pid, exc)
-        unmapped.append({"pid": int(pid), "argv": argv})
+            return None
+
+    # Snapshot unmapped gateways' argv *before* force-killing so resume can replay it.
+    # Unmapped = no profile->PID-file mapping (e.g. Scheduled Task ``pythonw.exe -m ...``).
+    unmapped = [{"pid": int(pid), "argv": _argv_or_none(int(pid))} for pid in unmapped_pids]
 
     # Tree-kill survivors, unmapped gateways, and pre-drain launchers; a launcher
     # already gone with its worker raises ProcessLookupError and is skipped.
     force_killed = []
     for pid in sorted(set(survivors).union(unmapped_pids).union(launcher_pids)):
         with suppress(ProcessLookupError, PermissionError, OSError):
-            pid_int = int(pid)
-            terminate_pid(pid_int, force=True, expected_start_time=get_process_start_time(pid_int))
-            force_killed.append(pid_int)
+            terminate_pid(int(pid), force=True, expected_start_time=get_process_start_time(int(pid)))
+            force_killed.append(int(pid))
 
     if profiles:
         print(f"  ✓ Paused gateway profile(s): {', '.join(sorted(profiles))}")
     if force_killed:
         print(f"  → Force-stopped {len(force_killed)} gateway process(es)")
-
     if unmapped_pids:
         print(f"  → Stopped {len(unmapped_pids)} gateway process(es) without profile mapping")
-        if sum(1 for u in unmapped if u.get("argv")) < len(unmapped_pids):
+        if any(not u.get("argv") for u in unmapped):
             # No recoverable cmdline (psutil missing, access denied, gone): manual restart.
             print("    Restart manually after update: hermes gateway run")
 
@@ -1011,15 +995,13 @@ def _refresh_bootstrap_cache_scripts(branch: str = "main") -> None:
     """
     from hermes_cli.update_cmd import _m
     with _best_effort('Could not refresh bootstrap-cache scripts after update: %s'):
-        import re as _re
-
         cache_dir = Path(_m().get_hermes_home()) / "bootstrap-cache"
         if not cache_dir.is_dir():
             return
         # Mirror install_script.rs::sanitize_ref().
-        safe_ref = _re.sub(r"[^A-Za-z0-9._-]", "_", str(branch or "main"))
+        safe_ref = re.sub(r"[^A-Za-z0-9._-]", "_", str(branch or "main"))
         # Mirror install_script.rs::is_valid_commit(): immutable commit pin, never rewrite.
-        if _re.fullmatch(r"[0-9a-fA-F]{7,40}", safe_ref):
+        if re.fullmatch(r"[0-9a-fA-F]{7,40}", safe_ref):
             return
         refreshed = []
         for kind, src_name in (("ps1", "install.ps1"), ("sh", "install.sh")):
@@ -1276,24 +1258,17 @@ def _clear_windows_venv_holders_or_exit(args, gateway_mode: bool, _windows_gatew
                 f"  ⚠ {len(_gateway_holders)} gateway process(es) still hold the venv after the pause; stopping them",
                 _gateway_holders, stop=_terminate_leftover_gateways,
             )
-    if _venv_holders:
-        # Positive-identity rung (any context): spawn ledger proves the holder is an
-        # orphaned backend (self-registered, spawner provably dead). No PPID archaeology.
-        _ledger_backends = _m()._ledger_reapable_backend_pids(_venv_holders)
-        if _ledger_backends:
-            _venv_holders = _reap_and_rescan(
-                f"  ⚠ {len(_ledger_backends)} ledger-identified orphaned "
-                "Hermes backend process(es) hold the venv; stopping their trees", _ledger_backends,
-            )
-    if _venv_holders:
-        # Desktop `serve` backends whose app is GONE: nothing respawns an orphan, so
-        # reap the tree. Live-Desktop backends return None and keep the refusal.
-        _orphan_backends = _m()._orphaned_desktop_backend_pids(_venv_holders)
-        if _orphan_backends:
-            _venv_holders = _reap_and_rescan(
-                f"  ⚠ {len(_orphan_backends)} orphaned Desktop backend "
-                "process(es) still hold the venv; stopping their trees", _orphan_backends,
-            )
+    # Tree-reap rungs: (classifier, message). Ledger rung = positive identity in any context (self-registered
+    # backend, spawner provably dead; no PPID archaeology). Orphan rung = Desktop `serve` whose app is GONE
+    # (nothing respawns an orphan); live-Desktop backends return None and keep the refusal.
+    for classifier, message in (
+        (_m()._ledger_reapable_backend_pids, "ledger-identified orphaned Hermes backend process(es) hold the venv"),
+        (_m()._orphaned_desktop_backend_pids, "orphaned Desktop backend process(es) still hold the venv"),
+    ):
+        if _venv_holders:
+            backends = classifier(_venv_holders)
+            if backends:
+                _venv_holders = _reap_and_rescan(f"  ⚠ {len(backends)} {message}; stopping their trees", backends)
     if _venv_holders:
         # Manual serve/dashboard rung (e.g. `hermes serve --host <ip>` for a REMOTE Desktop):
         # ledger identity only (spawner dead; Desktop-owned keep the refusal). Stop and

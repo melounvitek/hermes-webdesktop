@@ -33,11 +33,7 @@ def _git_ok(git_cmd, args, cwd, **kw) -> bool:
 
 
 def _prune_orphan_rescue_refs(
-    git_cmd,
-    cwd,
-    branch,
-    keep=_ORPHAN_RESCUE_REFS_TO_KEEP,
-    max_age_days=_ORPHAN_RESCUE_REF_MAX_AGE_DAYS,
+    git_cmd, cwd, branch, keep=_ORPHAN_RESCUE_REFS_TO_KEEP, max_age_days=_ORPHAN_RESCUE_REF_MAX_AGE_DAYS
 ) -> None:
     """Expire old orphan rescue refs (``refs/hermes-update-backups/orphan-<branch>-<ts>-<sha>``).
 
@@ -49,9 +45,7 @@ def _prune_orphan_rescue_refs(
     from hermes_cli.update_cmd import _git_run
     with suppress(OSError):
         prefix = f"refs/hermes-update-backups/orphan-{branch}-"
-        list_result = _git_run(
-            git_cmd, ["for-each-ref", "--format=%(refname)", "--sort=refname", f"{prefix}*"], cwd,
-        )
+        list_result = _git_run(git_cmd, ["for-each-ref", "--format=%(refname)", "--sort=refname", f"{prefix}*"], cwd)
         if list_result.returncode != 0:
             return
         refs = [line.strip() for line in list_result.stdout.splitlines() if line.strip()]
@@ -277,27 +271,21 @@ def _sync_with_upstream_if_needed(
     the check never happened, so the caller never reports "up to date" on an origin-only compare.
     """
     from hermes_cli.update_cmd import (
-        _add_upstream_remote,
-        _count_commits_between,
-        _has_upstream_remote,
-        _mark_skip_upstream_prompt,
-        _no_prompt_git_kwargs,
-        _should_skip_upstream_prompt,
+        _add_upstream_remote, _count_commits_between, _has_upstream_remote,
+        _mark_skip_upstream_prompt, _no_prompt_git_kwargs, _should_skip_upstream_prompt,
     )
     if not _has_upstream_remote(git_cmd, cwd):
         if _should_skip_upstream_prompt():
             return False
-
         print(
             "\nℹ Your fork is not tracking the official Hermes repository.\n"
             "  This means you may miss updates from NousResearch/hermes-agent.\n"
         )
         if assume_yes or (input_fn is None and not (sys.stdin.isatty() and sys.stdout.isatty())):
             # --yes means "don't block", not "mutate my remotes"; don't persist the decline.
-            print("  Skipping upstream setup (non-interactive run).")
-            print("  Add it later with: git remote add upstream https://github.com/NousResearch/hermes-agent.git")
+            print("  Skipping upstream setup (non-interactive run).\n"
+                  "  Add it later with: git remote add upstream https://github.com/NousResearch/hermes-agent.git")
             return False
-
         if input_fn is not None:
             response = input_fn("Add official repo as 'upstream' remote? [y/N]", "n").strip().lower()
         else:
@@ -306,7 +294,6 @@ def _sync_with_upstream_if_needed(
             except (EOFError, KeyboardInterrupt, UnicodeDecodeError):
                 print()
                 response = "n"
-
         if response not in {"", "y", "yes"}:
             print("  Skipped. Run 'git remote add upstream https://github.com/NousResearch/hermes-agent.git' to add later.")
             _mark_skip_upstream_prompt()
@@ -320,21 +307,16 @@ def _sync_with_upstream_if_needed(
     # Only upstream/main: a bare fetch drags in thousands of auto-generated branches.
     print("\n→ Fetching upstream...")
     try:
-        subprocess.run(
-            git_cmd + ["fetch", "upstream", "main", "--quiet"],
-            cwd=cwd, capture_output=True, check=True, **_no_prompt_git_kwargs(),
-        )
+        subprocess.run(git_cmd + ["fetch", "upstream", "main", "--quiet"], cwd=cwd, capture_output=True, check=True, **_no_prompt_git_kwargs())
     except subprocess.CalledProcessError:
         print("  ✗ Failed to fetch upstream. Skipping upstream sync.")
         return False
 
     origin_ahead = _count_commits_between(git_cmd, cwd, "upstream/main", "origin/main")
     upstream_ahead = _count_commits_between(git_cmd, cwd, "origin/main", "upstream/main")
-
     if origin_ahead < 0 or upstream_ahead < 0:
         print("  ✗ Could not compare branches. Skipping upstream sync.")
         return False
-
     if origin_ahead > 0:
         print(
             f"\nℹ Your fork has {origin_ahead} commit(s) not on upstream.\n"
@@ -342,17 +324,13 @@ def _sync_with_upstream_if_needed(
             "  If you want to merge upstream changes, run:\n    git pull upstream main"
         )
         return True
-
     if upstream_ahead == 0:
         print("  ✓ Fork is up to date with upstream")
         return True
 
     print(f"\n→ Fork is {upstream_ahead} commit(s) behind upstream\n→ Pulling from upstream...")
     try:
-        subprocess.run(
-            git_cmd + ["pull", "--ff-only", "upstream", "main"],
-            cwd=cwd, check=True, **_no_prompt_git_kwargs(),
-        )
+        subprocess.run(git_cmd + ["pull", "--ff-only", "upstream", "main"], cwd=cwd, check=True, **_no_prompt_git_kwargs())
     except subprocess.CalledProcessError:
         print("  ✗ Failed to pull from upstream. You may need to resolve conflicts manually.")
         return False
@@ -430,8 +408,7 @@ def _portable_git_candidates() -> list:
     from hermes_cli.update_cmd import get_default_hermes_root, get_hermes_home
     candidates = []
     with suppress(Exception):
-        for root in (get_default_hermes_root(), Path(get_hermes_home())):
-            candidates.append(root / "git" / "mingw64" / "libexec" / "git-core" / "git.exe")
+        candidates += [root / "git" / "mingw64" / "libexec" / "git-core" / "git.exe" for root in (get_default_hermes_root(), Path(get_hermes_home()))]
     return candidates
 
 
@@ -459,10 +436,7 @@ def _ensure_non_trampoline_git(git_cmd: list) -> list:
         return git_cmd
     real_git = _locate_real_git()
     if real_git is None:
-        print(
-            "⚠ Detected a broken git trampoline and could not locate a real "
-            "git binary — the update will fall back to the ZIP path."
-        )
+        print("⚠ Detected a broken git trampoline and could not locate a real git binary — the update will fall back to the ZIP path.")
         return git_cmd
     print(f"⚠ Detected a broken git trampoline; switching to real git at {real_git}")
     return [str(real_git)] + list(git_cmd[1:])
@@ -479,10 +453,7 @@ def _discard_lockfile_churn(git_cmd, repo_root):
             return
         changed = [line.strip() for line in diff.stdout.splitlines()]
         dirty_package_dirs = {Path(p).parent for p in changed if p.endswith("package.json")}
-        dirty = [
-            p for p in changed
-            if p.endswith("package-lock.json") and Path(p).parent not in dirty_package_dirs
-        ]
+        dirty = [p for p in changed if p.endswith("package-lock.json") and Path(p).parent not in dirty_package_dirs]
         if not dirty:
             return
         _git_run(git_cmd, ["checkout", "--", *dirty], repo_root)
