@@ -1,8 +1,4 @@
-"""``hermes backup`` subcommand parser.
-
-Extracted verbatim from ``hermes_cli/main.py:main()`` (god-file Phase 2).
-Handler injected to avoid importing ``main``.
-"""
+"""``hermes backup`` subcommand parser."""
 
 from __future__ import annotations
 
@@ -11,9 +7,6 @@ from typing import Callable
 
 def build_backup_parser(subparsers, *, cmd_backup: Callable) -> None:
     """Attach the ``backup`` subcommand to ``subparsers``."""
-    # =========================================================================
-    # backup command
-    # =========================================================================
     backup_parser = subparsers.add_parser(
         "backup",
         help="Back up Hermes home directory to a zip file",

@@ -1,8 +1,4 @@
-"""``hermes webhook`` subcommand parser.
-
-Extracted verbatim from ``hermes_cli/main.py:main()`` (god-file Phase 2).
-Handler injected to avoid importing ``main``.
-"""
+"""``hermes webhook`` subcommand parser."""
 
 from __future__ import annotations
 
@@ -11,9 +7,6 @@ from typing import Callable
 
 def build_webhook_parser(subparsers, *, cmd_webhook: Callable) -> None:
     """Attach the ``webhook`` subcommand to ``subparsers``."""
-    # =========================================================================
-    # webhook command
-    # =========================================================================
     webhook_parser = subparsers.add_parser(
         "webhook",
         help="Manage dynamic webhook subscriptions",

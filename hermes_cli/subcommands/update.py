@@ -1,8 +1,4 @@
-"""``hermes update`` subcommand parser.
-
-Extracted verbatim from ``hermes_cli/main.py:main()`` (god-file Phase 2).
-Handler injected to avoid importing ``main``.
-"""
+"""``hermes update`` subcommand parser."""
 
 from __future__ import annotations
 
@@ -11,9 +7,6 @@ from typing import Callable
 
 def build_update_parser(subparsers, *, cmd_update: Callable) -> None:
     """Attach the ``update`` subcommand to ``subparsers``."""
-    # =========================================================================
-    # update command
-    # =========================================================================
     update_parser = subparsers.add_parser(
         "update",
         help="Update Hermes Agent to the latest version",

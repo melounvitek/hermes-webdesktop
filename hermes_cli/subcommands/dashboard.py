@@ -3,9 +3,7 @@
 ``dashboard`` is the browser web UI; ``serve`` is the same gateway, headless —
 what the desktop app and remote backends run. ``serve`` also skips the web UI
 build (``headless_backend=True``): pure JSON-RPC/WS clients never load the SPA.
-Both share one handler (``cmd_dashboard`` → ``start_server``). Extracted from
-``hermes_cli/main.py:main()`` (god-file Phase 2); handler injected to avoid
-importing ``main``.
+Both share one handler (``cmd_dashboard`` → ``start_server``).
 """
 
 from __future__ import annotations
@@ -149,9 +147,6 @@ def build_dashboard_parser(
     "launches" the other — so the desktop app spawns ``serve``, never
     ``dashboard``.
     """
-    # =========================================================================
-    # dashboard command — the browser web UI
-    # =========================================================================
     dashboard_parser = subparsers.add_parser(
         "dashboard",
         help="Start the web UI dashboard",
@@ -178,7 +173,6 @@ def build_dashboard_parser(
     )
     dashboard_parser.set_defaults(func=cmd_dashboard)
 
-    # =========================================================================
     # serve command — the headless backend server
     #
     # `serve` boots the exact same gateway as `dashboard` but never opens a
@@ -186,7 +180,6 @@ def build_dashboard_parser(
     # backends) can launch a backend WITHOUT invoking `dashboard`: the desktop
     # app and the web dashboard are independent surfaces that merely share this
     # server, and neither should appear to launch the other.
-    # =========================================================================
     serve_parser = subparsers.add_parser(
         "serve",
         help="Start the Hermes backend server (headless; powers the desktop app and remote backends)",

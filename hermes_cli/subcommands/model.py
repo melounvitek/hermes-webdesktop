@@ -1,8 +1,4 @@
-"""``hermes model`` subcommand parser.
-
-Extracted verbatim from ``hermes_cli/main.py:main()`` (god-file Phase 2).
-Handler injected to avoid importing ``main``.
-"""
+"""``hermes model`` subcommand parser."""
 
 from __future__ import annotations
 
@@ -11,9 +7,6 @@ from typing import Callable
 
 def build_model_parser(subparsers, *, cmd_model: Callable) -> None:
     """Attach the ``model`` subcommand to ``subparsers``."""
-    # =========================================================================
-    # model command
-    # =========================================================================
     model_parser = subparsers.add_parser(
         "model",
         help="Select default model and provider",

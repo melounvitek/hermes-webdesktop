@@ -1,8 +1,4 @@
-"""``hermes computer-use`` subcommand parser.
-
-Extracted from ``hermes_cli/main.py:main()`` (god-file Phase 2 follow-up).
-Handlers are injected or imported lazily so this module never imports ``main``.
-"""
+"""``hermes computer-use`` subcommand parser."""
 
 from __future__ import annotations
 

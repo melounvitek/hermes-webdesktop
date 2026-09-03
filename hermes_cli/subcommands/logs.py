@@ -1,8 +1,4 @@
-"""``hermes logs`` subcommand parser.
-
-Extracted verbatim from ``hermes_cli/main.py:main()`` (god-file Phase 2).
-Handler injected to avoid importing ``main``.
-"""
+"""``hermes logs`` subcommand parser."""
 
 from __future__ import annotations
 
@@ -12,9 +8,6 @@ from typing import Callable
 
 def build_logs_parser(subparsers, *, cmd_logs: Callable) -> None:
     """Attach the ``logs`` subcommand to ``subparsers``."""
-    # =========================================================================
-    # logs command
-    # =========================================================================
     logs_parser = subparsers.add_parser(
         "logs",
         help="View and filter Hermes log files",

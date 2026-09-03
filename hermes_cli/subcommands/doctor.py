@@ -1,8 +1,4 @@
-"""``hermes doctor`` subcommand parser.
-
-Extracted verbatim from ``hermes_cli/main.py:main()`` (god-file Phase 2).
-Handler injected to avoid importing ``main``.
-"""
+"""``hermes doctor`` subcommand parser."""
 
 from __future__ import annotations
 
@@ -11,9 +7,6 @@ from typing import Callable
 
 def build_doctor_parser(subparsers, *, cmd_doctor: Callable) -> None:
     """Attach the ``doctor`` subcommand to ``subparsers``."""
-    # =========================================================================
-    # doctor command
-    # =========================================================================
     doctor_parser = subparsers.add_parser(
         "doctor",
         help="Check configuration and dependencies",

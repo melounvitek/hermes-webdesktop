@@ -1,10 +1,4 @@
-"""``hermes gateway`` and ``hermes proxy`` subcommand parsers.
-
-Extracted verbatim from ``hermes_cli/main.py:main()`` (god-file Phase 2).
-Both parsers are built together because they shared one inline block (the
-``gateway`` section also defined ``proxy``). Handlers injected to avoid
-importing ``main``.
-"""
+"""``hermes gateway`` and ``hermes proxy`` subcommand parsers."""
 
 from __future__ import annotations
 
@@ -33,9 +27,6 @@ def build_gateway_parser(
     subparsers, *, cmd_gateway: Callable, cmd_proxy: Callable, cmd_gateway_enroll: Callable
 ) -> None:
     """Attach the ``gateway`` and ``proxy`` subcommands to ``subparsers``."""
-    # =========================================================================
-    # gateway command
-    # =========================================================================
     gateway_parser = subparsers.add_parser(
         "gateway",
         help="Messaging gateway management",
@@ -307,12 +298,10 @@ def build_gateway_parser(
     )
     gateway_enroll.set_defaults(func=cmd_gateway_enroll)
 
-    # =========================================================================
     # proxy command — local OpenAI-compatible proxy that attaches the user's
     # OAuth-authenticated provider credentials to outbound requests. Lets
     # external apps (OpenViking, Karakeep, Open WebUI, ...) ride a logged-in
     # subscription without copy-pasting static API keys.
-    # =========================================================================
     proxy_parser = subparsers.add_parser(
         "proxy",
         help="Local OpenAI-compatible proxy to OAuth providers",

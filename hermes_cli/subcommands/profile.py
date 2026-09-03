@@ -1,8 +1,4 @@
-"""``hermes profile`` subcommand parser.
-
-Extracted verbatim from ``hermes_cli/main.py:main()`` (god-file Phase 2).
-Handler injected to avoid importing ``main``.
-"""
+"""``hermes profile`` subcommand parser."""
 
 from __future__ import annotations
 
@@ -11,9 +7,6 @@ from typing import Callable
 
 def build_profile_parser(subparsers, *, cmd_profile: Callable) -> None:
     """Attach the ``profile`` subcommand to ``subparsers``."""
-    # =========================================================================
-    # profile command
-    # =========================================================================
     profile_parser = subparsers.add_parser(
         "profile",
         help="Manage profiles — multiple isolated Hermes instances",

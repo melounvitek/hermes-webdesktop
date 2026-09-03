@@ -1,8 +1,4 @@
-"""``hermes login`` subcommand parser.
-
-Extracted verbatim from ``hermes_cli/main.py:main()`` (god-file Phase 2).
-Handler injected to avoid importing ``main``.
-"""
+"""``hermes login`` subcommand parser."""
 
 from __future__ import annotations
 

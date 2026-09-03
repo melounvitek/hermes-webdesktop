@@ -1,8 +1,4 @@
-"""``hermes debug`` subcommand parser.
-
-Extracted verbatim from ``hermes_cli/main.py:main()`` (god-file Phase 2).
-Handler injected to avoid importing ``main``.
-"""
+"""``hermes debug`` subcommand parser."""
 
 from __future__ import annotations
 
@@ -12,9 +8,6 @@ from typing import Callable
 
 def build_debug_parser(subparsers, *, cmd_debug: Callable) -> None:
     """Attach the ``debug`` subcommand to ``subparsers``."""
-    # =========================================================================
-    # debug command
-    # =========================================================================
     debug_parser = subparsers.add_parser(
         "debug",
         help="Debug tools — upload logs and system info for support",

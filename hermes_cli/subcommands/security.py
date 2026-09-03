@@ -1,8 +1,4 @@
-"""``hermes security`` subcommand parser.
-
-Extracted verbatim from ``hermes_cli/main.py:main()`` (god-file Phase 2).
-Handler injected to avoid importing ``main``.
-"""
+"""``hermes security`` subcommand parser."""
 
 from __future__ import annotations
 
@@ -11,7 +7,6 @@ from typing import Callable
 
 def build_security_parser(subparsers, *, cmd_security: Callable) -> None:
     """Attach the ``security`` subcommand to ``subparsers``."""
-    # =========================================================================
     security_parser = subparsers.add_parser(
         "security",
         help="Supply-chain audit (OSV.dev) for venv, plugins, and MCP servers",

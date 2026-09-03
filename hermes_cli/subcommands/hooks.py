@@ -1,8 +1,4 @@
-"""``hermes hooks`` subcommand parser.
-
-Extracted verbatim from ``hermes_cli/main.py:main()`` (god-file Phase 2).
-Handler injected to avoid importing ``main``.
-"""
+"""``hermes hooks`` subcommand parser."""
 
 from __future__ import annotations
 
@@ -11,7 +7,6 @@ from typing import Callable
 
 def build_hooks_parser(subparsers, *, cmd_hooks: Callable) -> None:
     """Attach the ``hooks`` subcommand to ``subparsers``."""
-    # =========================================================================
     hooks_parser = subparsers.add_parser(
         "hooks",
         help="Inspect and manage shell-script hooks",

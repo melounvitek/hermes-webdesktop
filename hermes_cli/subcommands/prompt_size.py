@@ -1,8 +1,4 @@
-"""``hermes prompt-size`` subcommand parser.
-
-Extracted verbatim from ``hermes_cli/main.py:main()`` (god-file Phase 2).
-Handler injected to avoid importing ``main``.
-"""
+"""``hermes prompt-size`` subcommand parser."""
 
 from __future__ import annotations
 
@@ -11,9 +7,6 @@ from typing import Callable
 
 def build_prompt_size_parser(subparsers, *, cmd_prompt_size: Callable) -> None:
     """Attach the ``prompt-size`` subcommand to ``subparsers``."""
-    # =========================================================================
-    # prompt-size command
-    # =========================================================================
     prompt_size_parser = subparsers.add_parser(
         "prompt-size",
         help="Show a byte breakdown of the system prompt + tool schemas",

@@ -1,8 +1,4 @@
-"""``hermes config`` subcommand parser.
-
-Extracted verbatim from ``hermes_cli/main.py:main()`` (god-file Phase 2).
-Handler injected to avoid importing ``main``.
-"""
+"""``hermes config`` subcommand parser."""
 
 from __future__ import annotations
 
@@ -11,9 +7,6 @@ from typing import Callable
 
 def build_config_parser(subparsers, *, cmd_config: Callable) -> None:
     """Attach the ``config`` subcommand to ``subparsers``."""
-    # =========================================================================
-    # config command
-    # =========================================================================
     config_parser = subparsers.add_parser(
         "config",
         help="View and edit configuration",

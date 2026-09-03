@@ -1,8 +1,4 @@
-"""``hermes setup`` subcommand parser.
-
-Extracted verbatim from ``hermes_cli/main.py:main()`` (god-file Phase 2).
-Handler injected to avoid importing ``main``.
-"""
+"""``hermes setup`` subcommand parser."""
 
 from __future__ import annotations
 
@@ -11,9 +7,6 @@ from typing import Callable
 
 def build_setup_parser(subparsers, *, cmd_setup: Callable) -> None:
     """Attach the ``setup`` subcommand to ``subparsers``."""
-    # =========================================================================
-    # setup command
-    # =========================================================================
     setup_parser = subparsers.add_parser(
         "setup",
         help="Interactive setup wizard",

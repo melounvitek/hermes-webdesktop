@@ -1,8 +1,4 @@
-"""``hermes gui`` subcommand parser.
-
-Extracted verbatim from ``hermes_cli/main.py:main()`` (god-file Phase 2).
-Handler injected to avoid importing ``main``.
-"""
+"""``hermes gui`` subcommand parser."""
 
 from __future__ import annotations
 
@@ -11,7 +7,6 @@ from typing import Callable
 
 def build_gui_parser(subparsers, *, cmd_gui: Callable) -> None:
     """Attach the ``gui`` subcommand to ``subparsers``."""
-    # =========================================================================
     gui_parser = subparsers.add_parser(
         "desktop",
         aliases=["gui"],
