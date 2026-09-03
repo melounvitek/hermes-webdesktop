@@ -198,7 +198,6 @@ def _print_migration_preview(report: dict):
     if not items:
         print_info("Nothing to migrate.")
         return
-
     groups = (
         ("migrated", "  Would import:", Colors.GREEN, _migrated_row),
         ("conflict", "  Would overwrite (conflicts with existing Hermes config):", Colors.YELLOW,
@@ -219,7 +218,6 @@ def _print_migration_preview(report: dict):
                 warnings_shown.update(
                     w for kw, w in _HIGH_IMPACT_KIND_KEYWORDS.items() if kw in kind_lower or kw in dest_lower)
         print()
-
     if warnings_shown:
         print(color("  ── Warnings ──", Colors.YELLOW))
         for warning in sorted(warnings_shown):
@@ -264,7 +262,6 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
     openclaw_dir = Path.home() / ".openclaw"
     if not openclaw_dir.is_dir() or not _OPENCLAW_SCRIPT.exists():
         return False
-
     print_header("OpenClaw Installation Detected", gap=True)
     _info(f"Found OpenClaw data at {openclaw_dir}",
           "Hermes can preview what would be imported before making any changes.", None)
@@ -275,7 +272,6 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
     # Ensure config.yaml exists before migration tries to read it
     if not get_config_path().exists():
         save_config(load_config())
-
     mod = _migration_step("Could not load migration script", "OpenClaw migration module load error",
                           _load_openclaw_migration_module)
     if mod is None:
@@ -292,7 +288,6 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
     if previewed is _FAILED:
         return False
     selected, preview_report = previewed
-
     preview_count = preview_report.get("summary", {}).get("migrated", 0)
     if preview_count == 0:
         _info(None, "Nothing to import from OpenClaw.")
@@ -313,7 +308,6 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
         mod, openclaw_dir, hermes_home, selected, execute=True, overwrite=False))
     if report is _FAILED:
         return False
-
     summary = report.get("summary", {})
     print()
     for key, printer, text in (
@@ -326,7 +320,6 @@ def _offer_openclaw_migration(hermes_home: Path) -> bool:
         count = summary.get(key, 0)
         if count:
             printer(text.format(n=count))
-
     output_dir = report.get("output_dir")
     if output_dir:
         print_info(f"Full report saved to: {output_dir}")

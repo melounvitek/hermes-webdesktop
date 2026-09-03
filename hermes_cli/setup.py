@@ -290,7 +290,6 @@ def prompt_yes_no(question: str, default: bool = True) -> bool:
     # consistently; every other caller keeps the traditional line prompt.
     if _SETUP_NAVIGATION.get() is not None:
         return _curses_prompt_choice(question, ["Yes", "No"], 0 if default else 1) == 0
-
     default_str = "Y/n" if default else "y/N"
     while True:
         try:
@@ -317,16 +316,20 @@ def prompt_checklist(title: str, items: list, pre_selected: list = None) -> list
     return sorted(curses_checklist(title, items, pre, cancel_returns=pre))
 
 
+def _section_rule(title: str) -> None:
+    """Blank-padded cyan ``─── title ───`` divider used by the key-entry screens."""
+    print()
+    print(color(f"  ─── {title} ───", Colors.CYAN))
+    print()
+
+
 def _prompt_api_key(var: dict):
     """Display a nicely formatted API key input screen for a single env var."""
     tools = var.get("tools", [])
     tools_str = ", ".join(tools[:3])
     if len(tools) > 3:
         tools_str += f", +{len(tools) - 3} more"
-
-    print()
-    print(color(f"  ─── {var.get('description', var['name'])} ───", Colors.CYAN))
-    print()
+    _section_rule(var.get("description", var["name"]))
     if tools_str:
         print_info(f"  Enables: {tools_str}")
     if var.get("url"):
@@ -372,7 +375,6 @@ def setup_model_provider(config: dict, *, quick: bool = False):
     print_header("Inference Provider")
     _info("Choose how to connect to your main chat model.",
           f"   Guide: {_DOCS_BASE}/integrations/providers", None)
-
     from hermes_cli.main import select_provider_and_model
     try:
         select_provider_and_model()
@@ -405,7 +407,6 @@ def _apply_default_agent_settings(config: dict):
     config["compression"]["threshold"] = 0.50
     # Never auto-reset (the gateway default); written explicitly so it is visible in config.yaml.
     config.setdefault("session_reset", {})["mode"] = "none"
-
     save_config(config)
     print_success("Applied recommended defaults:")
     _info("  Max iterations: 150", "  Tool progress: all", "  Compression threshold: 0.50",
@@ -456,7 +457,6 @@ _SESSION_RESET_MODES = ("both", "idle", "daily", "none")  # index 4 = keep curre
 
 def setup_agent_settings(config: dict):
     """Configure agent behavior: iterations, progress display, compression, session reset."""
-
     print_header("Agent Settings")
     _info(f"   Guide: {_DOCS_BASE}/user-guide/configuration", None)
 
@@ -465,7 +465,6 @@ def setup_agent_settings(config: dict):
     _info("Maximum tool-calling iterations per conversation.",
           "Higher = more complex tasks, but costs more tokens.",
           f"Press Enter to keep {current_max}. Use 90 for most tasks or 150+ for open exploration.")
-
     max_iter = _prompt_number("Max iterations", current_max)
     if max_iter is None:
         print_warning("Invalid number, keeping current value")
@@ -478,7 +477,6 @@ def setup_agent_settings(config: dict):
 
     # ── Tool Progress Display ──
     _info("", *_TOOL_PROGRESS_HELP)
-
     current_mode = cfg_get(config, "display", "tool_progress", default="all")
     mode = prompt("Tool progress mode", current_mode)
     if mode.lower() in {"off", "new", "all", "verbose", "log"}:
@@ -492,7 +490,6 @@ def setup_agent_settings(config: dict):
     print_header("Context Compression")
     _info("Automatically summarizes old messages when context gets too long.",
           "Higher threshold = compress later (use more context). Lower = compress sooner.")
-
     config.setdefault("compression", {})["enabled"] = True
     current_threshold = cfg_get(config, "compression", "threshold", default=0.50)
     threshold = _prompt_number("Compression threshold (0.5-0.95)", current_threshold, float)
@@ -563,7 +560,6 @@ def setup_telemetry(config: dict):
     print_header("Shared Metrics")
     _info("Shared metrics contain only bounded counters and histograms.",
           "Collection is local. Sending them to Nous is a separate opt-in.")
-
     shared_metrics = _sub_dict(_sub_dict(config, "telemetry"), "shared_metrics")
     current = shared_metrics.get("enabled") is True
     shared_metrics["enabled"] = prompt_yes_no("Enable local shared metrics?", default=current)
@@ -577,7 +573,6 @@ def setup_telemetry(config: dict):
         # key may already be false while the consent window is still open, and it must close.
         _record_send_consent_change(enabled=False)
         return
-
     print_success("Local shared metrics enabled.")
     _info(*_SEND_CONSENT_EXPLAINER)
     shared_metrics["send"] = prompt_yes_no("Send shared metrics to Nous?", default=shared_metrics.get("send") is True)
@@ -675,7 +670,6 @@ def _run_setup_section(config: dict, section: str) -> None:
             print()
             print_success(f"{label} configuration complete!")
             return
-
     print_error(f"Unknown setup section: {section}")
     print_info(f"Available sections: {', '.join(k for k, _, _ in SETUP_SECTIONS)}")
 
@@ -686,7 +680,6 @@ def _run_full_setup(config: dict, hermes_home, *, is_existing: bool, migration_r
     _info(f"Config file:  {get_config_path()}", f"Secrets file: {get_env_path()}",
           f"Data folder:  {hermes_home}", f"Install dir:  {PROJECT_ROOT}", None,
           "You can edit these files directly or use 'hermes config edit'")
-
     if migration_ran:
         _info(None, "Settings were imported from OpenClaw.",
               "Each section below will show what was imported — press Enter to keep,",
@@ -718,13 +711,13 @@ def _run_full_setup(config: dict, hermes_home, *, is_existing: bool, migration_r
         _step("tools", "Tools", lambda: setup_tools(config, first_install=not is_existing))])
 
 
-# First-time mode picker: (menu label, runner) — a None runner falls through to Full Setup.
+# First-time mode picker: (menu label, runner name on this module) — None falls through to Full
+# Setup; runners resolve at call time so test patches on hermes_cli.setup apply.
 _FIRST_TIME_MODES = (
     ("Quick Setup (Nous Portal) — free OAuth login, no API keys, model + tools (recommended)",
-     lambda *a: _run_first_time_quick_setup(*a)),
+     "_run_first_time_quick_setup"),
     ("Full setup — configure every provider, tool & option yourself (bring your own keys)", None),
-    ("Blank Slate — everything off except the bare minimum; opt in to each capability",
-     lambda *a: _run_blank_slate_setup(*a)),
+    ("Blank Slate — everything off except the bare minimum; opt in to each capability", "_run_blank_slate_setup"),
 )
 
 
@@ -736,13 +729,11 @@ def _run_setup_wizard_impl(args):
         managed_error("run setup wizard")
         return
     ensure_hermes_home()
-
     if getattr(args, "reset", False):
         save_config(copy.deepcopy(DEFAULT_CONFIG))
         print_success("Configuration reset to defaults.")
     reconfigure_requested = bool(getattr(args, "reconfigure", False))
     quick_requested = bool(getattr(args, "quick", False))
-
     config = load_config()
     hermes_home = get_hermes_home()
     config_path = get_config_path()
@@ -768,7 +759,6 @@ def _run_setup_wizard_impl(args):
                   "├─────────────────────────────────────────────────────────┤",
                   "│  Let's configure your Hermes Agent installation.       │",
                   "│  Press Ctrl+C at any time to exit.                     │")
-
     migration_ran = False
     if is_existing:
         # Full reconfigure wizard is the default (Enter keeps each current value); `--quick`
@@ -794,9 +784,8 @@ def _run_setup_wizard_impl(args):
         setup_mode = prompt_choice("How would you like to set up Hermes?", [label for label, _ in _FIRST_TIME_MODES], 0)
         label, runner = _FIRST_TIME_MODES[setup_mode]
         if runner is not None:
-            _run_setup_steps([(label, lambda: runner(config, hermes_home, is_existing))])
+            _run_setup_steps([(label, lambda: globals()[runner](config, hermes_home, is_existing))])
             return
-
     _run_full_setup(config, hermes_home, is_existing=is_existing, migration_ran=migration_ran)
 
     # Save and show summary

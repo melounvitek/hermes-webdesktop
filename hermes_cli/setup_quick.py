@@ -2,6 +2,7 @@
 Blank Slate setup and the `--quick` missing-items pass. Names from setup.py are imported lazily
 per function so test patches on ``hermes_cli.setup`` take effect."""
 
+import contextlib
 import logging
 import os
 import sys
@@ -12,9 +13,16 @@ logger = logging.getLogger("hermes_cli.setup")
 # (env-var name substring, platform label, emoji) — order matters: first match wins.
 _MESSAGING_PLATFORMS = (("TELEGRAM", "Telegram", "📱"), ("DISCORD", "Discord", "💬"), ("SLACK", "Slack", "💼"))
 
-_BLANK_SLATE_DONE_LINES = (
-    "  Seed skills:         hermes skills opt-in --sync", "  Add MCP servers:     hermes mcp add",
-)
+
+
+def _blank_slate_done(config: dict, hermes_home, tools_line: str, *extra: str, intro: str | None = None) -> None:
+    """Shared Blank Slate epilogue: success banner, the "enable later" hints, then the summary."""
+    from hermes_cli.setup import _info, _print_setup_summary, print_success
+    print()
+    print_success("Blank Slate setup complete — minimal agent ready.")
+    _info(*([intro] if intro else []), tools_line, "  Seed skills:         hermes skills opt-in --sync",
+          "  Add MCP servers:     hermes mcp add", *extra, "  Tune agent settings: hermes setup agent", None)
+    _print_setup_summary(config, hermes_home)
 
 
 def _reload_config_into(config: dict, *, dict_only: bool = False) -> None:
@@ -66,11 +74,8 @@ def _run_portal_one_shot(config: dict) -> None:
         return
 
     # Re-sync from disk so a caller's later save_config(config) can't clobber the login save.
-    try:
+    with contextlib.suppress(Exception):
         _reload_config_into(config, dict_only=True)
-    except Exception:
-        pass
-
     print()
     print_success("Portal setup complete.")
     _info("  Run `hermes portal info` to inspect routing.", "  Run `hermes` to start chatting.")
@@ -109,7 +114,6 @@ def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
     gateway_choice = prompt_choice("Connect a messaging platform? (Telegram, Discord, etc.)", [
         "Set up messaging now (recommended)", "Skip — set up later with 'hermes setup gateway'",
     ], 0)
-
     if gateway_choice == 0:
         setup_gateway(config)
         save_config(config)
@@ -118,7 +122,6 @@ def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
         # platforms come alive as soon as tokens are added later (e.g. via `hermes import`).
         from hermes_cli.gateway import ensure_gateway_service
         ensure_gateway_service(context="setup")
-
     print()
     print_success("Setup complete! You're ready to go.")
     _info(None, "  Configure all settings:    hermes setup")
@@ -126,7 +129,6 @@ def _run_first_time_quick_setup(config: dict, hermes_home, is_existing: bool):
         print_info("  Connect Telegram/Discord:  hermes setup gateway")
     _print_macos_fda_tip()
     print()
-
     _print_setup_summary(config, hermes_home)
 
 
@@ -159,7 +161,6 @@ def _blank_slate_minimal_toolsets(config: dict):
     in ``_get_platform_tools``, overriding the recovery that would re-add e.g. ``kanban``)."""
     keep = {"file", "terminal", "vision", "skills"}
     config.setdefault("platform_toolsets", {})["cli"] = sorted(keep)
-
     try:
         from toolsets import TOOLSETS
         from hermes_cli.tools_config import CONFIGURABLE_TOOLSETS, _get_plugin_toolset_keys
@@ -172,7 +173,6 @@ def _blank_slate_minimal_toolsets(config: dict):
             if k.startswith("hermes-") or (isinstance(tdef, dict) and (tdef.get("includes") or tdef.get("posture"))):
                 continue
             all_keys.add(k)
-
         disabled = sorted(all_keys - keep)
         if disabled:
             config.setdefault("agent", {})["disabled_toolsets"] = disabled
@@ -213,8 +213,8 @@ def _run_blank_slate_setup(config: dict, hermes_home, is_existing: bool):
     opting capabilities back in. Nothing is enabled that the user did not explicitly choose."""
     from hermes_cli.setup import (
         _blank_slate_minimal_toolsets, _blank_slate_minimize_config, _blank_slate_walkthrough, _info,
-        print_header, print_info, _print_setup_summary, print_success, prompt_choice, save_config,
-        setup_model_provider, setup_terminal_backend,
+        print_header, print_info, print_success, prompt_choice, save_config, setup_model_provider,
+        setup_terminal_backend,
     )
     print_header("Blank Slate Setup", gap=True)
     _info("Everything starts OFF. First we force-enable only what's required",
@@ -250,27 +250,21 @@ def _run_blank_slate_setup(config: dict, hermes_home, is_existing: bool):
         "Start with everything disabled — finish now (most minimal)",
         "Walk through all configurations — opt in to tools, skills, plugins, MCP",
     ], 0)
-
     if path != 0:
         _blank_slate_walkthrough(config, hermes_home)
         return
-
     save_config(config)
     # Blank Slate means no bundled skills; record the opt-out so future `hermes update` runs
     # don't re-inject them.
     _set_bundled_skills_opt_out(True, "skill opt-out")
-    print()
-    print_success("Blank Slate setup complete — minimal agent ready.")
-    _info("Enable anything later, on demand:", "  Enable tools:        hermes tools", *_BLANK_SLATE_DONE_LINES,
-          "  Enable plugins:      hermes plugins", "  Tune agent settings: hermes setup agent", None)
-    _print_setup_summary(config, hermes_home)
+    _blank_slate_done(config, hermes_home, "  Enable tools:        hermes tools", "  Enable plugins:      hermes plugins",
+                      intro="Enable anything later, on demand:")
 
 
 def _blank_slate_walkthrough(config: dict, hermes_home):
     """Opt-in walkthrough for Blank Slate: skills, tools, plugins, MCP, gateway."""
     from hermes_cli.setup import (
-        _info, print_header, print_info, _print_setup_summary, print_success, print_warning, prompt_yes_no,
-        save_config, setup_gateway,
+        _info, print_header, print_info, print_success, print_warning, prompt_yes_no, save_config, setup_gateway,
     )
     # Bundled skills — default to NONE, offer to seed all
     print_header("Bundled Skills", gap=True)
@@ -324,38 +318,30 @@ def _blank_slate_walkthrough(config: dict, hermes_home):
     print()
     if prompt_yes_no("Connect a messaging platform (Telegram, Discord, …)?", default=False):
         setup_gateway(config)
-
     save_config(config)
-
-    print()
-    print_success("Blank Slate setup complete — minimal agent ready.")
-    _info("  Enable more tools:   hermes tools", *_BLANK_SLATE_DONE_LINES,
-          "  Tune agent settings: hermes setup agent", None)
-
-    _print_setup_summary(config, hermes_home)
+    _blank_slate_done(config, hermes_home, "  Enable more tools:   hermes tools")
 
 
 def _run_quick_setup(config: dict, hermes_home):
     """Quick setup — only configure items that are missing."""
     from hermes_cli.setup import (
         color, Colors, _info, print_header, print_info, _print_setup_summary, print_success,
-        _prompt_and_save_env_var, _prompt_api_key, prompt_checklist, save_config,
+        _prompt_and_save_env_var, _prompt_api_key, _section_rule, prompt_checklist, save_config,
     )
     from hermes_cli.config import (get_missing_env_vars, get_missing_config_fields, check_config_version)
     print_header("Quick Setup — Missing Items Only", gap=True)
 
     # Check what's missing
-    missing_required = [v for v in get_missing_env_vars(required_only=False) if v.get("is_required")]
-    missing_optional = [v for v in get_missing_env_vars(required_only=False) if not v.get("is_required")]
+    missing_env = get_missing_env_vars(required_only=False)
+    missing_required = [v for v in missing_env if v.get("is_required")]
+    missing_optional = [v for v in missing_env if not v.get("is_required")]
     missing_config = get_missing_config_fields()
     current_ver, latest_ver = check_config_version()
-
     if not (missing_required or missing_optional or missing_config or current_ver < latest_ver):
         print_success("Everything is configured! Nothing to do.")
         _info(None, "Run 'hermes setup' and choose 'Full Setup' to reconfigure,",
               "or pick a specific section from the menu.")
         return
-
     if missing_required:
         _info(None, f"{len(missing_required)} required setting(s) missing:")
         for var in missing_required:
@@ -368,20 +354,14 @@ def _run_quick_setup(config: dict, hermes_home):
             if var.get("url"):
                 print_info(f"  Get key at: {var['url']}")
             _prompt_and_save_env_var(var, f"  Saved {var['name']}", f"  Skipped {var['name']}")
-
     missing_tools = [v for v in missing_optional if v.get("category") == "tool"]
     missing_messaging = [v for v in missing_optional if v.get("category") == "messaging" and not v.get("advanced")]
-
     if missing_tools:  # checklist, then the API-key screen for each pick
         print_header("Tool API Keys", gap=True)
-        labels = []
-        for var in missing_tools:
-            tools = var.get("tools", [])
-            tools_str = f" → {', '.join(tools[:2])}" if tools else ""
-            labels.append(f"{var.get('description', var['name'])}{tools_str}")
+        labels = [var.get("description", var["name"]) + (f" → {', '.join(var['tools'][:2])}" if var.get("tools") else "")
+                  for var in missing_tools]
         for idx in prompt_checklist("Which tools would you like to configure?", labels):
             _prompt_api_key(missing_tools[idx])
-
     if missing_messaging:  # checklist, then prompt for each selected platform's vars
         print_header("Messaging Platforms", gap=True)
         _info("Connect Hermes to messaging apps to chat from anywhere.",
@@ -390,18 +370,15 @@ def _run_quick_setup(config: dict, hermes_home):
         grouped: dict[str, list] = {}
         emojis = {}
         for var in missing_messaging:
-            for needle, plat, emoji in _MESSAGING_PLATFORMS:
-                if needle in var["name"]:
-                    grouped.setdefault(plat, []).append(var)
-                    emojis[plat] = emoji
-                    break
+            match = next(((plat, emoji) for needle, plat, emoji in _MESSAGING_PLATFORMS if needle in var["name"]), None)
+            if match:
+                grouped.setdefault(match[0], []).append(var)
+                emojis[match[0]] = match[1]
         platform_order = list(grouped)
         labels = [f"{emojis[p]} {p}" for p in platform_order]
         for idx in prompt_checklist("Which platforms would you like to set up?", labels):
             plat = platform_order[idx]
-            print()
-            print(color(f"  ─── {emojis[plat]} {plat} ───", Colors.CYAN))
-            print()
+            _section_rule(f"{emojis[plat]} {plat}")
             for var in grouped[plat]:
                 print_info(f"  {var.get('description', '')}")
                 if var.get("url"):
@@ -414,8 +391,6 @@ def _run_quick_setup(config: dict, hermes_home):
         _info(None, f"Adding {len(missing_config)} new config option(s) with defaults...")
         for field in missing_config:
             print_success(f"  Added {field['key']} = {field['default']}")
-
         config["_config_version"] = latest_ver
         save_config(config)
-
     _print_setup_summary(config, hermes_home)

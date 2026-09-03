@@ -29,7 +29,6 @@ def _read_message_body(positional: Optional[str], file_path: Optional[str]) -> O
     piped stdin when not attached to a TTY. ``None`` when nothing is available (a usage error)."""
     if positional:
         return positional
-
     if file_path:
         if file_path == "-":
             return sys.stdin.read()
@@ -61,7 +60,6 @@ def _emit_result(result_json: str, *, json_mode: bool, quiet: bool) -> int:
     except json.JSONDecodeError:
         # Pass the raw string through so the user can still see what went wrong.
         payload = {"error": "invalid JSON from send_message_tool", "raw": result_json}
-
     if json_mode:
         print(json.dumps(payload, indent=2))
     elif not quiet:
@@ -71,7 +69,6 @@ def _emit_result(result_json: str, *, json_mode: bool, quiet: bool) -> int:
             print(payload.get("note") or "sent")
         else:
             print(json.dumps(payload, indent=2))  # unknown shape — dump it, drop nothing
-
     if not payload.get("error") and (payload.get("skipped") or payload.get("success")):
         return _SUCCESS_EXIT
     return _FAILURE_EXIT
@@ -84,12 +81,10 @@ def _list_targets(platform_filter: Optional[str], *, json_mode: bool) -> int:
         from gateway.channel_directory import format_directory_for_display, load_directory
     except Exception as exc:
         return _fail(f"hermes send: failed to load channel directory: {exc}")
-
     try:
         raw = load_directory()
     except Exception as exc:
         return _fail(f"hermes send: failed to read channel directory: {exc}")
-
     platforms = dict(raw.get("platforms") or {})
 
     # Merge in configured-but-undiscovered platforms (e.g. a fresh SimpleX setup used only for
@@ -102,7 +97,6 @@ def _list_targets(platform_filter: Optional[str], *, json_mode: bool) -> int:
                 platforms.setdefault(plat_name, [])
     except Exception:
         pass  # directory contents alone are still useful; don't fail --list on a config problem
-
     if platform_filter:
         key = platform_filter.strip().lower()
         filtered = {k: v for k, v in platforms.items() if k.lower() == key}
@@ -111,11 +105,9 @@ def _list_targets(platform_filter: Optional[str], *, json_mode: bool) -> int:
                 f"hermes send: no targets found for platform '{platform_filter}'. "
                 f"Configured: {', '.join(sorted(platforms)) or '(none)'}")
         platforms = filtered
-
     if json_mode:
         print(json.dumps({"platforms": platforms}, indent=2, default=str))
         return _SUCCESS_EXIT
-
     if not platforms:
         print("No messaging platforms configured or no channels discovered yet.")
         print("Set one up with `hermes gateway setup`, or run the gateway once so")
@@ -126,20 +118,16 @@ def _list_targets(platform_filter: Optional[str], *, json_mode: bool) -> int:
     if platform_filter is None:
         print(format_directory_for_display(platforms))
         return _SUCCESS_EXIT
-
     for plat_name in sorted(platforms):
-        channels = platforms[plat_name]
         print(f"{plat_name}:")
-        if not channels:
+        if not platforms[plat_name]:
             print("  (no channels discovered yet)")
             continue
-        for ch in channels:
+        for ch in platforms[plat_name]:
             name = ch.get("name", "?")
             chat_id = ch.get("id") or ch.get("chat_id") or ""
-            suffix = f"  [{chat_id}]" if chat_id and chat_id != name else ""
-            print(f"  {plat_name}:{name}{suffix}")
+            print(f"  {plat_name}:{name}" + (f"  [{chat_id}]" if chat_id and chat_id != name else ""))
         print()
-
     return _SUCCESS_EXIT
 
 
@@ -150,13 +138,11 @@ def _load_hermes_env() -> None:
         from dotenv import load_dotenv
     except Exception:
         load_dotenv = None  # type: ignore[assignment]
-
     try:
         from hermes_cli.config import get_hermes_home
         home = get_hermes_home()
     except Exception:
         return
-
     env_path = home / ".env"
     if load_dotenv and env_path.exists():
         try:
@@ -164,13 +150,10 @@ def _load_hermes_env() -> None:
             # U+FEFF on the first key name and silently drop it from os.environ.
             load_dotenv(str(env_path), override=True, encoding="utf-8-sig")
         except UnicodeDecodeError:
-            try:
-                # utf-8-sig can't strip a BOM once we fall back to latin-1.
+            try:  # utf-8-sig can't strip a BOM once we fall back to latin-1.
                 import codecs
                 import io
-                raw = env_path.read_bytes()
-                if raw.startswith(codecs.BOM_UTF8):
-                    raw = raw[len(codecs.BOM_UTF8) :]
+                raw = env_path.read_bytes().removeprefix(codecs.BOM_UTF8)
                 load_dotenv(stream=io.StringIO(raw.decode("latin-1")), override=True)
             except Exception:
                 pass
@@ -182,14 +165,12 @@ def _load_hermes_env() -> None:
     config_path = home / "config.yaml"
     if not config_path.exists():
         return
-
     try:
         # Raw read is deliberate — only keys the user actually wrote get bridged.
         from hermes_cli.config import read_user_config_raw
         raw = read_user_config_raw(config_path)
     except Exception:
         return
-
     try:
         from hermes_cli.config import _expand_env_vars
         raw = _expand_env_vars(raw)
@@ -202,10 +183,8 @@ def _load_hermes_env() -> None:
         raw = managed_scope.apply_managed_overlay(raw if isinstance(raw, dict) else {})
     except Exception:
         pass
-
     if not isinstance(raw, dict):
         return
-
     for key, val in raw.items():
         if isinstance(val, (str, int, float, bool)) and key not in os.environ:
             os.environ[key] = str(val)
@@ -214,12 +193,10 @@ def _load_hermes_env() -> None:
 def cmd_send(args: argparse.Namespace) -> None:
     """Entry point wired into the top-level argparse dispatcher."""
     _load_hermes_env()  # the downstream gateway config loader reads credentials from os.environ
-
     if getattr(args, "list_targets", False):  # --list short-circuits everything else
         # `hermes send --list telegram` lands "telegram" in the `message` positional.
         exit_code = _list_targets(getattr(args, "message", None), json_mode=getattr(args, "json", False))
         sys.exit(exit_code)
-
     target = (getattr(args, "to", None) or "").strip()
     if not target:
         _fail(
@@ -229,7 +206,6 @@ def cmd_send(args: argparse.Namespace) -> None:
             "  hermes send --to discord:#ops --file report.md\n"
             "  hermes send --list      # list available targets",
             _USAGE_EXIT)
-
     message = _read_message_body(getattr(args, "message", None), getattr(args, "file", None))
     if message is None or not message.strip():
         _fail(
@@ -253,30 +229,18 @@ def cmd_send(args: argparse.Namespace) -> None:
 
 # (flags, add_argument kwargs) in --help order.
 _SEND_ARGUMENTS = (
-    (("-t", "--to"), dict(
-        metavar="TARGET",
-        default=None,
-        help=(
-            "Delivery target. Format: 'platform' (home channel), "
-            "'platform:chat_id', 'platform:chat_id:thread_id', or "
-            "'platform:#channel-name'. Examples: telegram, "
-            "telegram:-1001234567890:17585, discord:#ops, slack:C0123ABCD, signal:+15551234567."
-        ),
-    )),
+    (("-t", "--to"), dict(metavar="TARGET", default=None, help=(
+        "Delivery target. Format: 'platform' (home channel), "
+        "'platform:chat_id', 'platform:chat_id:thread_id', or "
+        "'platform:#channel-name'. Examples: telegram, "
+        "telegram:-1001234567890:17585, discord:#ops, slack:C0123ABCD, signal:+15551234567."))),
     (("message",), dict(nargs="?", default=None, help="Message text. If omitted, read from --file or stdin.")),
-    (("-f", "--file"), dict(
-        metavar="PATH",
-        default=None,
-        help=(
-            "Read message body from PATH (text only). Use '-' to force stdin. "
-            "To send an image/document as an attachment, use MEDIA:<path> in the message text instead."
-        ),
-    )),
+    (("-f", "--file"), dict(metavar="PATH", default=None, help=(
+        "Read message body from PATH (text only). Use '-' to force stdin. "
+        "To send an image/document as an attachment, use MEDIA:<path> in the message text instead."))),
     (("-s", "--subject"), dict(metavar="LINE", default=None, help="Prepend a subject/header line before the message body.")),
-    (("-l", "--list"), dict(
-        dest="list_targets", action="store_true", default=False,
-        help="List available targets. Optional positional filter: `hermes send --list telegram`.",
-    )),
+    (("-l", "--list"), dict(dest="list_targets", action="store_true", default=False,
+                            help="List available targets. Optional positional filter: `hermes send --list telegram`.")),
     (("-q", "--quiet"), dict(action="store_true", default=False, help="Suppress stdout on success (exit code only).")),
     (("--json",), dict(action="store_true", default=False, help="Emit raw JSON result instead of human-readable output.")),
 )
@@ -307,7 +271,6 @@ def register_send_subparser(subparsers) -> argparse.ArgumentParser:
             "Exit codes: 0 ok, 1 delivery/backend error, 2 usage error."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter)
-
     for flags, kwargs in _SEND_ARGUMENTS:
         parser.add_argument(*flags, **kwargs)
     parser.set_defaults(func=cmd_send)
