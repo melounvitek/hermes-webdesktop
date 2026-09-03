@@ -140,7 +140,6 @@ def _desktop_packaged_executable(desktop_dir: Path) -> Optional[Path]:
 
 def _desktop_packaged_executable_in(release_dir: Path) -> Optional[Path]:
     """The unpacked Electron app executable under *release_dir* (live ``release`` or a staging dir)."""
-    from hermes_cli.main import _expected_windows_pe_machines
     if sys.platform == "darwin":
         candidates = list(release_dir.glob("mac*/Hermes.app/Contents/MacOS/Hermes"))
     elif sys.platform == "win32":
@@ -398,7 +397,6 @@ def _parse_pe_machine(path: Path) -> int:
 
 
 def _pe_machine_or_none(path: Path) -> Optional[int]:
-    from hermes_cli.main import _parse_pe_machine
     try:
         return _parse_pe_machine(path)
     except ValueError:
@@ -407,7 +405,7 @@ def _pe_machine_or_none(path: Path) -> Optional[int]:
 
 def _desktop_exe_integrity_error(path: Path) -> Optional[str]:
     """Why ``path`` cannot run on this Windows host, or None when it parses as a loadable PE."""
-    from hermes_cli.main import _expected_windows_pe_machines, _parse_pe_machine, _windows_native_machine
+    from hermes_cli.main import _windows_native_machine
     try:
         machine = _parse_pe_machine(path)
     except ValueError as exc:
@@ -461,7 +459,7 @@ def _ensure_desktop_exe_launchable(desktop_dir: Path, packaged_executable: Optio
     and the stamp invalidated so the retry-once rebuild pulls a fresh,
     SHASUM-verified download. No-op off Windows / with no executable.
     """
-    from hermes_cli.main import _desktop_stamp_path, _purge_electron_build_cache, _rollback_desktop_from_backup
+    from hermes_cli.main import _desktop_stamp_path, _purge_electron_build_cache
     if packaged_executable is None or sys.platform != "win32":
         return packaged_executable, False
 
@@ -594,7 +592,6 @@ def _electron_dist_binary(project_root: Path) -> Path:
 
 def _electron_dist_ok(project_root: Path) -> bool:
     """True when ``node_modules/electron/dist`` holds a usable binary (a partial dir counts as NOT ok)."""
-    from hermes_cli.main import _electron_dist_binary
     try:
         return _electron_dist_binary(project_root).exists()
     except OSError:
@@ -1440,7 +1437,7 @@ def _run_desktop_pack_with_recovery(
 
 def _promote_staged_desktop_app(desktop_dir: Path, staging_dir: Path) -> Path:
     """Sign + integrity-gate the STAGED pack, then swap it over the live app. Exits (live app kept) on failure."""
-    from hermes_cli.main import _desktop_macos_relaunchable_fixup, _ensure_desktop_exe_launchable, _swap_staged_desktop_app
+    from hermes_cli.main import _desktop_macos_relaunchable_fixup
     staged_executable = _desktop_packaged_executable_in(staging_dir)
     # Locally-built apps are ad-hoc signed; make them relaunchable after an
     # in-place self-update. Signs the STAGED bundle so the live app is never
@@ -1472,7 +1469,7 @@ def _build_desktop_app(desktop_dir: Path, *, source_mode: bool, npm: str, env: d
     (source mode builds ``dist/`` in place). Exits on any unrecoverable build
     failure, leaving the previous packaged app untouched.
     """
-    from hermes_cli.main import PROJECT_ROOT, _desktop_packaged_executable, _desktop_staging_dir, _stop_desktop_processes_locking_build, _write_desktop_build_stamp
+    from hermes_cli.main import PROJECT_ROOT, _desktop_packaged_executable, _stop_desktop_processes_locking_build, _write_desktop_build_stamp
 
     _install_desktop_workspace_deps(npm, env)
 
@@ -1592,7 +1589,7 @@ def _check_desktop_skip_build(
 
 def _packaged_desktop_launch_command(packaged_executable: Path) -> list[str]:
     """``[exe, *sandbox flags]`` after the Linux sandbox fixup; exits when the sandbox can't be configured."""
-    from hermes_cli.main import _desktop_linux_needs_disable_setuid_sandbox, _desktop_linux_sandbox_fixup
+    from hermes_cli.main import _desktop_linux_sandbox_fixup
     launch_command = [str(packaged_executable)]
     if not _desktop_linux_sandbox_fixup(packaged_executable):
         if _desktop_linux_needs_no_sandbox() and _desktop_linux_sandbox_helper_is_regular_file(packaged_executable):

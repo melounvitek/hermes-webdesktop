@@ -34,7 +34,7 @@ _BYTECODE_FINGERPRINT_FILE = ".bytecode-fingerprint"
 
 def _record_bytecode_fingerprint() -> None:
     """Persist the current checkout fingerprint after a bytecode sweep. Never raises."""
-    from hermes_cli.main import PROJECT_ROOT, _BYTECODE_FINGERPRINT_FILE, _read_git_revision_fingerprint
+    from hermes_cli.main import PROJECT_ROOT, _read_git_revision_fingerprint
     try:
         fingerprint = _read_git_revision_fingerprint(PROJECT_ROOT)
         if not fingerprint:
@@ -58,7 +58,7 @@ def _sweep_stale_bytecode_if_checkout_changed() -> None:
     (cheap file reads, no git subprocess) against the last-validated stamp and
     sweeps once when they diverge. Never raises.
     """
-    from hermes_cli.main import PROJECT_ROOT, _BYTECODE_FINGERPRINT_FILE, _clear_bytecode_cache, _read_git_revision_fingerprint, _record_bytecode_fingerprint
+    from hermes_cli.main import PROJECT_ROOT, _clear_bytecode_cache, _read_git_revision_fingerprint, _record_bytecode_fingerprint
     try:
         fingerprint = _read_git_revision_fingerprint(PROJECT_ROOT)
         if not fingerprint:

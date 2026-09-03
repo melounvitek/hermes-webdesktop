@@ -232,7 +232,6 @@ def _tui_need_npm_install(root: Path) -> bool:
     both). Extra hidden-only entries are ignored. Falls back to mtime when either
     lockfile is unparseable.
     """
-    from hermes_cli.main import _npm_lock_workspace_closure
     entry = root / "dist" / "entry.js"
     ws_root = _workspace_root(root)
     lock = ws_root / "package-lock.json"
