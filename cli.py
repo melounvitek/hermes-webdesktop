@@ -982,6 +982,41 @@ def _shutdown_agent_memory_provider(agent) -> None:
         agent.shutdown_memory_provider()
 
 
+def _stop_cli_wake_word() -> None:
+    from tools.wake_word import stop_listening
+    if _cli_wake_owner is not None:
+        stop_listening(owner=_cli_wake_owner)
+
+
+def _interrupt_async_delegations() -> None:
+    from tools.async_delegation import interrupt_all
+    interrupt_all(reason="CLI shutdown")
+
+
+def _shutdown_mcp_servers() -> None:
+    from tools.mcp_tool import shutdown_mcp_servers
+    shutdown_mcp_servers()
+
+
+def _shutdown_cached_aux_clients() -> None:
+    # Close cached auxiliary LLM clients so AsyncHttpxClientWrapper.__del__ doesn't
+    # fire on a closed loop and trigger prompt_toolkit's "Press ENTER to continue...".
+    from agent.auxiliary_client import shutdown_cached_clients
+    shutdown_cached_clients()
+
+
+# Ordered best-effort teardown steps (module attribute names, resolved at call time so
+# tests can patch ``cli._cleanup_all_terminals`` etc.) and the exception each swallows.
+_CLEANUP_STEPS = (
+    ("_stop_cli_wake_word", Exception),
+    ("_cleanup_all_terminals", Exception),
+    ("_interrupt_async_delegations", Exception),
+    ("_cleanup_all_browsers", Exception),
+    ("_shutdown_mcp_servers", BaseException),
+    ("_shutdown_cached_aux_clients", Exception),
+)
+
+
 def _run_cleanup(*, notify_session_finalize: bool = True):
     """Run resource cleanup exactly once."""
     global _cleanup_done, _cleanup_in_progress
@@ -999,37 +1034,11 @@ def _run_cleanup(*, notify_session_finalize: bool = True):
         # and a later step raising must not skip the reset. No-op unless the TUI ran.
         _reset_terminal_input_modes_on_exit()
 
-        try:
-            from tools.wake_word import stop_listening as _stop_wake_word
-            if _cli_wake_owner is not None:
-                _stop_wake_word(owner=_cli_wake_owner)
-        except Exception:
-            pass
-        try:
-            _cleanup_all_terminals()
-        except Exception:
-            pass
-        try:
-            from tools.async_delegation import interrupt_all as _interrupt_async_delegations
-            _interrupt_async_delegations(reason="CLI shutdown")
-        except Exception:
-            pass
-        try:
-            _cleanup_all_browsers()
-        except Exception:
-            pass
-        try:
-            from tools.mcp_tool import shutdown_mcp_servers
-            shutdown_mcp_servers()
-        except BaseException:
-            pass
-        # Close cached auxiliary LLM clients so AsyncHttpxClientWrapper.__del__ doesn't
-        # fire on a closed loop and trigger prompt_toolkit's "Press ENTER to continue...".
-        try:
-            from agent.auxiliary_client import shutdown_cached_clients
-            shutdown_cached_clients()
-        except Exception:
-            pass
+        for step, swallow in _CLEANUP_STEPS:
+            try:
+                globals()[step]()
+            except swallow:
+                pass
         if notify_session_finalize:
             cleanup_session_id = _active_agent_ref.session_id if _active_agent_ref else None
             if _should_emit_cleanup_session_finalize(cleanup_session_id):
