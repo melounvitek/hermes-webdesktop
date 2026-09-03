@@ -39,6 +39,7 @@ from gateway.platforms.signal_rate_limit import (
     SignalRateLimitError, _extract_retry_after_seconds, _format_wait, _is_signal_rate_limit_error,
     _signal_send_timeout, get_scheduler)
 from gateway.platforms._shared import get_scoped_secret as _sig_secret
+from utils import TRUTHY_STRINGS
 
 logger = logging.getLogger(__name__)
 
@@ -56,7 +57,6 @@ _MEDIA_TYPE_BY_MIME_PREFIX = (
 _OUTCOME_REACTION = {ProcessingOutcome.SUCCESS: "✅", ProcessingOutcome.FAILURE: "❌"}
 _QUOTE_AUTHOR_KEYS = (
     "author", "authorNumber", "authorUuid", "authorAci", "authorServiceId", "authorServiceIdString")
-_TRUTHY = ("true", "1", "yes", "on")
 
 
 def _parse_comma_list(value: str) -> List[str]:
@@ -195,7 +195,7 @@ class SignalAdapter(BasePlatformAdapter):
         _rm_cfg = extra.get("require_mention")
         self.require_mention = (
             bool(_rm_cfg) if _rm_cfg is not None
-            else os.getenv("SIGNAL_REQUIRE_MENTION", "false").lower() in _TRUTHY)
+            else os.getenv("SIGNAL_REQUIRE_MENTION", "false").lower() in TRUTHY_STRINGS)
         # DM allowlist mirrors run.py's SIGNAL_ALLOWED_USERS so reaction hooks (which fire
         # before run.py's auth gate) can skip unauthorized senders. "*" = open.
         self.dm_allow_from = set(_parse_comma_list(_sig_secret("SIGNAL_ALLOWED_USERS", "*")))

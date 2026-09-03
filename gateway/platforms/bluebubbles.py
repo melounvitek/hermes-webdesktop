@@ -26,6 +26,7 @@ from gateway.platforms.base import (
     cache_image_from_bytes, cache_audio_from_bytes, cache_document_from_bytes)
 from .media_cache import ext_for_mime
 from gateway.platforms.helpers import compile_mention_patterns, strip_markdown
+from utils import TRUTHY_STRINGS
 
 # Historical BlueBubbles mime→ext maps, preserved verbatim as overrides for
 # the shared dispatch in gateway.platforms.media_cache. Both maps are
@@ -68,7 +69,6 @@ _ADDRESS_RE = re.compile(r"^\+\d+")
 
 _GUID_CACHE_SIZE = 500  # LRU cap for resolved chat-GUID lookups
 _LOCAL_HOSTS = {"0.0.0.0", "127.0.0.1", "localhost", "::"}
-_TRUTHY = {"true", "1", "yes", "on"}
 
 
 def _redact(text: str) -> str:
@@ -135,7 +135,7 @@ class BlueBubblesAdapter(BasePlatformAdapter):
         _require_mention = extra.get("require_mention")
         if _require_mention is None:
             _require_mention = os.getenv("BLUEBUBBLES_REQUIRE_MENTION")
-        self.require_mention = str(_require_mention).strip().lower() in _TRUTHY
+        self.require_mention = str(_require_mention).strip().lower() in TRUTHY_STRINGS
         self._mention_patterns = self._compile_mention_patterns(
             extra["mention_patterns"] if "mention_patterns" in extra else os.getenv("BLUEBUBBLES_MENTION_PATTERNS")
         )
