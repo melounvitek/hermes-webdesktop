@@ -21,11 +21,9 @@ from utils import atomic_json_write, atomic_write_text
 import requests
 
 logger = logging.getLogger(__name__)
-
 MODELS_DEV_URL = "https://models.dev/api.json"
 _MODELS_DEV_CACHE_TTL = 4 * 3600  # 4 hours — ETag conditional GET makes refresh cheap
 _MODELS_DEV_RETRY_DELAY = 300  # 5 minutes after a failed refresh
-
 # In-memory cache
 _models_dev_cache: Dict[str, Any] = {}
 _models_dev_cache_time: float = 0
@@ -66,19 +64,14 @@ class ModelInfo:
     release_date: str = ""
     status: str = ""          # "alpha", "beta", "deprecated", or ""
     interleaved: Any = False  # True or {"field": "reasoning_content"}
-
     def has_cost_data(self) -> bool:
         return self.cost_input > 0 or self.cost_output > 0
-
     def supports_vision(self) -> bool:
         return self.attachment or "image" in self.input_modalities
-
     def supports_pdf(self) -> bool:
         return "pdf" in self.input_modalities
-
     def supports_audio_input(self) -> bool:
         return "audio" in self.input_modalities
-
     def format_capabilities(self) -> str:
         """Human-readable capabilities, e.g. 'reasoning, tools, vision, PDF'."""
         flags = (
@@ -135,7 +128,6 @@ PROVIDER_TO_MODELS_DEV: Dict[str, str] = {
     "togetherai": "togetherai", "perplexity": "perplexity", "cohere": "cohere",
     "ollama-cloud": "ollama-cloud",
 }
-
 # Reverse mapping: models.dev id → Hermes ids (built lazily; many-to-one).
 _MODELS_DEV_TO_PROVIDER: Optional[Dict[str, List[str]]] = None
 
@@ -414,7 +406,6 @@ def _start_background_refresh_models_dev() -> None:
 
 def fetch_models_dev(force_refresh: bool = False, *, allow_network: bool = True) -> Dict[str, Any]:
     """Fetch the models.dev registry (dict keyed by provider ID; {} on failure).
-
     Cache hierarchy: fresh in-memory → stale in-memory (served now, refreshed in
     one background daemon thread — stale beats a foreground timeout) → disk of any
     age (stale triggers the same background refresh) → singleflight foreground
@@ -424,14 +415,12 @@ def fetch_models_dev(force_refresh: bool = False, *, allow_network: bool = True)
     any memory/disk cache regardless of age and never makes a request.
     """
     global _models_dev_cache, _models_dev_cache_time, _models_dev_retry_after
-
     if not allow_network:
         if not _models_dev_cache and (disk_data := _load_disk_cache()):
             _models_dev_cache = disk_data
             disk_age = _disk_cache_age_seconds()
             _models_dev_cache_time = time.time() - disk_age if disk_age is not None else 0
         return _models_dev_cache
-
     if not force_refresh:
         # Stage 1: fresh in-memory cache — the hot path, no I/O.
         if _models_dev_cache and (time.time() - _models_dev_cache_time) < _MODELS_DEV_CACHE_TTL:
@@ -456,7 +445,6 @@ def fetch_models_dev(force_refresh: bool = False, *, allow_network: bool = True)
         # endpoint while no usable cache exists.
         if time.time() < _models_dev_retry_after:
             return _models_dev_cache
-
     # Stage 4: singleflight foreground fetch. Recheck state under the lock —
     # another caller may have refreshed or armed the backoff while we waited.
     with _models_dev_fetch_lock:
@@ -509,7 +497,6 @@ def _get_provider_models(provider: str, *, allow_network: bool = False) -> Optio
 def _iter_model_entries(models: Dict[str, Any], model: str, *, suffix_fallback: bool = True):
     """Yield ``(model_id, entry)`` candidates: exact, case-insensitive, then
     (optionally) ``:cloud``/``-cloud`` suffixed forms.
-
     Suffix fallback: some providers (ollama-cloud) store ``kimi-k2.6:cloud``
     while the live API returns the bare name; without it context lookup falls to
     stale OpenRouter metadata and trips the 64k minimum-context guard. Every
@@ -547,7 +534,6 @@ def _extract_context(entry: Dict[str, Any]) -> Optional[int]:
 
 def lookup_models_dev_context(provider: str, model: str, *, allow_network: bool = False) -> Optional[int]:
     """Context window in tokens for provider+model, or None if not found.
-
     An EXPLICIT ``model_overrides`` entry wins over the catalog; ``_default``
     fills the gap only when the catalog has no answer (the self-unblock path for
     wrong/missing context in models.dev). Catalog entries with context=0 are
@@ -575,7 +561,6 @@ def lookup_models_dev_context(provider: str, model: str, *, allow_network: bool 
 # then case-insensitively (mirroring catalog lookup).
 
 _OVERRIDE_WARNED_KEYS: set = set()
-
 # Safe defaults for models absent from the catalog (tools on, vision/reasoning
 # off, 200K context); shared by get_model_capabilities and get_model_info so
 # the two unknown-model paths agree.
@@ -745,7 +730,6 @@ def _entry_supports_vision(entry: Dict[str, Any]) -> bool:
 
 def get_model_capabilities(provider: str, model: str, *, allow_network: bool = False) -> Optional[ModelCapabilities]:
     """Capability metadata from the models.dev cache, or None if unresolvable.
-
     EXPLICIT ``model_overrides`` patch catalog fields; ``_default`` fills the gap
     only for models the catalog does not know. Unspecified fields fall through to
     the catalog, or to safe defaults (tools on, vision/reasoning off, 200K/8K).
@@ -784,7 +768,6 @@ _NOISE_PATTERNS: re.Pattern = re.compile(
     r"-image\b|-image-preview\b|-customtools\b",
     re.IGNORECASE,
 )
-
 # Hidden from the Gemini catalogs surfaced in setup/model selection (capability
 # metadata stays available for direct/manual use).
 _GOOGLE_HIDDEN_MODELS = frozenset({
@@ -825,14 +808,11 @@ def _parse_model_info(model_id: str, raw: Dict[str, Any], provider_id: str) -> M
     """Convert a raw models.dev model entry dict into a ModelInfo dataclass."""
     cost = _dict_or_empty(raw.get("cost"))
     modalities = _dict_or_empty(raw.get("modalities"))
-
     def _mods(key: str) -> Tuple[str, ...]:
         mods = modalities.get(key) or []
         return tuple(mods) if isinstance(mods, list) else ()
-
     def _cost(key: str) -> Optional[float]:
         return float(cost[key]) if cost.get(key) is not None else None
-
     return ModelInfo(
         id=model_id,
         name=raw.get("name", "") or model_id,
