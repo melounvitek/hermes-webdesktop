@@ -35,12 +35,8 @@ class GatewayHealthSnapshot:
 
 _RUNNING_PLATFORM_STATES = {"running", "connected", "ok", "ready"}
 _FATAL_PLATFORM_STATES = {"fatal", "degraded", "error", "failed"}
-_KNOWN_GATEWAY_STATES = {
-    "starting", "draining", "stopping", "stopped", "startup_failed", "unknown"
-} | _RUNNING_PLATFORM_STATES | _FATAL_PLATFORM_STATES
-_KNOWN_PLATFORM_STATES = _RUNNING_PLATFORM_STATES | _FATAL_PLATFORM_STATES | {
-    "connecting", "disconnected", "disabled", "paused", "retrying", "unknown"
-}
+_KNOWN_GATEWAY_STATES = _RUNNING_PLATFORM_STATES | _FATAL_PLATFORM_STATES | {"starting", "draining", "stopping", "stopped", "startup_failed", "unknown"}
+_KNOWN_PLATFORM_STATES = _RUNNING_PLATFORM_STATES | _FATAL_PLATFORM_STATES | {"connecting", "disconnected", "disabled", "paused", "retrying", "unknown"}
 _SUPERVISION_MODES = {"systemd", "s6", "container", "launchd", "manual", "unknown"}
 _SOURCE_LOGGER_RE = re.compile(r"^gateway(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 
@@ -124,6 +120,14 @@ def platform_for_subsystem(subsystem: str) -> Optional[str]:
     return (subsystem.split(".", 1)[1] or None) if subsystem.startswith("platform.") else None
 
 
+def _coerce_pid(raw: Any) -> Optional[int]:
+    try:
+        pid = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return pid if pid > 0 else None
+
+
 def _gateway_status(name: str, fallback: Callable[[], Any], /, **kwargs: Any) -> Any:
     """Prefer ``gateway.status.<name>`` (the runtime-status contract); fall back to the local approximation."""
     try:
@@ -133,52 +137,22 @@ def _gateway_status(name: str, fallback: Callable[[], Any], /, **kwargs: Any) ->
         return fallback()
 
 
-def _int_or_zero(raw: Any) -> int:
-    try:
-        return max(0, int(raw))
-    except (TypeError, ValueError):
-        return 0
-
-
 def _parse_active_agents(raw: Any) -> int:
-    return _gateway_status("parse_active_agents", lambda: _int_or_zero(raw), raw=raw)
+    def fallback() -> int:
+        try:
+            return max(0, int(raw))
+        except (TypeError, ValueError):
+            return 0
+
+    return _gateway_status("parse_active_agents", fallback, raw=raw)
 
 
-def _derive_busy(gateway_running: bool, gateway_state: Any, active_agents: Any) -> bool:
-    fallback = lambda: bool(gateway_running and gateway_state == "running" and _parse_active_agents(active_agents) > 0)  # noqa: E731
-    return _gateway_status("derive_gateway_busy", fallback, gateway_running=gateway_running, gateway_state=gateway_state, active_agents=active_agents)
-
-
-def _derive_drainable(gateway_running: bool, gateway_state: Any) -> bool:
-    fallback = lambda: bool(gateway_running and gateway_state == "running")  # noqa: E731
-    return _gateway_status("derive_gateway_drainable", fallback, gateway_running=gateway_running, gateway_state=gateway_state)
-
-
-def _base_attrs(*, install_id: str, version: str, supervision_mode: str) -> Dict[str, str]:
-    mode = str(supervision_mode or "unknown").lower()
-    return {
-        "service.instance.id": _safe_instance_id(install_id),
-        "service.version": _safe_metric_value(version, limit=64),
-        "hermes.supervision_mode": mode if mode in _SUPERVISION_MODES else "unknown",
-    }
-
-
-def _metric(name: str, value: int | float, attrs: Dict[str, str], **extra: str) -> GatewayMetric:
-    out = dict(attrs)
-    for key, val in extra.items():
-        if val is not None:
-            out[key] = _safe_metric_value(val)
-    return GatewayMetric(name=name, value=value, attributes=out)
-
-
-def _platforms_of(runtime: Optional[dict[str, Any]]) -> dict[str, Any]:
-    raw = (runtime or {}).get("platforms")
+def _dict_or_empty(raw: Any) -> dict[str, Any]:
     return raw if isinstance(raw, dict) else {}
 
 
-def _platform_error_code(pdata: dict[str, Any]) -> str:
-    # classify_* is idempotent on its own labels, so error_class == error_code downstream.
-    return classify_gateway_error(pdata.get("error_code") or pdata.get("error_message"))
+def _platforms_of(runtime: Optional[dict[str, Any]]) -> dict[str, Any]:
+    return _dict_or_empty((runtime or {}).get("platforms"))
 
 
 def build_gateway_health_snapshot(
@@ -189,32 +163,49 @@ def build_gateway_health_snapshot(
     runtime = runtime or {}
     gateway_state = _bounded_state(runtime.get("gateway_state"), allowed=_KNOWN_GATEWAY_STATES)
     active_agents = _parse_active_agents(runtime.get("active_agents", 0))
-    busy = _derive_busy(gateway_running, gateway_state, active_agents)
-    drainable = _derive_drainable(gateway_running, gateway_state)
+    running = gateway_running and gateway_state == "running"
+    busy = _gateway_status(
+        "derive_gateway_busy", lambda: bool(running and _parse_active_agents(active_agents) > 0),
+        gateway_running=gateway_running, gateway_state=gateway_state, active_agents=active_agents,
+    )
+    drainable = _gateway_status(
+        "derive_gateway_drainable", lambda: bool(running), gateway_running=gateway_running, gateway_state=gateway_state
+    )
     platforms = _platforms_of(runtime)
-    base = _base_attrs(install_id=install_id, version=version, supervision_mode=supervision_mode)
+    mode = str(supervision_mode or "unknown").lower()
+    base = {
+        "service.instance.id": _safe_instance_id(install_id),
+        "service.version": _safe_metric_value(version, limit=64),
+        "hermes.supervision_mode": mode if mode in _SUPERVISION_MODES else "unknown",
+    }
+
+    def metric(name: str, value: int | float, **extra: str) -> GatewayMetric:
+        attrs = dict(base)
+        for key, val in extra.items():
+            if val is not None:
+                attrs[key] = _safe_metric_value(val)
+        return GatewayMetric(name=name, value=value, attributes=attrs)
+
     metrics: list[GatewayMetric] = [
-        _metric("hermes.gateway.up", 1 if gateway_running else 0, base),
-        _metric("hermes.gateway.active_agents", active_agents, base),
-        _metric("hermes.gateway.busy", 1 if busy else 0, base),
-        _metric("hermes.gateway.drainable", 1 if drainable else 0, base),
-        _metric("hermes.gateway.restart_requested", 1 if runtime.get("restart_requested") else 0, base),
-        _metric("hermes.gateway.state", 1, base, **{"hermes.gateway.state": gateway_state}),
+        metric("hermes.gateway.up", int(bool(gateway_running))),
+        metric("hermes.gateway.active_agents", active_agents),
+        metric("hermes.gateway.busy", int(bool(busy))),
+        metric("hermes.gateway.drainable", int(bool(drainable))),
+        metric("hermes.gateway.restart_requested", int(bool(runtime.get("restart_requested")))),
+        metric("hermes.gateway.state", 1, **{"hermes.gateway.state": gateway_state}),
     ]
     fatal_count = 0
     events: list[GatewayHealthEvent | GatewayDiagnosticEvent] = []
+    # classify_* is idempotent on its own labels, so error_class == error_code downstream.
     for platform, pdata in platforms.items():
-        pdata = pdata if isinstance(pdata, dict) else {}
+        pdata = _dict_or_empty(pdata)
         state = _bounded_state(pdata.get("state"), allowed=_KNOWN_PLATFORM_STATES)
-        error_code = _platform_error_code(pdata)
+        error_code = classify_gateway_error(pdata.get("error_code") or pdata.get("error_message"))
         is_degraded = state in _FATAL_PLATFORM_STATES
-        if is_degraded:
-            fatal_count += 1
+        fatal_count += is_degraded
         pattrs = {"hermes.platform": str(platform), "hermes.platform.state": state}
-        metrics.append(_metric("hermes.platform.up", 1 if state in _RUNNING_PLATFORM_STATES else 0, base, **pattrs))
-        metrics.append(_metric(
-            "hermes.platform.degraded", 1 if is_degraded else 0, base, **pattrs, **{"hermes.error_code": error_code}
-        ))
+        metrics.append(metric("hermes.platform.up", int(state in _RUNNING_PLATFORM_STATES), **pattrs))
+        metrics.append(metric("hermes.platform.degraded", int(is_degraded), **pattrs, **{"hermes.error_code": error_code}))
         if is_degraded:
             events.append(GatewayDiagnosticEvent(
                 name="platform.fatal", subsystem=f"platform.{platform}", platform=str(platform),
@@ -282,14 +273,13 @@ def _platform_events(
     old_platforms = _platforms_of(previous)
     out: list[GatewayDiagnosticEvent] = []
     for platform, pdata in _platforms_of(current).items():
-        pdata = pdata if isinstance(pdata, dict) else {}
-        prev_raw = old_platforms.get(platform, {})
-        prev = prev_raw if isinstance(prev_raw, dict) else {}
+        pdata = _dict_or_empty(pdata)
+        prev = _dict_or_empty(old_platforms.get(platform, {}))
         old_state = _optional_state(prev.get("state"), allowed=_KNOWN_PLATFORM_STATES)
         new_state = _optional_state(pdata.get("state"), allowed=_KNOWN_PLATFORM_STATES)
         if old_state == new_state or not new_state:
             continue
-        error_code = _platform_error_code(pdata)
+        error_code = classify_gateway_error(pdata.get("error_code") or pdata.get("error_message"))
         common: dict[str, Any] = dict(
             subsystem=f"platform.{platform}", platform=str(platform), error_code=error_code, error_class=error_code,
             profile=profile, version=version, severity="error" if new_state in {"fatal", "failed", "error"} else "warning",
@@ -309,14 +299,6 @@ def emit_runtime_status_transition(previous: Optional[dict[str, Any]], current: 
             emitter.emit(ev)
     except Exception:
         logger.debug("gateway runtime status transition emit failed", exc_info=True)
-
-
-def _coerce_pid(raw: Any) -> Optional[int]:
-    try:
-        pid = int(raw)
-    except (TypeError, ValueError):
-        return None
-    return pid if pid > 0 else None
 
 
 class GatewayDiagnosticLogHandler(logging.Handler):

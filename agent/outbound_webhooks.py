@@ -69,8 +69,6 @@ class WebhookTarget(_ToolMatcherMixin):
         return self.name or self.url
 
 
-# --- Public API -----------------------------------------------------------------
-
 def register_from_config(cfg: Optional[Dict[str, Any]]) -> List[WebhookTarget]:
     """Register every configured outbound webhook on the plugin manager.  Malformed ``hooks.outbound``
     means zero targets — never raises.  Returns the targets that ended up wired (deduplicated)."""
@@ -117,8 +115,7 @@ def iter_configured_targets(cfg: Optional[Dict[str, Any]]) -> List[WebhookTarget
     if not isinstance(raw, list):
         logger.warning("hooks.outbound must be a list of webhook targets; got %s", type(raw).__name__)
         return []
-    targets = (_parse_single_target(i, entry) for i, entry in enumerate(raw))
-    return [t for t in targets if t is not None]
+    return [t for t in (_parse_single_target(i, entry) for i, entry in enumerate(raw)) if t is not None]
 
 
 def flush(timeout: float = 5.0) -> bool:
@@ -153,8 +150,6 @@ def reset_for_tests() -> None:
     except queue.Empty:
         pass
 
-
-# --- Config parsing -------------------------------------------------------------
 
 def _parse_single_target(index: int, raw: Any) -> Optional[WebhookTarget]:
     from hermes_cli.plugins import VALID_HOOKS
@@ -201,46 +196,34 @@ def _parse_single_target(index: int, raw: Any) -> Optional[WebhookTarget]:
         warn(".timeout must be an int (got %r); using default %ds", timeout_raw, DEFAULT_TIMEOUT_SECONDS)
         timeout = DEFAULT_TIMEOUT_SECONDS
     name = raw.get("name")
+    # ``secret_env`` (env var name, preferred) wins over inline ``secret``.
+    secret_env = raw.get("secret_env")
+    if isinstance(secret_env, str) and secret_env.strip():
+        secret = os.environ.get(secret_env.strip(), "") or None
+        if secret is None:
+            warn(".secret_env=%r is not set in the environment — deliveries will be UNSIGNED", secret_env.strip())
+    else:
+        secret = raw.get("secret")
+        secret = secret if isinstance(secret, str) and secret else None
     return WebhookTarget(
-        url=url, events=events, name=name.strip() if isinstance(name, str) else "", secret=_resolve_secret(index, raw),
+        url=url, events=events, name=name.strip() if isinstance(name, str) else "", secret=secret,
         matcher=matcher, timeout=max(1, min(timeout, MAX_TIMEOUT_SECONDS)),
     )
 
-
-def _resolve_secret(index: int, raw: Dict[str, Any]) -> Optional[str]:
-    """``secret_env`` (env var name, preferred) wins over inline ``secret``."""
-    secret_env = raw.get("secret_env")
-    if isinstance(secret_env, str) and secret_env.strip():
-        value = os.environ.get(secret_env.strip(), "")
-        if value:
-            return value
-        logger.warning(
-            "hooks.outbound[%d].secret_env=%r is not set in the environment — deliveries will be UNSIGNED",
-            index, secret_env.strip(),
-        )
-        return None
-    secret = raw.get("secret")
-    return secret if isinstance(secret, str) and secret else None
-
-
-# --- Callback + delivery --------------------------------------------------------
 
 def _make_callback(event: str, target: WebhookTarget):
     """Build the notify-only closure ``invoke_hook()`` calls per firing."""
 
     def _callback(**kwargs: Any) -> None:
         if event in _TOOL_SCOPED_EVENTS and not target.matches_tool(kwargs.get("tool_name")):
-            return None
+            return
         delivery_id = uuid.uuid4().hex
         try:
             body = _serialize_payload(event, kwargs, delivery_id)
         except Exception:  # a bad payload must not hurt the loop
-            logger.warning(
-                "outbound webhook payload serialization failed (event=%s target=%s)", event, target.label, exc_info=True,
-            )
-            return None
+            logger.warning("outbound webhook payload serialization failed (event=%s target=%s)", event, target.label, exc_info=True)
+            return
         _enqueue(_build_delivery(event, target, body, delivery_id))
-        return None
 
     _callback.__name__ = f"outbound_webhook[{event}:{target.label}]"
     _callback.__qualname__ = _callback.__name__
@@ -268,14 +251,19 @@ def _build_delivery(event: str, target: WebhookTarget, body: bytes, delivery_id:
     if target.secret:
         digest = hmac.new(target.secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
         headers["X-Hermes-Signature-256"] = f"sha256={digest}"
-    return {
-        "url": target.url, "label": target.label, "event": event,
-        "body": body, "headers": headers, "timeout": target.timeout,
-    }
+    return {"url": target.url, "label": target.label, "event": event, "body": body, "headers": headers, "timeout": target.timeout}
 
 
 def _enqueue(delivery: Dict[str, Any]) -> None:
-    _ensure_worker()
+    global _worker
+    if _worker is None or not _worker.is_alive():
+        with _worker_lock:
+            if _worker is None or not _worker.is_alive():
+                _worker = threading.Thread(target=_worker_loop, name="outbound-webhooks", daemon=True)
+                _worker.start()
+                # Daemon worker: a short-lived process could exit right after enqueuing on_session_end.
+                # Drain at interpreter shutdown, bounded so a dead endpoint can only delay exit, never hang it.
+                atexit.register(flush, timeout=5.0)
     try:
         _delivery_queue.put_nowait(delivery)
     except queue.Full:
@@ -285,20 +273,6 @@ def _enqueue(delivery: Dict[str, Any]) -> None:
         )
 
 
-def _ensure_worker() -> None:
-    global _worker
-    if _worker is not None and _worker.is_alive():
-        return
-    with _worker_lock:
-        if _worker is not None and _worker.is_alive():
-            return
-        _worker = threading.Thread(target=_worker_loop, name="outbound-webhooks", daemon=True)
-        _worker.start()
-        # Daemon worker: a short-lived process could exit right after enqueuing on_session_end.
-        # Drain at interpreter shutdown, bounded so a dead endpoint can only delay exit, never hang it.
-        atexit.register(flush, timeout=5.0)
-
-
 def _worker_loop() -> None:
     while True:
         delivery = _delivery_queue.get()
@@ -306,11 +280,8 @@ def _worker_loop() -> None:
             if delivery is not None:
                 _deliver(delivery)
         except Exception:  # pragma: no cover — defensive
-            logger.warning(
-                "outbound webhook delivery crashed (target=%s)",
-                delivery.get("label") if isinstance(delivery, dict) else "?",
-                exc_info=True,
-            )
+            label = delivery.get("label") if isinstance(delivery, dict) else "?"
+            logger.warning("outbound webhook delivery crashed (target=%s)", label, exc_info=True)
         finally:
             _delivery_queue.task_done()
 
