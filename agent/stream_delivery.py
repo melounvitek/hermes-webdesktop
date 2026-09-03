@@ -21,18 +21,21 @@ class StreamDeliveryMixin:
 
     # ── stream text delivery ──
 
+    @staticmethod
+    def _call_quietly(cb, *args) -> bool:
+        """Call ``cb(*args)`` if set, swallowing errors; True when it ran without raising."""
+        if cb is None:
+            return False
+        try:
+            cb(*args)
+            return True
+        except Exception:
+            return False
+
     def _deliver_to_stream_callbacks(self, text: str) -> bool:
         """Send ``text`` to the display + TTS delta callbacks; True if at least one accepted it."""
-        delivered = False
-        for cb in (self.stream_delta_callback, self._stream_callback):
-            if cb is None:
-                continue
-            try:
-                cb(text)
-                delivered = True
-            except Exception:
-                pass
-        return delivered
+        results = [self._call_quietly(cb, text) for cb in (self.stream_delta_callback, self._stream_callback)]
+        return any(results)
 
     def _enqueue_stream_hook(self, event: str, *, label: str | None = None, **fields: Any) -> None:
         """Best-effort plugin stream hook enqueue; never raises into the stream path."""
@@ -46,38 +49,28 @@ class StreamDeliveryMixin:
     def _reset_stream_delivery_tracking(self) -> None:
         """Reset tracking for text delivered during the current model response.
 
-        Flushes the think scrubber's benign partial-tag tail first, routed through the
-        context scrubber (a span straddling the boundary must still be caught), then the
-        context scrubber's own tail. Mid-span, ``flush()`` drops orphaned content.
+        Flushes the think scrubber's benign tail first, routed through the context scrubber (a span
+        straddling the boundary must still be caught), then the context scrubber's own tail.
         """
         think_scrubber = getattr(self, "_stream_think_scrubber", None)
         ctx_scrubber = getattr(self, "_stream_context_scrubber", None)
-        if think_scrubber is not None:
-            think_tail = think_scrubber.flush()
-            if think_tail and ctx_scrubber is not None:
-                think_tail = ctx_scrubber.feed(think_tail)
-            if think_tail:
-                self._deliver_to_stream_callbacks(think_tail)
-                self._record_streamed_assistant_text(think_tail)
-        if ctx_scrubber is not None:
-            tail = ctx_scrubber.flush()
+
+        def deliver(tail: str) -> None:
             if tail:
                 self._deliver_to_stream_callbacks(tail)
                 self._record_streamed_assistant_text(tail)
+
+        if think_scrubber is not None:
+            think_tail = think_scrubber.flush()
+            deliver(ctx_scrubber.feed(think_tail) if think_tail and ctx_scrubber is not None else think_tail)
+        if ctx_scrubber is not None:
+            deliver(ctx_scrubber.flush())
         self._current_streamed_assistant_text = ""
 
     def _record_streamed_assistant_text(self, text: str) -> None:
-        """Accumulate visible assistant text emitted through stream callbacks.
-
-        A superseded stream writer must not pollute the accumulated text, even via the
-        tool-suppressed path.
-        """
-        if self._stream_writer_superseded():
-            return
-        if isinstance(text, str) and text:
-            self._current_streamed_assistant_text = (
-                getattr(self, "_current_streamed_assistant_text", "") + text
-            )
+        """Accumulate visible assistant text emitted through stream callbacks (superseded writers excluded)."""
+        if isinstance(text, str) and text and not self._stream_writer_superseded():
+            self._current_streamed_assistant_text = getattr(self, "_current_streamed_assistant_text", "") + text
 
     # ── interim assistant text ──
 
@@ -97,11 +90,10 @@ class StreamDeliveryMixin:
         return bool(streamed) and visible_content.startswith(streamed)
 
     def _extract_codex_interim_visible_parts(self, assistant_msg: Dict[str, Any]) -> List[str]:
-        """Visible Codex commentary, one string per message item.
+        """Visible Codex commentary (``phase=commentary`` items), one string per message item.
 
-        Codex keeps mid-turn narration as ``phase=commentary`` items while the final answer
-        stays in ``content``; ``phase=analysis`` stays hidden (scratchpad). With
-        ``display.show_commentary=false`` commentary stays on the reasoning channel.
+        ``phase=analysis`` stays hidden (scratchpad); with ``display.show_commentary=false``
+        commentary stays on the reasoning channel.
         """
         if not getattr(self, "show_commentary", True):
             return []
@@ -135,12 +127,9 @@ class StreamDeliveryMixin:
         return "\n\n".join(self._extract_codex_interim_visible_parts(assistant_msg)).strip()
 
     def _interim_assistant_visible_text(self, assistant_msg: Dict[str, Any]) -> str:
-        """The exact assistant text eligible for interim delivery.
-
-        Prefers structured Codex commentary over top-level content — a response can hold
-        commentary AND a partial final answer while tools are pending, and treating content
-        as progress leaks the answer early. Content may be a parts list.
-        """
+        """Assistant text eligible for interim delivery: structured Codex commentary first — a response can
+        hold commentary AND a partial final answer while tools are pending, and treating content as
+        progress leaks the answer early — else top-level content (may be a parts list)."""
         return (
             self._extract_codex_interim_visible_text(assistant_msg)
             or self._strip_think_blocks(flatten_message_text(assistant_msg.get("content"))).strip()
@@ -183,11 +172,9 @@ class StreamDeliveryMixin:
         self._deliver_interim(visible, already_streamed=False, record=[visible])
 
     def _emit_interim_assistant_message(self, assistant_msg: Dict[str, Any]) -> None:
-        """Surface a real mid-turn assistant commentary message to the UI layer.
-
-        Does NOT set ``_response_was_previewed`` — that means "the final response was shown";
-        setting it for narration would make the CLI suppress a different final summary.
-        """
+        """Surface a real mid-turn assistant commentary message to the UI layer. Does NOT set
+        ``_response_was_previewed`` ("the final response was shown") — the CLI would then suppress a
+        different final summary."""
         if not isinstance(assistant_msg, dict):
             return
         commentary_parts = self._extract_codex_interim_visible_parts(assistant_msg)
@@ -216,20 +203,18 @@ class StreamDeliveryMixin:
         """Lazily create the single-writer guard fields (``AIAgent.__new__``-built instances skip ``agent_init``)."""
         if getattr(self, "_stream_writer_lock", None) is None:
             self._stream_writer_lock = threading.Lock()
-        if not hasattr(self, "_stream_writer_token"):
-            self._stream_writer_token = 0
         if getattr(self, "_stream_writer_tls", None) is None:
             self._stream_writer_tls = threading.local()
-        if not hasattr(self, "_stream_writer_dropped"):
-            self._stream_writer_dropped = 0
+        for attr in ("_stream_writer_token", "_stream_writer_dropped"):
+            if not hasattr(self, attr):
+                setattr(self, attr, 0)
 
     def _claim_stream_writer(self) -> int:
         """Claim exclusive ownership of the delta sink for this stream attempt; returns its writer token.
 
-        Every attempt (each provider path, each retry) claims right before consuming. Claiming
-        bumps the shared token, so an earlier attempt still alive on another thread is
-        superseded and its late chunks fenced out. Stored per-thread: a thread that never
-        claimed is never a writer and can never be fenced.
+        Every attempt (each provider path, each retry) claims right before consuming; claiming bumps
+        the shared token, so an earlier attempt still alive on another thread is superseded and its
+        late chunks fenced out. Stored per-thread: a thread that never claimed can never be fenced.
         """
         self._ensure_stream_writer_state()
         with self._stream_writer_lock:
@@ -242,10 +227,7 @@ class StreamDeliveryMixin:
         return token == getattr(self, "_stream_writer_token", token)
 
     def _stream_writer_superseded(self) -> bool:
-        """True when this thread claimed the sink but a newer attempt has since claimed it.
-
-        A thread that never claimed (``token is None``) is never reported superseded.
-        """
+        """True when this thread claimed the sink but a newer attempt has since claimed it (never for a non-claimer)."""
         token = getattr(getattr(self, "_stream_writer_tls", None), "token", None)
         return token is not None and token != getattr(self, "_stream_writer_token", token)
 
@@ -318,12 +300,7 @@ class StreamDeliveryMixin:
         if self._stream_writer_superseded():
             self._note_dropped_stream_writer("_fire_reasoning_delta")
             return
-        cb = self.reasoning_callback
-        if cb is not None:
-            try:
-                cb(text)
-            except Exception:
-                pass
+        self._call_quietly(self.reasoning_callback, text)
         try:
             from agent.plugin_stream_hooks import stream_reasoning_deltas_enabled
 
@@ -336,12 +313,7 @@ class StreamDeliveryMixin:
 
     def _fire_tool_gen_started(self, tool_name: str) -> None:
         """Notify the display layer that the model is generating tool call arguments (spinner for large payloads)."""
-        cb = self.tool_gen_callback
-        if cb is not None:
-            try:
-                cb(tool_name)
-            except Exception:
-                pass
+        self._call_quietly(self.tool_gen_callback, tool_name)
 
     def _has_stream_consumers(self) -> bool:
         """Return True if any streaming consumer is registered."""
@@ -352,7 +324,4 @@ class StreamDeliveryMixin:
                 return True
         except Exception:
             logger.debug("plugin stream hook consumer check failed", exc_info=True)
-        return (
-            self.stream_delta_callback is not None
-            or getattr(self, "_stream_callback", None) is not None
-        )
+        return self.stream_delta_callback is not None or getattr(self, "_stream_callback", None) is not None
