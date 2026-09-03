@@ -1,10 +1,10 @@
-"""Generic webhook platform adapter: aiohttp server that validates HMAC-signed POSTs (GitHub,
-GitLab, Svix, Linear, generic), renders payloads into agent prompts, and routes responses back
-(github_comment or any gateway platform). Routes live under platforms.webhook.extra.routes:
-events (header filter), secret (REQUIRED; "INSECURE_NO_AUTH" skips validation, loopback only),
-prompt template, skills, deliver/deliver_extra, deliver_only (rendered prompt IS the message).
-Per-route rate limiting, idempotency cache, body-size caps checked before reading. Generic HMAC
-V2 binds a timestamp for replay protection; body-only V1 is deprecated but accepted with a warning."""
+"""Generic webhook platform adapter: aiohttp server that validates HMAC-signed POSTs (GitHub, GitLab,
+Svix, Linear, generic), renders payloads into agent prompts, and routes responses back (github_comment
+or any gateway platform). Routes live under platforms.webhook.extra.routes: events (header filter),
+secret (REQUIRED; "INSECURE_NO_AUTH" skips validation, loopback only), prompt template, skills,
+deliver/deliver_extra, deliver_only (rendered prompt IS the message). Per-route rate limiting,
+idempotency cache, body-size caps checked before reading. Generic HMAC V2 binds a timestamp for
+replay protection; body-only V1 is deprecated but accepted with a warning."""
 
 import asyncio
 import base64
@@ -36,8 +36,8 @@ from gateway.response_filters import is_autonomous_silence_response
 
 logger = logging.getLogger(__name__)
 
-# Sentinel from _resolve_request_profile: a /p/<profile>/ prefix names a profile
-# this gateway does not serve (→ 404). Distinct from None (no prefix / default).
+# _resolve_request_profile sentinel: /p/<profile>/ names a profile this gateway does not serve (→ 404);
+# distinct from None (no prefix / default).
 _PROFILE_REJECTED = object()
 _UNPARSEABLE = object()
 
@@ -46,10 +46,9 @@ _BUILTIN_DELIVER_PLATFORMS = {
     "homeassistant", "email", "dingtalk", "feishu", "wecom", "wecom_callback", "weixin",
     "bluebubbles", "qqbot", "yuanbao"}
 
-# ``None`` → aiohttp binds BOTH address families. "0.0.0.0" is IPv4-only and was
-# unreachable on IPv6-only networks (Fly.io 6PN); "::" becomes IPv6-only where the
-# kernel sets IPV6_V6ONLY=1, breaking the 127.0.0.1 health check. Users can pin a
-# host via ``platforms.webhook.extra.host``.
+# ``None`` → aiohttp binds BOTH address families. "0.0.0.0" is IPv4-only (unreachable on IPv6-only
+# networks such as Fly.io 6PN); "::" becomes IPv6-only where the kernel sets IPV6_V6ONLY=1, breaking
+# the 127.0.0.1 health check. Users can pin a host via ``platforms.webhook.extra.host``.
 DEFAULT_HOST = None
 DEFAULT_PORT = 8644
 _INSECURE_NO_AUTH = "INSECURE_NO_AUTH"
@@ -77,12 +76,17 @@ def _hex_hmac(secret: str, data: bytes) -> str:
     return hmac.new(secret.encode(), data, hashlib.sha256).hexdigest()
 
 
-def _timestamp_age(raw: str) -> Optional[int]:
-    """Seconds between now and an integer timestamp header; None when unparseable."""
+def _timestamp_fresh(raw: str, stale_msg: str, *args) -> bool:
+    """True when integer timestamp header *raw* is within the replay window; unparseable → False,
+    stale → warn ``stale_msg % args`` and False."""
     try:
-        return abs(int(time.time()) - int(raw))
+        age = abs(int(time.time()) - int(raw))
     except (TypeError, ValueError):
-        return None
+        return False
+    if age > _V2_REPLAY_WINDOW_SECONDS:
+        logger.warning(stale_msg, *args)
+        return False
+    return True
 
 
 def _is_known_platform(name: str) -> bool:
@@ -100,8 +104,7 @@ def _json_error(message: str, status: int) -> "web.Response":
 
 
 def _peek_session_id(store, session_key: str):
-    """Prefer the store's lock-held accessor; fall back to the private path only for
-    older stores / test doubles that predate it."""
+    """Prefer the store's lock-held accessor; the private-path fallback is for older stores / test doubles."""
     peek = getattr(store, "peek_session_id", None)
     if callable(peek):
         return peek(session_key)
@@ -121,11 +124,7 @@ def _validate_svix_signature(body: bytes, secret: str, msg_id: str, timestamp: s
     """Svix-compatible signatures (AgentMail): base64 HMAC-SHA256 of "{id}.{timestamp}.{body}"."""
     if not (msg_id and timestamp and signature_header and secret):
         return False
-    age = _timestamp_age(timestamp)
-    if age is None:
-        return False
-    if age > _V2_REPLAY_WINDOW_SECONDS:
-        logger.warning("[webhook] Svix signature timestamp outside replay window")
+    if not _timestamp_fresh(timestamp, "[webhook] Svix signature timestamp outside replay window"):
         return False
     if secret.startswith("whsec_"):
         try:
@@ -150,8 +149,7 @@ def _validate_svix_signature(body: bytes, secret: str, msg_id: str, timestamp: s
 class WebhookAdapter(BasePlatformAdapter):
     """Generic webhook receiver that triggers agent runs from HTTP POSTs."""
 
-    # Event-triggered, no human present: the startup auto-resume turn must FINISH
-    # the interrupted work instead of asking "what next?".
+    # Event-triggered, no human present: startup auto-resume must FINISH the interrupted work, not ask "what next?".
     interactive_resume: bool = False
 
     def __init__(self, config: PlatformConfig):
@@ -166,21 +164,18 @@ class WebhookAdapter(BasePlatformAdapter):
         self._dynamic_routes_mtime: float = 0.0
         self._routes: Dict[str, dict] = dict(self._static_routes)
         self._runner = None
-        # Routes already warned about legacy V1 body-only signatures (once per route).
-        self._v1_signature_warned: set[str] = set()
-        # Keyed by session chat_id; read by EVERY send() (interim status messages AND
-        # the final response) so never pop on send(). TTL-pruned on each POST.
+        self._v1_signature_warned: set[str] = set()  # routes already warned about legacy V1 (once per route)
+        # Keyed by session chat_id; read by EVERY send() (interim status messages AND the final
+        # response) so never pop on send(). TTL-pruned on each POST.
         self._delivery_info: Dict[str, dict] = {}
         self._delivery_info_created: Dict[str, float] = {}
         self._delivery_info_order: Deque[tuple[float, str]] = deque()
-        # Gateway runner for cross-platform delivery (set externally).
-        self.gateway_runner = None
+        self.gateway_runner = None  # set externally; needed for cross-platform delivery
         # Idempotency: TTL cache of recently processed delivery IDs.
         self._seen_deliveries: Dict[str, float] = {}
         self._idempotency_ttl: int = 3600  # 1 hour
         self._seen_deliveries_next_prune_at: float = 0.0
-        # Rate limiting: per-route timestamps in a fixed window.
-        self._rate_counts: Dict[str, Deque[float]] = {}
+        self._rate_counts: Dict[str, Deque[float]] = {}  # per-route hit timestamps in a fixed window
         self._rate_limit: int = int(extra.get("rate_limit", 30))  # per minute
         self._max_body_bytes: int = int(extra.get("max_body_bytes", 1_048_576))  # 1MB
         self._script_timeout_seconds: int = int(extra.get("script_timeout_seconds", DEFAULT_SCRIPT_TIMEOUT_SECONDS))
@@ -189,8 +184,7 @@ class WebhookAdapter(BasePlatformAdapter):
     # --- Lifecycle ---
 
     def _validate_route(self, name: str, route: dict) -> None:
-        """Startup validation: secret is required; INSECURE_NO_AUTH only on loopback
-        (an unauthenticated route on a public interface is a footgun — crash early)."""
+        """Startup validation: secret required; INSECURE_NO_AUTH only on loopback (crash early on a public footgun)."""
         secret = route.get("secret", self._global_secret)
         if not secret:
             raise ValueError(
@@ -215,22 +209,20 @@ class WebhookAdapter(BasePlatformAdapter):
         self._reload_dynamic_routes()
         for name, route in self._routes.items():
             self._validate_route(name, route)
-        # client_max_size enforces the cap on every read path, including chunked
-        # bodies without Content-Length that bypass the header check.
+        # client_max_size enforces the cap on every read path, including chunked bodies without
+        # Content-Length that bypass the header check.
         app = web.Application(client_max_size=self._max_body_bytes)
         app.router.add_get("/health", self._handle_health)
         app.router.add_post("/webhooks/{route_name}", self._handle_webhook)
-        # /p/<profile>/ prefix routes the event to that profile (only honored when
-        # gateway.multiplex_profiles is on; the handler validates).
+        # /p/<profile>/ routes the event to that profile (honored only under gateway.multiplex_profiles).
         app.router.add_post("/p/{profile}/webhooks/{route_name}", self._handle_webhook)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
-        # SO_REUSEADDR: on macOS (BSD) two wildcard/specific sockets can silently split traffic
-        # while both report success → disable. On Linux it only permits rebinding past TIME_WAIT
-        # (a quick restart would otherwise fail to bind for ~60s) → keep the default.
-        site = web.TCPSite(
-            self._runner, self._host, self._port, reuse_address=False if sys.platform == "darwin" else None,
-        )
+        # SO_REUSEADDR: on macOS (BSD) two wildcard/specific sockets can silently split traffic while
+        # both report success → disable. On Linux it only permits rebinding past TIME_WAIT (a quick
+        # restart would otherwise fail to bind for ~60s) → keep the default.
+        site = web.TCPSite(self._runner, self._host, self._port,
+                           reuse_address=False if sys.platform == "darwin" else None)
         try:
             await site.start()
         except OSError as exc:
@@ -255,14 +247,13 @@ class WebhookAdapter(BasePlatformAdapter):
         self._mark_disconnected()
         logger.info("[webhook] Disconnected")
 
-    async def send(
-        self, chat_id: str, content: str, reply_to: Optional[str] = None,
-        metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+    async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None,
+                   metadata: Optional[Dict[str, Any]] = None) -> SendResult:
         """Deliver the agent's response to the destination stored for ``chat_id``
         (``webhook:{route}:{delivery_id}``) — read with ``.get()``, never popped."""
-        # Autonomous lane (no human reader): the loose marker matcher shared with cron —
-        # marker on its own first/last line — because models add a sentence explaining
-        # why they stayed quiet, which the interactive exact-match rule would deliver.
+        # Autonomous lane (no human reader): the loose marker matcher shared with cron (marker on its own
+        # first/last line), because models add a sentence explaining why they stayed quiet, which the
+        # interactive exact-match rule would deliver.
         if is_autonomous_silence_response(content):
             logger.info("[webhook] Response for %s is a silence marker — not delivering", chat_id)
             return SendResult(success=True)
@@ -279,8 +270,8 @@ class WebhookAdapter(BasePlatformAdapter):
         return SendResult(success=False, error=f"Unknown deliver type: {deliver_type}")
 
     def _prune_delivery_info(self, now: float) -> None:
-        """Drop delivery_info entries older than the idempotency TTL (bounds the dict
-        by ``rate_limit * TTL`` even when runs never produce a final response)."""
+        """Drop delivery_info entries older than the idempotency TTL (bounds the dict by ``rate_limit * TTL``
+        even when runs never produce a final response)."""
         created = self._delivery_info_created
         if len(self._delivery_info_order) < len(created):
             self._delivery_info_order = deque((at, key) for key, at in sorted(created.items(), key=lambda kv: kv[1]))
@@ -329,17 +320,15 @@ class WebhookAdapter(BasePlatformAdapter):
         return {"name": chat_id, "type": "webhook"}
 
     def toolsets_for_source(self, source) -> Optional[List[str]]:
-        """Per-route ``toolsets`` override (config.yaml or a manual key in
-        webhook_subscriptions.json — deliberately NOT settable via `hermes webhook
-        subscribe`, so an agent-created subscription cannot self-grant tools)."""
+        """Per-route ``toolsets`` override (config.yaml or a manual key in webhook_subscriptions.json —
+        deliberately NOT settable via `hermes webhook subscribe`, so an agent-created subscription
+        cannot self-grant tools)."""
         parts = str(getattr(source, "chat_id", "") or "").split(":", 2)
         if len(parts) < 2 or parts[0] != "webhook":
             return None
         route_config = self._routes.get(parts[1])
-        if not isinstance(route_config, dict):
-            return None
-        toolsets = route_config.get("toolsets")
-        if not isinstance(toolsets, list) or not toolsets:
+        toolsets = route_config.get("toolsets") if isinstance(route_config, dict) else None
+        if not isinstance(toolsets, list):
             return None
         return [str(t).strip() for t in toolsets if str(t).strip()] or None
 
@@ -350,21 +339,16 @@ class WebhookAdapter(BasePlatformAdapter):
         return web.json_response({"status": "ok", "platform": "webhook"})
 
     def _dynamic_route_allowed(self, name: str, route: dict) -> bool:
-        """An empty effective secret would make _handle_webhook skip HMAC validation →
-        reject such dynamic routes; INSECURE_NO_AUTH is loopback-only."""
+        """An empty effective secret would make _handle_webhook skip HMAC validation → reject such
+        dynamic routes; INSECURE_NO_AUTH is loopback-only."""
         effective_secret = route.get("secret", self._global_secret)
         if not effective_secret:
-            logger.warning(
-                "[webhook] Dynamic route '%s' skipped: 'secret' is "
-                "missing or empty. Set a valid HMAC secret, or use "
-                "'%s' to explicitly disable auth (testing only).",
-                name, _INSECURE_NO_AUTH)
+            logger.warning("[webhook] Dynamic route '%s' skipped: 'secret' is missing or empty. Set a valid HMAC "
+                           "secret, or use '%s' to explicitly disable auth (testing only).", name, _INSECURE_NO_AUTH)
             return False
         if effective_secret == _INSECURE_NO_AUTH and not _is_loopback_host(self._host):
-            logger.warning(
-                "[webhook] Dynamic route '%s' skipped: INSECURE_NO_AUTH "
-                "is only allowed on loopback hosts. Current host: '%s'.",
-                name, self._host)
+            logger.warning("[webhook] Dynamic route '%s' skipped: INSECURE_NO_AUTH is only allowed on loopback "
+                           "hosts. Current host: '%s'.", name, self._host)
             return False
         return True
 
@@ -385,10 +369,8 @@ class WebhookAdapter(BasePlatformAdapter):
             data = json.loads(subs_path.read_text(encoding="utf-8"))
             if not isinstance(data, dict):
                 return
-            # Static routes take precedence.
-            self._dynamic_routes = {
-                k: v for k, v in data.items()
-                if k not in self._static_routes and self._dynamic_route_allowed(k, v)}
+            self._dynamic_routes = {  # static routes take precedence
+                k: v for k, v in data.items() if k not in self._static_routes and self._dynamic_route_allowed(k, v)}
             self._routes = {**self._dynamic_routes, **self._static_routes}
             self._dynamic_routes_mtime = mtime
             logger.info("[webhook] Reloaded %d dynamic route(s): %s",
@@ -405,9 +387,8 @@ class WebhookAdapter(BasePlatformAdapter):
             return None
         cfg = getattr(self.gateway_runner, "config", None)
         if not getattr(cfg, "multiplex_profiles", False):
-            # Only a self-referential prefix may fall through to the bare route;
-            # anything else fails closed (silently ignoring the prefix served the
-            # owner's routes under another profile's URL).
+            # Only a self-referential prefix may fall through to the bare route; anything else fails
+            # closed (silently ignoring the prefix served the owner's routes under another profile's URL).
             with suppress(Exception):
                 from hermes_cli.profiles import profile_matches_home
                 if profile_matches_home(profile):
@@ -438,25 +419,22 @@ class WebhookAdapter(BasePlatformAdapter):
         from hermes_cli.profiles import get_profile_dir
         return _profile_runtime_scope(get_profile_dir(profile))
 
-    async def _read_authenticated_body(
-        self, request: "web.Request", route_name: str, route_config: dict
-    ) -> "tuple[Optional[bytes], Optional[web.Response]]":
+    async def _read_authenticated_body(self, request: "web.Request", route_name: str,
+                                       route_config: dict) -> "tuple[Optional[bytes], Optional[web.Response]]":
         """Auth-before-body: size-cap, read, then HMAC-validate. Returns ``(body, None)`` or ``(None, response)``."""
         if (request.content_length or 0) > self._max_body_bytes:
             return None, _json_error("Payload too large", 413)
         try:
             raw_body = await request.read()
-        except web.HTTPRequestEntityTooLarge:
-            # aiohttp's client_max_size tripped — chunked or lying Content-Length.
+        except web.HTTPRequestEntityTooLarge:  # client_max_size tripped — chunked or lying Content-Length
             return None, _json_error("Payload too large", 413)
         except Exception as e:
             logger.error("[webhook] Failed to read body: %s", e)
             return None, _json_error("Bad request", 400)
-        if len(raw_body) > self._max_body_bytes:
-            # Defense in depth if the server-level limit was bypassed or misconfigured.
+        if len(raw_body) > self._max_body_bytes:  # defense in depth if the server-level limit was bypassed
             return None, _json_error("Payload too large", 413)
-        # Missing/empty secrets fail closed here too (not only in connect()), so
-        # direct handler reuse cannot become an unauthenticated dispatch surface.
+        # Missing/empty secrets fail closed here too (not only in connect()), so direct handler reuse
+        # cannot become an unauthenticated dispatch surface.
         secret = route_config.get("secret", self._global_secret)
         if not secret:
             logger.error("[webhook] Route %s has no HMAC secret; refusing request", route_name)
@@ -478,11 +456,10 @@ class WebhookAdapter(BasePlatformAdapter):
             except Exception:
                 return _UNPARSEABLE
 
-    async def _handle_deliver_only(
-        self, prompt: str, payload: Any, route_config: dict, route_name: str, event_type: str, delivery_id: str
-    ) -> "web.Response":
-        """deliver_only: the rendered prompt IS the message — skip the agent, reuse
-        the same auth/rate-limit/idempotency/template pipeline."""
+    async def _handle_deliver_only(self, prompt: str, payload: Any, route_config: dict, route_name: str,
+                                   event_type: str, delivery_id: str) -> "web.Response":
+        """deliver_only: the rendered prompt IS the message — skip the agent, reuse the same
+        auth/rate-limit/idempotency/template pipeline."""
         delivery = {
             "deliver": route_config.get("deliver", "log"),
             "deliver_extra": self._render_delivery_extra(route_config.get("deliver_extra", {}), payload),
@@ -500,14 +477,13 @@ class WebhookAdapter(BasePlatformAdapter):
                 {"status": "delivered", "route": route_name, "target": delivery["deliver"], "delivery_id": delivery_id},
                 status=200)
         # Target rejected it — 502 with a generic error (don't leak adapter detail).
-        logger.warning("[webhook] direct-deliver target rejected route=%s target=%s error=%s",
-                       route_name, delivery["deliver"], result.error)
+        logger.warning("[webhook] direct-deliver target rejected route=%s target=%s error=%s", route_name,
+                       delivery["deliver"], result.error)
         return web.json_response(failed, status=502)
 
     def _resolve_route(self, request: "web.Request") -> "tuple[str, Optional[dict], Any, Optional[web.Response]]":
         """Route + profile lookup for a POST; ``(route_name, route_config, profile, error_response)``."""
-        # Hot-reload dynamic subscriptions on each request (mtime-gated, cheap)
-        self._reload_dynamic_routes()
+        self._reload_dynamic_routes()  # hot-reload dynamic subscriptions (mtime-gated, cheap)
         route_name = request.match_info.get("route_name", "")
         route_config = self._routes.get(route_name)
         profile = self._resolve_request_profile(request)
@@ -519,16 +495,16 @@ class WebhookAdapter(BasePlatformAdapter):
             logger.warning("[webhook] Route %s is not authorized for profile %r", route_name, profile or "default")
             # Same as unknown-route so profile mismatches can't enumerate route bindings.
             return route_name, None, profile, _json_error(f"Unknown route: {route_name}", 404)
-        # Disabled routes stay in the subscriptions file (dashboard can re-enable)
-        # but reject events. Only an explicit ``enabled: false`` turns a route off.
+        # Disabled routes stay in the subscriptions file (dashboard can re-enable) but reject events.
+        # Only an explicit ``enabled: false`` turns a route off.
         if route_config.get("enabled", True) is False:
             return route_name, None, profile, _json_error(f"Route disabled: {route_name}", 403)
         return route_name, route_config, profile, None
 
     @staticmethod
     def _apply_skills(prompt: str, skills: list) -> str:
-        """Inject the first matching skill via build_skill_invocation_message() directly —
-        /skill-name slash commands would be intercepted by the command parser."""
+        """Inject the first matching skill via build_skill_invocation_message() directly — /skill-name slash
+        commands would be intercepted by the command parser."""
         try:
             from agent.skill_commands import build_skill_invocation_message, get_skill_commands
             skill_cmds = get_skill_commands()
@@ -557,16 +533,12 @@ class WebhookAdapter(BasePlatformAdapter):
         payload = self._parse_body(raw_body)
         if payload is _UNPARSEABLE:
             return _json_error("Cannot parse body", 400)
-        event_type = (
-            request.headers.get("X-GitHub-Event", "")
-            or request.headers.get("X-GitLab-Event", "")
-            or payload.get("event_type", "")
-            or payload.get("type", "")
-            or "unknown")
+        headers = request.headers
+        event_type = (headers.get("X-GitHub-Event", "") or headers.get("X-GitLab-Event", "")
+                      or payload.get("event_type", "") or payload.get("type", "") or "unknown")
         allowed_events = route_config.get("events", [])
         if allowed_events and event_type not in allowed_events:
-            logger.debug("[webhook] Ignoring event %s for route %s (allowed: %s)",
-                         event_type, route_name, allowed_events)
+            logger.debug("[webhook] Ignoring event %s for route %s (allowed: %s)", event_type, route_name, allowed_events)
             return web.json_response({"status": "ignored", "event": event_type})
         if not self._route_processor.route_filters_match(route_config, payload, event_type, request.headers):
             logger.info("[webhook] filtered event=%s route=%s", event_type, route_name)
@@ -578,21 +550,17 @@ class WebhookAdapter(BasePlatformAdapter):
             if script:
                 # Shells out (up to its timeout) — worker thread so the loop isn't blocked; to_thread
                 # copies contextvars so the profile scope follows.
-                keep, transformed_payload = await asyncio.to_thread(
-                    self._route_processor.run_route_script, script, payload)
+                keep, transformed_payload = await asyncio.to_thread(self._route_processor.run_route_script, script, payload)
                 if not keep:
                     logger.info("[webhook] script ignored event=%s route=%s", event_type, route_name)
                     return web.json_response({"status": "ignored", "reason": "script", "route": route_name})
                 payload = transformed_payload or payload
             prompt = self._render_prompt(route_config.get("prompt", ""), payload, event_type, route_name)
-            skills = route_config.get("skills", [])
-            if skills:
+            if skills := route_config.get("skills", []):
                 prompt = self._apply_skills(prompt, skills)
-        headers = request.headers
         delivery_id = headers.get("X-GitHub-Delivery", headers.get(
             "svix-id", headers.get("X-Request-ID", str(int(time.time() * 1000)))))
-        # Idempotency: skip duplicate deliveries (webhook retries).
-        now = time.time()
+        now = time.time()  # idempotency: skip duplicate deliveries (webhook retries)
         if not self._record_delivery_id(delivery_id, now):
             logger.info("[webhook] Skipping duplicate delivery %s", delivery_id)
             return web.json_response({"status": "duplicate", "delivery_id": delivery_id}, status=200)
@@ -601,13 +569,10 @@ class WebhookAdapter(BasePlatformAdapter):
         return self._dispatch_agent_run(request, route_config, route_name, profile, payload, prompt, event_type,
                                         delivery_id, now)
 
-    def _dispatch_agent_run(
-        self, request, route_config: dict, route_name: str, profile, payload: Any, prompt: str,
-        event_type: str, delivery_id: str, now: float,
-    ) -> "web.Response":
+    def _dispatch_agent_run(self, request, route_config: dict, route_name: str, profile, payload: Any, prompt: str,
+                            event_type: str, delivery_id: str, now: float) -> "web.Response":
         """Record delivery info, spawn the agent run, and return 202 immediately."""
-        # delivery_id in the session key → concurrent webhooks on one route get
-        # independent agent runs (not queued/interrupted).
+        # delivery_id in the session key → concurrent webhooks on one route get independent runs.
         session_chat_id = f"webhook:{route_name}:{delivery_id}"
         self._delivery_info[session_chat_id] = {
             "deliver": route_config.get("deliver", "log"),
@@ -622,10 +587,10 @@ class WebhookAdapter(BasePlatformAdapter):
             source.profile = profile
         event = MessageEvent(
             text=prompt, message_type=MessageType.TEXT, source=source, raw_message=payload, message_id=delivery_id)
-        logger.info("[webhook] %s event=%s route=%s prompt_len=%d delivery=%s",
-                    request.method, event_type, route_name, len(prompt), delivery_id)
-        # The per-delivery session is closed by ``on_processing_complete`` once the run
-        # finishes (``handle_message`` is fire-and-forget, so nothing can be closed here).
+        logger.info("[webhook] %s event=%s route=%s prompt_len=%d delivery=%s", request.method, event_type, route_name,
+                    len(prompt), delivery_id)
+        # The per-delivery session is closed by ``on_processing_complete`` once the run finishes
+        # (``handle_message`` is fire-and-forget, so nothing can be closed here).
         task = asyncio.create_task(self.handle_message(event))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
@@ -642,8 +607,7 @@ class WebhookAdapter(BasePlatformAdapter):
         """Mark the per-delivery session ended via ``SessionDB.end_session`` (never a hand-written UPDATE),
         resolving session_id from the SAME source the run was keyed on."""
         runner = self.gateway_runner
-        session_db = getattr(runner, "_session_db", None)
-        store = getattr(runner, "session_store", None)
+        session_db, store = getattr(runner, "_session_db", None), getattr(runner, "session_store", None)
         key_fn = getattr(runner, "_session_key_for_source", None)
         if runner is None or session_db is None or store is None or key_fn is None:
             return
@@ -683,25 +647,19 @@ class WebhookAdapter(BasePlatformAdapter):
             if provided:
                 return _hmac_str_equal(provided, expected())
         route_name = request.match_info.get("route_name", "")
-        # Generic V2: X-Webhook-Signature-V2 = hex HMAC-SHA256 of "<timestamp>.<body>",
-        # X-Webhook-Timestamp required. Presence of the V2 header COMMITS to V2 — it
-        # must not fall through to V1 on a missing/bad timestamp, or an attacker could
-        # strip the timestamp from a captured mixed V1+V2 request and replay it
-        # against the still-present body-only V1 signature.
+        # Generic V2: X-Webhook-Signature-V2 = hex HMAC-SHA256 of "<timestamp>.<body>", X-Webhook-Timestamp
+        # required. Presence of the V2 header COMMITS to V2 — it must not fall through to V1 on a
+        # missing/bad timestamp, or an attacker could strip the timestamp from a captured mixed V1+V2
+        # request and replay it against the still-present body-only V1 signature.
         v2_sig = headers.get("X-Webhook-Signature-V2", "")
         if v2_sig:
             v2_timestamp = headers.get("X-Webhook-Timestamp", "")
             if not v2_timestamp:
-                logger.warning(
-                    "[webhook] Route '%s' sent X-Webhook-Signature-V2 with "
-                    "no X-Webhook-Timestamp — rejecting rather than falling back to legacy V1",
-                    route_name)
+                logger.warning("[webhook] Route '%s' sent X-Webhook-Signature-V2 with no X-Webhook-Timestamp — "
+                               "rejecting rather than falling back to legacy V1", route_name)
                 return False
-            age = _timestamp_age(v2_timestamp)
-            if age is None:
-                return False
-            if age > _V2_REPLAY_WINDOW_SECONDS:
-                logger.warning("[webhook] Route '%s' generic HMAC V2 timestamp outside replay window", route_name)
+            if not _timestamp_fresh(v2_timestamp, "[webhook] Route '%s' generic HMAC V2 timestamp outside replay window",
+                                    route_name):
                 return False
             return _hmac_str_equal(v2_sig, _hex_hmac(secret, v2_timestamp.encode() + b"." + body))
         # Generic V1 (legacy, deprecated): body-only HMAC → replays indefinitely.
@@ -709,12 +667,9 @@ class WebhookAdapter(BasePlatformAdapter):
         if generic_sig:
             if route_name not in self._v1_signature_warned:
                 self._v1_signature_warned.add(route_name)
-                logger.warning(
-                    "[webhook] Route '%s' uses legacy body-only HMAC (no "
-                    "timestamp), which is vulnerable to replay attacks. Add "
-                    "an 'X-Webhook-Timestamp' header and switch to "
-                    "'X-Webhook-Signature-V2' (HMAC-SHA256 of '<timestamp>.<body>').",
-                    route_name)
+                logger.warning("[webhook] Route '%s' uses legacy body-only HMAC (no timestamp), which is vulnerable "
+                               "to replay attacks. Add an 'X-Webhook-Timestamp' header and switch to "
+                               "'X-Webhook-Signature-V2' (HMAC-SHA256 of '<timestamp>.<body>').", route_name)
             return _hmac_str_equal(generic_sig, _hex_hmac(secret, body))
         logger.debug("[webhook] Secret configured but no signature header found")
         return False
@@ -747,17 +702,15 @@ class WebhookAdapter(BasePlatformAdapter):
 
     def _render_delivery_extra(self, extra: dict, payload: dict) -> dict:
         """Render delivery_extra template values with payload data."""
-        return {
-            key: self._render_prompt(value, payload, "", "") if isinstance(value, str) else value
-            for key, value in extra.items()}
+        return {key: self._render_prompt(value, payload, "", "") if isinstance(value, str) else value
+                for key, value in extra.items()}
 
     # --- Response delivery ---
 
     async def _direct_deliver(self, content: str, delivery: dict) -> SendResult:
         """deliver_only: dispatch *content* to the same delivery helpers agent-mode ``send()`` uses."""
         deliver_type = delivery.get("deliver", "log")
-        if deliver_type == "log":
-            # Startup validation rejects deliver_only + log, but guard defensively.
+        if deliver_type == "log":  # startup validation rejects deliver_only + log; guard defensively
             logger.info("[webhook] direct-deliver log-only: %s", content[:200])
             return SendResult(success=True)
         if deliver_type == "github_comment":
@@ -767,13 +720,11 @@ class WebhookAdapter(BasePlatformAdapter):
     async def _deliver_github_comment(self, content: str, delivery: dict) -> SendResult:
         """Post agent response as a GitHub PR/issue comment via ``gh`` CLI."""
         extra = delivery.get("deliver_extra", {})
-        repo = extra.get("repo", "")
-        pr_number = extra.get("pr_number", "")
+        repo, pr_number = extra.get("repo", ""), extra.get("pr_number", "")
         if not repo or not pr_number:
             logger.error("[webhook] github_comment delivery missing repo or pr_number")
             return SendResult(success=False, error="Missing repo or pr_number")
-        # Input validation (prevent CLI argument injection).
-        try:
+        try:  # input validation (prevent CLI argument injection)
             pr_int = int(pr_number)
             if pr_int <= 0:
                 raise ValueError("non-positive")
@@ -784,11 +735,10 @@ class WebhookAdapter(BasePlatformAdapter):
             logger.error("[webhook] invalid repo format: %r", repo)
             return SendResult(success=False, error="Invalid repo format")
         try:
-            # Off-loop: `gh` does network I/O up to its 30s timeout; inline it froze
-            # every adapter and timer on the gateway event loop.
+            # Off-loop: `gh` does network I/O up to its 30s timeout; inline it froze every adapter and
+            # timer on the gateway event loop.
             result = await asyncio.to_thread(
-                subprocess.run,
-                ["gh", "pr", "comment", str(pr_int), "--repo", repo, "--body", content],
+                subprocess.run, ["gh", "pr", "comment", str(pr_int), "--repo", repo, "--body", content],
                 capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=30)
             if result.returncode == 0:
                 logger.info("[webhook] Posted comment on %s#%s", repo, pr_number)
@@ -803,8 +753,7 @@ class WebhookAdapter(BasePlatformAdapter):
             return SendResult(success=False, error=str(e))
 
     def _find_adapter(self, target_platform: Platform):
-        """Default adapters first; multiplex may park a platform only on a secondary
-        profile (_profile_adapters), so fall back to those."""
+        """Default adapters first; multiplex may park a platform only on a secondary profile (_profile_adapters)."""
         adapter = self.gateway_runner.adapters.get(target_platform)
         if adapter:
             return adapter
@@ -831,7 +780,5 @@ class WebhookAdapter(BasePlatformAdapter):
             if not home:
                 return SendResult(success=False, error=f"No chat_id or home channel for {platform_name}")
             chat_id = home.chat_id
-        # thread_id from deliver_extra so Telegram forum topics work.
-        thread_id = extra.get("message_thread_id") or extra.get("thread_id")
-        metadata = {"thread_id": thread_id} if thread_id else None
-        return await adapter.send(chat_id, content, metadata=metadata)
+        thread_id = extra.get("message_thread_id") or extra.get("thread_id")  # Telegram forum topics
+        return await adapter.send(chat_id, content, metadata={"thread_id": thread_id} if thread_id else None)
