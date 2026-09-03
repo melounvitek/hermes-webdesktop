@@ -15,8 +15,7 @@ MAX_POLICY_TOOLSETS = 128
 MAX_POLICY_ITERATIONS = (1 << 53) - 1
 _IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
 _POLICY_FIELDS = {
-    "version", "target_profile", "enabled_toolsets", "approval_mode", "max_iterations", "policy_digest",
-}
+    "version", "target_profile", "enabled_toolsets", "approval_mode", "max_iterations", "policy_digest"}
 
 
 class RoomExecutionPolicyError(ValueError):
@@ -67,16 +66,14 @@ class RoomExecutionPolicy:
         if (
             isinstance(max_iterations, bool)
             or not isinstance(max_iterations, int)
-            or not 1 <= max_iterations <= MAX_POLICY_ITERATIONS
-        ):
+            or not 1 <= max_iterations <= MAX_POLICY_ITERATIONS):
             raise RoomExecutionPolicyError("max_iterations is invalid")
         unsigned = {
             "version": POLICY_VERSION,
             "target_profile": target_profile,
             "enabled_toolsets": list(toolsets),
             "approval_mode": approval_mode,
-            "max_iterations": max_iterations,
-        }
+            "max_iterations": max_iterations}
         supplied = str(value["policy_digest"] or "").strip().lower()
         if supplied != _policy_digest(unsigned):
             raise RoomExecutionPolicyError("policy_digest does not match the execution policy")
@@ -107,10 +104,8 @@ def execution_policy_mapping(*, target_profile: str, config: Mapping[str, Any] |
         "target_profile": _identifier(target_profile, field="target_profile"),
         "enabled_toolsets": toolsets,
         "approval_mode": (
-            "off" if _YOLO_MODE_FROZEN else _normalize_approval_mode(approvals.get("mode", "manual"))
-        ),
-        "max_iterations": min(resolve_turn_limit(agent.get("max_turns")), MAX_POLICY_ITERATIONS),
-    }
+            "off" if _YOLO_MODE_FROZEN else _normalize_approval_mode(approvals.get("mode", "manual"))),
+        "max_iterations": min(resolve_turn_limit(agent.get("max_turns")), MAX_POLICY_ITERATIONS)}
     value = {**unsigned, "policy_digest": _policy_digest(unsigned)}
     return RoomExecutionPolicy.from_mapping(value).as_mapping()
 
@@ -138,5 +133,4 @@ __all__ = [
     "bind_room_execution_policy",
     "current_room_execution_policy",
     "execution_policy_mapping",
-    "reset_room_execution_policy",
-]
+    "reset_room_execution_policy"]
