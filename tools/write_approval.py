@@ -34,6 +34,7 @@ _SUBSYSTEMS = (MEMORY, SKILLS)
 # Per-subsystem config key. Intentionally a single boolean with no "block all writes"
 # state — to disable a subsystem use its own enable flag (e.g. ``memory.memory_enabled``).
 CONFIG_KEY = "write_approval"
+_TRUTHY_STRINGS = frozenset({"on", "true", "yes", "1", "approve", "enabled"})
 
 
 # --- Config resolution ---
@@ -55,9 +56,7 @@ def _normalize_enabled(value: Any) -> bool:
     covers hand-edited configs (YAML already parses bare on/off/yes/no)."""
     if isinstance(value, bool):
         return value
-    if isinstance(value, str):
-        return value.strip().lower() in {"on", "true", "yes", "1", "approve", "enabled"}
-    return False
+    return isinstance(value, str) and value.strip().lower() in _TRUTHY_STRINGS
 
 
 # --- Pending store (file-backed) ---
@@ -75,22 +74,15 @@ def _read_record(path: Path) -> Dict[str, Any]:
 
 
 def stage_write(subsystem: str, payload: Dict[str, Any], *, summary: str, origin: str) -> Dict[str, Any]:
-    """Persist a pending write and return its record (``id`` + metadata).
-
-    ``payload`` is the exact kwargs to replay the write on approval; ``origin`` is
-    ``foreground`` or ``background_review`` (audit). Best-effort: on disk failure it
-    logs and still returns a record — the write is lost, which is the safe failure
-    for an approval gate (nothing silently committed).
-    """
+    """Persist a pending write and return its record (``id`` + metadata). ``payload`` is the exact
+    kwargs to replay the write on approval; ``origin`` is ``foreground`` or ``background_review``.
+    Best-effort: on disk failure it logs and still returns a record — the write is lost, which is
+    the safe failure for an approval gate (nothing silently committed)."""
     pid = uuid.uuid4().hex[:8]
     record = {
-        "id": pid,
-        "subsystem": subsystem,
-        "action": payload.get("action", ""),
-        "summary": (summary or "").strip(),
-        "origin": origin or "foreground",
-        "created_at": time.time(),
-        "payload": payload,
+        "id": pid, "subsystem": subsystem, "action": payload.get("action", ""),
+        "summary": (summary or "").strip(), "origin": origin or "foreground",
+        "created_at": time.time(), "payload": payload,
     }
     try:
         path = _pending_path(subsystem, pid)
@@ -164,12 +156,9 @@ def current_origin() -> str:
 
 @dataclass(slots=True, kw_only=True)
 class GateDecision:
-    """Result of evaluating the write gate. Exactly one flag is True.
-
-    ``allow`` proceed with the real write; ``blocked`` the user denied an inline prompt
-    (``message`` explains why); ``stage`` the caller must ``stage_write`` the payload
-    (``message`` is the user-facing "staged for approval" note).
-    """
+    """Result of evaluating the write gate; exactly one flag is True. ``allow``: do the real write;
+    ``blocked``: user denied the inline prompt (``message`` says why); ``stage``: caller must
+    ``stage_write`` the payload (``message`` is the user-facing "staged for approval" note)."""
 
     allow: bool = False
     blocked: bool = False
@@ -184,13 +173,10 @@ def _staged(subsystem: str) -> GateDecision:
 
 
 def evaluate_gate(subsystem: str, *, inline_summary: str = "", inline_detail: str = "") -> GateDecision:
-    """Decide what to do with a pending write for ``subsystem``.
-
-    gate off → allow; gate on + skills (any origin) or background → stage; gate on +
-    memory + foreground → inline prompt when an interactive channel exists, else stage.
-    The gate only ever delays a write, never silently refuses it; ``blocked`` is
-    produced only when the user actively denies the inline prompt.
-    """
+    """Decide what to do with a pending write: gate off → allow; gate on + skills (any origin) or
+    background → stage; gate on + memory + foreground → inline prompt when an interactive channel
+    exists, else stage. The gate only ever delays a write, never silently refuses it; ``blocked``
+    is produced only when the user actively denies the inline prompt."""
     if not write_approval_enabled(subsystem):
         return GateDecision(allow=True)
     # Skills are too big to review inline; a background write runs in a daemon thread with no user.
@@ -205,14 +191,11 @@ def evaluate_gate(subsystem: str, *, inline_summary: str = "", inline_detail: st
 
 
 def _prompt_inline_memory_approval(summary: str, detail: str) -> Optional[bool]:
-    """Prompt inline for a memory write: True approved, False denied, None → stage.
-
-    Uses the per-thread CLI approval callback (``tools.terminal_tool.set_approval_callback``)
-    directly rather than ``prompt_dangerous_approval``: that wrapper falls back to
-    ``input()`` (deadlock-prone under prompt_toolkit; silent deny in gateway sessions)
-    and turns callback errors into a deny, whereas here a missing channel or failed
-    prompt must stage instead.
-    """
+    """Prompt inline for a memory write: True approved, False denied, None → stage. Uses the per-thread
+    CLI approval callback (``tools.terminal_tool.set_approval_callback``) directly, not
+    ``prompt_dangerous_approval``: that wrapper falls back to ``input()`` (deadlock-prone under
+    prompt_toolkit; silent deny in gateway sessions) and turns callback errors into a deny, whereas
+    here a missing channel or failed prompt must stage instead."""
     try:
         from tools.terminal_tool import _get_approval_callback
     except Exception:

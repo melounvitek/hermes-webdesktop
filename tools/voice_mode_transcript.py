@@ -68,12 +68,9 @@ def _configured_stop_phrases() -> tuple:
 
 
 def is_voice_stop_phrase(transcript: str, stop_phrases: Optional[tuple] = None) -> bool:
-    """True when *transcript* is EXACTLY a configured stop phrase.
-
-    Deliberately strict: the whole utterance — lowercased, surrounding punctuation
-    stripped — must equal a phrase, so "stop doing that and try again" still reaches
-    the agent. ``voice.stop_phrases: []`` disables.
-    """
+    """True when *transcript* is EXACTLY a configured stop phrase. Deliberately strict: the whole
+    utterance — lowercased, surrounding punctuation stripped — must equal a phrase, so "stop doing
+    that and try again" still reaches the agent. ``voice.stop_phrases: []`` disables."""
     cleaned = transcript.strip().lower().strip(".,!?;: \t\n\"'") if transcript else ""
     if not cleaned:
         return False
@@ -126,11 +123,8 @@ def is_tts_echo(transcript: str, spoken_text: str,
 
 
 def voice_stop_hint() -> str:
-    """One-line 'Say "stop" to end the voice chat.' hint for voice-mode start.
-
-    Uses the first ``voice.stop_phrases`` entry so a custom phrase renders correctly;
-    "" when stop phrases are disabled. Every surface announcing voice-mode start (CLI,
-    TUI, desktop) uses this one owner instead of hardcoding the wording.
-    """
+    """One-line 'Say "stop" to end the voice chat.' hint for voice-mode start, using the first
+    ``voice.stop_phrases`` entry ("" when disabled). Every surface announcing voice-mode start
+    (CLI, TUI, desktop) uses this one owner instead of hardcoding the wording."""
     phrases = _configured_stop_phrases()
     return f'Say "{phrases[0]}" to end the voice chat.' if phrases else ""

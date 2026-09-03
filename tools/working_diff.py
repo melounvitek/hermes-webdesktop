@@ -28,13 +28,10 @@ VALID_MODES = tuple(_MODE_ARGS)
 
 
 def _run(args: List[str], cwd: str, timeout: int = _GIT_TIMEOUT):
-    """Run git, returning (returncode, stdout). Never raises on git failure.
-
-    Hardened against a malicious repo's ``.git/config`` (GHSA-7x36-8jrh-v4pw):
-    ``noninteractive_git_env`` disables fsmonitor/hooks/pager/editor/credential sinks,
-    and ``harden_git_argv`` appends ``--no-ext-diff --no-textconv`` to diff-rendering
-    subcommands so attribute-scoped diff/textconv drivers can't execute either.
-    """
+    """Run git, returning (returncode, stdout). Never raises on git failure. Hardened against a
+    malicious repo's ``.git/config`` (GHSA-7x36-8jrh-v4pw): ``noninteractive_git_env`` disables
+    fsmonitor/hooks/pager/editor/credential sinks and ``harden_git_argv`` appends ``--no-ext-diff
+    --no-textconv`` to diff-rendering subcommands so attribute-scoped drivers can't execute either."""
     proc = subprocess.run(
         ["git", "-c", "core.quotePath=false", *harden_git_argv(args)],
         cwd=cwd, capture_output=True, text=True, timeout=timeout, encoding="utf-8", errors="replace",
@@ -65,12 +62,9 @@ def _untracked_diff(cwd: str, files: List[str]) -> str:
 
 
 def collect_working_diff(cwd: str, mode: str = "working", paths: List[str] | None = None) -> Dict:
-    """Collect a git diff of the working directory.
-
-    Returns ``{"success", "stat", "diff", "untracked", "empty"}`` on success or
-    ``{"success": False, "error": ...}`` when git is unavailable / not a repo. ``paths``
-    restricts the diff to pathspecs (passed verbatim); untracked files are then skipped.
-    """
+    """Collect a git diff of the working directory: ``{"success", "stat", "diff", "untracked", "empty"}``
+    on success or ``{"success": False, "error": ...}`` when git is unavailable / not a repo. ``paths``
+    restricts the diff to pathspecs (passed verbatim); untracked files are then skipped."""
     if mode not in _MODE_ARGS:
         return {"success": False, "error": f"Unknown mode '{mode}'. Use: {', '.join(VALID_MODES)}"}
     if not shutil.which("git"):

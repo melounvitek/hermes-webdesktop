@@ -17,13 +17,11 @@ logger = logging.getLogger("tools.wake_word")
 
 def _ww():
     from tools import wake_word
-
     return wake_word
 
 
 def _ensure_dep(feature: str) -> None:
     from tools import lazy_deps
-
     lazy_deps.ensure(feature, prompt=False)
 
 
@@ -56,12 +54,9 @@ def _sub(cfg: Dict[str, Any], key: str) -> Dict[str, Any]:
 
 
 class _OpenWakeWordEngine(_Engine):
-    """openWakeWord — free, local ONNX/tflite hotword detection.
-
-    Scores one ~80 ms frame at a time; ``sensitivity`` IS the raw 0..1 threshold
-    (higher = stricter). A real utterance holds the score high across frames while a
-    stray phoneme spikes one, so ``confirmation_frames`` consecutive hits are required.
-    """
+    """openWakeWord — free, local ONNX/tflite hotword detection. Scores one ~80 ms frame at a time;
+    ``sensitivity`` IS the raw 0..1 threshold (higher = stricter). A real utterance holds the score
+    high across frames while a stray phoneme spikes one, so ``confirmation_frames`` hits are required."""
 
     frame_length = 1280  # openWakeWord recommends 80 ms frames.
 
@@ -69,7 +64,6 @@ class _OpenWakeWordEngine(_Engine):
         _ensure_dep("wake.openwakeword")
         import openwakeword
         from openwakeword.model import Model
-
         ww = _ww()
         model_ref = str(_sub(cfg, "openwakeword").get("model") or ww._BUNDLED_MODEL_NAME).strip()
         framework = self._usable_framework(ww.resolve_inference_framework(cfg))
@@ -90,13 +84,9 @@ class _OpenWakeWordEngine(_Engine):
 
     @staticmethod
     def _usable_framework(framework: str) -> str:
-        """Refuse openWakeWord's silent tflite→onnx downgrade.
-
-        Without a tflite runtime openWakeWord falls back to onnx, which on macOS ARM64
-        never fires — the listener would arm and stay deaf. Install + bridge the runtime
-        first (the platform gate lives here because dep specs can't carry PEP 508
-        markers); on that Mac raise instead of downgrading.
-        """
+        """Refuse openWakeWord's silent tflite→onnx downgrade: without a tflite runtime it falls back
+        to onnx, which on macOS ARM64 never fires (armed but deaf). Install + bridge the runtime first
+        (gate lives here because dep specs can't carry PEP 508 markers); on that Mac raise instead."""
         ww = _ww()
         if framework != "tflite" or ww.ensure_tflite_runtime():
             return framework
@@ -107,10 +97,8 @@ class _OpenWakeWordEngine(_Engine):
         if ww.ensure_tflite_runtime():
             return framework
         if ww._is_macos_arm64():
-            raise RuntimeError(
-                "The wake word needs the tflite backend on this Mac, but its "
-                "runtime is missing. Install it with: pip install ai-edge-litert"
-            )
+            raise RuntimeError("The wake word needs the tflite backend on this Mac, but its "
+                               "runtime is missing. Install it with: pip install ai-edge-litert")
         logger.warning("wake word: no tflite runtime available — falling back to onnx")
         return "onnx"
 
@@ -149,7 +137,6 @@ _SHERPA_KWS_MODEL_DIR = "sherpa-onnx-kws-zipformer-gigaspeech-3.3M-2024-01-01"
 
 def _sherpa_model_root() -> Path:
     from hermes_constants import get_hermes_home
-
     return get_hermes_home() / "cache" / "wakewords"
 
 
@@ -161,7 +148,6 @@ def _ensure_sherpa_model(root: Optional[Path] = None) -> Path:
         return target
     import tarfile
     import urllib.request
-
     root.mkdir(parents=True, exist_ok=True)
     archive = root / f"{_SHERPA_KWS_MODEL_DIR}.tar.bz2"
     logger.info("wake word: downloading sherpa KWS model (one-time, ~13 MB)")
@@ -175,11 +161,8 @@ def _ensure_sherpa_model(root: Optional[Path] = None) -> Path:
 
 
 class _SherpaKwsEngine(_Engine):
-    """sherpa-onnx open-vocabulary keyword spotting — any typed phrase, zero training.
-
-    ``wake_word.phrase`` is BPE-tokenized at runtime against the model's vocabulary,
-    so here ``phrase`` is DETECTION config, not a cosmetic label.
-    """
+    """sherpa-onnx open-vocabulary keyword spotting — any typed phrase, zero training. ``wake_word.phrase``
+    is BPE-tokenized at runtime against the model's vocabulary: DETECTION config, not a cosmetic label."""
 
     frame_length = 1280  # streaming zipformer accepts any chunk; match capture path.
 
@@ -188,7 +171,6 @@ class _SherpaKwsEngine(_Engine):
         import sherpa_onnx
         import tempfile
         from sherpa_onnx import text2token
-
         ww = _ww()
         model_dir = str(_sub(cfg, "sherpa").get("model_dir") or "").strip()
         d = Path(model_dir) if model_dir else _ensure_sherpa_model()
@@ -230,19 +212,14 @@ class _SherpaKwsEngine(_Engine):
             return str(hits[0])
 
         self._spotter = sherpa_onnx.KeywordSpotter(
-            tokens=str(d / "tokens.txt"),
-            encoder=_model_file("encoder-*[!8].onnx"),
-            decoder=_model_file("decoder-*[!8].onnx"),
-            joiner=_model_file("joiner-*[!8].onnx"),
-            keywords_file=self._keywords_file,
-            keywords_threshold=threshold,
-            num_threads=1,
+            tokens=str(d / "tokens.txt"), encoder=_model_file("encoder-*[!8].onnx"),
+            decoder=_model_file("decoder-*[!8].onnx"), joiner=_model_file("joiner-*[!8].onnx"),
+            keywords_file=self._keywords_file, keywords_threshold=threshold, num_threads=1,
         )
         self._stream = self._spotter.create_stream()
 
     def process(self, frame) -> bool:
         import numpy as np
-
         self._stream.accept_waveform(_ww().SAMPLE_RATE, np.asarray(frame, dtype=np.float32) / 32768.0)
         fired = False
         while self._spotter.is_ready(self._stream):
@@ -276,13 +253,10 @@ class _PorcupineEngine(_Engine):
     def __init__(self, cfg: Dict[str, Any]):
         _ensure_dep("wake.porcupine")
         import pvporcupine
-
         access_key = (os.getenv("PORCUPINE_ACCESS_KEY") or "").strip()
         if not access_key:
-            raise RuntimeError(
-                "Porcupine wake word requires PORCUPINE_ACCESS_KEY "
-                "(get a free key at https://console.picovoice.ai)."
-            )
+            raise RuntimeError("Porcupine wake word requires PORCUPINE_ACCESS_KEY "
+                               "(get a free key at https://console.picovoice.ai).")
         keyword = str(_sub(cfg, "porcupine").get("keyword") or "jarvis").strip()
         # Porcupine's `sensitivities` runs the OPPOSITE way to our shared knob (higher =
         # looser); invert so "higher = stricter" holds for every engine.
