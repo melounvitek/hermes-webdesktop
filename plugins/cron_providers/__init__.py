@@ -71,10 +71,8 @@ def discover_cron_schedulers() -> List[Tuple[str, str, bool]]:
         (
             name,
             _loader.read_plugin_description(child),
-            _loader.probe_availability(lambda c=child: _load_provider_from_dir(c)),
-        )
-        for name, child in _iter_provider_dirs()
-    ]
+            _loader.probe_availability(lambda c=child: _load_provider_from_dir(c)))
+        for name, child in _iter_provider_dirs()]
 
 
 def load_cron_scheduler(name: str) -> Optional["CronScheduler"]:  # noqa: F821
@@ -85,8 +83,7 @@ def load_cron_scheduler(name: str) -> Optional["CronScheduler"]:  # noqa: F821
         return None
     return _loader.load_named(
         name, provider_dir, _load_provider_from_dir,
-        kind="Cron provider", noun="provider", logger=logger,
-    )
+        kind="Cron provider", noun="provider", logger=logger)
 
 
 def _load_provider_from_dir(provider_dir: Path) -> Optional["CronScheduler"]:  # noqa: F821
@@ -100,14 +97,12 @@ def _load_provider_from_dir(provider_dir: Path) -> Optional["CronScheduler"]:  #
         module_name, provider_dir,
         parents=("plugins", "plugins.cron_providers"),
         logger=logger,
-        synthetic_namespace=None if is_bundled else _USER_NAMESPACE,
-    )
+        synthetic_namespace=None if is_bundled else _USER_NAMESPACE)
     if mod is None:
         return None
     return _loader.instance_from_module(
         mod, collector=_ProviderCollector(), collected_attr="provider",
-        base_cls=CronScheduler, name=name, logger=logger,
-    )
+        base_cls=CronScheduler, name=name, logger=logger)
 
 
 class _ProviderCollector(_loader.NoopPluginContext):

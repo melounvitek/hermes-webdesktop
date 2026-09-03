@@ -45,8 +45,7 @@ def iter_plugin_dirs(root: Path) -> List[Path]:
         child for child in sorted(root.iterdir())
         if child.is_dir()
         and not child.name.startswith(("_", "."))
-        and (child / "__init__.py").exists()
-    ]
+        and (child / "__init__.py").exists()]
 
 
 def read_plugin_description(plugin_dir: Path) -> str:
@@ -66,8 +65,7 @@ def read_plugin_description(plugin_dir: Path) -> str:
 def _new_module(name: str, file: Path, search_locations: Optional[List[str]] = None) -> Optional[Any]:
     """spec -> module -> sys.modules[name] (NOT executed); None if no spec."""
     spec = importlib.util.spec_from_file_location(
-        name, str(file), submodule_search_locations=search_locations
-    )
+        name, str(file), submodule_search_locations=search_locations)
     if not spec:
         return None
     mod = importlib.util.module_from_spec(spec)
@@ -98,8 +96,7 @@ def load_plugin_module(
     *,
     parents: Tuple[str, ...],
     logger: logging.Logger,
-    synthetic_namespace: Optional[str] = None,
-) -> Optional[Any]:
+    synthetic_namespace: Optional[str] = None) -> Optional[Any]:
     """Import ``plugin_dir/__init__.py`` as *module_name* (reusing sys.modules when loaded).
 
     Order matters: parent packages first (relative imports need them), then sibling
@@ -167,8 +164,7 @@ def instance_from_module(
     collected_attr: str,
     base_cls: type,
     name: str,
-    logger: logging.Logger,
-) -> Optional[Any]:
+    logger: logging.Logger) -> Optional[Any]:
     """Extract the provider instance: ``register(ctx)`` first, then any ``base_cls`` subclass."""
     if hasattr(mod, "register"):
         try:
@@ -196,8 +192,7 @@ def load_named(
     *,
     kind: str,
     noun: str,
-    logger: logging.Logger,
-) -> Optional[Any]:
+    logger: logging.Logger) -> Optional[Any]:
     """Shared body of ``load_<kind>(name)``: load from *plugin_dir*, warn + None on failure."""
     try:
         instance = load_from_dir(plugin_dir)

@@ -38,9 +38,7 @@ def _get_jwk_client(jwks_url: str) -> Any:
 
             # Explicit Accept + User-Agent: the portal WAF 403s the default urllib fingerprint.
             client = PyJWKClient(
-                jwks_url,
-                headers={"Accept": "application/json", "User-Agent": "HermesAgent/1.0"},
-            )
+                jwks_url, headers={"Accept": "application/json", "User-Agent": "HermesAgent/1.0"})
             _JWK_CLIENTS[jwks_url] = client
         return client
 
@@ -51,8 +49,7 @@ def verify_nas_fire_token(
     expected_audience: str,
     jwks_or_key: Optional[str] = None,
     issuer: Optional[str] = None,
-    leeway_seconds: int = 30,
-) -> Optional[Dict[str, Any]]:
+    leeway_seconds: int = 30) -> Optional[Dict[str, Any]]:
     """Verify a NAS-minted cron-fire JWT; return decoded claims or None (never raises).
 
     Checks asymmetric signature (JWKS URL or inline PEM; symmetric secrets rejected since
@@ -79,8 +76,7 @@ def verify_nas_fire_token(
             algorithms=["RS256", "RS384", "RS512", "ES256", "ES384"],
             audience=expected_audience,
             leeway=leeway_seconds,
-            options={"require": ["exp", "aud"]},
-        )
+            options={"require": ["exp", "aud"]})
         if issuer:
             decode_kwargs["issuer"] = issuer
         claims = jwt.decode(token, signing_key, **decode_kwargs)

@@ -107,9 +107,7 @@ def save_tracked(tracked: List[Dict[str, Any]]) -> None:
 # --- Categories / protected trees -------------------------------------------
 
 ALLOWED_CATEGORIES = {
-    "temp", "test", "research", "download",
-    "chrome-profile", "cron-output", "other",
-}
+    "temp", "test", "research", "download", "chrome-profile", "cron-output", "other"}
 
 # Top-level HERMES_HOME dirs whose empty subdirs are never swept. The last row
 # is user-authored project trees (patches/, projects/, ...) — never sweep inside.
@@ -117,13 +115,10 @@ _EMPTY_DIR_PROTECTED_TOP_LEVEL = frozenset({
     "logs", "memories", "sessions", "cron", "cronjobs",
     "cache", "skills", "plugins", "disk-cleanup", "optional-skills",
     "hermes-agent", "backups", "profiles", ".worktrees",
-    "patches", "projects", "skins", "themes", "contributors",
-})
+    "patches", "projects", "skins", "themes", "contributors"})
 
 _EMPTY_DIR_SWEEP_PRUNE_DIRS = frozenset({
-    ".git", "node_modules", "venv", ".venv",
-    "site-packages", "__pycache__",
-})
+    ".git", "node_modules", "venv", ".venv", "site-packages", "__pycache__"})
 
 # Top-level entries under HERMES_HOME that guess_category() never auto-tracks:
 # state dir, logs, memory, sessions, config/secrets, and user-authored project
@@ -133,8 +128,7 @@ _NEVER_TRACK_TOP_LEVEL = frozenset({
     "skills", "plugins", ".env", "USER.md", "MEMORY.md", "SOUL.md",
     "auth.json", "hermes-agent",
     "patches", "projects", "skins", "themes", "contributors",
-    "profiles", "backups", "optional-skills",
-})
+    "profiles", "backups", "optional-skills"})
 
 # Defense-in-depth for quick(): exact cron control-plane paths never deleted,
 # regardless of stored category (guards stale tracked.json entries).
@@ -155,8 +149,7 @@ def _is_protected_cron_path(p: Path) -> bool:
         for parent in ("cron", "cronjobs"):
             base = hermes_home / parent
             _PROTECTED_CRON_PATHS.update(
-                str(x) for x in (base, base / "output", base / "jobs.json", base / ".tick.lock")
-            )
+                str(x) for x in (base, base / "output", base / "jobs.json", base / ".tick.lock"))
     return str(p.resolve()) in _PROTECTED_CRON_PATHS
 
 
@@ -193,8 +186,7 @@ def track(path_str: str, category: str, silent: bool = False) -> bool:
         "path": str(path),
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "category": category,
-        "size": size,
-    })
+        "size": size})
     save_tracked(tracked)
     _log(f"TRACKED: {path} ({category}, {fmt_size(size)})")
     if not silent:

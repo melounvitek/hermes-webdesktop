@@ -25,10 +25,8 @@ def discover_context_engines() -> List[Tuple[str, str, bool]]:
         (
             child.name,
             _loader.read_plugin_description(child),
-            _loader.probe_availability(lambda c=child: _load_engine_from_dir(c)),
-        )
-        for child in _loader.iter_plugin_dirs(_CONTEXT_ENGINE_PLUGINS_DIR)
-    ]
+            _loader.probe_availability(lambda c=child: _load_engine_from_dir(c)))
+        for child in _loader.iter_plugin_dirs(_CONTEXT_ENGINE_PLUGINS_DIR)]
 
 
 def load_context_engine(name: str) -> Optional["ContextEngine"]:  # noqa: F821
@@ -38,8 +36,7 @@ def load_context_engine(name: str) -> Optional["ContextEngine"]:  # noqa: F821
         logger.debug("Context engine '%s' not found in %s", name, _CONTEXT_ENGINE_PLUGINS_DIR)
         return None
     return _loader.load_named(
-        name, engine_dir, _load_engine_from_dir,
-        kind="Context engine", noun="engine", logger=logger,
+        name, engine_dir, _load_engine_from_dir, kind="Context engine", noun="engine", logger=logger
     )
 
 
@@ -50,14 +47,12 @@ def _load_engine_from_dir(engine_dir: Path) -> Optional["ContextEngine"]:  # noq
     name = engine_dir.name
     mod = _loader.load_plugin_module(
         f"plugins.context_engine.{name}", engine_dir,
-        parents=("plugins", "plugins.context_engine"), logger=logger,
-    )
+        parents=("plugins", "plugins.context_engine"), logger=logger)
     if mod is None:
         return None
     return _loader.instance_from_module(
         mod, collector=_EngineCollector(engine_name=name), collected_attr="engine",
-        base_cls=ContextEngine, name=name, logger=logger,
-    )
+        base_cls=ContextEngine, name=name, logger=logger)
 
 
 class _EngineCollector(_loader.NoopPluginContext):
@@ -77,8 +72,7 @@ class _EngineCollector(_loader.NoopPluginContext):
         if not clean:
             logger.warning(
                 "Context engine '%s' tried to register a command with an empty name.",
-                self._engine_name,
-            )
+                self._engine_name)
             return
 
         conflict = "Context engine '%s' tried to register command '/%s' which %s Skipping."
@@ -100,11 +94,9 @@ class _EngineCollector(_loader.NoopPluginContext):
                 "handler": handler,
                 "description": description or "Context engine command",
                 "plugin": f"context-engine:{self._engine_name}",
-                "args_hint": (args_hint or "").strip(),
-            }
+                "args_hint": (args_hint or "").strip()}
             self._registered_commands.append(clean)
             logger.debug("Context engine '%s' registered command: /%s", self._engine_name, clean)
         except Exception as exc:
             logger.debug(
-                "Context engine '%s' could not register /%s: %s", self._engine_name, clean, exc,
-            )
+                "Context engine '%s' could not register /%s: %s", self._engine_name, clean, exc)

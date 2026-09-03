@@ -33,8 +33,7 @@ class NasCronClient:
         from hermes_cli.auth import resolve_nous_access_token
         return {
             "Authorization": f"Bearer {resolve_nous_access_token()}",
-            "Content-Type": "application/json",
-        }
+            "Content-Type": "application/json"}
 
     def _request(self, method: str, path: str, **kwargs: Any) -> Dict[str, Any]:
         """Issue one request; raise NasCronClientError on transport error or non-2xx."""
@@ -43,14 +42,12 @@ class NasCronClient:
         try:
             resp = requests.request(
                 method, f"{self.portal_url}{path}",
-                headers=self._headers(), timeout=self.timeout_seconds, **kwargs,
-            )
+                headers=self._headers(), timeout=self.timeout_seconds, **kwargs)
         except Exception as e:
             raise NasCronClientError(f"{method} {path} failed: {e}") from e
         if resp.status_code // 100 != 2:
             raise NasCronClientError(
-                f"{method} {path} returned {resp.status_code}: {resp.text[:200]}"
-            )
+                f"{method} {path} returned {resp.status_code}: {resp.text[:200]}")
         try:
             return resp.json() if resp.content else {}
         except Exception:
@@ -67,8 +64,7 @@ class NasCronClient:
             "job_id": job_id,
             "fire_at": fire_at,
             "agent_callback_url": agent_callback_url,
-            "dedup_key": dedup_key,
-        })
+            "dedup_key": dedup_key})
 
     def cancel(self, *, job_id: str) -> Dict[str, Any]:
         """Cancel any armed one-shot for ``job_id``."""

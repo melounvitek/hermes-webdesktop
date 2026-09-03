@@ -100,8 +100,7 @@ class ChronosCronScheduler(CronScheduler):
             job_id=job_id,
             fire_at=fire_at,
             agent_callback_url=str(_cfg("cron", "chronos", "callback_url") or ""),
-            dedup_key=f"{job_id}:{fire_at}",
-        )
+            dedup_key=f"{job_id}:{fire_at}")
         with self._lock:
             self._armed[job_id] = fire_at
 
@@ -129,8 +128,7 @@ class ChronosCronScheduler(CronScheduler):
             observed = {
                 item["job_id"]: item.get("fire_at", "")
                 for item in self._get_client().list_armed()
-                if item.get("job_id")
-            }
+                if item.get("job_id")}
             with self._lock:
                 self._armed.update(observed)
             return observed
@@ -145,8 +143,7 @@ class ChronosCronScheduler(CronScheduler):
         desired: Dict[str, str] = {
             j["id"]: j["next_run_at"]
             for j in load_jobs()
-            if j.get("enabled") and j.get("next_run_at") and j.get("state") != "paused"
-        }
+            if j.get("enabled") and j.get("next_run_at") and j.get("state") != "paused"}
         observed = self._list_armed()
 
         for job_id, fire_at in desired.items():
@@ -167,16 +164,10 @@ class ChronosCronScheduler(CronScheduler):
     # admission, duplicate detection, and cancel-aware drain on the fire webhook.
 
     def fire_claimed(
-        self,
-        claimed_job: dict,
-        *,
-        adapters: Any = None,
-        loop: Any = None,
-        cancel_event: Any = None,
+        self, claimed_job: dict, *, adapters: Any = None, loop: Any = None, cancel_event: Any = None
     ) -> bool:
         ran = super().fire_claimed(
-            claimed_job, adapters=adapters, loop=loop, cancel_event=cancel_event,
-        )
+            claimed_job, adapters=adapters, loop=loop, cancel_event=cancel_event)
         if ran:
             from cron.jobs import get_job
             job_id = claimed_job["id"]
