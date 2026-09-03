@@ -1,12 +1,10 @@
-"""Token-free detection of user *reactions* to the agent.
+"""Token-free (regex) detection of user *reactions* to the agent.
 
-The only reaction today is ``vibe`` — affection/gratitude aimed at the agent
-(``ily``, ``<3``, ``good bot``, a heart emoji). Detection is a curated regex:
-no model call. Single source of truth for the CLI pet, TUI heart and desktop
-hearts via ``AIAgent.reaction_callback``. :func:`detect_reaction` returns a
-*kind* string so new kinds can be added without touching callers. Matches
-affection specifically, not general positive sentiment ("this is great" does
-NOT fire).
+The only kind today is ``vibe`` — affection/gratitude aimed at the agent (``ily``, ``<3``,
+``good bot``, a heart emoji), NOT general positive sentiment ("this is great" does not fire).
+Single source of truth for the CLI pet, TUI heart and desktop hearts via
+``AIAgent.reaction_callback``; :func:`detect_reaction` returns a *kind* string so new kinds
+can be added without touching callers.
 """
 
 from __future__ import annotations

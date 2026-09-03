@@ -1,11 +1,8 @@
 """Thinking-timeout detection and user-facing guidance for reasoning models.
 
-When a known reasoning model hits a transport-layer error before the first
-content token, the upstream proxy has almost certainly idle-killed a long
-thinking stream — not a context overflow or configuration error. The generic
-stream-drop guidance in conversation_loop ("use execute_code for large files")
-is wrong for that case, so detection and message live here as standalone,
-unit-testable helpers.
+A known reasoning model hitting a transport-layer error before the first content token was
+almost certainly idle-killed mid-think by the upstream proxy — not a context overflow — so
+the generic stream-drop guidance in conversation_loop is wrong for that case.
 """
 
 from __future__ import annotations
@@ -13,29 +10,21 @@ from __future__ import annotations
 from typing import Optional
 
 
-# Transport-layer failure signatures on the response stream — the classifier's
-# server-disconnect set plus the OS-level ``broken pipe`` / ``errno 32`` the
-# upstream kill surfaces through the OpenAI SDK wrapper.
+# Transport-layer failure signatures: the classifier's server-disconnect set plus the OS-level
+# ``broken pipe`` / ``errno 32`` the upstream kill surfaces through the OpenAI SDK wrapper.
 _THINKING_TIMEOUT_SUBSTRINGS: tuple[str, ...] = (
-    "broken pipe",
-    "errno 32",
-    "remote protocol",
-    "connection reset",
-    "connection lost",
-    "peer closed",
-    "server disconnected",
+    "broken pipe", "errno 32", "remote protocol", "connection reset", "connection lost",
+    "peer closed", "server disconnected",
 )
 
 
 def is_thinking_timeout(classified: object, model: str, error_msg: str) -> bool:
     """True when a reasoning model's thinking phase hit a transport kill.
 
-    All must hold: ``classified.reason`` is the ``timeout`` FailoverReason
-    (duck-typed via ``.value`` to avoid importing error_classifier), ``model``
-    is in the reasoning allowlist (``reasoning_timeouts``), and ``error_msg``
-    carries a transport-kill substring. The caller gates on the error having no
-    HTTP ``status_code`` before calling. Non-reasoning models and non-transport
-    errors (billing / rate_limit / auth / context_overflow) return False.
+    All must hold: ``classified.reason`` is the ``timeout`` FailoverReason (duck-typed via
+    ``.value`` to avoid importing error_classifier), ``model`` is in the reasoning allowlist,
+    and ``error_msg`` carries a transport-kill substring. The caller gates on the error having
+    no HTTP ``status_code``.
     """
     from agent.reasoning_timeouts import get_reasoning_stale_timeout_floor
 
@@ -51,12 +40,8 @@ def is_thinking_timeout(classified: object, model: str, error_msg: str) -> bool:
 def build_thinking_timeout_guidance(
     provider: str, model: str, model_label: Optional[str] = None,
 ) -> str:
-    """User-facing guidance appended to the final response.
-
-    ``model`` is used verbatim in the config snippet so it is copy-pasteable
-    (bare slug for direct providers, ``vendor/slug`` through aggregators);
-    ``model_label`` is the optional prose name, defaulting to the slug.
-    """
+    """User-facing guidance appended to the final response. ``model`` is used verbatim in
+    the config snippet so it is copy-pasteable; ``model_label`` is the optional prose name."""
     label = model_label or model
     return (
         "\n\nThe model's thinking phase exceeded the upstream proxy's "
