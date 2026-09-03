@@ -34,13 +34,12 @@ logger = logging.getLogger(__name__)
 # snapshots (see ``create_quick_snapshot``); defined here because the exclusion set needs it.
 _QUICK_SNAPSHOTS_DIR = "state-snapshots"
 
-# Directory names to skip (matched against each path component). ``hermes-agent`` is
-# special-cased to the root level in ``_should_exclude`` so skill dirs like
-# ``skills/autonomous-ai-agents/hermes-agent/`` survive. The dependency/cache entries matter:
-# one plugin venv or pip/uv cache under HERMES_HOME walked file-by-file balloons a backup to
-# hundreds of thousands of entries ("backup stuck for days"). They mostly mirror
-# ``agent.skill_utils.EXCLUDED_SKILL_DIRS``; ``.cache`` is backup-only. ``.archive`` is
-# deliberately NOT excluded: the curator's ``skills/.archive/`` holds restorable user skills.
+# Directory names to skip (matched against each path component). ``hermes-agent`` only matches at
+# the root (``_should_exclude``) so skill dirs like ``skills/.../hermes-agent/`` survive. The
+# dependency/cache entries matter: one plugin venv or pip/uv cache under HERMES_HOME walked
+# file-by-file balloons a backup to hundreds of thousands of entries ("backup stuck for days").
+# Mostly mirrors ``agent.skill_utils.EXCLUDED_SKILL_DIRS``; ``.cache`` is backup-only. ``.archive``
+# is deliberately NOT excluded: the curator's ``skills/.archive/`` holds restorable user skills.
 _EXCLUDED_DIRS = {
     "hermes-agent",     # the codebase repo — re-clone instead
     "__pycache__",      # bytecode caches — regenerated on import
@@ -49,9 +48,8 @@ _EXCLUDED_DIRS = {
     "backups",          # prior auto-backups — don't nest backups exponentially
     _QUICK_SNAPSHOTS_DIR,  # each holds a full state.db copy — same reason as ``backups``
     "checkpoints",      # session-hash-keyed trajectory caches — regenerated, don't port
-    # Live CDP browser profiles: Chromium holds their SQLite DBs with exclusive locks while
-    # running and sqlite3.backup() retries SQLITE_BUSY forever, hanging the backup mid-archive.
-    # Regenerable (cache + re-login) and unsafe to snapshot live.
+    # Live CDP browser profiles: Chromium holds their SQLite DBs exclusively locked while running
+    # and sqlite3.backup() retries SQLITE_BUSY forever, hanging the backup. Regenerable anyway.
     "browser-profiles",
     # Real-profile browsing snapshot (browser.use_real_profile): copies of the user's Cookies /
     # Login Data — a credential store that must NOT enter an archive. Regenerated on next launch.
@@ -62,10 +60,9 @@ _EXCLUDED_DIRS = {
     ".cache", ".tox", ".nox", ".pytest_cache", ".mypy_cache", ".ruff_cache",
 }
 
-# Hermes-managed runtime downloads (GGUF models, llama.cpp runtimes, managed Node): all
-# re-downloaded on demand and routinely tens to hundreds of GB of incompressible weights.
-# Matched ONLY at the root of HERMES_HOME and at ``profiles/<name>/`` — a deeper directory
-# sharing one of these names (a skill's ``models/``) is user data and stays in the backup.
+# Hermes-managed runtime downloads (GGUF models, llama.cpp runtimes, managed Node): re-downloaded
+# on demand and routinely tens to hundreds of GB. Matched ONLY at the root of HERMES_HOME and at
+# ``profiles/<name>/`` — a deeper dir of the same name (a skill's ``models/``) is user data.
 _EXCLUDED_ROOT_DIRS = {"models", "runtimes", "node"}
 
 
@@ -90,21 +87,20 @@ _EXCLUDED_NAMES = {".backup.lock", "gateway.pid", "cron.pid"}
 # a plain ``.bak`` suffix rule would drop user files.
 _EXCLUDED_PREFIXES = ("state.db.pre-update-emergency-",)
 
-# Files ``hermes import`` must never overwrite, matched by basename so root and named profiles
-# (``profiles/<name>/gateway_state.json``) are both covered. They hold gateway/process runtime
-# state namespaced to the source machine: ``gateway_state.json`` drives the container-boot
-# reconciler (a stale/foreign value leaves the gateway stuck "starting" and disconnected from
-# the Nous portal); the PID/lock/registry files reference the SOURCE process namespace. Mirrors
-# ``container_boot._STALE_RUNTIME_FILES``. Older backups predate the backup-side exclusions,
-# so import filters too rather than trusting the archive.
+# Files ``hermes import`` must never overwrite, matched by basename so root and named profiles are
+# both covered. They hold runtime state namespaced to the SOURCE machine: ``gateway_state.json``
+# drives the container-boot reconciler (a foreign value leaves the gateway stuck "starting" and
+# disconnected from the Nous portal); PID/lock/registry files reference source PIDs. Mirrors
+# ``container_boot._STALE_RUNTIME_FILES``; import filters too because older backups predate the
+# backup-side exclusions.
 _IMPORT_SKIP_NAMES = {"gateway_state.json", "gateway.pid", "cron.pid", "gateway.lock", "processes.json"}
 
 # zipfile.open() drops Unix mode bits on extract; restore tightens these to 0600.
 _SECRET_FILE_NAMES = {".env", "auth.json", "state.db"}
 
-# Reserved archive subtree for memory-provider state OUTSIDE HERMES_HOME (e.g. ~/.honcho),
-# declared via MemoryProvider.backup_paths(). Stored relative to the user's home and restored
-# to the same home-relative location; anything not under home is skipped.
+# Reserved archive subtree for memory-provider state OUTSIDE HERMES_HOME (e.g. ~/.honcho, via
+# MemoryProvider.backup_paths()), stored and restored relative to the user's home; paths not
+# under home are skipped.
 _EXTERNAL_PREFIX = "_external/"
 
 
@@ -182,11 +178,8 @@ def _is_within(path: Path, root: Path) -> bool:
 
 
 def _collect_memory_provider_external_paths() -> List[Path]:
-    """Existing absolute paths the active memory provider declares via ``backup_paths()``.
-
-    ``[]`` when no external provider is active or it can't be loaded: backup must never fail
-    because of a flaky plugin.
-    """
+    """Existing paths the active memory provider declares via ``backup_paths()``; ``[]`` on any
+    provider failure (backup must never fail because of a flaky plugin)."""
     try:
         from plugins.memory import _get_active_memory_provider, load_memory_provider
         active = _get_active_memory_provider()
@@ -247,10 +240,9 @@ def _should_exclude(rel_path: Path) -> bool:
 def _iter_backup_files(hermes_root: Path, out_path: Path, skipped_dirs: Optional[set] = None):
     """Yield ``(abs_path, rel_path)`` for every file a full backup should hold.
 
-    The one owner of the backup walk policy — directory pruning (so os.walk never descends a
-    multi-GB excluded tree), the root-only ``hermes-agent`` carve-out, profile-home-root runtime
-    trees, and the per-file rules — shared by ``hermes backup`` and the automatic pre-update /
-    pre-migration path so the two can never drift.
+    The one owner of the walk policy (directory pruning so os.walk never descends a multi-GB
+    excluded tree, the root-only ``hermes-agent`` carve-out, root runtime trees, per-file rules),
+    shared by ``hermes backup`` and the pre-update / pre-migration path so they can never drift.
     """
     for dirpath, dirnames, filenames in os.walk(hermes_root, followlinks=False):
         rel_dir = Path(dirpath).relative_to(hermes_root)
@@ -298,8 +290,7 @@ def _query_ro_sqlite(path: Path, fn):
 def _safe_copy_db(src: Path, dst: Path, *, timeout_seconds: float = 10.0) -> bool:
     """Copy a SQLite database with the backup() API (WAL-safe consistent snapshot).
 
-    Fails closed when no consistent snapshot can be made: copying only the live main file can
-    omit committed WAL data.
+    Fails closed when no consistent snapshot can be made: copying only the main file loses WAL data.
     """
     conn = backup_conn = None
     try:
@@ -336,8 +327,7 @@ def _safe_copy_db(src: Path, dst: Path, *, timeout_seconds: float = 10.0) -> boo
 def is_zeroed_sqlite_file(path: Path, *, probe_bytes: int = 100, force: bool = False) -> bool:
     """True when *path* looks like the #68474 zeroed-state.db signature.
 
-    Only regular files qualify: probing a FIFO/device/socket could block indefinitely, so refuse
-    before any I/O.
+    Only regular files qualify: probing a FIFO/device/socket could block indefinitely.
     """
     try:
         if not path.is_file():
@@ -357,20 +347,16 @@ def is_zeroed_sqlite_file(path: Path, *, probe_bytes: int = 100, force: bool = F
 
 _SQLITE_HEADER = b"SQLite format 3\0"
 
-# Above this size ``PRAGMA integrity_check`` (which walks every b-tree page — many minutes of
-# pegged CPU on a 30 GB state.db, reading as a hung ``hermes update``) is replaced by the O(1)
-# header + schema probe. Tens-of-GB session databases are normal for heavy users.
+# Above this size ``PRAGMA integrity_check`` (walks every b-tree page — minutes of pegged CPU on a
+# 30 GB state.db, reading as a hung ``hermes update``) is replaced by the O(1) header+schema probe.
 DEFAULT_INTEGRITY_CHECK_MAX_BYTES = 2 << 30  # 2 GiB
 
 
 def verify_sqlite_integrity(
     path: Path, *, check_header: bool = True, run_pragma: bool = True,
     max_bytes: int = DEFAULT_INTEGRITY_CHECK_MAX_BYTES) -> dict:
-    """Verify that a SQLite database at *path* is intact.
-
-    Checks, in order: file exists with a minimum size; SQLite header magic; then for files at or
-    under ``max_bytes`` a read-only ``PRAGMA integrity_check``, else a cheap structural probe.
-    """
+    """Verify a SQLite database: existence + minimum size, header magic, then a read-only
+    ``PRAGMA integrity_check`` (or a cheap structural probe above ``max_bytes``)."""
     def _done(message: str, valid: bool = False, size: Optional[int] = None) -> dict:
         return {"valid": valid, "message": message, "size": size}
     try:
@@ -383,9 +369,8 @@ def verify_sqlite_integrity(
     if size < 100:  # SQLite minimum viable size (header + 1 page)
         return _done(f"too small ({size} bytes) to be a valid SQLite database", size=size)
     if check_header:
-        # Byte-level read is refused when a live connection exists (close() would cancel this
-        # process's POSIX locks — see hermes_cli.sqlite_safe_read); verification targets
-        # snapshots and backup artifacts, which are offline by construction.
+        # Refused when a live connection exists (close() would cancel this process's POSIX locks
+        # — see sqlite_safe_read); verification targets offline snapshots/backup artifacts anyway.
         from hermes_cli.sqlite_safe_read import read_header_bytes_preopen
         head = read_header_bytes_preopen(path, length=len(_SQLITE_HEADER))
         if head is None:
@@ -393,9 +378,8 @@ def verify_sqlite_integrity(
         if head != _SQLITE_HEADER:
             return _done(f"missing SQLite header magic (got {head[:16].hex()!r})", size=size)
     if max_bytes > 0 and size > max_bytes:
-        # O(1) structural probe: the header check catches the zeroed signature; opening
-        # read-only plus reading sqlite_master + page geometry catches malformed-schema and
-        # truncated-header-page classes without walking the data.
+        # O(1) probe: the header check caught the zeroed signature; reading sqlite_master + page
+        # geometry catches malformed-schema and truncated-header-page classes without a data walk.
         _, exc = _query_ro_sqlite(path, lambda c: (
             c.execute("PRAGMA schema_version").fetchone(),
             c.execute("SELECT count(*) FROM sqlite_master").fetchone()))
@@ -407,7 +391,8 @@ def verify_sqlite_integrity(
             "skipped PRAGMA integrity_check (header + schema probe passed)",
             valid=True, size=size)
     if run_pragma:
-        rows, exc = _query_ro_sqlite(path, lambda c: [str(r[0]) for r in c.execute("PRAGMA integrity_check")])
+        rows, exc = _query_ro_sqlite(
+            path, lambda c: [str(r[0]) for r in c.execute("PRAGMA integrity_check")])
         if exc is not None:
             kind = "cannot open database" if isinstance(exc, sqlite3.DatabaseError) else "integrity check error"
             return _done(f"{kind}: {exc}", size=size)
@@ -420,8 +405,8 @@ def verify_sqlite_integrity(
 def _foreign_db_holder_pids(db_path: Path) -> Optional[List[int]]:
     """PIDs of OTHER processes holding *db_path* or its WAL/SHM open (Linux ``/proc`` scan).
 
-    Preserves the kernel's ``(deleted)`` suffix so an already-unlinked sidecar generation — the
-    #90950 split-brain fingerprint — still counts as held. None off-Linux or when /proc fails.
+    An already-unlinked ``(deleted)`` sidecar — the #90950 split-brain fingerprint — still
+    counts as held. None off-Linux or when /proc fails.
     """
     if not sys.platform.startswith("linux"):
         return None
@@ -453,11 +438,10 @@ def _foreign_db_holder_pids(db_path: Path) -> Optional[List[int]]:
 
 
 def _safe_restore_db(src: Path, dst: Path) -> bool:
-    """Restore snapshot *src* into live *dst* through the backup() API.
+    """Restore snapshot *src* into live *dst* through the backup() API; unlink+move fallback.
 
-    Writing pages into the live file preserves its inode and WAL state, so any other process
-    still holding the DB open (gateway, dashboard, another CLI) sees the restored data instead of
-    serving stale pages from a replaced inode. Falls back to unlink+move on failure.
+    Writing pages into the live file preserves its inode and WAL state, so other holders (gateway,
+    dashboard, another CLI) see the restored data instead of stale pages from a replaced inode.
     """
     try:
         dst_conn = sqlite3.connect(str(dst))
@@ -482,10 +466,9 @@ def _unlink_move_restore_db(src: Path, dst: Path) -> bool:
     """Fallback restore: unlink+move. Only safe when no process holds the DB open.
 
     Replacing the inode under a live holder is the #90950 corruption class (the holder keeps
-    writing through a deleted-inode fd and loses its WAL index), so fail closed rather than
-    corrupt. The foreign-pid scan excludes THIS process, but an in-process SessionDB is exactly
-    as much of a live holder, so ``offline_file_access`` fails CLOSED when any tracked
-    connection to *dst* is live and holds the connection-lifecycle lock across the whole swap.
+    writing through a deleted-inode fd and loses its WAL index), so fail closed. The foreign-pid
+    scan excludes THIS process, so ``offline_file_access`` also fails CLOSED on any live
+    in-process connection to *dst* and holds the connection-lifecycle lock across the swap.
     """
     from hermes_cli.sqlite_safe_read import LiveConnectionError, offline_file_access
     try:
@@ -500,10 +483,9 @@ def _unlink_move_restore_db(src: Path, dst: Path) -> bool:
             tmp = dst.parent / f".{dst.name}.snap_restore"
             shutil.copy2(src, tmp)
             dst.unlink(missing_ok=True)
-            # The snapshot is a checkpointed backup() image that owns no WAL, so any -wal/-shm
-            # left here belongs to the database just unlinked (an ungracefully killed gateway
-            # leaves them behind — exactly when a restore runs). SQLite would replay that foreign
-            # WAL over the restored file and come up "malformed" or resurrect post-snapshot rows.
+            # The snapshot owns no WAL, so any -wal/-shm here belongs to the DB just unlinked (a
+            # killed gateway leaves them — exactly when a restore runs); SQLite would replay that
+            # foreign WAL over the restored file: "malformed" or resurrected post-snapshot rows.
             for _sidecar_suffix in ("-wal", "-shm", "-journal"):
                 dst.with_name(dst.name + _sidecar_suffix).unlink(missing_ok=True)
             shutil.move(str(tmp), str(dst))
@@ -522,8 +504,7 @@ def _unlink_move_restore_db(src: Path, dst: Path) -> bool:
 def _zip_sqlite_snapshot(zf: zipfile.ZipFile, abs_path: Path, rel_path: Path, out_path: Path) -> Optional[int]:
     """Add a WAL-safe snapshot of *abs_path* to *zf*; return its byte size, or None on failure.
 
-    Staged beside the output zip (same filesystem): the system /tmp may be a small tmpfs that
-    cannot hold large databases, causing silent backup incompleteness.
+    Staged beside the output zip: /tmp may be a small tmpfs that cannot hold large databases.
     """
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False, dir=str(out_path.parent)) as tmp:
         tmp_db = Path(tmp.name)
@@ -541,9 +522,9 @@ def _write_zip_entries(
     *, on_db_failure, on_error, on_progress, track_bytes: bool) -> int:
     """Add every ``(abs_path, rel_path)`` to *zf*, WAL-safe for ``*.db``; return bytes archived.
 
-    ``on_db_failure(rel_path)`` runs when a SQLite snapshot fails (it may raise to abort);
-    ``on_error(rel_path, exc)`` records a per-file read failure; ``on_progress(index)`` fires
-    every 500 files. ``track_bytes`` stats each archived plain file for the size total.
+    ``on_db_failure(rel_path)`` runs when a SQLite snapshot fails (may raise to abort);
+    ``on_error(rel_path, exc)`` records a read failure; ``on_progress(i)`` fires every 500 files;
+    ``track_bytes`` stats plain files for the size total.
     """
     total_bytes = 0
     for i, (abs_path, rel_path) in enumerate(files_to_add, 1):
@@ -578,10 +559,8 @@ def _print_capped(header: str, lines: List[str], indent: str) -> None:
 # --- Backup ---
 
 def _resolve_backup_output_path(output: Optional[str]) -> Path:
-    """Turn ``--output`` (file, directory, or None) into a ``.zip`` path whose parent exists.
-
-    An unwritable output path gives a clean one-line error, not a raw traceback.
-    """
+    """Turn ``--output`` (file, directory, or None) into a ``.zip`` path whose parent exists;
+    an unwritable path exits with a one-line error, not a traceback."""
     out_path = None
     default_name = f"hermes-backup-{datetime.now().strftime('%Y-%m-%d-%H%M%S')}.zip"
     try:
@@ -601,11 +580,8 @@ def _resolve_backup_output_path(output: Optional[str]) -> Path:
 
 
 def _collect_external_entries() -> tuple[list[tuple[Path, str]], list[str]]:
-    """``([(abs_path, arcname)], [skipped])`` for the active memory provider's external state.
-
-    Staged under the reserved ``_external/`` arc prefix, encoded relative to the user's home.
-    Only paths under home are captured (security + portability); others are returned as skipped.
-    """
+    """``([(abs_path, arcname)], [skipped])`` for the memory provider's external state, arc-named
+    ``_external/<home-relative>``; paths outside home are skipped (security + portability)."""
     home_dir = Path.home().resolve()
     external_to_add: list[tuple[Path, str]] = []
     skipped_external: list[str] = []
@@ -729,9 +705,9 @@ def _detect_prefix(zf: zipfile.ZipFile) -> str:
 def _default_new_file_mode() -> Optional[int]:
     """The mode ``open(path, "wb")`` gives a file it has to create.
 
-    ``tempfile.mkstemp`` always creates at 0600, so staging an import through a temp file would
-    tighten every *newly created* file to owner-only — the hazard ``utils._restore_file_mode``
-    documents for Docker/NAS volume mounts that rely on broader permissions.
+    ``mkstemp`` always creates at 0600, so staging an import through a temp file would tighten
+    every *newly created* file to owner-only — the Docker/NAS volume-mount hazard
+    ``utils._restore_file_mode`` documents.
     """
     try:
         current = os.umask(0o077)
@@ -747,31 +723,27 @@ def _extract_member_atomically(
 
     ``open(target, "wb")`` would truncate the user's file before any replacement bytes exist.
     ``atomic_replace`` (not bare ``os.replace``) resolves a symlinked target first, so a
-    dotfiles-linked ``config.yaml`` keeps the link (GitHub #16743), and falls back to
-    copy/fsync/unlink on ``EXDEV``/``EBUSY`` for cross-device and bind-mount installs.
+    dotfiles-linked ``config.yaml`` keeps the link (#16743), and falls back to copy/fsync/unlink
+    on ``EXDEV``/``EBUSY`` for cross-device and bind-mount installs.
     """
-    # ``_preserve_file_mode`` is None when the target does not exist, in which case the
-    # umask-derived create-mode applies (same shape as ``atomic_yaml_write``'s ``create_mode``).
+    # Mode is None when the target does not exist: the umask-derived create-mode applies.
     mode = _preserve_file_mode(target)
     owner = _preserve_file_owner(target)
     if mode is None:
         mode = new_file_mode
     else:
-        # Deliberately NOT a faithful copy: setuid/setgid are dropped. The bytes replacing this
-        # file come from the archive, so carrying elevated bits across would hand whoever produced
-        # the zip the identity an existing setuid file runs as — and the ``_external/`` branch
-        # publishes members anywhere under ``$HOME``. The sticky bit is inert on a regular file.
+        # Deliberately NOT a faithful copy: setuid/setgid are dropped. The bytes come from the
+        # archive, so carrying elevated bits would hand the zip's author the identity an existing
+        # setuid file runs as — and ``_external/`` publishes members anywhere under ``$HOME``.
         mode &= ~(stat.S_ISUID | stat.S_ISGID)
-
     # Truncate the stem: mkstemp adds ~16 chars and a member near NAME_MAX would otherwise fail.
     fd, tmp_name = tempfile.mkstemp(dir=str(target.parent), prefix=f".{target.name[:80]}.", suffix=".partial")
     try:
         with os.fdopen(fd, "wb") as dst:
             if mode is not None:
-                # Apply the mode BEFORE the replace so the target never transits through
-                # mkstemp's 0600 and the EXDEV/EBUSY ``copystat`` fallback copies the intended
-                # bits. fchmod is Unix-only; Windows takes the path-based chmod.
-                if hasattr(os, "fchmod"):
+                # Apply the mode BEFORE the replace so the target never transits through mkstemp's
+                # 0600 and the EXDEV/EBUSY ``copystat`` fallback copies the intended bits.
+                if hasattr(os, "fchmod"):  # Unix-only; Windows takes the path-based chmod
                     os.fchmod(dst.fileno(), mode)
                 else:
                     os.chmod(tmp_name, mode)
@@ -781,7 +753,7 @@ def _extract_member_atomically(
             dst.flush()
             os.fsync(dst.fileno())
         real_path = Path(atomic_replace(tmp_name, target))
-        # Owner first, mode second (as ``atomic_yaml_write``): chown drops setuid/setgid, and
+        # Owner first, mode second (as ``atomic_yaml_write``): chown drops setuid/setgid and
         # ``mode`` no longer carries them, so neither step can re-elevate the restored file.
         _restore_file_owner(real_path, owner)
         _restore_file_mode(real_path, mode)
@@ -802,10 +774,10 @@ def _confirm_import_overwrite(hermes_root: Path) -> bool:
     except (EOFError, KeyboardInterrupt):
         print("\nAborted.")
         sys.exit(1)
-    if answer not in {"y", "yes"}:
-        print("Aborted.")
-        return False
-    return True
+    if answer in {"y", "yes"}:
+        return True
+    print("Aborted.")
+    return False
 
 
 def _import_members(
@@ -816,14 +788,10 @@ def _import_members(
     skipped_runtime: list[str] = []
     restored = restored_external = 0
     home_dir = Path.home().resolve()
-    # Resolved once: every member is published via a temp file, and mkstemp would otherwise
-    # create newly restored files as 0600.
-    new_file_mode = _default_new_file_mode()
-
+    new_file_mode = _default_new_file_mode()  # once: every member is published via mkstemp (0600)
     for member in members:
-        # ``_external/`` members restore to their original home-relative location (e.g.
-        # ~/.honcho/config.json), NOT under HERMES_HOME. Provider configs commonly hold
-        # credentials, so they are tightened to 0600 best-effort.
+        # ``_external/`` members restore to their home-relative location (~/.honcho/config.json),
+        # NOT under HERMES_HOME; provider configs commonly hold credentials, so tighten to 0600.
         external = member.startswith(_EXTERNAL_PREFIX)
         if external:
             rel = member[len(_EXTERNAL_PREFIX):]
@@ -832,9 +800,7 @@ def _import_members(
             tighten = target.suffix in {".json", ".env", ".conf"} or target.name in _SECRET_FILE_NAMES
         else:
             rel = member[len(prefix):] if prefix and member.startswith(prefix) else member
-            # Never overwrite volatile runtime state namespaced to the source machine — see
-            # ``_IMPORT_SKIP_NAMES``. Basename match covers root and named profiles.
-            if rel and Path(rel).name in _IMPORT_SKIP_NAMES:
+            if rel and Path(rel).name in _IMPORT_SKIP_NAMES:  # see ``_IMPORT_SKIP_NAMES``
                 skipped_runtime.append(rel)
                 continue
             target = hermes_root / rel
@@ -854,7 +820,7 @@ def _import_members(
                     try:
                         os.chmod(target, 0o600)
                     except OSError:
-                        if not external:  # external provider configs are tightened best-effort only
+                        if not external:  # external configs are tightened best-effort only
                             raise
                 restored += 1
                 restored_external += external
@@ -876,9 +842,8 @@ def run_import(args) -> None:
     if not zipfile.is_zipfile(zip_path):
         print(f"Error: Not a valid zip file: {zip_path}")
         sys.exit(1)
-    # The restore target must be the home the command operates under — the same path printed as
-    # "Target:". ``get_default_hermes_root()`` would map a profile home back to <root> and
-    # silently retarget the restore at the live root while the profile directory stays empty.
+    # The restore target is the home the command operates under (the printed "Target:");
+    # ``get_default_hermes_root()`` would silently retarget a profile restore at the live root.
     hermes_root = get_hermes_home()
     with zipfile.ZipFile(zip_path, "r") as zf:
         ok, reason = _validate_backup_zip(zf)
@@ -907,7 +872,8 @@ def run_import(args) -> None:
             _print_capped(f"\n  Warnings ({len(errors)} files skipped):", errors, "  ")
         if skipped_runtime:
             _print_capped(f"\n  Preserved {len(skipped_runtime)} runtime state "
-                          f"file(s) (kept this machine's, not the backup's):", sorted(skipped_runtime), "    ")
+                          f"file(s) (kept this machine's, not the backup's):",
+                          sorted(skipped_runtime), "    ")
         restored_profiles = _restore_profile_wrappers(hermes_root)
         print()
         if not (hermes_root / "hermes-agent").is_dir():
@@ -931,9 +897,8 @@ def _restore_profile_wrappers(hermes_root: Path) -> List[str]:
         from hermes_cli.profiles import (
             create_wrapper_script, check_alias_collision, _is_wrapper_dir_in_path, _get_wrapper_dir)
         for entry in sorted(profiles_dir.iterdir()):
-            # Only create wrappers for directories with config
             if not entry.is_dir() or not any((entry / m).exists() for m in ("config.yaml", ".env")):
-                continue
+                continue  # only profiles with config get wrappers
             profile_name = entry.name
             collision = check_alias_collision(profile_name)
             if collision:
@@ -951,8 +916,7 @@ def _restore_profile_wrappers(hermes_root: Path) -> List[str]:
                 print(f"\n  Note: {_get_wrapper_dir()} is not in your PATH.\n"
                       "  Add to your shell config (~/.bashrc or ~/.zshrc):\n"
                       '    export PATH="$HOME/.local/bin:$PATH"')
-    except ImportError:
-        # hermes_cli.profiles might not be available (fresh install)
+    except ImportError:  # hermes_cli.profiles unavailable (fresh install)
         if any(profiles_dir.iterdir()):
             print("\n  Profiles detected but aliases could not be created.\n"
                   "  Run: hermes profile list  (after installing hermes)")
@@ -962,12 +926,10 @@ def _restore_profile_wrappers(hermes_root: Path) -> List[str]:
 def _revive_gateway_after_import(hermes_root: Path) -> None:
     """Install/start the gateway service after a restore, best-effort and prompt-free.
 
-    Bot tokens and cron jobs in the backup are inert without a gateway; a platform-less gateway
-    is a supported mode, so this is safe for any backup. Failures print a manual fallback, never
-    fail the import. A restore into a sandbox or profile home must not silently install a second
-    gateway on the default service name (it would shadow the machine's primary install), so the
-    service is only revived when the restore landed in the default home or no other install
-    exists.
+    Bot tokens and cron jobs are inert without a gateway (a platform-less gateway is supported, so
+    this is safe for any backup); failures print a manual fallback, never fail the import. Only
+    revived when the restore landed in the default home or no other install exists: a sandbox or
+    profile restore must not install a second gateway on the default service name.
     """
     native_default = _get_platform_default_hermes_home()
     if hermes_root != native_default and any(
@@ -989,9 +951,8 @@ def _revive_gateway_after_import(hermes_root: Path) -> None:
 
 # Critical state files (relative to HERMES_HOME) for quick snapshots; everything else is
 # regeneratable or managed separately (skills, repo, sessions/). Entries may be files OR
-# directories (captured recursively); missing entries are silently skipped. Pairing data lives
-# in platform JSON blobs outside state.db, so it is listed explicitly — ``hermes update``
-# snapshots this set before pulling so approved-user lists are recoverable (#15733).
+# directories (recursive); missing entries are skipped. Pairing data lives in platform JSON blobs
+# outside state.db, so it is listed explicitly — ``hermes update`` snapshots this set (#15733).
 _QUICK_STATE_FILES = (
     "state.db",
     "config.yaml",
@@ -1004,9 +965,8 @@ _QUICK_STATE_FILES = (
     "channel_aliases.json",
     "processes.json",
     "gateway/discord_message_recovery.db",  # Discord reconnect replay ledger
-    # Per-profile user-created stores outside the git checkout, destroyed if the update flow
-    # replaces the file and the post-update schema-init re-creates an empty one (#52889). On
-    # non-root profiles the real path is outside HERMES_HOME and the entry is silently skipped.
+    # Per-profile user stores, destroyed if the update flow replaces the file and the post-update
+    # schema-init re-creates an empty one (#52889). Skipped when outside HERMES_HOME.
     "projects.db",                      # per-profile project store
     "response_store.db",                # gateway conversation history / tool payloads
     "memory_store.db",                  # holographic memory facts/entities
@@ -1037,11 +997,8 @@ def create_quick_snapshot(
 
 
 def _quick_snapshot_candidates(home: Path):
-    """Yield ``(src, rel_posix, in_dir)`` for every regular file a quick snapshot captures.
-
-    Directory entries are walked so restore treats every file uniformly; heavy, regenerable
-    per-board subtrees (scratch workspaces and task attachments) are skipped.
-    """
+    """Yield ``(src, rel_posix, in_dir)`` for every regular file a quick snapshot captures; heavy
+    regenerable per-board subtrees (workspaces, attachments) are skipped."""
     for rel in _QUICK_STATE_FILES:
         src = home / rel
         if src.is_dir():
@@ -1059,10 +1016,9 @@ def _copy_quick_snapshot_files(
 ) -> tuple[Dict[str, int], list[str], list[str]]:
     """Copy every quick-snapshot candidate into *staging_dir*.
 
-    Returns ``(manifest, failed_dbs, oversized_skipped)``: ``manifest`` maps rel_path -> size;
-    ``failed_dbs`` lists present ``*.db`` that could not be snapshotted; ``oversized_skipped``
-    lists DB files skipped for size (#68805) — both are snapshot incompleteness, so the caller
-    must suppress pruning to preserve the older snapshot that may hold the only recoverable DB.
+    Returns ``(manifest {rel: size}, failed_dbs, oversized_skipped)``. The last two are snapshot
+    incompleteness (#68805): the caller must suppress pruning so the older snapshot that may hold
+    the only recoverable DB survives.
     """
     manifest: Dict[str, int] = {}
     failed_dbs: list[str] = []
@@ -1106,9 +1062,8 @@ def _create_quick_snapshot_locked(
 ) -> Optional[str]:
     """Copy the quick-snapshot set to a timestamped dir under state-snapshots/ and prune old ones.
 
-    ``max_file_size`` skips (with a warning) files above that many bytes; the pre-update snapshot
-    uses it so a multi-GB ``state.db`` can never stall ``hermes update`` while the small
-    pairing/cron/config files are always captured. ``None`` copies everything.
+    ``max_file_size`` skips (with a warning) larger files: the pre-update snapshot uses it so a
+    multi-GB ``state.db`` never stalls ``hermes update`` while the small files are always captured.
     """
     home = hermes_home or get_hermes_home()
     root = _quick_snapshot_root(home)
@@ -1125,8 +1080,8 @@ def _create_quick_snapshot_locked(
     logger.info("quick snapshot phase=copy status=started id=%s", snap_id)
     manifest, failed_dbs, oversized_skipped = _copy_quick_snapshot_files(home, staging_dir, max_file_size)
     if failed_dbs:
-        # The update path used to log-and-continue with exit 0, so a missing state.db backup
-        # looked like a successful pre-update snapshot (#68474). Surface it on stdout.
+        # Surface on stdout: a log-and-continue made a missing state.db backup look like a
+        # successful pre-update snapshot (#68474).
         print(f"  ⚠ CRITICAL: could not snapshot DB file(s): {', '.join(failed_dbs)}\n"
               f"  ⚠ If sessions disappear after update, check {root} and run: hermes snapshot list")
         logger.error("Quick snapshot failed to capture DB file(s): %s", ", ".join(failed_dbs))
@@ -1144,10 +1099,9 @@ def _create_quick_snapshot_locked(
     with open(staging_dir / "manifest.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)
     os.replace(staging_dir, snap_dir)
-    # Auto-prune; callers with high-churn safety snapshots (pre-update) pass a smaller keep so
-    # large state.db copies don't accumulate. Skip pruning when a present DB failed to capture
-    # OR was skipped for size (#68805): the snapshot is incomplete and the older one may hold
-    # the only recoverable database.
+    # Auto-prune (pre-update callers pass a smaller keep so state.db copies don't accumulate).
+    # Skip when a DB failed to capture OR was skipped for size (#68805): the snapshot is
+    # incomplete and the older one may hold the only recoverable database.
     if not (failed_dbs or oversized_skipped):
         _prune_oldest(_snapshot_dirs(root), _QUICK_DEFAULT_KEEP if keep is None else keep, shutil.rmtree, "snapshot")
     else:
@@ -1156,14 +1110,15 @@ def _create_quick_snapshot_locked(
             logger.warning("Quick snapshot skipped oversized DB file(s): %s", ", ".join(oversized_skipped))
         logger.warning(
             "Skipping snapshot prune because %d DB(s) failed to capture and/or %d were oversized "
-            "— preserving older snapshots as recovery source", len(failed_dbs), len(oversized_skipped))
+            "— preserving older snapshots as recovery source",
+            len(failed_dbs), len(oversized_skipped))
     logger.info("quick snapshot phase=copy status=complete id=%s files=%d bytes=%d",
                 snap_id, len(manifest), sum(manifest.values()))
     return snap_id
 
 
 def _newest_first(root: Path, keep_entry) -> List[Path]:
-    """Entries of *root* passing ``keep_entry``, newest (by name) first; ``[]`` when *root* is missing."""
+    """Entries of *root* passing ``keep_entry``, newest (by name) first; ``[]`` if *root* is missing."""
     if not root.exists():
         return []
     return sorted(filter(keep_entry, root.iterdir()), key=lambda p: p.name, reverse=True)
@@ -1171,8 +1126,8 @@ def _newest_first(root: Path, keep_entry) -> List[Path]:
 
 def _snapshot_dirs(root: Path) -> List[Path]:
     """Published snapshot directories under *root*, newest first."""
-    return _newest_first(
-        root, lambda d: d.is_dir() and not d.name.startswith(".") and not d.name.endswith(".partial"))
+    return _newest_first(root, lambda d: d.is_dir() and not d.name.startswith(".")
+                         and not d.name.endswith(".partial"))
 
 
 def list_quick_snapshots(limit: int = 20, hermes_home: Optional[Path] = None) -> List[Dict[str, Any]]:
@@ -1182,8 +1137,7 @@ def list_quick_snapshots(limit: int = 20, hermes_home: Optional[Path] = None) ->
         manifest_path = d / "manifest.json"
         if manifest_path.exists():
             try:
-                with open(manifest_path, encoding="utf-8") as f:
-                    results.append(json.load(f))
+                results.append(json.loads(manifest_path.read_text(encoding="utf-8")))
             except (json.JSONDecodeError, OSError):
                 results.append({"id": d.name, "file_count": 0, "total_size": 0})
         if len(results) >= limit:
@@ -1233,22 +1187,21 @@ def restore_quick_snapshot(snapshot_id: str, hermes_home: Optional[Path] = None)
     return restored > 0
 
 
-# Relative path of the cron job database inside HERMES_HOME. Kept in sync with the entry in
-# ``_QUICK_STATE_FILES`` and with ``cron/jobs.py``'s ``JOBS_FILE``.
+# Kept in sync with ``_QUICK_STATE_FILES`` and ``cron/jobs.py``'s ``JOBS_FILE``.
 _CRON_JOBS_REL = "cron/jobs.json"
 
 
 def _count_cron_jobs(path: Path) -> Optional[int]:
     """Number of cron jobs in ``path`` (canonical ``{"jobs": [...]}`` or legacy bare list).
 
-    ``None`` if missing or unparseable; callers must treat that as "unknown", not zero, since
-    acting on an unreadable file could mask a real corruption the user needs to see.
+    ``None`` if missing or unparseable — "unknown", not zero: acting on an unreadable file could
+    mask a real corruption the user needs to see.
     """
     if not path.is_file():
         return None
     try:
-        # utf-8-sig: same dialect as cron/jobs.load_jobs — a Windows-editor BOM would otherwise
-        # count as "unreadable" and silently disable the post-update auto-restore safety net.
+        # utf-8-sig as cron/jobs.load_jobs: a Windows-editor BOM would otherwise read as
+        # "unreadable" and silently disable the post-update auto-restore safety net.
         with open(path, "r", encoding="utf-8-sig") as f:
             data = json.load(f)
     except (OSError, json.JSONDecodeError):
@@ -1261,9 +1214,8 @@ def _count_cron_jobs(path: Path) -> Optional[int]:
 def restore_cron_jobs_if_emptied(snapshot_id: str, hermes_home: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """Safety net for silent cron-job loss across ``hermes update``.
 
-    Deliberately conservative: restores only on unambiguous evidence of loss (snapshot had more
-    jobs than the live file), so a user who genuinely deleted jobs is never second-guessed, and
-    an unreadable live file (``None``) is left untouched so real corruption still surfaces.
+    Conservative: restores only when the snapshot had MORE jobs than the live file (a user who
+    deleted jobs is never second-guessed); an unreadable live file is left so corruption surfaces.
     """
     if not snapshot_id:
         return None
@@ -1292,11 +1244,9 @@ def restore_cron_jobs_if_emptied(snapshot_id: str, hermes_home: Optional[Path] =
 
 
 def _sibling_profile_homes(invoking_home: Path) -> list[tuple[str, Path]]:
-    """(name, home) for every OTHER profile on this install. Never raises.
-
-    The update's code swap and fleet restart touch every profile, so the pre-update snapshot
-    must too (#66140). The invoking profile is excluded — its snapshot is taken separately.
-    """
+    """(name, home) for every OTHER profile on this install (the invoking one is snapshotted
+    separately). The update's code swap touches every profile, so its snapshot must too (#66140).
+    Never raises."""
     homes: list[tuple[str, Path]] = []
     try:
         from hermes_cli.profiles import _get_default_hermes_home, _get_profiles_root, _PROFILE_ID_RE
@@ -1318,11 +1268,8 @@ def _sibling_profile_homes(invoking_home: Path) -> list[tuple[str, Path]]:
 def create_pre_update_snapshots_all_profiles(
     invoking_home: Optional[Path] = None, keep: Optional[int] = None, max_file_size: Optional[int] = None
 ) -> Dict[str, str]:
-    """Pre-update quick snapshots for every SIBLING profile (#66140).
-
-    Same snapshot set, size cap, and keep policy as the invoking profile's snapshot; each lands
-    under its OWN ``<home>/state-snapshots/`` so per-profile restore tooling finds it.
-    """
+    """Pre-update quick snapshots for every SIBLING profile (#66140), same set/size cap/keep policy
+    as the invoking profile's; each lands under its OWN ``<home>/state-snapshots/``."""
     results: Dict[str, str] = {}
     home = invoking_home or get_hermes_home()
     for name, profile_home in _sibling_profile_homes(home):
@@ -1336,12 +1283,12 @@ def create_pre_update_snapshots_all_profiles(
     return results
 
 
-# Config paths the update flow must never change (#64160): model routing keys and the MoA
-# section are consumed machine-wide (gateway, cron, desktop), so an update/repair cycle that
-# rewrites them silently redirects paid inference. Dotted paths into the raw config.yaml
-# document; a single-element tuple protects the whole section.
+# Config paths the update flow must never change (#64160): model routing and the MoA section are
+# consumed machine-wide, so an update/repair cycle that rewrites them silently redirects paid
+# inference. Dotted paths into raw config.yaml; a single-element tuple protects a whole section.
 _PROTECTED_CONFIG_PATHS: Tuple[Tuple[str, ...], ...] = (
-    ("model", "provider"), ("model", "default"), ("model", "base_url"), ("model", "api_key"), ("moa",))
+    ("model", "provider"), ("model", "default"), ("model", "base_url"), ("model", "api_key"),
+    ("moa",))
 
 
 def _read_raw_yaml_dict(path: Path) -> Optional[Dict[str, Any]]:
@@ -1350,8 +1297,7 @@ def _read_raw_yaml_dict(path: Path) -> Optional[Dict[str, Any]]:
         return None
     try:
         import yaml
-        with open(path, "r", encoding="utf-8") as f:
-            data = yaml.safe_load(f)
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except Exception:
         return None
     return data if isinstance(data, dict) else None
@@ -1379,9 +1325,8 @@ def restore_config_model_settings_if_rewritten(
     snapshot_id: str, hermes_home: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """Safety net for silent config.yaml model/MoA loss across ``hermes update``.
 
-    Mirrors :func:`restore_cron_jobs_if_emptied`: compare the current config against the
-    pre-update snapshot taken by this same update run and restore only the protected keys —
-    never the whole file — when a value the user had set was changed or dropped.
+    Mirrors :func:`restore_cron_jobs_if_emptied`: restore only the protected keys — never the
+    whole file — whose user-set value in the same-run pre-update snapshot changed or vanished.
     """
     if not snapshot_id:
         return None
@@ -1411,19 +1356,17 @@ def restore_config_model_settings_if_rewritten(
         logger.error("config.yaml model settings were rewritten during update but auto-restore failed: %s", exc)
         return None
     logger.warning(
-        "Restored user config value(s) %s from pre-update snapshot %s — the update flow rewrote them (#64160)",
-        ", ".join(restored_keys), snapshot_id)
+        "Restored user config value(s) %s from pre-update snapshot %s — "
+        "the update flow rewrote them (#64160)", ", ".join(restored_keys), snapshot_id)
     return {"restored": True, "keys": restored_keys, "snapshot_id": snapshot_id}
 
 
 def _restore_all_sibling_profiles(
     profile_snapshots: Dict[str, str], invoking_home: Optional[Path], restore_fn, failure_log: str
 ) -> list[Dict[str, Any]]:
-    """Run a per-profile safety net (``restore_fn(snap_id, hermes_home=...)``) for every sibling.
-
-    Each profile's live file is compared against ITS OWN same-generation pre-update snapshot.
-    Returns one result dict per restored profile, each with a ``profile`` key added. Never raises.
-    """
+    """Run ``restore_fn(snap_id, hermes_home=...)`` for every sibling against ITS OWN
+    same-generation snapshot; one result dict (plus ``profile`` key) per restored profile.
+    Never raises."""
     restored: list[Dict[str, Any]] = []
     if not profile_snapshots:
         return restored
@@ -1454,11 +1397,8 @@ def restore_config_model_settings_all_profiles(
 
 def restore_cron_jobs_all_profiles(
     profile_snapshots: Dict[str, str], invoking_home: Optional[Path] = None) -> list[Dict[str, Any]]:
-    """Run the cron-jobs safety net for every sibling profile (#66140).
-
-    ``profile_snapshots`` comes from :func:`create_pre_update_snapshots_all_profiles`, so
-    restores are same-generation by construction.
-    """
+    """Run the cron-jobs safety net for every sibling profile (#66140); ``profile_snapshots`` comes
+    from :func:`create_pre_update_snapshots_all_profiles`, so restores are same-generation."""
     return _restore_all_sibling_profiles(
         profile_snapshots, invoking_home, restore_cron_jobs_if_emptied,
         "Cron restore check for profile %s failed: %s")
@@ -1495,11 +1435,8 @@ def run_quick_backup(args) -> None:
 # --- Shared full-zip backup helper ---
 
 def _write_full_zip_backup(out_path: Path, hermes_root: Path) -> Optional[Path]:
-    """Write a full zip snapshot of ``hermes_root`` to ``out_path`` while holding the backup slot.
-
-    Same exclusion rules and SQLite safe-copy as :func:`run_backup`. Returns the output path on
-    success, None on failure (nothing to back up, another backup running, or write error).
-    """
+    """Full zip snapshot of ``hermes_root`` to ``out_path`` under the backup slot (same rules as
+    :func:`run_backup`); None when nothing to back up, another backup running, or write error."""
     try:
         with _backup_operation_lock(hermes_root):
             return _write_full_zip_backup_locked(out_path, hermes_root)
@@ -1535,12 +1472,12 @@ def _write_full_zip_backup_locked(out_path: Path, hermes_root: Path) -> Optional
                 on_progress=lambda i: logger.info(
                     "automatic backup phase=archive status=progress completed=%d total=%d", i, len(files_to_add)))
     except (OSError, _SQLiteSnapshotError) as exc:
-        # ``_atomic_output_path`` already removed the hidden partial. Do not unlink ``out_path``:
-        # it may be a previous valid backup that the atomic publisher deliberately preserved.
+        # The hidden partial is already gone; ``out_path`` may be a previous valid backup: keep it.
         logger.warning("Full-zip backup: zip write failed: %s", exc)
         return None
     logger.info("automatic backup phase=archive status=complete duration_ms=%.1f files=%d bytes=%d",
-                (time.monotonic() - archive_started) * 1000, len(files_to_add), out_path.stat().st_size)
+                (time.monotonic() - archive_started) * 1000, len(files_to_add),
+                out_path.stat().st_size)
     return out_path
 
 
@@ -1554,24 +1491,19 @@ _PRE_MIGRATION_DEFAULT_KEEP = 5
 
 
 def _prune_prefixed_zips(backup_dir: Path, prefix: str, keep: int, what: str) -> int:
-    """Remove oldest ``<prefix>*.zip`` files in *backup_dir* beyond the keep limit; return count deleted.
+    """Remove oldest ``<prefix>*.zip`` in *backup_dir* beyond *keep*; return count deleted.
 
-    Only prefix-matched files are touched, so hand-made zips or other backup kinds in the same
-    directory are never removed. Operators who don't want a backup set
-    ``updates.pre_update_backup: off`` — that gates creation.
+    Only prefix-matched files are touched, so hand-made zips or other backup kinds survive.
     """
-    backups = _newest_first(
-        backup_dir, lambda p: p.is_file() and p.name.startswith(prefix) and p.suffix.lower() == ".zip")
+    backups = _newest_first(backup_dir, lambda p: p.is_file() and p.name.startswith(prefix)
+                            and p.suffix.lower() == ".zip")
     return _prune_oldest(backups, keep, Path.unlink, what)
 
 
 def _create_prefixed_full_backup(
     hermes_home: Optional[Path], prefix: str, keep: int, what: str, prune_what: str) -> Optional[Path]:
     """Write ``<HERMES_HOME>/backups/<prefix><timestamp>.zip`` and prune older same-prefix zips.
-
-    Returns the created path, or ``None`` if nothing was found to back up or the write failed.
-    Never raises.
-    """
+    Returns the path, or ``None`` if nothing to back up or the write failed. Never raises."""
     hermes_root = hermes_home or get_default_hermes_root()
     if not hermes_root.is_dir():
         return None
@@ -1590,21 +1522,15 @@ def _create_prefixed_full_backup(
 
 def create_pre_update_backup(
     hermes_home: Optional[Path] = None, keep: int = _PRE_UPDATE_DEFAULT_KEEP) -> Optional[Path]:
-    """Full zip backup to ``<HERMES_HOME>/backups/pre-update-<timestamp>.zip``, auto-pruned.
-
-    Same exclusions and SQLite safe-copy as :func:`run_backup`. Returns the zip path, or ``None``
-    if nothing was found or the backup failed. Never raises — ``hermes update`` continues anyway.
-    """
+    """Full zip backup to ``backups/pre-update-<timestamp>.zip``, auto-pruned; ``None`` if nothing
+    was found or the backup failed. Never raises — ``hermes update`` continues anyway."""
     return _create_prefixed_full_backup(hermes_home, _PRE_UPDATE_PREFIX, max(keep, 1), "pre-update", "backup")
 
 
 def create_pre_migration_backup(
     hermes_home: Optional[Path] = None, keep: int = _PRE_MIGRATION_DEFAULT_KEEP) -> Optional[Path]:
-    """Full zip backup to ``<HERMES_HOME>/backups/pre-migration-<timestamp>.zip`` before ``hermes claw migrate``.
-
-    Shares the shared ``backups/`` dir (so ``hermes import`` and the update-backup listing pick
-    it up), restorable with ``hermes import <archive>``. Returns the zip path, or ``None`` if
-    nothing was found (fresh install) or the write failed. Never raises.
-    """
+    """Full zip backup to ``backups/pre-migration-<timestamp>.zip`` before ``hermes claw migrate``
+    (same dir as update backups so listings/``hermes import`` find it); ``None`` if nothing was
+    found or the write failed. Never raises."""
     return _create_prefixed_full_backup(
         hermes_home, _PRE_MIGRATION_PREFIX, max(keep, 0), "pre-migration", "pre-migration backup")
