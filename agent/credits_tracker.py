@@ -261,8 +261,8 @@ def parse_credits_headers(headers: Mapping[str, str], provider: str = "") -> Opt
     half-pair (only -micros or only -usd) parses as both-absent (both None)."""
     global _version_warning_emitted
     try:
-        # Cheap probe before the lowercase copy (header names are case-insensitive):
-        # bail when the version header is absent — the hot path for non-Nous providers.
+        # Cheap probe before the lowercase copy (header names are case-insensitive): bail when the
+        # version header is absent — the hot path for non-Nous providers.
         if not any(k.lower() == "x-nous-credits-version" for k in headers):
             return None
         lowered = {k.lower(): v for k, v in headers.items()}
@@ -285,21 +285,17 @@ def parse_credits_headers(headers: Mapping[str, str], provider: str = "") -> Opt
         denominator_kind = lowered.get("x-nous-credits-denominator-kind", "none")
         if _SENTINEL in fields.values() or denominator_kind not in _VALID_DENOMINATOR_KINDS:
             return None
-        return CreditsState(
-            version=version_val, denominator_kind=denominator_kind,
-            disabled_reason=lowered.get("x-nous-credits-disabled-reason"),  # None if absent (omitted when null)
-            captured_at=time.time(), from_header=True, **fields,
-        )
-    except Exception:
-        # Fail-open → miss; the breadcrumb distinguishes a parser regression from a no-headers response.
+        disabled_reason = lowered.get("x-nous-credits-disabled-reason")  # None if absent (omitted when null)
+        return CreditsState(version=version_val, denominator_kind=denominator_kind, disabled_reason=disabled_reason,
+                            captured_at=time.time(), from_header=True, **fields)
+    except Exception:  # fail-open → miss; the breadcrumb distinguishes a parser regression from a no-headers response
         logger.debug("credits ▸ parse_credits_headers raised (fail-open miss)", exc_info=True)
         return None
 
 
-# ── Dev fixtures (HERMES_DEV_CREDITS_FIXTURE): throwaway scaffolding to trigger
-# any notice state without real spend. Value is a state NAME or a FILE PATH whose
-# contents are a name (re-read every turn → `echo depleted > /tmp/cf` flips live).
-# Drives the per-turn capture/notice path, the cold-start seed, and /usage.
+# ── Dev fixtures (HERMES_DEV_CREDITS_FIXTURE): throwaway scaffolding to trigger any notice state
+# without real spend. Value is a state NAME or a FILE PATH whose contents are a name (re-read every
+# turn → `echo depleted > /tmp/cf` flips live). Drives per-turn notices, the cold-start seed, and /usage.
 def _fixture(remaining: str, subscription: str, limit: Optional[str] = None, purchased: Optional[str] = None,
              *, paid: bool = True, reason: Optional[str] = None) -> dict:
     """Fixture spec from *_usd strings; micros derived exactly (Decimal)."""

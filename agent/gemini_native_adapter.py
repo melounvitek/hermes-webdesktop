@@ -344,13 +344,11 @@ _THINKING_KEYS = (
 
 
 def _normalize_thinking_config(config: Any) -> Optional[Dict[str, Any]]:
-    if not isinstance(config, dict) or not config:
+    if not isinstance(config, dict):
         return None
-    normalized: Dict[str, Any] = {}
-    for key, alias, types, norm in _THINKING_KEYS:
-        value = config.get(key, config.get(alias))
-        if isinstance(value, types) and (value.strip() if isinstance(value, str) else True):
-            normalized[key] = norm(value)
+    values = {key: config.get(key, config.get(alias)) for key, alias, _, _ in _THINKING_KEYS}
+    normalized = {key: norm(values[key]) for key, _, types, norm in _THINKING_KEYS
+                  if isinstance(values[key], types) and (values[key].strip() if isinstance(values[key], str) else True)}
     return normalized or None
 
 
@@ -669,8 +667,8 @@ class GeminiNativeClient:
         return translate_gemini_response(payload, model=model)
 
     def _stream_completion(self, model: str, url: str, request: Dict[str, Any], timeout: Any) -> Iterator[_GeminiStreamChunk]:
-        headers = {**self._headers(), "Accept": "text/event-stream"}
         try:
+            headers = {**self._headers(), "Accept": "text/event-stream"}
             with self._http.stream("POST", url, json=request, headers=headers, timeout=timeout) as response:
                 if response.status_code != 200:
                     raise gemini_http_error(response, body_text=read_streaming_error_body(response))
