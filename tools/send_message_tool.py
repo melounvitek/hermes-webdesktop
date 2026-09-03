@@ -15,7 +15,7 @@ from tools.send_message_targets import (  # noqa: F401
     _HOME_CHANNEL_ENV_OVERRIDES, _SLACK_USER_ID_RE, _parse_target_ref, resolve_send_target)
 from tools.send_message_senders import (  # noqa: F401
     _AUDIO_EXTS, _DEFAULT_CAPTION_LIMIT, _IMAGE_EXTS, _TELEGRAM_CAPTION_LIMIT, _VIDEO_EXTS,
-    _VOICE_EXTS, _error, _live_adapter, _media_caption_split, _plugin_standalone_sender,
+    _VOICE_EXTS, _adapter_media_method, _error, _live_adapter, _media_caption_split, _plugin_standalone_sender,
     _registry_standalone_send, _resolve_slack_user_target, _sanitize_error_text,
     _send_bluebubbles, _send_matrix_via_adapter, _send_qqbot, _send_signal, _send_telegram,
     _send_weixin, _send_yuanbao)
@@ -147,11 +147,9 @@ def _handle_send(args):
     # Capture [[as_document]] before extract_media strips it: images then go through
     # send_document so the original bytes survive (Telegram's sendPhoto recompresses).
     force_document_attachments = "[[as_document]]" in message
-
     media_files, cleaned_message = BasePlatformAdapter.extract_media(message)
     media_files = BasePlatformAdapter.filter_media_delivery_paths(media_files)
     mirror_text = cleaned_message.strip() or _describe_media_for_mirror(media_files)
-
     used_home_channel = not chat_id
     if used_home_channel:
         chat_id, err = _home_chat_id(config, platform, platform_name)
@@ -316,19 +314,6 @@ def _bounded_send_error(detail, max_chars=900):
     return text if len(text) <= max_chars else f"{text[: max_chars - 3]}..."
 
 
-def _live_media_method(ext, is_voice, force_document):
-    """Adapter media method name and kind for one live-adapter media file."""
-    if force_document:
-        return "send_document", "document"
-    if ext in _IMAGE_EXTS:
-        return "send_image_file", "image"
-    if ext in _VIDEO_EXTS:
-        return "send_video", "video"
-    if is_voice or ext in _AUDIO_EXTS:
-        return "send_voice", "audio"
-    return "send_document", "document"
-
-
 async def _send_live_adapter_media(
     adapter, chat_id, message, media_files, *, thread_id=None, metadata=None, force_document=False):
     """Deliver text and every media descriptor through adapter media APIs. Adapters that
@@ -352,7 +337,7 @@ async def _send_live_adapter_media(
             return {"error": f"Adapter media send failed: media file {index + 1}/{total} was not found"}
 
         ext = os.path.splitext(media_path)[1].lower()
-        method_name, media_kind = _live_media_method(ext, is_voice, force_document)
+        method_name, media_kind = _adapter_media_method(ext, is_voice or ext in _AUDIO_EXTS, force_document)
         adapter_method = getattr(type(adapter), method_name, None)
         if adapter_method is None or adapter_method is getattr(BasePlatformAdapter, method_name):
             return {"error": (f"Live adapter does not implement native {media_kind} delivery; "
@@ -406,12 +391,8 @@ async def _send_via_adapter(
     runner, adapter = _live_adapter(platform)
     if adapter is not None:
         try:
-            metadata = {}
-            if thread_id:
-                metadata["thread_id"] = thread_id
-            if platform_name == "ntfy" and chat_id:
-                metadata["publish_topic"] = chat_id
-            metadata = metadata or None
+            metadata = {**({"thread_id": thread_id} if thread_id else {}),
+                        **({"publish_topic": chat_id} if platform_name == "ntfy" and chat_id else {})} or None
             if media_files:
                 return await _dispatch_on_gateway_loop(
                     runner,
@@ -580,7 +561,6 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     from gateway.config import Platform
     platform_name = platform.value if hasattr(platform, "value") else str(platform)
     media_files = media_files or []
-
     if platform == Platform.WEIXIN:
         return await _send_weixin(pconfig, chat_id, message, media_files=media_files)
 
@@ -595,7 +575,6 @@ async def _send_to_platform(platform, pconfig, chat_id, message, thread_id=None,
     from gateway.platforms.base import BasePlatformAdapter
     max_len = _platform_max_length(platform)
     chunks = BasePlatformAdapter.truncate_message(message, max_len) if max_len else [message]
-
     if platform_name == "discord" or (media_files and platform_name in _PLUGIN_STANDALONE_MEDIA):
         return await _send_plugin_standalone(
             platform_name, pconfig, chat_id, message, chunks, media_files,

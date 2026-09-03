@@ -57,8 +57,7 @@ _GENERIC_SECRET_ASSIGN_RE = re.compile(
 
 def _sanitize_error_text(text) -> str:
     """Redact secrets from error text before surfacing it to users/models."""
-    redacted = redact_sensitive_text(text)
-    redacted = _URL_SECRET_QUERY_RE.sub(lambda m: f"{m.group(1)}***", redacted)
+    redacted = _URL_SECRET_QUERY_RE.sub(lambda m: f"{m.group(1)}***", redact_sensitive_text(text))
     return _GENERIC_SECRET_ASSIGN_RE.sub(lambda m: f"{m.group(1)}=***", redacted)
 
 
@@ -69,17 +68,13 @@ def _error(message: str) -> dict:
 
 def _success(platform: str, chat_id, warnings=None, **fields) -> dict:
     """Standard success payload; ``warnings`` is only included when non-empty."""
-    result = {"success": True, "platform": platform, "chat_id": chat_id, **fields}
-    if warnings:
-        result["warnings"] = warnings
-    return result
+    return {"success": True, "platform": platform, "chat_id": chat_id, **fields,
+            **({"warnings": warnings} if warnings else {})}
 
 
 def _display_chat_id(platform_name: str, chat_id: str) -> str:
     """Return a result-safe chat identifier for tool transcripts/log consumers."""
-    if platform_name == "signal" and str(chat_id).startswith("group:"):
-        return "group:***"
-    return chat_id
+    return "group:***" if platform_name == "signal" and str(chat_id).startswith("group:") else chat_id
 
 
 _NO_DELIVERABLE = "No deliverable text or media remained after processing MEDIA tags"
@@ -98,13 +93,10 @@ def _telegram_retry_delay(exc: Exception, attempt: int) -> float | None:
             return max(float(retry_after), 0.0)
         except (TypeError, ValueError):
             return 1.0
-
     text = str(exc).lower()
     if "timed out" in text or "timeout" in text:
         return None
-    if any(marker in text for marker in _TELEGRAM_TRANSIENT_MARKERS):
-        return float(2 ** attempt)
-    return None
+    return float(2 ** attempt) if any(marker in text for marker in _TELEGRAM_TRANSIENT_MARKERS) else None
 
 
 async def _send_telegram_message_with_retry(bot, *, attempts: int = 3, **kwargs):
@@ -168,6 +160,18 @@ def _strip_mdv2_safe(text):
         return _strip_mdv2(text)
     except Exception:
         return text
+
+
+def _adapter_media_method(ext, voice, force_document=False):
+    """Adapter media method name + kind for one file: document when forced, else image /
+    video / voice by extension (``voice`` already folds in the caller's audio rule)."""
+    if force_document:
+        return "send_document", "document"
+    if ext in _IMAGE_EXTS:
+        return "send_image_file", "image"
+    if ext in _VIDEO_EXTS:
+        return "send_video", "video"
+    return ("send_voice", "audio") if voice else ("send_document", "document")
 
 
 async def _telegram_send_media(bot, chat_id, f, ext, is_voice, force_document, **kwargs):
@@ -584,7 +588,6 @@ async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, 
     messages — so the ephemeral connect/disconnect path is only for standalone/cron."""
     media_files = media_files or []
     metadata = {"thread_id": thread_id} if thread_id else None
-
     from gateway.config import Platform
     _, live_adapter = _live_adapter(
         Platform.MATRIX,
@@ -619,7 +622,6 @@ async def _send_matrix_via_adapter(pconfig, chat_id, message, media_files=None, 
 async def _matrix_send_core(adapter, chat_id, message, media_files, metadata):
     """Core send logic shared by live and ephemeral Matrix adapters."""
     last_result = None
-
     if message.strip():
         last_result = await adapter.send(chat_id, message, metadata=metadata)
         if not last_result.success:
@@ -630,21 +632,13 @@ async def _matrix_send_core(adapter, chat_id, message, media_files, metadata):
             return _error(f"Media file not found: {media_path}")
 
         ext = os.path.splitext(media_path)[1].lower()
-        if ext in _IMAGE_EXTS:
-            method = adapter.send_image_file
-        elif ext in _VIDEO_EXTS:
-            method = adapter.send_video
-        elif (ext in _VOICE_EXTS and is_voice) or ext in _AUDIO_EXTS:
-            method = adapter.send_voice
-        else:
-            method = adapter.send_document
-        last_result = await method(chat_id, media_path, metadata=metadata)
+        method, _ = _adapter_media_method(ext, (ext in _VOICE_EXTS and is_voice) or ext in _AUDIO_EXTS)
+        last_result = await getattr(adapter, method)(chat_id, media_path, metadata=metadata)
         if not last_result.success:
             return _error(f"Matrix media send failed: {last_result.error}")
 
-    if last_result is None:
-        return {"error": _NO_DELIVERABLE}
-    return _success("matrix", chat_id, message_id=last_result.message_id)
+    return {"error": _NO_DELIVERABLE} if last_result is None else _success(
+        "matrix", chat_id, message_id=last_result.message_id)
 
 
 async def _send_weixin(pconfig, chat_id, message, media_files=None):
