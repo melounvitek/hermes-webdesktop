@@ -127,12 +127,14 @@ class ArtifactStore:
         # are unreachable orphans past their TTL by definition — sweep them.
         self._sweep_orphan_files()
 
-    def _sweep_orphan_files(self) -> None:
-        """Delete on-disk files with no live index entry; only minted-id-shaped and ``*.tmp`` names are touched."""
+    def _sweep_orphan_files(self) -> int:
+        """Delete on-disk files with no live index entry; only minted-id-shaped and ``*.tmp`` names are
+        touched. Returns the number removed."""
+        removed = 0
         try:
             candidates = list(self._root.iterdir())
         except OSError:
-            return
+            return 0
         with self._lock:
             live = set(self._entries)
         for path in candidates:
@@ -140,6 +142,8 @@ class ArtifactStore:
             if path.is_file() and orphan:
                 with contextlib.suppress(OSError):
                     path.unlink(missing_ok=True)
+                    removed += 1
+        return removed
 
     @property
     def root(self) -> Path:

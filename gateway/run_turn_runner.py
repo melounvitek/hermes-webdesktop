@@ -876,11 +876,13 @@ class TurnRunner:
         ctx = self._ctx
         if self._runner._session_db is None or not ctx.session_id:
             return None
-        row = None
+        count = None
         with suppress(Exception):
             # run_sync is off-loop (executor); sync DB is fine.
             row = self._runner._session_db._db.get_session(ctx.session_id)
-        return row.get("message_count", 0) if row else None
+            if row:
+                count = row.get("message_count", 0)
+        return count
 
     def _pop_cached_agent_for_eviction(self):
         """Evict under the lock but DEFER release (release_clients can block on memory-provider /
