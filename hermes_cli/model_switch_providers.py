@@ -83,11 +83,6 @@ def _discovered_catalog_stale(entry: dict, model_ids: list[str]) -> bool:
     return True
 
 
-_MODEL_DISCOVERY_ERRORS = (
-    ImportError, OSError, RuntimeError, TimeoutError, TypeError, ValueError, http.client.HTTPException,
-)
-
-
 class _NativePickerModelList(list[str]):
     """A successful native catalog, including an authoritative empty one."""
 
@@ -185,9 +180,6 @@ def prewarm_picker_cache_async() -> Optional["_threading.Thread"]:
     return t
 
 
-_PARALLEL_PREFETCH_WORKERS = 8
-
-
 def _prefetch_provider_models_parallel(provider_slugs: list[str]) -> None:
     """Fetch stale/missing provider catalogs in parallel before the serial picker loop.
 
@@ -232,7 +224,7 @@ def _prefetch_provider_models_parallel(provider_slugs: list[str]) -> None:
             pass  # best-effort; picker falls back to curated list
 
     with concurrent.futures.ThreadPoolExecutor(
-        max_workers=min(_PARALLEL_PREFETCH_WORKERS, len(stale_slugs)), thread_name_prefix="model-cache-prefetch",
+        max_workers=min(8, len(stale_slugs)), thread_name_prefix="model-cache-prefetch",
     ) as executor:
         list(executor.map(_fetch_one, stale_slugs))
 
@@ -531,7 +523,7 @@ def _discover_endpoint_models(
             )
             if cached_models:
                 return cached_models, False
-        except _MODEL_DISCOVERY_ERRORS:
+        except (ImportError, OSError, RuntimeError, TimeoutError, TypeError, ValueError, http.client.HTTPException):
             pass
     return None, False
 
@@ -729,8 +721,7 @@ def _overlay_has_creds(b: _PickerBuild, pid: str, hermes_slug: str, overlay) -> 
             logger.debug("External-process check failed for %s: %s", pid, exc)
     # Auth store / credential pool cover OAuth providers AND api_key providers that also support
     # OAuth (anthropic via Claude Code credential files).
-    if not has_creds:
-        has_creds = _auth_store_has_provider(pid, hermes_slug)
+    has_creds = has_creds or _auth_store_has_provider(pid, hermes_slug)
     if not has_creds:
         # Full auto-seeding pool check catches external stores (Codex CLI ~/.codex/auth.json)
         # not yet in auth.json.
@@ -810,10 +801,8 @@ def _lap_canonical_rows(b: _PickerBuild) -> None:
             sib_vars = set(sib.api_key_env_vars) if sib else set()
             if lit and lit <= sib_vars < set(cp_config.api_key_env_vars) and cp.slug != b.current_provider:
                 continue
-        if not has_creds:
-            has_creds = _auth_store_has_provider(cp.slug) or _pool_usable(cp.slug)
-        if not has_creds and _is_aws_sdk(cp_config):
-            has_creds = _has_aws_sdk_creds_for_listing(cp.slug, b.current_provider)
+        has_creds = has_creds or _auth_store_has_provider(cp.slug) or _pool_usable(cp.slug) or (
+            _is_aws_sdk(cp_config) and _has_aws_sdk_creds_for_listing(cp.slug, b.current_provider))
         if not has_creds:
             continue
         if _is_aws_sdk(cp_config):
