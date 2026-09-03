@@ -1,8 +1,5 @@
-"""Runtime-backed validation behind ``hermes plugins doctor``.
-
-This core command keeps that contribution's manifest/import/ registration validation intent while
-routing every check through the current runtime contracts instead of maintaining a parallel scanner.
-"""
+"""Runtime-backed validation behind ``hermes plugins doctor``: every manifest/import/registration
+check routes through the real runtime contracts instead of a parallel scanner."""
 
 from __future__ import annotations
 
@@ -32,43 +29,30 @@ def _deny_network(*_args: Any, **_kwargs: Any) -> None:
 
 @contextmanager
 def _doctor_runtime(plugin_path: Path):
-    """Load one plugin through the real runtime and restore global state.
+    """Load one plugin through the real runtime and restore global state afterwards.
 
-    Deliberately private Doctor machinery, not a plugin test framework. Registration code runs
-    under a temporary HERMES_HOME with outbound socket connects blocked.
+    Private Doctor machinery, not a plugin test framework. Registration code runs under a temporary
+    HERMES_HOME with outbound socket connects blocked.
     """
     stack = ExitStack()
     try:
-        # The temp dir enters the stack FIRST so any failure below — including
-        # ENOSPC or KeyboardInterrupt inside copytree — deterministically
-        # removes it instead of stranding a hermes-plugin-doctor-* directory
-        # until interpreter GC (or never, on a hard exit).
-        temporary_home = stack.enter_context(
-            tempfile.TemporaryDirectory(prefix="hermes-plugin-doctor-")
-        )
-        home = Path(temporary_home)
+        # The temp dir enters the stack FIRST so any failure below (ENOSPC / KeyboardInterrupt in
+        # copytree) removes it instead of stranding a hermes-plugin-doctor-* directory.
+        home = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="hermes-plugin-doctor-")))
         bundled = home / "bundled-plugins"
         plugins_root = home / "plugins"
         bundled.mkdir(parents=True)
         plugins_root.mkdir(parents=True)
         copied = plugins_root / plugin_path.name
         shutil.copytree(
-            plugin_path,
-            copied,
+            plugin_path, copied,
             ignore=shutil.ignore_patterns(".git", "__pycache__", ".pytest_cache", "*.pyc"),
         )
-
-        stack.enter_context(
-            patch.dict(
-                os.environ,
-                {
-                    "HERMES_HOME": str(home),
-                    "HERMES_BUNDLED_PLUGINS": str(bundled),
-                    "HERMES_ENABLE_PROJECT_PLUGINS": "0",
-                },
-                clear=False,
-            )
-        )
+        stack.enter_context(patch.dict(os.environ, {
+            "HERMES_HOME": str(home),
+            "HERMES_BUNDLED_PLUGINS": str(bundled),
+            "HERMES_ENABLE_PROJECT_PLUGINS": "0",
+        }, clear=False))
         stack.enter_context(patch.object(socket, "create_connection", _deny_network))
         stack.enter_context(patch.object(socket.socket, "connect", _deny_network))
         stack.enter_context(patch.object(socket.socket, "connect_ex", _deny_network))
@@ -81,18 +65,12 @@ def _doctor_runtime(plugin_path: Path):
 
     entries_before = {entry.name: entry for entry in registry._snapshot_entries()}
     policy_before = dict(registry._plugin_override_policy)
-    modules_before = {
-        name
-        for name in sys.modules
-        if name == "hermes_plugins" or name.startswith("hermes_plugins.")
-    }
+    modules_before = {name for name in sys.modules if _is_plugin_module(name)}
     manager = PluginManager()
     try:
         manifests = manager._scan_directory(plugins_root, source="user")
         if not manifests:
-            raise _DoctorLoadError(
-                f"Hermes discovery found no valid plugin manifest under {copied}"
-            )
+            raise _DoctorLoadError(f"Hermes discovery found no valid plugin manifest under {copied}")
         if len(manifests) != 1:
             raise _DoctorLoadError(
                 f"Expected one plugin manifest, discovered {len(manifests)} under {copied}"
@@ -131,12 +109,13 @@ def _doctor_runtime(plugin_path: Path):
             if changed_names:
                 registry._generation += 1
         for name in list(sys.modules):
-            if (
-                name not in modules_before
-                and (name == "hermes_plugins" or name.startswith("hermes_plugins."))
-            ):
+            if name not in modules_before and _is_plugin_module(name):
                 sys.modules.pop(name, None)
         stack.close()
+
+
+def _is_plugin_module(name: str) -> bool:
+    return name == "hermes_plugins" or name.startswith("hermes_plugins.")
 
 
 @dataclass(frozen=True)
@@ -171,12 +150,9 @@ class DoctorReport:
                 f"{self.manifest.version or '(no version)'} ({self.manifest.kind})"
             )
         for finding in self.findings:
-            marker = "ERROR" if finding.level == "error" else "WARN"
-            lines.append(f"  {marker}: {finding.message}")
+            lines.append(f"  {'ERROR' if finding.level == 'error' else 'WARN'}: {finding.message}")
         if self.ok:
-            lines.append(
-                "  OK: runtime discovery, manifest parsing, import, and registration passed"
-            )
+            lines.append("  OK: runtime discovery, manifest parsing, import, and registration passed")
         lines.append(
             f"  registrations: {len(self.registered_tools)} tool(s), "
             f"{len(self.registered_hooks)} hook(s)"
@@ -188,20 +164,13 @@ _MANIFEST_NAMES = ("plugin.yaml", "plugin.yml", "plugin.json")
 
 
 def _has_manifest(path: Path) -> bool:
-    return any(
-        (path / name).exists() or (path / name).is_symlink()
-        for name in _MANIFEST_NAMES
-    )
+    return any((path / name).exists() or (path / name).is_symlink() for name in _MANIFEST_NAMES)
 
 
 def _holds_plugin(path: Path) -> bool:
-    """True when plugin discovery would find a manifest under *path*.
-
-    Mirrors ``PluginManager._scan_directory``: a manifest in *path* itself or in one immediate
-    subdirectory (category layout). Doctor copies the resolved directory wholesale before the
-    runtime can reject it, so an unvalidated resolve is a disk-usage bug: with no argument
-    Doctor defaults to ``.``, and any directory used to satisfy that.
-    """
+    """True when discovery would find a manifest in *path* or one immediate subdirectory (category
+    layout), mirroring ``PluginManager._scan_directory``. Doctor copies the resolved directory
+    wholesale, so resolving an arbitrary directory (e.g. the default ``.``) would be a disk bug."""
     if not path.is_dir():
         return False
     if _has_manifest(path):
@@ -214,12 +183,8 @@ def _holds_plugin(path: Path) -> bool:
 
 
 def _is_plugin_id(raw: str) -> bool:
-    """True when *raw* can name an installed plugin rather than a path.
-
-    Ids are relative and may carry one category segment (``image_gen/openai``). Dot components
-    are excluded: joining ``.`` onto a plugins root yields the root itself, handing Doctor every
-    installed plugin at once instead of one.
-    """
+    """True when *raw* can name an installed plugin (relative, maybe ``category/name``). Dot
+    components are excluded: ``.`` joined onto a plugins root would hand Doctor every plugin."""
     if not raw or PurePath(raw).is_absolute():
         return False
     parts = PurePath(raw).parts
@@ -236,19 +201,11 @@ def resolve_plugin_path(target: str | os.PathLike[str] | None = None) -> Path:
 
     candidates: list[Path] = []
     if _is_plugin_id(raw):
-        user_root = get_hermes_home() / "plugins"
-        candidates.append(user_root / raw)
+        candidates.append(get_hermes_home() / "plugins" / raw)
         try:
             from hermes_cli.plugins import get_bundled_plugins_dir
-
             bundled = get_bundled_plugins_dir()
-            candidates.extend(
-                [
-                    bundled / raw,
-                    bundled / "platforms" / raw,
-                    bundled / "model-providers" / raw,
-                ]
-            )
+            candidates += [bundled / raw, bundled / "platforms" / raw, bundled / "model-providers" / raw]
         except Exception:
             pass
         candidates.append(Path.cwd() / ".hermes" / "plugins" / raw)
@@ -261,9 +218,7 @@ def resolve_plugin_path(target: str | os.PathLike[str] | None = None) -> Path:
             f"({', '.join(_MANIFEST_NAMES)}), and {raw!r} is not an installed "
             "plugin id. Point Doctor at a plugin directory."
         )
-    raise FileNotFoundError(
-        f"Plugin {raw!r} was not found as a path or installed plugin id"
-    )
+    raise FileNotFoundError(f"Plugin {raw!r} was not found as a path or installed plugin id")
 
 
 def _accepts_var_kwargs(callback: Any) -> bool:
@@ -275,7 +230,7 @@ def _accepts_var_kwargs(callback: Any) -> bool:
 
 
 def _check_manifest_v2(report: "DoctorReport", manifest: Any) -> None:
-    """Manifest v2 (#64165) checks: versions, deps, pip declarations, schema."""
+    """Manifest v2 checks: versions, deps, pip declarations, config schema."""
     import importlib.metadata
     import re as _re
 
@@ -326,25 +281,18 @@ def _check_manifest_v2(report: "DoctorReport", manifest: Any) -> None:
         )
     if missing:
         report.warning(
-            "declared python_dependencies not installed: "
-            + ", ".join(missing)
-            + " — Hermes never auto-installs plugin dependencies; "
-            + "install manually: pip install "
+            "declared python_dependencies not installed: " + ", ".join(missing)
+            + " — Hermes never auto-installs plugin dependencies; install manually: pip install "
             + " ".join(f"'{m}'" for m in missing)
         )
 
     schema = getattr(manifest, "config_schema", {}) or {}
     if schema:
         from hermes_cli.plugins import _CONFIG_SCHEMA_TYPES
-
         for skey, spec in schema.items():
-            if not isinstance(spec, dict):
-                continue
-            stype = spec.get("type")
+            stype = spec.get("type") if isinstance(spec, dict) else None
             if stype is not None and str(stype).lower() not in _CONFIG_SCHEMA_TYPES:
-                report.warning(
-                    f"config_schema key {skey!r} declares unknown type {stype!r}"
-                )
+                report.warning(f"config_schema key {skey!r} declares unknown type {stype!r}")
 
 
 def doctor_plugin(target: str | os.PathLike[str] | None = None) -> DoctorReport:
@@ -391,19 +339,16 @@ def doctor_plugin(target: str | os.PathLike[str] | None = None) -> DoctorReport:
                             "must accept **kwargs for forward compatibility"
                         )
 
-            declared_hook_names = {name for name in declared_hooks if isinstance(name, str)}
-            registered_hook_names = set(host.registered_hooks)
-            for name in sorted(declared_hook_names - registered_hook_names):
-                report.warning(f"manifest declares hook {name!r} but registration did not add it")
-            for name in sorted(registered_hook_names - declared_hook_names):
-                report.warning(f"registration adds hook {name!r} not listed in provides_hooks")
-
-            declared_tool_names = {name for name in declared_tools if isinstance(name, str)}
-            registered_tool_names = set(host.registered_tools)
-            for name in sorted(declared_tool_names - registered_tool_names):
-                report.warning(f"manifest declares tool {name!r} but registration did not add it")
-            for name in sorted(registered_tool_names - declared_tool_names):
-                report.warning(f"registration adds tool {name!r} not listed in provides_tools")
+            for kind, declared, registered in (
+                ("hook", declared_hooks, host.registered_hooks),
+                ("tool", declared_tools, host.registered_tools),
+            ):
+                declared_names = {name for name in declared if isinstance(name, str)}
+                registered_names = set(registered)
+                for name in sorted(declared_names - registered_names):
+                    report.warning(f"manifest declares {kind} {name!r} but registration did not add it")
+                for name in sorted(registered_names - declared_names):
+                    report.warning(f"registration adds {kind} {name!r} not listed in provides_{kind}s")
 
             _check_manifest_v2(report, host.manifest)
     except _DoctorLoadError as exc:
