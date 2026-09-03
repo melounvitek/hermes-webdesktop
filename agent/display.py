@@ -12,7 +12,7 @@ import time
 from dataclasses import dataclass, field
 from difflib import unified_diff
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 from urllib.parse import urlsplit
 
 from utils import safe_json_loads
@@ -37,6 +37,15 @@ def _hex_rgb(h: str) -> tuple[int, int, int]:
     return int(h[1:3], 16), int(h[3:5], 16), int(h[5:7], 16)
 
 
+def _get_skin():
+    """Get the active skin config, or None if not available (lazy import avoids cycles)."""
+    try:
+        from hermes_cli.skin_engine import get_active_skin
+        return get_active_skin()
+    except Exception:
+        return None
+
+
 # Diff colors resolve lazily from the skin engine (light/dark aware) and are
 # cached after the first resolution.
 _diff_colors_cached: dict[str, str] | None = None
@@ -47,37 +56,38 @@ def _diff_ansi() -> dict[str, str]:
     global _diff_colors_cached
     if _diff_colors_cached is not None:
         return _diff_colors_cached
-    # Defaults that work on dark terminals
-    dim = "\033[38;2;150;150;150m"
-    file_c = "\033[38;2;180;160;255m"
-    hunk = "\033[38;2;120;120;140m"
-    minus = "\033[38;2;255;255;255;48;2;120;20;20m"
-    plus = "\033[38;2;255;255;255;48;2;20;90;20m"
+
+    def _fg(r: int, g: int, b: int) -> str:
+        return f"\033[38;2;{r};{g};{b}m"
+
+    # Defaults that work on dark terminals.
+    colors = {
+        "dim": _fg(150, 150, 150), "file": _fg(180, 160, 255), "hunk": _fg(120, 120, 140),
+        "minus": "\033[38;2;255;255;255;48;2;120;20;20m", "plus": "\033[38;2;255;255;255;48;2;20;90;20m",
+    }
     try:
-        from hermes_cli.skin_engine import get_active_skin
-        skin = get_active_skin()
+        skin = _get_skin()
 
-        def _hex_fg(key: str, fallback_rgb: tuple[int, int, int]) -> str:
+        def _skin_fg(key: str, fallback_rgb: tuple[int, int, int]) -> str:
             h = skin.get_color(key, "")
-            r, g, b = _hex_rgb(h) if h and len(h) == 7 and h[0] == "#" else fallback_rgb
-            return f"\033[38;2;{r};{g};{b}m"
+            return _fg(*(_hex_rgb(h) if h and len(h) == 7 and h[0] == "#" else fallback_rgb))
 
-        dim = _hex_fg("banner_dim", (150, 150, 150))
-        file_c = _hex_fg("session_label", (180, 160, 255))
-        hunk = _hex_fg("session_border", (120, 120, 140))
-        # minus/plus use dark-tinted backgrounds derived from ui_error/ui_ok
+        colors["dim"] = _skin_fg("banner_dim", (150, 150, 150))
+        colors["file"] = _skin_fg("session_label", (180, 160, 255))
+        colors["hunk"] = _skin_fg("session_border", (120, 120, 140))
+        # minus/plus use dark-tinted backgrounds derived from ui_error/ui_ok.
         err_h = skin.get_color("ui_error", "#ef5350")
         ok_h = skin.get_color("ui_ok", "#4caf50")
         if err_h and len(err_h) == 7:
             er, eg, eb = _hex_rgb(err_h)
-            minus = f"\033[38;2;255;255;255;48;2;{max(er//2,20)};{max(eg//4,10)};{max(eb//4,10)}m"
+            colors["minus"] = f"\033[38;2;255;255;255;48;2;{max(er//2,20)};{max(eg//4,10)};{max(eb//4,10)}m"
         if ok_h and len(ok_h) == 7:
             or_, og, ob = _hex_rgb(ok_h)
-            plus = f"\033[38;2;255;255;255;48;2;{max(or_//4,10)};{max(og//2,20)};{max(ob//4,10)}m"
+            colors["plus"] = f"\033[38;2;255;255;255;48;2;{max(or_//4,10)};{max(og//2,20)};{max(ob//4,10)}m"
     except Exception:
         pass
-    _diff_colors_cached = {"dim": dim, "file": file_c, "hunk": hunk, "minus": minus, "plus": plus}
-    return _diff_colors_cached
+    _diff_colors_cached = colors
+    return colors
 
 
 @dataclass
@@ -100,15 +110,6 @@ def set_tool_preview_max_len(n: int) -> None:
 def get_tool_preview_max_len() -> int:
     """Return the configured max preview length (0 = unlimited)."""
     return _tool_preview_max_len
-
-
-def _get_skin():
-    """Get the active skin config, or None if not available (lazy import avoids cycles)."""
-    try:
-        from hermes_cli.skin_engine import get_active_skin
-        return get_active_skin()
-    except Exception:
-        return None
 
 
 def get_skin_tool_prefix() -> str:
@@ -143,12 +144,20 @@ def _oneline(text: str) -> str:
     return " ".join(text.split())
 
 
+def _tail_trunc(text: str, limit: int) -> str:
+    """Tail-truncate to ``limit`` chars with ``...`` (0 = unlimited; no guard for limit <= 3)."""
+    return text[:limit - 3] + "..." if limit > 0 and len(text) > limit else text
+
+
 def _truncate_preview(text: str, max_len: int | None) -> str:
     if max_len and max_len > 0 and len(text) > max_len:
-        if max_len <= 3:
-            return "." * max_len
-        return text[:max_len - 3] + "..."
+        return "." * max_len if max_len <= 3 else text[:max_len - 3] + "..."
     return text
+
+
+def _clip(text: str, n: int) -> str:
+    """``text[:n]`` plus ``...`` when longer (used inside quoted previews)."""
+    return f"{text[:n]}{'...' if len(text) > n else ''}"
 
 
 @dataclass(frozen=True)
@@ -160,6 +169,8 @@ class ToolPreview:
     url: str | None = None
 
 
+# ── Shell command summarisation ──────────────────────────────────────────
+
 _SHELL_SILENT_HEADS = {"cd", "pushd", "popd", "export", "set", "unset", "source", ".", "true", "false", ":"}
 _SHELL_PIPE_TAIL_HEADS = {"head", "tail", "wc", "sort", "uniq"}
 
@@ -168,26 +179,31 @@ def _shell_basename(head: str) -> str:
     return head.rsplit("/", 1)[-1] if head else ""
 
 
+def _scan_quoted(text: str) -> Iterator[tuple[int, str, bool]]:
+    """Yield ``(index, char, inside_quotes)``; a quote closes unless backslash-escaped."""
+    quote: str | None = None
+    for i, ch in enumerate(text):
+        if quote:
+            yield i, ch, True
+            if ch == quote and (i == 0 or text[i - 1] != "\\"):
+                quote = None
+        elif ch in {"'", '"'}:
+            quote = ch
+            yield i, ch, True
+        else:
+            yield i, ch, False
+
+
 def _split_shell_words(segment: str) -> list[str]:
     words: list[str] = []
     buf: list[str] = []
-    quote: str | None = None
-    for i, ch in enumerate(segment):
-        if quote:
-            buf.append(ch)
-            if ch == quote and (i == 0 or segment[i - 1] != "\\"):
-                quote = None
-            continue
-        if ch in {"'", '"'}:
-            quote = ch
-            buf.append(ch)
-            continue
-        if ch.isspace():
+    for _, ch, quoted in _scan_quoted(segment):
+        if not quoted and ch.isspace():
             if buf:
                 words.append("".join(buf))
                 buf = []
-            continue
-        buf.append(ch)
+        else:
+            buf.append(ch)
     if buf:
         words.append("".join(buf))
     return words
@@ -204,37 +220,29 @@ def _strip_shell_pipe_tail(segment: str) -> str:
 
 
 def _split_shell_compound(command: str) -> list[str]:
+    """Split on unquoted ``&&`` / ``||`` / ``;`` / newline, dropping pipe tails per segment."""
     segments: list[str] = []
     buf: list[str] = []
-    quote: str | None = None
-    i = 0
+    skip = False
 
     def _flush() -> None:
         segment = _strip_shell_pipe_tail("".join(buf).strip())
         if segment:
             segments.append(segment)
+        buf.clear()
 
-    while i < len(command):
-        ch = command[i]
-        if quote:
-            buf.append(ch)
-            if ch == quote and (i == 0 or command[i - 1] != "\\"):
-                quote = None
-            i += 1
+    for i, ch, quoted in _scan_quoted(command):
+        if skip:
+            skip = False
             continue
-        if ch in {"'", '"'}:
-            quote = ch
-            buf.append(ch)
-            i += 1
-            continue
-        op_len = 2 if command.startswith("&&", i) or command.startswith("||", i) else 1 if ch in {";", "\n"} else 0
-        if op_len:
+        if not quoted and (command.startswith("&&", i) or command.startswith("||", i)):
             _flush()
-            buf = []
-            i += op_len
+            skip = True
+            continue
+        if not quoted and ch in {";", "\n"}:
+            _flush()
             continue
         buf.append(ch)
-        i += 1
     _flush()
     return segments
 
@@ -248,6 +256,7 @@ def _shell_head_word(segment: str) -> str:
 
 
 def _clean_shell_segment(segment: str) -> str:
+    """Drop redirections (``> file``, ``2>&1``) from a segment."""
     words = _split_shell_words(segment)
     out: list[str] = []
     i = 0
@@ -268,8 +277,7 @@ def _is_shell_boundary_echo(segment: str) -> bool:
     words = _split_shell_words(segment)
     if _shell_basename(words[0] if words else "") != "echo":
         return False
-    rest = " ".join(words[1:])
-    return bool(re.search(r"-{2,}|_exit=|(?:^|\s|=)\$[?{]|PIPESTATUS", rest))
+    return bool(re.search(r"-{2,}|_exit=|(?:^|\s|=)\$[?{]|PIPESTATUS", " ".join(words[1:])))
 
 
 def summarize_shell_command(command: str) -> str:
@@ -283,8 +291,7 @@ def summarize_shell_command(command: str) -> str:
     core: list[str] = []
     for segment in segments:
         cleaned = _clean_shell_segment(segment)
-        head = _shell_head_word(cleaned)
-        if cleaned and head not in _SHELL_SILENT_HEADS and not _is_shell_boundary_echo(cleaned):
+        if cleaned and _shell_head_word(cleaned) not in _SHELL_SILENT_HEADS and not _is_shell_boundary_echo(cleaned):
             core.append(cleaned)
     if not core:
         return original
@@ -308,10 +315,10 @@ def redact_browser_typed_text_for_display(value: Any, typed_text: Any) -> Any:
     """Replace every occurrence of a secret-looking browser_type value with its redacted form.
 
     Backends echo the attempted input in error strings/fallback metadata, so the raw
-    value is swapped for its redacted form before the result reaches logs, callbacks,
-    the model, or chat history. Normal typed text matches no secret pattern and passes
-    through unchanged. Redaction is forced regardless of ``security.redact_secrets``:
-    a typed credential leaking into chat history is a security boundary, not log hygiene.
+    value is swapped before the result reaches logs, callbacks, the model, or chat
+    history. Normal typed text matches no secret pattern and passes through unchanged.
+    Redaction is forced regardless of ``security.redact_secrets``: a typed credential
+    leaking into chat history is a security boundary, not log hygiene.
     """
     if typed_text is None:
         return value
@@ -337,23 +344,21 @@ def redact_tool_args_for_display(tool_name: str, args: dict | None) -> dict | No
     if not isinstance(args, dict):
         return args
     if tool_name == "browser_type" and isinstance(args.get("text"), str):
-        safe_args = dict(args)
-        safe_args["text"] = redact_sensitive_text(args["text"], force=True)
-        return safe_args
+        return {**args, "text": redact_sensitive_text(args["text"], force=True)}
     return args
 
 
-def _delegate_task_goal_parts(tasks: Any, *, per_goal_len: int) -> tuple[int, list[str]]:
+def _delegate_task_goals(tasks: Any, *, per_goal_len: int) -> list[str]:
+    """One truncated goal string per dict task (``?`` when missing)."""
     if not isinstance(tasks, list):
-        return 0, []
+        return []
     goals: list[str] = []
     for task in tasks:
-        if not isinstance(task, dict):
-            continue
-        raw_goal = task.get("goal")
-        goal = "?" if raw_goal is None else _oneline(str(raw_goal))
-        goals.append(_truncate_preview(goal or "?", per_goal_len))
-    return len(goals), goals
+        if isinstance(task, dict):
+            raw_goal = task.get("goal")
+            goal = "?" if raw_goal is None else _oneline(str(raw_goal))
+            goals.append(_truncate_preview(goal or "?", per_goal_len))
+    return goals
 
 
 def _browser_exec_step_label(args: dict, max_chars: int = 80) -> str | None:
@@ -408,8 +413,8 @@ def _preview_delegate_task(args: dict, max_len: int) -> str | None:
         return _truncate_preview(action_preview, max_len)
     tasks = args.get("tasks")
     if tasks and isinstance(tasks, list):
-        task_count, goals = _delegate_task_goal_parts(tasks, per_goal_len=40)
-        preview = f"{task_count} tasks: " + " | ".join(goals) if goals else f"{len(tasks)} parallel tasks"
+        goals = _delegate_task_goals(tasks, per_goal_len=40)
+        preview = f"{len(goals)} tasks: " + " | ".join(goals) if goals else f"{len(tasks)} parallel tasks"
         return _truncate_preview(preview, max_len)
     goal = args.get("goal", "")
     if goal is None:
@@ -437,9 +442,7 @@ def _preview_todo_list(args: dict, _max_len: int) -> str:
     todos_arg = args.get("todos")
     if todos_arg is None:
         return "reading task list"
-    if args.get("merge", False):
-        return f"updating {len(todos_arg)} task(s)"
-    return f"planning {len(todos_arg)} task(s)"
+    return f"{'updating' if args.get('merge', False) else 'planning'} {len(todos_arg)} task(s)"
 
 
 def _preview_shell(key: str):
@@ -459,17 +462,11 @@ def _preview_read_file(args: dict, max_len: int) -> str | None:
     return _truncate_preview(f"{label} {_read_file_line_label(args)}".strip(), max_len) or None
 
 
-def _preview_session_search(args: dict, _max_len: int) -> str:
-    query = _oneline(args.get("query", ""))
-    return f"recall: \"{query[:25]}{'...' if len(query) > 25 else ''}\""
-
-
 def _preview_memory(args: dict, _max_len: int) -> str:
     action = args.get("action", "")
     target = args.get("target", "")
     if action == "add":
-        content = _oneline(args.get("content", ""))
-        return f"+{target}: \"{content[:25]}{'...' if len(content) > 25 else ''}\""
+        return f"+{target}: \"{_clip(_oneline(args.get('content', '')), 25)}\""
     if action in ("replace", "remove"):
         old = _oneline(args.get("old_text") or "") or "<missing old_text>"
         return f"{'~' if action == 'replace' else '-'}{target}: \"{old[:20]}\""
@@ -477,11 +474,10 @@ def _preview_memory(args: dict, _max_len: int) -> str:
 
 
 def _preview_send_message(args: dict, _max_len: int) -> str:
-    target = args.get("target", "?")
     msg = _oneline(args.get("message", ""))
     if len(msg) > 20:
         msg = msg[:17] + "..."
-    return f"to {target}: \"{msg}\""
+    return f"to {args.get('target', '?')}: \"{msg}\""
 
 
 def _preview_skill_view(args: dict, max_len: int) -> str | None:
@@ -503,7 +499,7 @@ _PREVIEW_BUILDERS = {
     "terminal": _preview_shell("command"),
     "execute_code": _preview_shell("code"),
     "read_file": _preview_read_file,
-    "session_search": _preview_session_search,
+    "session_search": lambda args, _m: f"recall: \"{_clip(_oneline(args.get('query', '')), 25)}\"",
     "memory": _preview_memory,
     "send_message": _preview_send_message,
     "skill_view": _preview_skill_view,
@@ -532,11 +528,7 @@ def build_tool_preview(tool_name: str, args: dict, max_len: int | None = None) -
     if isinstance(value, list):
         value = value[0] if value else ""
     preview = _oneline(str(value))
-    if not preview:
-        return None
-    if max_len > 0 and len(preview) > max_len:
-        preview = preview[:max_len - 3] + "..."
-    return preview
+    return _tail_trunc(preview, max_len) if preview else None
 
 
 def prepare_tool_preview(
@@ -574,30 +566,16 @@ def prepare_tool_preview(
 # =========================================================================
 
 _TOOL_VERBS: dict[str, str] = {
-    "web_search": "Searching the web",
-    "web_extract": "Reading",
-    "browser_navigate": "Browsing",
-    "browser_click": "Clicking",
-    "browser_type": "Typing",
-    "read_file": "Reading",
-    "write_file": "Writing",
-    "patch": "Editing",
-    "search_files": "Searching files",
-    "terminal": "Running",
-    "execute_code": "Running code",
-    "image_generate": "Generating image",
-    "video_generate": "Generating video",
-    "text_to_speech": "Generating speech",
-    "vision_analyze": "Looking at the image",
+    "web_search": "Searching the web", "web_extract": "Reading",
+    "browser_navigate": "Browsing", "browser_click": "Clicking", "browser_type": "Typing",
+    "read_file": "Reading", "write_file": "Writing", "patch": "Editing", "search_files": "Searching files",
+    "terminal": "Running", "execute_code": "Running code",
+    "image_generate": "Generating image", "video_generate": "Generating video",
+    "text_to_speech": "Generating speech", "vision_analyze": "Looking at the image",
     "session_search": "Searching past sessions",
-    "skill_view": "Reading skill",
-    "skills_list": "Listing skills",
-    "skill_manage": "Updating skill",
-    "delegate_task": "Delegating",
-    "cronjob_manage": "Scheduling",
-    "clarify": "Asking",
-    "memory": "Updating memory",
-    "todo_list": "Updating tasks",
+    "skill_view": "Reading skill", "skills_list": "Listing skills", "skill_manage": "Updating skill",
+    "delegate_task": "Delegating", "cronjob_manage": "Scheduling", "clarify": "Asking",
+    "memory": "Updating memory", "todo_list": "Updating tasks",
 }
 # Verbs that read better without the argument preview appended.
 _TOOL_VERBS_NO_PREVIEW: frozenset[str] = frozenset({"skills_list", "session_search"})
@@ -619,9 +597,7 @@ def get_tool_verb(tool_name: str) -> str | None:
     Callers holding a computed preview compose ``f"{verb}{connector}{preview}"``
     themselves via :func:`tool_verb_connector`.
     """
-    if not _friendly_tool_labels:
-        return None
-    return _TOOL_VERBS.get(tool_name)
+    return _TOOL_VERBS.get(tool_name) if _friendly_tool_labels else None
 
 
 def tool_verb_connector(tool_name: str) -> str:
@@ -646,14 +622,12 @@ def build_status_phrase(tool_name: str, args: dict | None, max_len: int = 49) ->
     if not tool_name or tool_name == "_thinking" or not _friendly_tool_labels:
         return None
     verb = _TOOL_VERBS.get(tool_name)
-    head = f"is {verb[0].lower()}{verb[1:]}" if verb else f"is using {tool_name}"
-    phrase = head
+    phrase = f"is {verb[0].lower()}{verb[1:]}" if verb else f"is using {tool_name}"
     if args and verb and tool_name not in _TOOL_VERBS_NO_PREVIEW:
         preview = build_tool_preview(tool_name, args, max_len=None)
         if preview:
             # Previews can contain newlines (terminal commands); keep the first line.
-            preview = preview.splitlines()[0].strip()
-            phrase = f"{head}{tool_verb_connector(tool_name)}{preview}"
+            phrase = f"{phrase}{tool_verb_connector(tool_name)}{preview.splitlines()[0].strip()}"
     if len(phrase) > max_len - 1:
         return phrase[: max_len - 2].rstrip() + "…"
     return phrase + "…"
@@ -665,15 +639,13 @@ def build_tool_label(tool_name: str, args: dict, max_len: int | None = None) -> 
     Custom/plugin/MCP tools (or labels disabled) get the raw preview, so this is a
     drop-in replacement for :func:`build_tool_preview`.
     """
-    verb = _TOOL_VERBS.get(tool_name) if _friendly_tool_labels else None
+    verb = get_tool_verb(tool_name)
     if not verb:
         return build_tool_preview(tool_name, args, max_len=max_len)
     if tool_name in _TOOL_VERBS_NO_PREVIEW:
         return verb
     preview = build_tool_preview(tool_name, args, max_len=max_len)
-    if not preview:
-        return verb
-    return f"{verb}{tool_verb_connector(tool_name)}{preview}"
+    return f"{verb}{tool_verb_connector(tool_name)}{preview}" if preview else verb
 
 
 # =========================================================================
@@ -753,9 +725,7 @@ def _result_succeeded(result: str | None) -> bool:
     data = safe_json_loads(result)
     if not isinstance(data, dict) or data.get("error"):
         return False
-    if "success" in data:
-        return bool(data.get("success"))
-    return True
+    return bool(data.get("success")) if "success" in data else True
 
 
 def _diff_from_snapshot(snapshot: LocalEditSnapshot | None) -> str | None:
@@ -769,14 +739,11 @@ def _diff_from_snapshot(snapshot: LocalEditSnapshot | None) -> str | None:
         if before == after:
             continue
         display_path = _display_diff_path(path)
-        diff = "".join(
-            unified_diff(
-                [] if before is None else before.splitlines(keepends=True),
-                [] if after is None else after.splitlines(keepends=True),
-                fromfile=f"a/{display_path}",
-                tofile=f"b/{display_path}",
-            )
-        )
+        diff = "".join(unified_diff(
+            [] if before is None else before.splitlines(keepends=True),
+            [] if after is None else after.splitlines(keepends=True),
+            fromfile=f"a/{display_path}", tofile=f"b/{display_path}",
+        ))
         if diff:
             chunks.append(diff)
     if not chunks:
@@ -834,13 +801,11 @@ def _render_inline_unified_diff(diff: str) -> list[str]:
             if from_file or to_file:
                 rendered.append(f"{_diff_ansi()['file']}{from_file or 'a/?'} → {to_file or 'b/?'}{_ANSI_RESET}")
             continue
-        for prefix, color in _DIFF_LINE_COLORS:
-            if raw_line.startswith(prefix):
-                rendered.append(f"{_diff_ansi()[color]}{raw_line}{_ANSI_RESET}")
-                break
-        else:
-            if raw_line:
-                rendered.append(raw_line)
+        color = next((c for prefix, c in _DIFF_LINE_COLORS if raw_line.startswith(prefix)), None)
+        if color:
+            rendered.append(f"{_diff_ansi()[color]}{raw_line}{_ANSI_RESET}")
+        elif raw_line:
+            rendered.append(raw_line)
     return rendered
 
 
@@ -1115,13 +1080,10 @@ def _trim_error(msg: str) -> str:
     """Shrink an error message for inline display (long 'File not found' paths -> filename)."""
     msg = msg.strip()
     if "File not found:" in msg:
-        _, _, tail = msg.partition("File not found:")
-        tail = tail.strip()
+        tail = msg.partition("File not found:")[2].strip()
         if "/" in tail:
             msg = f"File not found: {tail.rsplit('/', 1)[-1]}"
-    if len(msg) > _ERROR_SUFFIX_MAX_LEN:
-        msg = msg[: _ERROR_SUFFIX_MAX_LEN - 3] + "..."
-    return msg
+    return _tail_trunc(msg, _ERROR_SUFFIX_MAX_LEN)
 
 
 def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]:
@@ -1136,18 +1098,12 @@ def _detect_tool_failure(tool_name: str, result: str | None) -> tuple[bool, str]
             exit_code = data.get("exit_code")
             if exit_code is not None and exit_code != 0:
                 err_msg = data.get("error")
-                if err_msg:
-                    return True, f" [{_trim_error(str(err_msg))}]"
-                return True, f" [exit {exit_code}]"
+                return True, f" [{_trim_error(str(err_msg))}]" if err_msg else f" [exit {exit_code}]"
         return False, ""
 
     if isinstance(data, dict):
         # Memory: distinguish "store full" from real errors.
-        if (
-            tool_name == "memory"
-            and data.get("success") is False
-            and "exceed the limit" in data.get("error", "")
-        ):
+        if tool_name == "memory" and data.get("success") is False and "exceed the limit" in data.get("error", ""):
             return True, " [full]"
         err = data.get("error") or data.get("message")
         if err and (data.get("success") is False or "error" in data):
@@ -1168,20 +1124,14 @@ def _domain(url: str) -> str:
 
 def _cute_trunc(s) -> str:
     """Tail-truncate to the configured preview cap (0 = unlimited)."""
-    s = str(s)
-    limit = _tool_preview_max_len
-    if limit == 0:
-        return s
-    return (s[:limit-3] + "...") if len(s) > limit else s
+    return _tail_trunc(str(s), _tool_preview_max_len)
 
 
 def _cute_path(p) -> str:
     """Head-truncate a path to the configured preview cap, keeping the filename end."""
     p = str(p)
     limit = _tool_preview_max_len
-    if limit == 0:
-        return p
-    return ("..." + p[-(limit-3):]) if len(p) > limit else p
+    return ("..." + p[-(limit-3):]) if limit and len(p) > limit else p
 
 
 def _cute_web_extract(a: dict, _r) -> str:
@@ -1265,9 +1215,9 @@ def _cute_delegate(a: dict, _r) -> str:
         return f"┊ 🔀 delegate  {_cute_trunc(action_preview)}"
     tasks = a.get("tasks")
     if tasks and isinstance(tasks, list):
-        task_count, goals = _delegate_task_goal_parts(tasks, per_goal_len=30)
+        goals = _delegate_task_goals(tasks, per_goal_len=30)
         detail = " | ".join(goals) if goals else "parallel"
-        return f"┊ 🔀 delegate  {task_count or len(tasks)}x: {_cute_trunc(detail)}"
+        return f"┊ 🔀 delegate  {len(goals) or len(tasks)}x: {_cute_trunc(detail)}"
     return f"┊ 🔀 delegate  {_cute_trunc(a.get('goal', ''))}"
 
 
@@ -1288,16 +1238,12 @@ _CUTE_LINES = {
     "read_file": lambda a, r: f"┊ 📖 read      {_cute_trunc(build_tool_preview('read_file', a) or a.get('path', ''))}",
     "write_file": lambda a, r: f"┊ ✍️  write     {_cute_path(a.get('path', ''))}",
     "patch": lambda a, r: f"┊ 🔧 patch     {_cute_path(a.get('path', ''))}",
-    "search_files": lambda a, r: (
-        f"┊ 🔎 {'find' if a.get('target', 'content') == 'files' else 'grep':9} {_cute_trunc(a.get('pattern', ''))}"
-    ),
+    "search_files": lambda a, r: f"┊ 🔎 {'find' if a.get('target', 'content') == 'files' else 'grep':9} {_cute_trunc(a.get('pattern', ''))}",
     "browser_navigate": lambda a, r: f"┊ 🌐 navigate  {_cute_trunc(_domain(a.get('url', '')))}",
     "browser_snapshot": lambda a, r: f"┊ 📸 snapshot  {'full' if a.get('full') else 'compact'}",
     "browser_click": lambda a, r: f"┊ 👆 click     {a.get('ref', '?')}",
     "browser_type": lambda a, r: f"┊ ⌨️  type      \"{_cute_trunc(a.get('text', ''))}\"",
-    "browser_scroll": lambda a, r: (
-        f"┊ {_SCROLL_ARROWS.get(a.get('direction', 'down'), '↓')}  scroll    {a.get('direction', 'down')}"
-    ),
+    "browser_scroll": lambda a, r: f"┊ {_SCROLL_ARROWS.get(a.get('direction', 'down'), '↓')}  scroll    {a.get('direction', 'down')}",
     "browser_back": lambda a, r: "┊ ◀️  back    ",
     "browser_press": lambda a, r: f"┊ ⌨️  press     {a.get('key', '?')}",
     "browser_get_images": lambda a, r: "┊ 🖼️  images    extracting",
