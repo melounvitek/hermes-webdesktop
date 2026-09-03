@@ -164,17 +164,12 @@ def _run_under_progress_timeout(
         return retry_fence
 
     return run_compress_context_with_progress_timeout(
-        worker=_snapshot_worker,
-        messages=messages,
+        worker=_snapshot_worker, messages=messages,
         system_prompt_fallback=lambda: _timeout_fallback_prompt(agent, system_message),
-        idle_timeout_seconds=idle_timeout,
-        total_ceiling_seconds=total_ceiling,
-        on_timeout=_on_timeout,
+        idle_timeout_seconds=idle_timeout, total_ceiling_seconds=total_ceiling, on_timeout=_on_timeout,
         on_timeout_cause=_on_timeout_cause,
-        on_commit_overrun=lambda waited, ceiling: _warn_commit_overrun(agent, waited, ceiling),
-        fence=active_fence,
-        telemetry_agent=agent,
-        new_fence=_publish_new_fence,
+        on_commit_overrun=lambda waited, ceiling: _warn_commit_overrun(agent, waited, ceiling), fence=active_fence,
+        telemetry_agent=agent, new_fence=_publish_new_fence,
     )
 
 
@@ -274,16 +269,10 @@ class CompressionFacadeMixin:
 
             def _run(fence=None, target_messages=None):
                 return compress_context(
-                    self,
-                    target_messages if target_messages is not None else messages,
-                    system_message,
-                    approx_tokens=approx_tokens,
-                    task_id=task_id,
-                    focus_topic=focus_topic,
-                    force=force,
+                    self, target_messages if target_messages is not None else messages, system_message,
+                    approx_tokens=approx_tokens, task_id=task_id, focus_topic=focus_topic, force=force,
                     bypass_cooldown=bypass_cooldown,
-                    defer_context_engine_notification=(defer_context_engine_notification),
-                    commit_fence=fence,
+                    defer_context_engine_notification=(defer_context_engine_notification), commit_fence=fence,
                 )
 
             # Callers that already own a progress-aware wait (gateway session
