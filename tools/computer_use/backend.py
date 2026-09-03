@@ -17,11 +17,8 @@ def image_dimensions_from_bytes(raw: bytes) -> Optional[Tuple[int, int]]:
     segments (skipping 0xFF fill bytes) to the first SOF marker; stop at SOS. Used by the
     tool layer's provider min-size guard."""
     if raw.startswith(b"\x89PNG\r\n\x1a\n") and len(raw) >= 24:
-        try:
-            width, height = struct.unpack(">II", raw[16:24])
-            return int(width), int(height)
-        except Exception:
-            return None
+        width, height = struct.unpack(">II", raw[16:24])  # cannot fail: 8 bytes are guaranteed present
+        return int(width), int(height)
     if raw.startswith(b"\xff\xd8") and len(raw) > 4:
         i = 2
         while i + 9 < len(raw):
@@ -56,14 +53,9 @@ class UIElement:
     pid: int = 0                     # owning process PID
     window_id: int = 0               # SkyLight / CG window ID
     attributes: Dict[str, Any] = field(default_factory=dict)
-    # Opaque per-snapshot handle from cua-driver. Passed alongside `index` for explicit
-    # stale-detection: a stale token errors instead of silently re-resolving to a
-    # different element. None for older drivers that lack the field.
+    # Opaque per-snapshot handle from cua-driver, passed alongside `index` for explicit stale-detection: a
+    # stale token errors instead of silently re-resolving to a different element. None on older drivers.
     element_token: Optional[str] = None
-
-    def center(self) -> Tuple[int, int]:
-        x, y, w, h = self.bounds
-        return x + w // 2, y + h // 2
 
 
 @dataclass
@@ -80,11 +72,11 @@ class CaptureResult:
     app: str = ""                   # target app/window the elements were captured for
     window_title: str = ""
     png_bytes_len: int = 0          # raw bytes sent to Anthropic, for token estimation
-    # MIME type of `png_b64` when the backend supplied it (cua-driver-rs emits `mimeType`
-    # on every image part). None → consumers fall back to base64-prefix sniffing (older drivers).
+    # MIME type of `png_b64` when the backend supplied it (cua-driver-rs emits `mimeType` on every image
+    # part). None → consumers fall back to base64-prefix sniffing (older drivers).
     image_mime_type: Optional[str] = None
-    # Guidance appended to the summary by capture lanes that intentionally return no
-    # elements (e.g. full-screen composited grabs) to point the model at an interactive lane.
+    # Guidance appended to the summary by capture lanes that intentionally return no elements (e.g.
+    # full-screen composited grabs) to point the model at an interactive lane.
     note: str = ""
 
 
@@ -101,7 +93,6 @@ class ActionResult:
     message: str = ""                # human-readable summary
     capture: Optional[CaptureResult] = None  # trailing screenshot, when requested / always-on
     meta: Dict[str, Any] = field(default_factory=dict)  # debugging / telemetry extras
-    # ── cua-driver structured verdict (additive; None on old drivers) ──
     verified: Optional[bool] = None  # AX read-back: True confirmed, False unconfirmed, None n/a
     effect: Optional[str] = None     # "confirmed" | "unverifiable" | "suspected_noop"
     # {"recommended": "px"|"foreground"|"page", "reason": str} — only when driver recommends climbing
@@ -126,8 +117,7 @@ class ComputerUseBackend(ABC):
     def stop(self) -> None: ...
 
     @abstractmethod
-    def is_available(self) -> bool:
-        """True if the backend can be used on this host right now (check_fn gating, setup wizard)."""
+    def is_available(self) -> bool: ...  # usable on this host right now (check_fn gating, setup wizard)
 
     @abstractmethod
     def capture(self, mode: str = "som", app: Optional[str] = None, pid: Optional[int] = None,
@@ -157,23 +147,19 @@ class ComputerUseBackend(ABC):
     def key(self, keys: str, *, delivery_mode: Optional[str] = None, bring_to_front: bool = False) -> ActionResult: ...
 
     @abstractmethod
-    def list_apps(self) -> List[Dict[str, Any]]:
-        """Return running apps with bundle IDs, PIDs, window counts."""
+    def list_apps(self) -> List[Dict[str, Any]]: ...  # running apps with bundle IDs, PIDs, window counts
 
     def list_windows(self) -> List[Dict[str, Any]]:
-        """Visible native windows with PID and window identifiers. Optional compatibility
-        hook: backends that predate window discovery stay instantiable and report none."""
+        """Visible native windows with PID and window identifiers. Optional compatibility hook: backends that
+        predate window discovery stay instantiable and report none."""
         return []
 
     @abstractmethod
-    def focus_app(self, app: str, raise_window: bool = False) -> ActionResult:
-        """Route input to `app` (by name or bundle ID). Default: focus without raise."""
+    def focus_app(self, app: str, raise_window: bool = False) -> ActionResult: ...  # route input to `app` (name / bundle ID)
 
     @abstractmethod
-    def set_value(self, value: str, element: Optional[int] = None) -> ActionResult:
-        """Set a native value on an element (e.g. AXPopUpButton selection)."""
+    def set_value(self, value: str, element: Optional[int] = None) -> ActionResult: ...  # e.g. AXPopUpButton selection
 
-    def wait(self, seconds: float) -> ActionResult:
-        """Default implementation: time.sleep."""
+    def wait(self, seconds: float) -> ActionResult:  # default implementation
         time.sleep(max(0.0, min(seconds, 30.0)))
         return ActionResult(ok=True, action="wait", message=f"waited {seconds:.2f}s")
