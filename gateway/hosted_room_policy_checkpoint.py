@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from gateway import hosted_rooms
-from gateway.hosted_rooms_common import compact_json
+from gateway.hosted_rooms_common import DbPath, compact_json
 
 
 MAX_ACTIVE_POLICY_EVENTS = 64
@@ -97,7 +97,7 @@ def _settled_message(
 class HostedRoomPolicyCheckpoint:
     """Incrementally index room policy without compacting visible history."""
 
-    def __init__(self, db_path: Path | str) -> None:
+    def __init__(self, db_path: DbPath) -> None:
         self.db_path = Path(db_path)
         with self._connect() as conn:
             for ddl in _SCHEMA_DDL:

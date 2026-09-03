@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping
 
 IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]*$")
+DbPath = Path | str
 
 
 def identifier(
@@ -98,7 +99,7 @@ def clock(now: float | None) -> float:
     return time.time() if now is None else float(now)
 
 
-def open_sqlite(path: Path | str, *, timeout: float = 10) -> sqlite3.Connection:
+def open_sqlite(path: DbPath, *, timeout: float = 10) -> sqlite3.Connection:
     """Row-factory connection with foreign keys on; no journal or schema work."""
     conn = sqlite3.connect(path, timeout=timeout)
     conn.row_factory = sqlite3.Row
@@ -107,7 +108,7 @@ def open_sqlite(path: Path | str, *, timeout: float = 10) -> sqlite3.Connection:
 
 
 def connect(
-    db_path: Path | str, *, db_label: str, ready: Callable[[sqlite3.Connection], bool],
+    db_path: DbPath, *, db_label: str, ready: Callable[[sqlite3.Connection], bool],
     initialize: Callable[[sqlite3.Connection], None], lock_retries: int = 1) -> sqlite3.Connection:
     """Open the shared root store: WAL, foreign keys, then ``initialize`` in one IMMEDIATE txn if not ``ready``.
 
@@ -154,7 +155,7 @@ def table_columns(conn: sqlite3.Connection, table: str) -> frozenset[str]:
 
 @contextmanager
 def transaction(
-    connect: Callable[[Path | str], sqlite3.Connection], db_path: Path | str, *, immediate: bool
+    connect: Callable[[DbPath], sqlite3.Connection], db_path: DbPath, *, immediate: bool
 ) -> Iterator[sqlite3.Connection]:
     """Open via ``connect``, optionally ``BEGIN IMMEDIATE``, commit on success, always close."""
     conn = connect(db_path)

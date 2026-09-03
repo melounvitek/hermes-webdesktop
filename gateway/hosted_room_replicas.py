@@ -13,13 +13,12 @@ import json
 import sqlite3
 from contextlib import contextmanager
 from functools import partial
-from pathlib import Path
 from typing import Any, Iterator
 
 from gateway.hosted_rooms import (
     MAX_ACTOR_ID_CHARS, HostedRoomError, RoomConflictError, _actor_json, _connect, _payload_json, _room_id,
     _transaction, _validate_identifier, _validate_members, _validate_room_name, local_authority_gateway_id)
-from gateway.hosted_rooms_common import bounded_int, clock, utf8_len
+from gateway.hosted_rooms_common import DbPath, bounded_int, clock, utf8_len
 
 MAX_REPLICA_ROOMS = 256
 MAX_REPLICA_EVENT_BYTES = 256 * 1024 * 1024
@@ -57,7 +56,7 @@ def _initialize_replica_schema(conn: sqlite3.Connection) -> None:
 
 
 @contextmanager
-def _replica_transaction(db_path: Path | str) -> Iterator[sqlite3.Connection]:
+def _replica_transaction(db_path: DbPath) -> Iterator[sqlite3.Connection]:
     """Ensure the replica schema (own autocommit connection), then open an IMMEDIATE transaction.
 
     The DDL is deliberately re-run inside the transaction: that double init is the established statement order.
@@ -147,7 +146,7 @@ def _store_replica(
 
 
 def ingest_page(
-    db_path: Path | str, *, room_id: Any, room_name: Any, members: Any, page: Any, now: float | None = None
+    db_path: DbPath, *, room_id: Any, room_name: Any, members: Any, page: Any, now: float | None = None
 ) -> dict[str, Any]:
     """Persist one verbatim ``read_events()`` page idempotently; refuses seq gaps and epoch regressions."""
     room_id = _room_id(room_id)
@@ -187,7 +186,7 @@ def ingest_page(
         "caught_up": new_last >= max(latest_seq, new_last)}
 
 
-def replica_state(db_path: Path | str, *, room_id: Any) -> dict[str, Any]:
+def replica_state(db_path: DbPath, *, room_id: Any) -> dict[str, Any]:
     """Return the stored replica's coverage and authority lineage."""
     room_id = _room_id(room_id)
     with _replica_transaction(db_path) as conn:
@@ -202,7 +201,7 @@ def replica_state(db_path: Path | str, *, room_id: Any) -> dict[str, Any]:
 
 
 def promote_replica(
-    db_path: Path | str, *, room_id: Any, reason: Any = "authority-unreachable", now: float | None = None
+    db_path: DbPath, *, room_id: Any, reason: Any = "authority-unreachable", now: float | None = None
 ) -> dict[str, Any]:
     """Continue a replicated room on THIS gateway at ``epoch + 1``.
 
@@ -259,7 +258,7 @@ def promote_replica(
 
 
 def demote_room(
-    db_path: Path | str, *, room_id: Any, observed_gateway_id: Any, observed_epoch: Any, now: float | None = None
+    db_path: DbPath, *, room_id: Any, observed_gateway_id: Any, observed_epoch: Any, now: float | None = None
 ) -> dict[str, Any]:
     """Fence THIS gateway's stale room authority against a proven newer epoch.
 

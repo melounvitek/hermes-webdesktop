@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Mapping, NoReturn
 
 from gateway.hosted_rooms_common import (
-    bounded_int, canonical_json, clock as _now, compact_json, connect, identifier, open_sqlite, table_columns,
+    DbPath, bounded_int, canonical_json, clock as _now, compact_json, connect, identifier, open_sqlite, table_columns,
     table_exists, transaction)
 
 PROTOCOL_VERSION = 2
@@ -445,13 +445,13 @@ def local_authority_gateway_id() -> str:
     return _actor_id(f"install:{install_id}", "authority_gateway_id")
 
 
-def _connect(db_path: Path | str) -> sqlite3.Connection:
+def _connect(db_path: DbPath) -> sqlite3.Connection:
     return connect(
         db_path, db_label="state.db (hosted_rooms)", ready=_schema_is_current,
         initialize=lambda conn: _initialize_schema(conn), lock_retries=_JOURNAL_MODE_LOCK_RETRIES)
 
 
-def _read_connection(db_path: Path | str) -> sqlite3.Connection:
+def _read_connection(db_path: DbPath) -> sqlite3.Connection:
     """Open the room store without steady-state journal or migration writes."""
     path = Path(db_path)
     if not path.is_file():
@@ -464,7 +464,7 @@ def _read_connection(db_path: Path | str) -> sqlite3.Connection:
     return open_sqlite(path)
 
 
-def _transaction(db_path: Path | str, *, immediate: bool = False):
+def _transaction(db_path: DbPath, *, immediate: bool = False):
     return transaction(_connect, db_path, immediate=immediate)
 
 
@@ -619,7 +619,7 @@ def _prune_disbanded_rooms_locked(
     return len(room_ids)
 
 
-def prune_disbanded_rooms(db_path: Path | str, *, now: float | None = None) -> int:
+def prune_disbanded_rooms(db_path: DbPath, *, now: float | None = None) -> int:
     """Purge deleted Group Chat payloads while reserving their identities."""
     timestamp = _now(now)
     with _transaction(db_path, immediate=True) as conn:
@@ -629,7 +629,7 @@ def prune_disbanded_rooms(db_path: Path | str, *, now: float | None = None) -> i
 # --- room links / grants / reservations / remote runs ---------------------------------
 
 
-def list_room_link_records(db_path: Path | str) -> list[dict[str, Any]]:
+def list_room_link_records(db_path: DbPath) -> list[dict[str, Any]]:
     """Return private RoomLink records without logging or formatting grants."""
     with _transaction(db_path) as conn:
         rows = conn.execute("""SELECT room_id, member_id, target_url, target_profile, grant,
@@ -641,7 +641,7 @@ def list_room_link_records(db_path: Path | str) -> list[dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
-def upsert_room_link_record(db_path: Path | str, *, record: Mapping[str, Any], max_links: int) -> None:
+def upsert_room_link_record(db_path: DbPath, *, record: Mapping[str, Any], max_links: int) -> None:
     """Atomically insert or replace one private RoomLink record."""
     with _transaction(db_path, immediate=True) as conn:
         existing = conn.execute(
@@ -670,7 +670,7 @@ def upsert_room_link_record(db_path: Path | str, *, record: Mapping[str, Any], m
 
 
 def update_room_link_status(
-    db_path: Path | str, *, room_id: str, member_id: str, status: str, now: float | None = None) -> bool:
+    db_path: DbPath, *, room_id: str, member_id: str, status: str, now: float | None = None) -> bool:
     """Persist a non-secret route health classification."""
     with _transaction(db_path, immediate=True) as conn:
         cursor = conn.execute(
@@ -679,7 +679,7 @@ def update_room_link_status(
         return cursor.rowcount == 1
 
 
-def delete_room_link_records(db_path: Path | str, *, room_id: str) -> int:
+def delete_room_link_records(db_path: DbPath, *, room_id: str) -> int:
     """Delete persisted peer routes after their target grants are revoked."""
     with _transaction(db_path, immediate=True) as conn:
         return conn.execute("DELETE FROM hosted_room_links WHERE room_id=?", (room_id,)).rowcount
@@ -698,7 +698,7 @@ def _room_grant_scope_key(claims: Mapping[str, Any]) -> str:
 
 
 def revoke_room_grant_scope(
-    db_path: Path | str, *, claims: Mapping[str, Any], expires_at: float, now: float | None = None) -> None:
+    db_path: DbPath, *, claims: Mapping[str, Any], expires_at: float, now: float | None = None) -> None:
     """Revoke every grant issued at or before now for one exact room scope."""
     scope_key = _room_grant_scope_key(claims)
     timestamp = _now(now)
@@ -742,7 +742,7 @@ def _reservation_superseded(row: sqlite3.Row, gateway_id: str, epoch: int) -> bo
 
 
 def reserve_peer_room(
-    db_path: Path | str, *, claims: Mapping[str, Any], expires_at: float, now: float | None = None) -> None:
+    db_path: DbPath, *, claims: Mapping[str, Any], expires_at: float, now: float | None = None) -> None:
     """Fence direct Desktop prompts before the first peer run is admitted."""
     timestamp = _now(now)
     expiry = float(expires_at)
@@ -778,19 +778,19 @@ def reserve_peer_room(
                    updated_at=excluded.updated_at""", (*values, expiry, timestamp, timestamp))
 
 
-def _read_one(db_path: Path | str, sql: str, params: tuple[Any, ...]) -> sqlite3.Row | None:
+def _read_one(db_path: DbPath, sql: str, params: tuple[Any, ...]) -> sqlite3.Row | None:
     with _transaction(db_path) as conn:
         return conn.execute(sql, params).fetchone()
 
 
-def peer_room_is_reserved(db_path: Path | str, *, room_id: str, target_profile: str, now: float | None = None) -> bool:
+def peer_room_is_reserved(db_path: DbPath, *, room_id: str, target_profile: str, now: float | None = None) -> bool:
     """Return whether a live target-side RoomLink reservation fences Desktop."""
     timestamp = _now(now)
     params = (_room_id(room_id), _actor_id(target_profile, "target_profile"), timestamp)
     return _read_one(db_path, _SELECT_LIVE_RESERVATION, params) is not None
 
 
-def peer_room_grant_is_current(db_path: Path | str, *, claims: Mapping[str, Any], now: float | None = None) -> bool:
+def peer_room_grant_is_current(db_path: DbPath, *, claims: Mapping[str, Any], now: float | None = None) -> bool:
     """Require a grant to match the target's current live reservation."""
     timestamp = _now(now)
     values = _reservation_claims(claims)
@@ -802,7 +802,7 @@ def peer_room_grant_is_current(db_path: Path | str, *, claims: Mapping[str, Any]
     return row is not None
 
 
-def room_grant_is_revoked(db_path: Path | str, *, claims: Mapping[str, Any], now: float | None = None) -> bool:
+def room_grant_is_revoked(db_path: DbPath, *, claims: Mapping[str, Any], now: float | None = None) -> bool:
     """Return whether a grant predates its exact scope's revocation fence."""
     timestamp = _now(now)
     scope_key = _room_grant_scope_key(claims)
@@ -818,7 +818,7 @@ def _remote_run_identity(record: Mapping[str, Any]) -> tuple[Any, ...]:
     return tuple(record[column] for column in _REMOTE_RUN_IDENTITY_COLUMNS)
 
 
-def upsert_remote_run_receipt(db_path: Path | str, *, record: Mapping[str, Any], now: float | None = None) -> None:
+def upsert_remote_run_receipt(db_path: DbPath, *, record: Mapping[str, Any], now: float | None = None) -> None:
     """Durably bind one logical peer task attempt to its remote run handle."""
     timestamp = _now(now)
     identity = _remote_run_identity(record)
@@ -840,7 +840,7 @@ def upsert_remote_run_receipt(db_path: Path | str, *, record: Mapping[str, Any],
 
 
 def list_remote_run_receipts(
-    db_path: Path | str, *, room_id: str | None = None, target_profile: str | None = None, session_id: str | None = None
+    db_path: DbPath, *, room_id: str | None = None, target_profile: str | None = None, session_id: str | None = None
 ) -> list[dict[str, Any]]:
     """Return remote run handles in durable task order."""
     filters = [
@@ -856,7 +856,7 @@ def list_remote_run_receipts(
     return [dict(row) for row in rows]
 
 
-def remote_run_receipt(db_path: Path | str, *, record: Mapping[str, Any]) -> dict[str, Any] | None:
+def remote_run_receipt(db_path: DbPath, *, record: Mapping[str, Any]) -> dict[str, Any] | None:
     """Return the exact durable remote run handle for one task attempt."""
     row = _read_one(db_path, _SELECT_REMOTE_RUN, _remote_run_identity(record))
     return dict(row) if row is not None else None
@@ -896,7 +896,7 @@ def _adopt_legacy_room(
 
 
 def create_room(
-    db_path: Path | str, *, room_id: Any, name: Any, members: Any, authority_gateway_id: Any, now: float | None = None
+    db_path: DbPath, *, room_id: Any, name: Any, members: Any, authority_gateway_id: Any, now: float | None = None
 ) -> dict[str, Any]:
     """Create a room, or return the identical existing room idempotently."""
     room_id = _room_id(room_id)
@@ -942,7 +942,7 @@ def create_room(
 
 
 def list_rooms(
-    db_path: Path | str, *, include_disbanded: bool = False, limit: int = MAX_ROOM_LIST_LIMIT, offset: int = 0
+    db_path: DbPath, *, include_disbanded: bool = False, limit: int = MAX_ROOM_LIST_LIMIT, offset: int = 0
 ) -> list[dict[str, Any]]:
     """Return one bounded read-only page ordered by most recent change."""
     limit = _bounded_limit(limit, MAX_ROOM_LIST_LIMIT)
@@ -958,8 +958,7 @@ def list_rooms(
     return [_room_from_row(row) for row in rows]
 
 
-def rename_room(
-    db_path: Path | str, *, room_id: Any, event_id: Any, name: Any, now: float | None = None) -> dict[str, Any]:
+def rename_room(db_path: DbPath, *, room_id: Any, event_id: Any, name: Any, now: float | None = None) -> dict[str, Any]:
     """Rename a live room and append its replay event atomically."""
     room_id = _room_id(room_id)
     event_id = _event_id(event_id)
@@ -994,7 +993,7 @@ def rename_room(
 
 
 def append_event(
-    db_path: Path | str, *, room_id: Any, event_id: Any, kind: Any, actor: Any, payload: Any,
+    db_path: DbPath, *, room_id: Any, event_id: Any, kind: Any, actor: Any, payload: Any,
     authority_gateway_id: Any = None, authority_epoch: Any = None, now: float | None = None) -> dict[str, Any]:
     """Append one immutable event and allocate its per-room sequence atomically.
 
@@ -1056,7 +1055,7 @@ def _probe(path: Path, table: str, query: str, params: tuple[Any, ...], unavaila
         raise RoomProbeUnavailableError(unavailable) from exc
 
 
-def probe_hosted_room(db_path: Path | str, *, room_id: Any) -> bool:
+def probe_hosted_room(db_path: DbPath, *, room_id: Any) -> bool:
     """Check room ownership without creating or migrating the shared store.
 
     Runs on the synchronous prompt-admission path for older Desktop clients, so it fails fast
@@ -1069,7 +1068,7 @@ def probe_hosted_room(db_path: Path | str, *, room_id: Any) -> bool:
 
 
 def probe_peer_room_reservation(
-    db_path: Path | str, *, room_id: Any, target_profile: Any, now: float | None = None) -> bool:
+    db_path: DbPath, *, room_id: Any, target_profile: Any, now: float | None = None) -> bool:
     """Check a peer reservation without creating or migrating shared state."""
     checked_room_id = _room_id(room_id)
     checked_profile = _actor_id(target_profile, "target_profile")
@@ -1078,7 +1077,7 @@ def probe_peer_room_reservation(
         (checked_room_id, checked_profile, _now(now)), "peer room ownership is temporarily unavailable")
 
 
-def room_state(db_path: Path | str, *, room_id: Any, include_disbanded: bool = False) -> dict[str, Any]:
+def room_state(db_path: DbPath, *, room_id: Any, include_disbanded: bool = False) -> dict[str, Any]:
     """Return durable replay and authority state for one room."""
     room_id = _room_id(room_id)
     with _transaction(db_path) as conn:
@@ -1097,8 +1096,7 @@ def room_state(db_path: Path | str, *, room_id: Any, include_disbanded: bool = F
 
 
 def request_room_stop(
-    db_path: Path | str, *, room_id: Any, cancel_id: Any, expected_gateway_id: Any, expected_epoch: Any
-) -> dict[str, Any]:
+    db_path: DbPath, *, room_id: Any, cancel_id: Any, expected_gateway_id: Any, expected_epoch: Any) -> dict[str, Any]:
     """Append an idempotent fence that supersedes earlier user turns."""
     cancel_id = _validate_identifier(cancel_id, label="cancel_id", max_chars=MAX_EVENT_ID_CHARS)
     digest = hashlib.sha256(cancel_id.encode()).hexdigest()[:32]
@@ -1127,8 +1125,8 @@ def _append_authority_claim(
 
 
 def claim_authority(
-    db_path: Path | str, *, room_id: Any, expected_gateway_id: Any, expected_epoch: Any, new_gateway_id: Any,
-    event_id: Any, now: float | None = None) -> dict[str, Any]:
+    db_path: DbPath, *, room_id: Any, expected_gateway_id: Any, expected_epoch: Any, new_gateway_id: Any, event_id: Any,
+    now: float | None = None) -> dict[str, Any]:
     """Fence a verified authority transfer with a compare-and-swap epoch.
 
     Does not decide *when* takeover is safe: a replicated driver calls it only after its
@@ -1196,7 +1194,7 @@ def _disband_replay(conn: sqlite3.Connection, room_id: str, room: sqlite3.Row | 
 
 
 def disband_room(
-    db_path: Path | str, *, room_id: Any, expected_gateway_id: Any, expected_epoch: Any, now: float | None = None
+    db_path: DbPath, *, room_id: Any, expected_gateway_id: Any, expected_epoch: Any, now: float | None = None
 ) -> dict[str, Any]:
     """Tombstone a room id permanently and idempotently."""
     room_id = _room_id(room_id)
@@ -1230,7 +1228,7 @@ def disband_room(
 
 
 def read_events(
-    db_path: Path | str, *, room_id: Any, since_seq: Any = 0, limit: Any = 100, include_disbanded: bool = False
+    db_path: DbPath, *, room_id: Any, since_seq: Any = 0, limit: Any = 100, include_disbanded: bool = False
 ) -> dict[str, Any]:
     """Read a monotonic room-log delta after ``since_seq``."""
     room_id = _room_id(room_id)

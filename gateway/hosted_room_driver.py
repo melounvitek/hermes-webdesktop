@@ -15,11 +15,10 @@ import math
 import sqlite3
 from dataclasses import dataclass
 from functools import partial
-from pathlib import Path
 from typing import Any, Callable, Literal, get_args
 
 from gateway.hosted_rooms_common import (
-    bounded_int, canonical_json, compact_json, connect, identifier, table_columns, text, transaction)
+    DbPath, bounded_int, canonical_json, compact_json, connect, identifier, table_columns, text, transaction)
 
 Clock = Callable[[], float]
 TaskStatus = Literal["queued", "running", "settled", "failed", "cancelled", "indeterminate", "deferred", "stopping"]
@@ -283,7 +282,7 @@ def _migrate_task_status_constraint(conn: sqlite3.Connection) -> None:
     conn.execute(_TASK_INDEX_SQL.format(if_not_exists=""))
 
 
-def _connect(db_path: Path | str) -> sqlite3.Connection:
+def _connect(db_path: DbPath) -> sqlite3.Connection:
     """Open the store; existing tables are validated (after the status-constraint migration when needed).
 
     The driver schema never shipped, so an incompatible draft fails closed in ``_validate_schema``.
@@ -304,7 +303,7 @@ def _connect(db_path: Path | str) -> sqlite3.Connection:
     return conn
 
 
-def _transaction(db_path: Path | str):
+def _transaction(db_path: DbPath):
     return transaction(_connect, db_path, immediate=True)
 
 
@@ -460,8 +459,8 @@ def _require_cancel_generation(row: sqlite3.Row, expected_cancel_generation: int
 
 
 def _transition(
-    db_path: Path | str, identity: TaskIdentity, *, sql: str, set_params: tuple[Any, ...],
-    fence_params: tuple[Any, ...], stale: str, now: float, lease: DriverLease | None = None, lease_first: bool = True,
+    db_path: DbPath, identity: TaskIdentity, *, sql: str, set_params: tuple[Any, ...], fence_params: tuple[Any, ...],
+    stale: str, now: float, lease: DriverLease | None = None, lease_first: bool = True,
     replay: Callable[[sqlite3.Row], dict[str, Any] | None] | None = None,
     guard: Callable[[sqlite3.Row], None] | None = None) -> dict[str, Any]:
     """Run one fenced task transition: load -> idempotent replay -> lease/fence guard -> UPDATE.
@@ -489,7 +488,7 @@ def _transition(
 
 
 def _generation_transition(
-    db_path: Path | str, identity: TaskIdentity, lease: DriverLease, name: str, execution_generation: int,
+    db_path: DbPath, identity: TaskIdentity, lease: DriverLease, name: str, execution_generation: int,
     cancel_generation: int, *, now: float, set_params: tuple[Any, ...],
     replay: Callable[[sqlite3.Row], Any] | None = None) -> dict[str, Any]:
     """Lease-first transition from ``_GENERATION_TRANSITIONS`` fenced on status + both generations."""
@@ -503,7 +502,7 @@ def _generation_transition(
 
 
 def _run_fence_transition(
-    db_path: Path | str, attempt: TaskAttempt, *, guard_stale: str, lease_generation: Callable[[Any], int] = int,
+    db_path: DbPath, attempt: TaskAttempt, *, guard_stale: str, lease_generation: Callable[[Any], int] = int,
     **transition: Any) -> dict[str, Any]:
     """Transition fenced on this attempt's running generation under its exact lease (row guard + SQL fence).
 
@@ -525,8 +524,8 @@ def _run_fence_transition(
 
 
 def acquire_lease(
-    db_path: Path | str, *, room_id: Any, gateway_id: Any, authority_epoch: Any, process_generation: Any,
-    ttl_seconds: Any, clock: Clock) -> DriverLease:
+    db_path: DbPath, *, room_id: Any, gateway_id: Any, authority_epoch: Any, process_generation: Any, ttl_seconds: Any,
+    clock: Clock) -> DriverLease:
     """Acquire an empty or expired room lease with a monotonic generation."""
     room_id = _identifier(room_id, label="room_id")
     gateway_id = _identifier(gateway_id, label="gateway_id")
@@ -568,7 +567,7 @@ def acquire_lease(
         return _lease_from_row(conn.execute(_SELECT_LEASE, (room_id,)).fetchone(), reclaimed=True)
 
 
-def renew_lease(db_path: Path | str, lease: DriverLease, *, ttl_seconds: Any, clock: Clock) -> DriverLease:
+def renew_lease(db_path: DbPath, lease: DriverLease, *, ttl_seconds: Any, clock: Clock) -> DriverLease:
     """Renew the exact active lease generation or fail closed."""
     ttl_seconds = _ttl(ttl_seconds)
     now = _timestamp(clock)
@@ -585,7 +584,7 @@ def renew_lease(db_path: Path | str, lease: DriverLease, *, ttl_seconds: Any, cl
         return dataclasses.replace(lease, expires_at=expires_at, reclaimed=False)
 
 
-def release_lease(db_path: Path | str, lease: DriverLease, *, clock: Clock) -> dict[str, Any]:
+def release_lease(db_path: DbPath, lease: DriverLease, *, clock: Clock) -> dict[str, Any]:
     """Release the exact active lease generation idempotently."""
     now = _timestamp(clock)
     with _transaction(db_path) as conn:
@@ -609,7 +608,7 @@ def release_lease(db_path: Path | str, lease: DriverLease, *, clock: Clock) -> d
         return {"lease": _lease_from_row(current), "idempotent": False}
 
 
-def admit_task(db_path: Path | str, identity: TaskIdentity, *, payload: Any, clock: Clock) -> dict[str, Any]:
+def admit_task(db_path: DbPath, identity: TaskIdentity, *, payload: Any, clock: Clock) -> dict[str, Any]:
     """Persist a queued task, or return the identical admission."""
     normalized_payload, payload_json, payload_digest = _task_payload(payload)
     now = _timestamp(clock)
@@ -638,7 +637,7 @@ def admit_task(db_path: Path | str, identity: TaskIdentity, *, payload: Any, clo
 
 
 def start_task(
-    db_path: Path | str, identity: TaskIdentity, lease: DriverLease, *, expected_cancel_generation: int, clock: Clock
+    db_path: DbPath, identity: TaskIdentity, lease: DriverLease, *, expected_cancel_generation: int, clock: Clock
 ) -> TaskAttempt:
     """Move one queued task to running under the current driver lease."""
     _check_same_room(lease, identity)
@@ -677,7 +676,7 @@ def start_task(
 
 
 def settle_task(
-    db_path: Path | str, attempt: TaskAttempt, *, settlement_id: Any, status: TerminalStatus, result: Any, clock: Clock
+    db_path: DbPath, attempt: TaskAttempt, *, settlement_id: Any, status: TerminalStatus, result: Any, clock: Clock
 ) -> dict[str, Any]:
     """Commit one terminal result if every lease and task fence still matches."""
     settlement_id = _terminal_settlement_id(settlement_id, status)
@@ -690,7 +689,7 @@ def settle_task(
 
 
 def settle_stopping_task(
-    db_path: Path | str, identity: TaskIdentity, lease: DriverLease, *, expected_execution_generation: int,
+    db_path: DbPath, identity: TaskIdentity, lease: DriverLease, *, expected_execution_generation: int,
     expected_cancel_generation: int, settlement_id: Any, status: TerminalStatus, result: Any, clock: Clock
 ) -> dict[str, Any]:
     """Commit a completion that won the race with an unacknowledged Stop."""
@@ -708,7 +707,7 @@ def settle_stopping_task(
 
 
 def resolve_indeterminate_task(
-    db_path: Path | str, identity: TaskIdentity, lease: DriverLease, *, expected_execution_generation: int,
+    db_path: DbPath, identity: TaskIdentity, lease: DriverLease, *, expected_execution_generation: int,
     expected_cancel_generation: int, settlement_id: Any, status: TerminalStatus, result: Any, clock: Clock
 ) -> dict[str, Any]:
     """Commit a verified historical receipt under the current room lease."""
@@ -723,7 +722,7 @@ def resolve_indeterminate_task(
 
 
 def resolve_indeterminate_cancellation(
-    db_path: Path | str, identity: TaskIdentity, lease: DriverLease, *, expected_execution_generation: int,
+    db_path: DbPath, identity: TaskIdentity, lease: DriverLease, *, expected_execution_generation: int,
     expected_cancel_generation: int, cancel_id: Any, clock: Clock) -> dict[str, Any]:
     """Commit a verified terminal cancellation for an uncertain attempt."""
     _expected_generations(lease, identity, expected_execution_generation, expected_cancel_generation)
@@ -735,7 +734,7 @@ def resolve_indeterminate_cancellation(
 
 
 def requeue_indeterminate_task(
-    db_path: Path | str, identity: TaskIdentity, lease: DriverLease, *, expected_execution_generation: int,
+    db_path: DbPath, identity: TaskIdentity, lease: DriverLease, *, expected_execution_generation: int,
     expected_cancel_generation: int, clock: Clock) -> dict[str, Any]:
     """Explicitly retry uncertain work after an operator accepts at-least-once risk."""
     _expected_generations(lease, identity, expected_execution_generation, expected_cancel_generation)
@@ -746,7 +745,7 @@ def requeue_indeterminate_task(
 
 
 def defer_indeterminate_task(
-    db_path: Path | str, identity: TaskIdentity, lease: DriverLease, *, expected_execution_generation: int,
+    db_path: DbPath, identity: TaskIdentity, lease: DriverLease, *, expected_execution_generation: int,
     expected_cancel_generation: int, reason: Any, clock: Clock) -> dict[str, Any]:
     """Fence one uncertain attempt and release later room work."""
     _expected_generations(lease, identity, expected_execution_generation, expected_cancel_generation)
@@ -762,7 +761,7 @@ def defer_indeterminate_task(
 
 
 def requeue_deferred_task(
-    db_path: Path | str, identity: TaskIdentity, lease: DriverLease, *, expected_execution_generation: int,
+    db_path: DbPath, identity: TaskIdentity, lease: DriverLease, *, expected_execution_generation: int,
     expected_cancel_generation: int, clock: Clock) -> dict[str, Any]:
     """Explicitly retry a fenced deferred turn under a new generation."""
     _expected_generations(lease, identity, expected_execution_generation, expected_cancel_generation)
@@ -772,7 +771,7 @@ def requeue_deferred_task(
         now=now, set_params=(now,))
 
 
-def requeue_not_admitted_task(db_path: Path | str, attempt: TaskAttempt, *, clock: Clock) -> dict[str, Any]:
+def requeue_not_admitted_task(db_path: DbPath, attempt: TaskAttempt, *, clock: Clock) -> dict[str, Any]:
     """Return a running task to its durable queue after proven non-admission."""
     now = _timestamp(clock)
     _check_same_room(attempt.lease, attempt.identity)
@@ -790,7 +789,7 @@ def requeue_not_admitted_task(db_path: Path | str, attempt: TaskAttempt, *, cloc
 
 
 def cancel_task(
-    db_path: Path | str, identity: TaskIdentity, *, cancel_id: Any, expected_cancel_generation: int, clock: Clock
+    db_path: DbPath, identity: TaskIdentity, *, cancel_id: Any, expected_cancel_generation: int, clock: Clock
 ) -> dict[str, Any]:
     """Cancel a queued task before any external work was admitted."""
     cancel_id = _identifier(cancel_id, label="cancel_id")
@@ -809,7 +808,7 @@ def cancel_task(
 
 
 def begin_task_cancel(
-    db_path: Path | str, identity: TaskIdentity, *, cancel_id: Any, expected_cancel_generation: int, clock: Clock
+    db_path: DbPath, identity: TaskIdentity, *, cancel_id: Any, expected_cancel_generation: int, clock: Clock
 ) -> dict[str, Any]:
     """Persist a stop intent without claiming the remote run has stopped."""
     cancel_id = _identifier(cancel_id, label="cancel_id")
@@ -826,7 +825,7 @@ def begin_task_cancel(
 
 
 def complete_task_cancel(
-    db_path: Path | str, identity: TaskIdentity, *, cancel_id: Any, expected_cancel_generation: int, clock: Clock
+    db_path: DbPath, identity: TaskIdentity, *, cancel_id: Any, expected_cancel_generation: int, clock: Clock
 ) -> dict[str, Any]:
     """Commit cancellation only after the transport acknowledges exact Stop."""
     cancel_id = _identifier(cancel_id, label="cancel_id")
@@ -841,7 +840,7 @@ def complete_task_cancel(
         stale="task changed during stop acknowledgement")
 
 
-def recover_room(db_path: Path | str, lease: DriverLease, *, clock: Clock) -> dict[str, list[TaskIdentity]]:
+def recover_room(db_path: DbPath, lease: DriverLease, *, clock: Clock) -> dict[str, list[TaskIdentity]]:
     """Fence abandoned running attempts without requeueing uncertain work."""
     now = _timestamp(clock)
     foreign_running = f"room_id=? AND status='running' AND NOT ({_RUN_FENCE})"
@@ -859,7 +858,7 @@ def recover_room(db_path: Path | str, lease: DriverLease, *, clock: Clock) -> di
             for status in ("queued", "indeterminate")}
 
 
-def _read(db_path: Path | str, query: Callable[[sqlite3.Connection], Any]) -> Any:
+def _read(db_path: DbPath, query: Callable[[sqlite3.Connection], Any]) -> Any:
     conn = _connect(db_path)
     try:
         return query(conn)
@@ -867,12 +866,12 @@ def _read(db_path: Path | str, query: Callable[[sqlite3.Connection], Any]) -> An
         conn.close()
 
 
-def get_task(db_path: Path | str, identity: TaskIdentity) -> dict[str, Any]:
+def get_task(db_path: DbPath, identity: TaskIdentity) -> dict[str, Any]:
     """Read one task without mutating its state."""
     return _read(db_path, lambda conn: _task_from_row(_load_task(conn, identity)))
 
 
-def list_tasks(db_path: Path | str, *, room_id: Any, status: TaskStatus | None = None) -> list[dict[str, Any]]:
+def list_tasks(db_path: DbPath, *, room_id: Any, status: TaskStatus | None = None) -> list[dict[str, Any]]:
     """Return room tasks in deterministic admission order."""
     room_id = _identifier(room_id, label="room_id")
     if status is not None and status not in TASK_STATUSES:
@@ -881,7 +880,7 @@ def list_tasks(db_path: Path | str, *, room_id: Any, status: TaskStatus | None =
 
 
 def prune_published_terminal_tasks(
-    db_path: Path | str, *, room_id: Any, clock: Clock, retention_seconds: float = TERMINAL_TASK_RETENTION_SECONDS,
+    db_path: DbPath, *, room_id: Any, clock: Clock, retention_seconds: float = TERMINAL_TASK_RETENTION_SECONDS,
     retain: int = MAX_RETAINED_TERMINAL_TASKS) -> int:
     """Bound execution rows after outcomes are durable in the room log."""
     room_id = _identifier(room_id, label="room_id")
