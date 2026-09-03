@@ -2683,25 +2683,12 @@ class GatewayTurnMixin:
 
     async def _run_agent(
         self, message: str, context_prompt: str, history: List[Dict[str, Any]],
-        source: SessionSource, session_id: str, session_key: str = None,
-        run_generation: Optional[int] = None, _interrupt_depth: int = 0,
-        event_message_id: Optional[str] = None, inbound_message_id: Optional[str] = None,
-        channel_prompt: Optional[str] = None, moa_config: Optional[dict] = None,
-        persist_user_message: Optional[Any] = None, persist_user_timestamp: Optional[float] = None,
-        persist_user_display_kind: Optional[str] = None, message_type: Optional[str] = None,
+        source: SessionSource, session_id: str, **turn_kwargs,
     ) -> Dict[str, Any]:
-        """Profile-scoping wrapper around the agent run (pass-through when multiplexing is off)."""
+        """Profile-scoping wrapper around ``_run_agent_inner`` (same keyword parameters; pass-through
+        when multiplexing is off)."""
         with self._profile_scope_for_source(source):
-            return await self._run_agent_inner(
-                message, context_prompt, history, source, session_id,
-                session_key=session_key, run_generation=run_generation,
-                _interrupt_depth=_interrupt_depth, event_message_id=event_message_id,
-                inbound_message_id=inbound_message_id,
-                channel_prompt=channel_prompt, moa_config=moa_config,
-                persist_user_message=persist_user_message,
-                persist_user_timestamp=persist_user_timestamp,
-                persist_user_display_kind=persist_user_display_kind, message_type=message_type,
-            )
+            return await self._run_agent_inner(message, context_prompt, history, source, session_id, **turn_kwargs)
 
     def _run_agent_display_settings(self, source: SessionSource) -> "GatewayRunner._RunAgentDisplay":
         """Resolve per-platform display, progress, status and streaming-surface settings for a turn."""
@@ -3100,15 +3087,14 @@ class GatewayTurnMixin:
             with suppress(asyncio.CancelledError):
                 await stream_task
 
-    async def _run_agent_track_agent(
-        self, session_key: Optional[str], run_generation: Optional[int], agent_holder: list,
-    ) -> None:
+    async def _run_agent_track_agent(self, turn_ctx: TurnContext) -> None:
         """Track this agent as running for the session (interrupt support) once it is created.
 
         Only promote the sentinel to the real agent if this run is still current: if /stop or /new
         bumped the generation while we were spinning up, leave the newer run's slot alone (the
         stale-result check in _handle_message_with_agent discards us).
         """
+        session_key, run_generation, agent_holder = turn_ctx.session_key, turn_ctx.run_generation, turn_ctx.agent_holder
         while agent_holder[0] is None:
             await asyncio.sleep(0.05)
         if not session_key:
@@ -3155,10 +3141,7 @@ class GatewayTurnMixin:
         if _stts is not None:
             _stts.abort("barge-in")
 
-    async def _run_agent_monitor_for_interrupt(
-        self, source: SessionSource, session_key: Optional[str], agent_holder: list,
-        _interrupt_detected: "asyncio.Event", streaming_tts_consumer_holder: list,
-    ) -> None:
+    async def _run_agent_monitor_for_interrupt(self, turn_ctx: TurnContext, _interrupt_detected: "asyncio.Event") -> None:
         """Poll the adapter for interrupts (new messages) every 200ms and signal the agent.
 
         PRIMARY interrupt path for regular text: Level 1 (base.py) catches them before
@@ -3166,6 +3149,8 @@ class GatewayTurnMixin:
         poll loop has a BACKUP check in case this task dies silently. Interrupts are keyed by
         session_key (build_session_key output), NOT source.chat_id.
         """
+        source, session_key, agent_holder = turn_ctx.source, turn_ctx.session_key, turn_ctx.agent_holder
+        streaming_tts_consumer_holder = turn_ctx.streaming_tts_consumer_holder
         if not session_key:
             return
         while True:
@@ -3190,21 +3175,20 @@ class GatewayTurnMixin:
                 logger.debug("monitor_for_interrupt error (will retry): %s", _mon_err)
 
     async def _run_agent_backup_interrupt_check(
-        self, source: SessionSource, session_key: Optional[str], agent_holder: list,
-        _interrupt_detected: "asyncio.Event", interrupt_monitor: "asyncio.Task",
-        streaming_tts_consumer_holder: list,
+        self, turn_ctx: TurnContext, _interrupt_detected: "asyncio.Event", interrupt_monitor: "asyncio.Task",
     ) -> None:
         """Backup interrupt check: if the monitor task died or missed the interrupt, catch it here."""
+        source, session_key = turn_ctx.source, turn_ctx.session_key
         if _interrupt_detected.is_set() or not session_key:
             return
         _backup_adapter = self._adapter_for_source(source)
-        _backup_agent = agent_holder[0]
+        _backup_agent = turn_ctx.agent_holder[0]
         if (_backup_adapter and _backup_agent
                 and hasattr(_backup_adapter, 'has_pending_interrupt')
                 and _backup_adapter.has_pending_interrupt(session_key)):
             await self._run_agent_fire_pending_interrupt(
                 _backup_adapter, _backup_agent, source, session_key, _interrupt_detected,
-                streaming_tts_consumer_holder,
+                turn_ctx.streaming_tts_consumer_holder,
                 log_context="Voice-backup-interrupt",
                 log=lambda: logger.info(
                     "Backup interrupt detected for session %s (monitor task state: %s)",
@@ -3239,10 +3223,7 @@ class GatewayTurnMixin:
                     return False
         return False
 
-    def _run_agent_start_turn_worker(
-        self, turn_ctx: TurnContext, run_sync: Callable[[], Any], agent_holder: list,
-        session_id: str, session_key: Optional[str], run_generation: Optional[int],
-    ) -> "GatewayRunner._RunAgentWorker":
+    def _run_agent_start_turn_worker(self, turn_ctx: TurnContext, run_sync: Callable[[], Any]) -> "GatewayRunner._RunAgentWorker":
         """Schedule ``run_sync`` on the executor plus the inactivity watchdog thread.
 
         *Inactivity* timeout, not wall-clock: the agent may run for hours while actively calling
@@ -3253,6 +3234,7 @@ class GatewayTurnMixin:
         """
         from gateway.run import _float_env, _watch_gateway_turn_inactivity
         from tools.process_registry import process_registry
+        agent_holder, session_key, run_generation = turn_ctx.agent_holder, turn_ctx.session_key, turn_ctx.run_generation
         _agent_timeout = _float_env("HERMES_AGENT_TIMEOUT", 1800)
         _agent_warning = _float_env("HERMES_AGENT_TIMEOUT_WARNING", 900)
         _agent_timeout = _agent_timeout if _agent_timeout > 0 else None
@@ -3260,7 +3242,7 @@ class GatewayTurnMixin:
 
         # A background=true process intentionally survives a successful turn, so capture existing IDs
         # and reap only children created by THIS turn if it times out.
-        _turn_task_id = session_id or ""
+        _turn_task_id = turn_ctx.session_id or ""
         _turn_process_baseline = process_registry.snapshot_running_ids(_turn_task_id)
         turn_ctx.process_task_id = _turn_task_id
         turn_ctx.process_baseline = _turn_process_baseline
@@ -3346,11 +3328,12 @@ class GatewayTurnMixin:
         except Exception as _warn_err:
             logger.debug("Inactivity warning send error: %s", _warn_err)
 
-    def _run_agent_timeout_result(self, worker, session_key, agent_holder, result_holder, tools_holder) -> dict:
+    def _run_agent_timeout_result(self, worker, turn_ctx: TurnContext) -> dict:
         """Synthetic failed run dict for an inactivity timeout, with the activity-tracker diagnostic;
         interrupts the agent if it is still running so the thread pool worker is freed."""
         from gateway.run import _INTERRUPT_REASON_TIMEOUT, request_hard_interrupt
-        _timed_out_agent = agent_holder[0]
+        session_key, result_holder, tools_holder = turn_ctx.session_key, turn_ctx.result_holder, turn_ctx.tools_holder
+        _timed_out_agent = turn_ctx.agent_holder[0]
         _activity = self._agent_activity_summary(_timed_out_agent)
         _last_desc = _activity.get("last_activity_desc", "unknown")
         _secs_ago = _activity.get("seconds_since_activity", 0)
@@ -3396,10 +3379,8 @@ class GatewayTurnMixin:
         }
 
     async def _run_agent_await_turn_worker(
-        self, worker: "GatewayRunner._RunAgentWorker", *, source: SessionSource,
-        session_key: Optional[str], agent_holder: list, result_holder: list, tools_holder: list,
+        self, worker: "GatewayRunner._RunAgentWorker", turn_ctx: TurnContext,
         _interrupt_detected: "asyncio.Event", interrupt_monitor: "asyncio.Task",
-        streaming_tts_consumer_holder: list, _status_thread_metadata: Optional[Dict[str, Any]],
     ) -> Any:
         """Poll the executor future (inactivity timeout + backup interrupt checks); return its result.
 
@@ -3409,6 +3390,7 @@ class GatewayTurnMixin:
         the result is a synthetic failed run dict carrying the diagnostic.
         """
         from gateway.run import _abandon_timed_out_gateway_turn
+        agent_holder = turn_ctx.agent_holder
         _warning_fired = False
         while True:
             done, _ = await asyncio.wait({worker.executor_task}, timeout=5.0)
@@ -3423,7 +3405,7 @@ class GatewayTurnMixin:
                 _idle_secs = self._agent_activity_summary(agent_holder[0]).get("seconds_since_activity", 0.0)
                 if not _warning_fired and worker.agent_warning is not None and _idle_secs >= worker.agent_warning:
                     _warning_fired = True
-                    await self._run_agent_inactivity_warning(worker, source, _status_thread_metadata)
+                    await self._run_agent_inactivity_warning(worker, turn_ctx.source, turn_ctx._status_thread_metadata)
                 if _idle_secs >= worker.agent_timeout:
                     threading.Thread(
                         target=_abandon_timed_out_gateway_turn,
@@ -3432,15 +3414,10 @@ class GatewayTurnMixin:
                         daemon=True,
                     ).start()
                     break
-            await self._run_agent_backup_interrupt_check(
-                source, session_key, agent_holder, _interrupt_detected, interrupt_monitor,
-                streaming_tts_consumer_holder,
-            )
-        return self._run_agent_timeout_result(worker, session_key, agent_holder, result_holder, tools_holder)
+            await self._run_agent_backup_interrupt_check(turn_ctx, _interrupt_detected, interrupt_monitor)
+        return self._run_agent_timeout_result(worker, turn_ctx)
 
-    def _run_agent_evict_on_fallback(
-        self, session_key: Optional[str], agent_holder: list, result_holder: list,
-    ) -> None:
+    def _run_agent_evict_on_fallback(self, turn_ctx: TurnContext) -> None:
         """Evict the cached agent when a fallback model activated on a successful run.
 
         So /model shows the actually-active model and the next message retries the primary. Skip
@@ -3448,8 +3425,9 @@ class GatewayTurnMixin:
         model → fallback → evict → recreate → same 400 loop burning CPU).
         """
         from gateway.run import _resolve_gateway_model
-        _agent = agent_holder[0]
-        _result_for_fb = result_holder[0]
+        session_key = turn_ctx.session_key
+        _agent = turn_ctx.agent_holder[0]
+        _result_for_fb = turn_ctx.result_holder[0]
         _run_failed = _result_for_fb.get("failed") if _result_for_fb else False
         if _agent is None or not hasattr(_agent, 'model') or _run_failed:
             return
@@ -3465,10 +3443,7 @@ class GatewayTurnMixin:
         if _agent.model != _cfg_model and not self._is_intentional_model_switch(session_key, _agent.model):
             self._evict_cached_agent(session_key)
 
-    async def _run_agent_finalize_streaming_tts(
-        self, streaming_tts_consumer_holder: list, adapter: Any, session_key: Optional[str],
-        run_generation: Optional[int],
-    ) -> None:
+    async def _run_agent_finalize_streaming_tts(self, turn_ctx: TurnContext, adapter: Any) -> None:
         """Finalize the streaming-TTS consumer on the outer event-loop thread.
 
         finish() here covers early returns from run_sync too. wait_complete() drains queued audio;
@@ -3476,7 +3451,7 @@ class GatewayTurnMixin:
         whole-file suppression (no replay from the start); silent streams stay eligible for the
         whole-file fallback.
         """
-        _stts = streaming_tts_consumer_holder[0]
+        _stts = turn_ctx.streaming_tts_consumer_holder[0]
         if _stts is None:
             return
         _stts.finish()
@@ -3490,7 +3465,7 @@ class GatewayTurnMixin:
         if _stts.suppress_whole_file and adapter is not None:
             _mark_turn = getattr(adapter, "_mark_streaming_tts_completed_turn", None)
             if callable(_mark_turn):
-                _mark_turn(session_key, run_generation)
+                _mark_turn(turn_ctx.session_key, turn_ctx.run_generation)
 
     async def _run_agent_drain_pending(
         self, result: Any, adapter: Any, source: SessionSource, session_key: Optional[str]
@@ -3567,13 +3542,11 @@ class GatewayTurnMixin:
         return pending_event, pending
 
     async def _run_agent_deliver_first_response(
-        self, *, source: SessionSource, adapter: Any, session_key: Optional[str],
-        run_generation: Optional[int], event_message_id: Optional[str], response: Any, result: Any,
-        stream_consumer_holder: list, stream_task: Any,
-        _status_thread_metadata: Optional[Dict[str, Any]],
+        self, turn_ctx: TurnContext, adapter: Any, response: Any, result: Any, stream_task: Any,
     ) -> None:
         """Deliver the first response before a queued follow-up runs, unless streaming already did."""
-        _sc = stream_consumer_holder[0]
+        session_key = turn_ctx.session_key
+        _sc = turn_ctx.stream_consumer_holder[0]
         if _sc and stream_task:
             try:
                 await self._await_stream_task(stream_task)
@@ -3603,8 +3576,8 @@ class GatewayTurnMixin:
                     session_key or "?",
                 )
                 await self._deliver_queued_first_response(
-                    first_response, source=source, adapter=adapter,
-                    metadata=_status_thread_metadata, event_message_id=event_message_id,
+                    first_response, source=turn_ctx.source, adapter=adapter,
+                    metadata=turn_ctx._status_thread_metadata, event_message_id=turn_ctx.event_message_id,
                     text_already_delivered=_already_streamed,
                     deliver_media=not _delivery_result.get("failed"), stream_consumer=_sc,
                 )
@@ -3612,7 +3585,7 @@ class GatewayTurnMixin:
                 logger.warning("Failed to send first response before queued message: %s", e)
         # Release deferred bg-review notifications now that the first response is delivered: pop from
         # the adapter's callback dict (no double-fire in base.py's finally) and call.
-        _bg_cb = self._pop_post_delivery_callback(adapter, session_key, run_generation)
+        _bg_cb = self._pop_post_delivery_callback(adapter, session_key, turn_ctx.run_generation)
         if callable(_bg_cb):
             with suppress(Exception):
                 _bg_result = _bg_cb()
@@ -3620,15 +3593,17 @@ class GatewayTurnMixin:
                     await _bg_result
 
     async def _run_agent_queued_followup(
-        self, *, source: SessionSource, adapter: Any, session_id: str, session_key: Optional[str],
-        run_generation: Optional[int], _interrupt_depth: int, event_message_id: Optional[str],
-        context_prompt: str, history: List[Dict[str, Any]], pending: Optional[str],
-        pending_event: Any, response: Any, result: Any, result_holder: list,
-        stream_consumer_holder: list, stream_task: Any,
-        _status_thread_metadata: Optional[Dict[str, Any]],
+        self, turn_ctx: TurnContext, adapter: Any, pending: Optional[str], pending_event: Any,
+        response: Any, result: Any, stream_task: Any,
     ) -> Any:
         """Run the queued / interrupting follow-up as the next turn (recursive ``_run_agent``)."""
         from gateway.run import _preserve_queued_followup_history_offset, merge_pending_message_event
+        source, session_id, session_key, run_generation = (
+            turn_ctx.source, turn_ctx.session_id, turn_ctx.session_key, turn_ctx.run_generation,
+        )
+        _interrupt_depth, history, _status_thread_metadata = (
+            turn_ctx._interrupt_depth, turn_ctx.history, turn_ctx._status_thread_metadata,
+        )
         logger.debug("Processing pending message: '%s...'", pending[:40])
 
         # Clear the adapter's interrupt event so the next _run_agent call doesn't re-trigger the
@@ -3648,17 +3623,12 @@ class GatewayTurnMixin:
                 merge_pending_message_event(adapter._pending_messages, session_key, pending_event)
             elif adapter and hasattr(adapter, 'queue_message'):
                 adapter.queue_message(session_key, pending)
-            return result_holder[0] or {"final_response": response, "messages": history}
+            return turn_ctx.result_holder[0] or {"final_response": response, "messages": history}
 
         # Interrupted: discard the response ("Operation interrupted." is noise; the user knows they
         # sent a new message).
         if not result.get("interrupted"):
-            await self._run_agent_deliver_first_response(
-                source=source, adapter=adapter, session_key=session_key,
-                run_generation=run_generation, event_message_id=event_message_id, response=response,
-                result=result, stream_consumer_holder=stream_consumer_holder,
-                stream_task=stream_task, _status_thread_metadata=_status_thread_metadata,
-            )
+            await self._run_agent_deliver_first_response(turn_ctx, adapter, response, result, stream_task)
 
         updated_history = result.get("messages", history)
         next_source = source
@@ -3719,7 +3689,7 @@ class GatewayTurnMixin:
         await self._refresh_agent_cache_message_count(session_key, session_id)
 
         followup_result = await self._run_agent(
-            message=next_message, context_prompt=context_prompt, history=updated_history,
+            message=next_message, context_prompt=turn_ctx.context_prompt, history=updated_history,
             source=next_source, session_id=session_id, session_key=next_session_key,
             run_generation=run_generation, _interrupt_depth=_interrupt_depth + 1,
             event_message_id=next_message_id, channel_prompt=next_channel_prompt,
@@ -3728,12 +3698,11 @@ class GatewayTurnMixin:
         return _preserve_queued_followup_history_offset(result, followup_result)
 
     async def _run_agent_cleanup_turn_tasks(
-        self, *, progress_task: Any, log_task: Any, interrupt_monitor: "asyncio.Task",
+        self, turn_ctx: TurnContext, *, progress_task: Any, log_task: Any, interrupt_monitor: "asyncio.Task",
         _notify_task: "asyncio.Task", tracking_task: "asyncio.Task", stream_task: Any,
-        stream_consumer_holder: list, streaming_tts_consumer_holder: list,
-        session_key: Optional[str], run_generation: Optional[int],
     ) -> None:
         """``finally`` half of a turn: cancel background tasks, flush stream, release the session slot."""
+        stream_consumer_holder, session_key = turn_ctx.stream_consumer_holder, turn_ctx.session_key
         for task in (progress_task, log_task, interrupt_monitor, _notify_task):
             if task:
                 task.cancel()
@@ -3751,7 +3720,7 @@ class GatewayTurnMixin:
 
         # Unconditional abort + bounded wait for the streaming-TTS consumer: covers cancellation /
         # exception paths where the normal finalisation block was skipped.
-        _stts_finally = streaming_tts_consumer_holder[0]
+        _stts_finally = turn_ctx.streaming_tts_consumer_holder[0]
         if _stts_finally is not None and not _stts_finally.done:
             _stts_finally.abort("cleanup")
             with suppress(Exception):
@@ -3761,7 +3730,7 @@ class GatewayTurnMixin:
         if session_key:
             # Release the slot only if this run's generation still owns it: a /stop or /new that bumped
             # the generation while we unwound already installed its own state; keep it.
-            self._release_running_agent_state(session_key, run_generation=run_generation)
+            self._release_running_agent_state(session_key, run_generation=turn_ctx.run_generation)
         if self._draining:
             self._update_runtime_status("draining")
 
@@ -3777,10 +3746,7 @@ class GatewayTurnMixin:
                     # bookkeeping after this loop still runs.
                     logger.debug("background turn task failed during cleanup", exc_info=True)
 
-    async def _run_agent_mark_streamed_delivery(
-        self, response: Any, stream_consumer_holder: list, source: SessionSource,
-        session_key: Optional[str],
-    ) -> None:
+    async def _run_agent_mark_streamed_delivery(self, response: Any, turn_ctx: TurnContext) -> None:
         """Set ``response["already_sent"]`` when streaming already delivered the final reply.
 
         Never when the agent failed (the error is unseen content) or on "(empty)": interim text
@@ -3789,7 +3755,7 @@ class GatewayTurnMixin:
         against the recorded turn-final payload: on mismatch (False, incl. payload-less split
         delivery) neither flag may suppress the final send; None (no record) keeps legacy trust.
         """
-        _sc = stream_consumer_holder[0]
+        _sc, source, session_key = turn_ctx.stream_consumer_holder[0], turn_ctx.source, turn_ctx.session_key
         if not isinstance(response, dict) or response.get("failed"):
             return
         _final = response.get("final_response") or ""
@@ -3888,18 +3854,15 @@ class GatewayTurnMixin:
                 _sk, _streamed, _previewed, _content_delivered, _transformed, len(_final),
             )
 
-    def _run_agent_schedule_bubble_cleanup(
-        self, response: Any, _cleanup_progress: bool, _cleanup_adapter: Any,
-        _cleanup_msg_ids: List[str], source: SessionSource, session_key: Optional[str],
-        run_generation: Optional[int],
-    ) -> None:
+    def _run_agent_schedule_bubble_cleanup(self, response: Any, _cleanup_adapter: Any, turn_ctx: TurnContext) -> None:
         """Schedule deletion of tracked temporary progress bubbles after the final response lands.
 
         Failed runs keep them as breadcrumbs. Only on adapters with ``delete_message``; failures swallowed.
         """
         from gateway.run import safe_schedule_threadsafe
+        _cleanup_msg_ids, session_key = turn_ctx._cleanup_msg_ids, turn_ctx.session_key
         if not (
-            _cleanup_progress
+            turn_ctx._cleanup_progress
             and _cleanup_adapter is not None
             and _cleanup_msg_ids
             and session_key
@@ -3909,7 +3872,7 @@ class GatewayTurnMixin:
         ):
             return
         _ids_snapshot = list(_cleanup_msg_ids)
-        _chat_id_snapshot = source.chat_id
+        _chat_id_snapshot = turn_ctx.source.chat_id
         _loop_snapshot = asyncio.get_running_loop()
 
         def _cleanup_temp_bubbles() -> None:
@@ -3925,7 +3888,7 @@ class GatewayTurnMixin:
 
         try:
             _cleanup_adapter.register_post_delivery_callback(
-                session_key, _cleanup_temp_bubbles, generation=run_generation,
+                session_key, _cleanup_temp_bubbles, generation=turn_ctx.run_generation,
             )
         except Exception as _rpe:
             logger.debug("Post-delivery cleanup registration failed: %s", _rpe)
@@ -3966,11 +3929,8 @@ class GatewayTurnMixin:
         return _status_thread_metadata
 
     async def _run_agent_notify_long_running(
-        self, disp: "GatewayRunner._RunAgentDisplay", *, source: SessionSource,
-        session_key: Optional[str], agent_holder: list, _executor_task_holder: list,
+        self, disp: "GatewayRunner._RunAgentDisplay", turn_ctx: TurnContext, *, _executor_task_holder: list,
         _NOTIFY_INTERVAL: Optional[float], _long_running_mode: str, _notify_start: float,
-        _status_thread_metadata: Optional[Dict[str, Any]], _cleanup_progress: bool,
-        _cleanup_msg_ids: List[str],
     ) -> None:
         """Periodic "still working" heartbeat, edited in place where the adapter supports it.
 
@@ -3981,6 +3941,8 @@ class GatewayTurnMixin:
         from gateway.run import _interim_metadata, _non_conversational_metadata
         if _NOTIFY_INTERVAL is None:
             return  # Notifications disabled (gateway_notify_interval: 0)
+        source, session_key, agent_holder = turn_ctx.source, turn_ctx.session_key, turn_ctx.agent_holder
+        _status_thread_metadata = turn_ctx._status_thread_metadata
         _notify_adapter = self._adapter_for_source(source)
         if not _notify_adapter:
             return
@@ -4029,8 +3991,8 @@ class GatewayTurnMixin:
                     )
                     if getattr(_notify_res, "success", False) and getattr(_notify_res, "message_id", None):
                         _heartbeat_msg_id = str(_notify_res.message_id)
-                        if _cleanup_progress:
-                            _cleanup_msg_ids.append(_heartbeat_msg_id)
+                        if turn_ctx._cleanup_progress:
+                            turn_ctx._cleanup_msg_ids.append(_heartbeat_msg_id)
             except Exception as _ne:
                 logger.debug("Long-running notification error: %s", _ne)
 
@@ -4068,18 +4030,11 @@ class GatewayTurnMixin:
             persist_user_timestamp=persist_user_timestamp,
             persist_user_display_kind=persist_user_display_kind,
         )
-        _cleanup_progress = turn_ctx._cleanup_progress
-        _cleanup_msg_ids = turn_ctx._cleanup_msg_ids
         _status_thread_metadata = self._run_agent_bind_turn_wiring(
             turn_ctx, turn_runner, source, event_message_id, disp._native_slack_task_cards,
         )
-        agent_holder = turn_ctx.agent_holder
-        result_holder = turn_ctx.result_holder
-        stream_consumer_holder = turn_ctx.stream_consumer_holder
-        streaming_tts_consumer_holder = turn_ctx.streaming_tts_consumer_holder
-
         self._run_agent_start_streaming_tts(
-            source, message_type, _status_thread_metadata, streaming_tts_consumer_holder,
+            source, message_type, _status_thread_metadata, turn_ctx.streaming_tts_consumer_holder,
         )
 
         # Progress sender gates on needs_progress_queue (tool_progress OR thinking_progress), not
@@ -4088,16 +4043,10 @@ class GatewayTurnMixin:
         log_task = asyncio.create_task(self._run_agent_write_tool_log(disp.log_queue)) if disp.log_mode_enabled else None
         # The stream consumer is created inside run_sync (thread pool) after the agent is constructed;
         # this task polls for it.
-        stream_task = asyncio.create_task(self._run_agent_stream_consumer_task(stream_consumer_holder))
-        tracking_task = asyncio.create_task(
-            self._run_agent_track_agent(session_key, run_generation, agent_holder)
-        )
+        stream_task = asyncio.create_task(self._run_agent_stream_consumer_task(turn_ctx.stream_consumer_holder))
+        tracking_task = asyncio.create_task(self._run_agent_track_agent(turn_ctx))
         _interrupt_detected = asyncio.Event()  # shared with backup check
-        interrupt_monitor = asyncio.create_task(
-            self._run_agent_monitor_for_interrupt(
-                source, session_key, agent_holder, _interrupt_detected, streaming_tts_consumer_holder,
-            )
-        )
+        interrupt_monitor = asyncio.create_task(self._run_agent_monitor_for_interrupt(turn_ctx, _interrupt_detected))
 
         # Periodic "still working" notifications so the user knows the agent hasn't died. Config:
         # agent.gateway_notify_interval or HERMES_AGENT_NOTIFY_INTERVAL env; default 180s.
@@ -4109,58 +4058,34 @@ class GatewayTurnMixin:
         _executor_task_holder: list = [None]  # bound once the executor future exists (see below)
         _notify_task = asyncio.create_task(
             self._run_agent_notify_long_running(
-                disp, source=source, session_key=session_key, agent_holder=agent_holder,
-                _executor_task_holder=_executor_task_holder, _NOTIFY_INTERVAL=_NOTIFY_INTERVAL,
+                disp, turn_ctx, _executor_task_holder=_executor_task_holder, _NOTIFY_INTERVAL=_NOTIFY_INTERVAL,
                 _long_running_mode=_long_running_mode, _notify_start=time.time(),
-                _status_thread_metadata=_status_thread_metadata,
-                _cleanup_progress=_cleanup_progress, _cleanup_msg_ids=_cleanup_msg_ids,
             )
         )
 
         try:
             # run_sync is TurnRunner.run_sync (bound method; executor call unchanged).
-            worker = self._run_agent_start_turn_worker(
-                turn_ctx, turn_runner.run_sync, agent_holder, session_id, session_key, run_generation,
-            )
+            worker = self._run_agent_start_turn_worker(turn_ctx, turn_runner.run_sync)
             _executor_task_holder[0] = worker.executor_task  # read late by _notify_long_running
-            response = await self._run_agent_await_turn_worker(
-                worker, source=source, session_key=session_key, agent_holder=agent_holder,
-                result_holder=result_holder, tools_holder=turn_ctx.tools_holder,
-                _interrupt_detected=_interrupt_detected, interrupt_monitor=interrupt_monitor,
-                streaming_tts_consumer_holder=streaming_tts_consumer_holder,
-                _status_thread_metadata=_status_thread_metadata,
-            )
-            self._run_agent_evict_on_fallback(session_key, agent_holder, result_holder)
+            response = await self._run_agent_await_turn_worker(worker, turn_ctx, _interrupt_detected, interrupt_monitor)
+            self._run_agent_evict_on_fallback(turn_ctx)
 
             # Interrupted OR queued message (/queue)?
-            result = result_holder[0]
+            result = turn_ctx.result_holder[0]
             adapter = self._adapter_for_source(source)
-            await self._run_agent_finalize_streaming_tts(
-                streaming_tts_consumer_holder, adapter, session_key, run_generation,
-            )
+            await self._run_agent_finalize_streaming_tts(turn_ctx, adapter)
             pending_event, pending = await self._run_agent_drain_pending(result, adapter, source, session_key)
             if pending_event or pending:
                 return await self._run_agent_queued_followup(
-                    source=source, adapter=adapter, session_id=session_id, session_key=session_key,
-                    run_generation=run_generation, _interrupt_depth=_interrupt_depth,
-                    event_message_id=event_message_id, context_prompt=context_prompt,
-                    history=history, pending=pending, pending_event=pending_event,
-                    response=response, result=result, result_holder=result_holder,
-                    stream_consumer_holder=stream_consumer_holder, stream_task=stream_task,
-                    _status_thread_metadata=_status_thread_metadata,
+                    turn_ctx, adapter, pending, pending_event, response, result, stream_task,
                 )
         finally:
             await self._run_agent_cleanup_turn_tasks(
-                progress_task=progress_task, log_task=log_task, interrupt_monitor=interrupt_monitor,
+                turn_ctx, progress_task=progress_task, log_task=log_task, interrupt_monitor=interrupt_monitor,
                 _notify_task=_notify_task, tracking_task=tracking_task, stream_task=stream_task,
-                stream_consumer_holder=stream_consumer_holder,
-                streaming_tts_consumer_holder=streaming_tts_consumer_holder,
-                session_key=session_key, run_generation=run_generation,
             )
 
-        await self._run_agent_mark_streamed_delivery(response, stream_consumer_holder, source, session_key)
-        self._run_agent_schedule_bubble_cleanup(
-            response, _cleanup_progress, _cleanup_adapter, _cleanup_msg_ids, source, session_key, run_generation,
-        )
+        await self._run_agent_mark_streamed_delivery(response, turn_ctx)
+        self._run_agent_schedule_bubble_cleanup(response, _cleanup_adapter, turn_ctx)
         return response
 
