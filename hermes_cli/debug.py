@@ -20,36 +20,24 @@ from utils import atomic_replace
 
 logger = logging.getLogger(__name__)
 
-# Prepended to upload-bound content when redaction is enabled so reviewers of the public
-# paste know it was sanitized; trailing newline keeps it on its own line.
+# Prepended to upload-bound content when redaction is enabled so paste reviewers know.
 _REDACTION_BANNER = (
     "[hermes debug share: log content redacted at upload time. "
-    "run with --no-redact to disable]\n"
-)
-
+    "run with --no-redact to disable]\n")
 _EMAIL_ADDRESS_RE = re.compile(
     r"(?<![A-Za-z0-9._%+-])"
     r"[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}"
-    r"(?![A-Za-z0-9._%+-])"
-)
-
-# Paste services — paste.rs first, dpaste.com as fallback.
-_PASTE_RS_URL = "https://paste.rs/"
+    r"(?![A-Za-z0-9._%+-])")
+_PASTE_RS_URL = "https://paste.rs/"  # primary; dpaste.com is the fallback
 _DPASTE_COM_URL = "https://dpaste.com/api/"
 _USER_AGENT = "hermes-agent/debug-share"
+_MAX_LOG_BYTES = 512_000  # per log file for upload (paste.rs caps at ~1 MB)
+_AUTO_DELETE_SECONDS = 21600  # 6 hours
 
-# Max bytes read from one log file for upload (paste.rs caps at ~1 MB; keep headroom).
-_MAX_LOG_BYTES = 512_000
+# Pending-deletion tracking: the gateway cron ticker calls ``_sweep_expired_pastes`` hourly and
+# ``hermes debug`` sweeps on entry (CLI-only users). Replaced a fork-and-sleep subprocess that
+# leaked ~20 MB per share.
 
-# Auto-delete pastes after 6 hours.
-_AUTO_DELETE_SECONDS = 21600
-
-
-# ── Pending-deletion tracking ──────────────────────────────────────────────
-# Deletion is driven by the gateway's cron ticker (``gateway/run.py::_start_cron_ticker``
-# calls ``_sweep_expired_pastes`` hourly); ``hermes debug`` also sweeps opportunistically on
-# entry for CLI-only users who never start the gateway. Replaces the old fork-and-sleep
-# subprocess that leaked ~20 MB of resident interpreter per share.
 
 def _pending_file() -> Path:
     return get_hermes_home() / "pastes" / "pending.json"
@@ -85,11 +73,9 @@ def _sweep_expired_pastes(now: Optional[float] = None) -> tuple[int, int]:
     entries = _load_pending()
     if not entries:
         return (0, 0)
-
     current = time.time() if now is None else now
     deleted = 0
     remaining: list[dict] = []
-
     for entry in entries:
         try:
             expire_at = float(entry.get("expire_at", 0))
@@ -106,22 +92,16 @@ def _sweep_expired_pastes(now: Optional[float] = None) -> tuple[int, int]:
             deleted += 1  # deleted, or given up on → count as reaped
         else:
             remaining.append(entry)
-
     if deleted:
         _save_pending(remaining)
-
     return (deleted, len(remaining))
 
 
 def _best_effort_sweep_expired_pastes() -> None:
     """Pending-paste cleanup that never lets /debug fail offline."""
-    try:
+    with contextlib.suppress(Exception):
         _sweep_expired_pastes()
-    except Exception:
-        pass
 
-
-# ── Privacy / delete helpers ───────────────────────────────────────────────
 
 _PRIVACY_NOTICE = """\
 ⚠️  This will upload system info + logs to a PUBLIC paste service.
@@ -144,8 +124,7 @@ _GATEWAY_PRIVACY_NOTICE = (
     "(may contain conversation fragments) to a public paste service. "
     "Full logs are NOT included from the gateway — use `hermes debug share` "
     "from the CLI for full log uploads.\n"
-    "Pastes auto-delete after 6 hours."
-)
+    "Pastes auto-delete after 6 hours.")
 
 
 def _extract_paste_id(url: str) -> Optional[str]:
@@ -162,7 +141,6 @@ def delete_paste(url: str) -> bool:
     paste_id = _extract_paste_id(url)
     if not paste_id:
         raise ValueError(f"Cannot delete: only paste.rs URLs are supported.  Got: {url}")
-
     req = urllib.request.Request(f"{_PASTE_RS_URL}{paste_id}", method="DELETE",
                                  headers={"User-Agent": _USER_AGENT})
     with urllib.request.urlopen(req, timeout=30) as resp:
@@ -174,7 +152,6 @@ def _schedule_auto_delete(urls: list[str], delay_seconds: int = _AUTO_DELETE_SEC
     paste_rs_urls = [u for u in urls if _extract_paste_id(u)]
     if not paste_rs_urls:
         return
-
     # Dedupe by URL, keeping the later expire_at.
     by_url: dict[str, float] = {e["url"]: float(e["expire_at"]) for e in _load_pending()}
     expire_at = time.time() + delay_seconds
@@ -200,17 +177,11 @@ def _upload_paste_rs(content: str) -> str:
 
 def _upload_dpaste_com(content: str, expiry_days: int = 7) -> str:
     boundary = "----HermesDebugBoundary9f3c"
-
-    def _field(name: str, value: str) -> str:
-        return f'--{boundary}\r\nContent-Disposition: form-data; name="{name}"\r\n\r\n{value}\r\n'
-
-    body = (
-        _field("content", content)
-        + _field("syntax", "text")
-        + _field("expiry_days", str(expiry_days))
-        + f"--{boundary}--\r\n"
-    ).encode("utf-8")
-    return _post_paste("dpaste.com", _DPASTE_COM_URL, body, f"multipart/form-data; boundary={boundary}")
+    fields = (("content", content), ("syntax", "text"), ("expiry_days", str(expiry_days)))
+    body = ("".join(f'--{boundary}\r\nContent-Disposition: form-data; name="{n}"\r\n\r\n{v}\r\n'
+                    for n, v in fields) + f"--{boundary}--\r\n").encode("utf-8")
+    return _post_paste("dpaste.com", _DPASTE_COM_URL, body,
+                       f"multipart/form-data; boundary={boundary}")
 
 
 def upload_to_pastebin(content: str, expiry_days: int = 7) -> str:
@@ -218,8 +189,7 @@ def upload_to_pastebin(content: str, expiry_days: int = 7) -> str:
     errors: list[str] = []
     for service, upload in (
         ("paste.rs", lambda: _upload_paste_rs(content)),
-        ("dpaste.com", lambda: _upload_dpaste_com(content, expiry_days=expiry_days)),
-    ):
+        ("dpaste.com", lambda: _upload_dpaste_com(content, expiry_days=expiry_days))):
         try:
             return upload()
         except Exception as exc:
@@ -227,12 +197,9 @@ def upload_to_pastebin(content: str, expiry_days: int = 7) -> str:
     raise RuntimeError("Failed to upload to any paste service:\n  " + "\n  ".join(errors))
 
 
-# ── Log file reading ───────────────────────────────────────────────────────
-
 @dataclass
 class LogSnapshot:
     """Single-read snapshot of a log file used by debug-share."""
-
     path: Optional[Path]
     tail_text: str
     full_text: Optional[str]
@@ -245,16 +212,13 @@ def _primary_log_path(log_name: str) -> Optional[Path]:
     return (get_hermes_home() / "logs" / filename) if filename else None
 
 
-# Logs written by a client process rather than this backend. When the desktop app talks to a
-# remote/docker/SSH backend, `hermes debug share` runs on the *backend* and can never see
-# them — a bare "(file not found)" would read as "the app logged nothing" and misdirect triage.
+# Logs written by a client process, invisible to a remote/docker/SSH backend running `debug
+# share`; a bare "(file not found)" would read as "the app logged nothing" and misdirect triage.
 _CLIENT_SIDE_LOGS = {
     "desktop": (
         "written by Hermes Desktop on the machine running the app, not by this "
         "backend. If the desktop connects to a remote/docker/SSH backend, collect "
-        "it on that client machine"
-    ),
-}
+        "it on that client machine")}
 
 
 def _missing_log_note(log_name: str) -> str:
@@ -278,11 +242,8 @@ def _resolve_log_path(log_name: str) -> Optional[Path]:
 
 
 def _redact_log_text(text: str) -> str:
-    """Force-mode ``redact_sensitive_text`` (+ email scrub) over upload-bound text.
-
-    ``force=True`` so redaction fires regardless of the operator's ``security.redact_secrets``
-    setting; only the in-memory copy headed for the paste service is sanitized.
-    """
+    """``redact_sensitive_text(force=True)`` + email scrub — fires regardless of the operator's
+    ``security.redact_secrets`` setting; only the in-memory upload copy is sanitized."""
     if not text:
         return text
     from agent.redact import redact_sensitive_text
@@ -291,13 +252,9 @@ def _redact_log_text(text: str) -> str:
 
 
 def _read_tail_bytes(
-    log_path: Path, size: int, max_bytes: int, tail_lines: int,
-) -> tuple[bytes, bool]:
-    """Read the whole file, or enough of its tail for both views → (raw, truncated).
-
-    For oversized files, read backwards until we have ``max_bytes`` for the standalone upload
-    AND enough newline context to render the summary tail from the same snapshot.
-    """
+    log_path: Path, size: int, max_bytes: int, tail_lines: int) -> tuple[bytes, bool]:
+    """Whole file, or (oversized) a backwards read holding ``max_bytes`` for the full upload AND
+    enough newlines for the summary tail from the same snapshot → (raw, truncated)."""
     with open(log_path, "rb") as f:
         if size <= max_bytes:
             return f.read(), False
@@ -322,12 +279,8 @@ def _read_tail_bytes(
 def _capture_log_snapshot(
     log_name: str, *, tail_lines: int, max_bytes: int = _MAX_LOG_BYTES, redact: bool = True,
 ) -> LogSnapshot:
-    """Capture a log once and derive the summary tail and full-log views from it.
-
-    Both views must come from the same read: a rotation/truncate between reads would make the
-    report look newer than the uploaded ``agent.log`` paste. With ``redact`` both texts are
-    upload-safe; the on-disk file is never modified.
-    """
+    """Capture a log once and derive the summary tail and full-log views from that single read
+    (a rotation between two reads would make the report look newer than the uploaded log)."""
     log_path = _resolve_log_path(log_name)
     if log_path is None:
         primary = _primary_log_path(log_name)
@@ -336,33 +289,25 @@ def _capture_log_snapshot(
 
     try:
         size = log_path.stat().st_size
-        if size == 0:
-            # race: file was truncated between _resolve_log_path and stat
+        if size == 0:  # truncated between _resolve_log_path and stat
             return LogSnapshot(path=log_path, tail_text="(file empty)", full_text=None)
-
         raw, truncated = _read_tail_bytes(log_path, size, max_bytes, tail_lines)
-
         full_raw = raw
         if truncated and len(full_raw) > max_bytes:
             cut = len(full_raw) - max_bytes
-            # Only drop a partial first line when the cut lands genuinely mid-line (the byte
-            # before the cut is not a newline).
+            # Drop a partial first line only when the cut lands genuinely mid-line.
             on_boundary = cut > 0 and full_raw[cut - 1 : cut] == b"\n"
             full_raw = full_raw[cut:]
             if not on_boundary and b"\n" in full_raw:
                 full_raw = full_raw.split(b"\n", 1)[1]
-
         all_text = raw.decode("utf-8", errors="replace")
         tail_text = "".join(all_text.splitlines(keepends=True)[-tail_lines:]).rstrip("\n")
-
         full_text = full_raw.decode("utf-8", errors="replace")
         if truncated:
             full_text = f"[... truncated — showing last ~{max_bytes // 1024}KB ...]\n{full_text}"
-
         if redact:
             tail_text = _redact_log_text(tail_text)
             full_text = _redact_log_text(full_text)
-
         return LogSnapshot(path=log_path, tail_text=tail_text, full_text=full_text)
     except Exception as exc:
         return LogSnapshot(path=log_path, tail_text=f"(error reading: {exc})", full_text=None)
@@ -379,16 +324,12 @@ def _tail_budget(name: str, log_lines: int) -> int:
 
 
 def _capture_default_log_snapshots(
-    log_lines: int, *, redact: bool = True,
-) -> dict[str, LogSnapshot]:
+    log_lines: int, *, redact: bool = True) -> dict[str, LogSnapshot]:
     """Capture all logs used by debug-share exactly once."""
     return {
         name: _capture_log_snapshot(name, tail_lines=_tail_budget(name, log_lines), redact=redact)
-        for name in _REPORT_LOGS
-    }
+        for name in _REPORT_LOGS}
 
-
-# ── Debug report collection ────────────────────────────────────────────────
 
 def _capture_dump() -> str:
     """Run ``hermes dump`` and return its stdout as a string."""
@@ -401,49 +342,33 @@ def _capture_dump() -> str:
 
 def collect_debug_report(
     *, log_lines: int = 200, dump_text: str = "",
-    log_snapshots: Optional[dict[str, LogSnapshot]] = None,
-) -> str:
+    log_snapshots: Optional[dict[str, LogSnapshot]] = None) -> str:
     """Build the summary debug report (system dump + log tails) as upload-ready text.
 
     ``dump_text`` is pre-captured dump output; when empty, ``hermes dump`` is run internally.
     """
     buf = io.StringIO()
-
-    if not dump_text:
-        dump_text = _capture_dump()
-    buf.write(dump_text)
-
+    buf.write(dump_text or _capture_dump())
     if log_snapshots is None:
         log_snapshots = _capture_default_log_snapshots(log_lines)
-
-    # Sanitiser heal counters: in-process, in-memory — populated when this report is built
-    # inside a process that ran agent turns (gateway /debug share); empty from a fresh CLI
-    # process, where the errors.log tail below carries the same escalation lines instead.
-    try:
+    # In-process sanitiser heal counters: populated only inside a process that ran agent turns
+    # (gateway /debug share); a fresh CLI's errors.log tail carries the same escalation lines.
+    with contextlib.suppress(Exception):
         from agent.agent_runtime_helpers import get_sanitizer_heal_stats
         heal_stats = get_sanitizer_heal_stats()
         if heal_stats:
             buf.write("\n\n--- transcript sanitiser heal counters ---\n")
             for sess, st in sorted(heal_stats.items()):
-                buf.write(
-                    f"session {sess}: {st['heal_events']} heal events, "
-                    f"{st['messages_healed']} messages healed, "
-                    f"escalated={st['escalated']}\n"
-                )
-    except Exception:
-        pass
-
+                buf.write(f"session {sess}: {st['heal_events']} heal events, "
+                          f"{st['messages_healed']} messages healed, escalated={st['escalated']}\n")
     buf.write("\n")
     for name in _REPORT_LOGS:
         buf.write(f"\n--- {name}.log (last {_tail_budget(name, log_lines)} lines) ---\n"
                   f"{log_snapshots[name].tail_text}\n")
-
     return buf.getvalue()
 
 
-# ── Shared bundle collection (paste.rs and Nous-S3 paths) ──────────────────
-
-# Bundle format identifier in the Nous-S3 JSON envelope; the discord-support viewer keys off it.
+# Nous-S3 envelope format id; the discord-support viewer keys off it.
 _NOUS_BUNDLE_FORMAT = "hermes-debug-share/1"
 
 
@@ -466,23 +391,17 @@ def collect_share_bundle(log_lines: int = 200, redact: bool = True) -> dict[str,
 
 
 def build_nous_bundle(bundle: dict[str, str], redact: bool = True) -> bytes:
-    """Gzip a :func:`collect_share_bundle` mapping into the Nous envelope.
-
-    The JSON shape (``format``, ``redacted``, ``created``, ``files``) is what the
-    discord-support viewer parses — keep it stable.
-    """
+    """Gzip a :func:`collect_share_bundle` mapping into the Nous envelope (shape parsed by the
+    discord-support viewer — keep it stable)."""
     envelope = {"format": _NOUS_BUNDLE_FORMAT, "redacted": bool(redact),
                 "created": datetime.datetime.now(datetime.timezone.utc).isoformat(),
                 "files": bundle}
     return gzip.compress(json.dumps(envelope).encode("utf-8"))
 
 
-# ── CLI entry points ───────────────────────────────────────────────────────
-
 @dataclass
 class DebugShareResult:
     """Outcome of a ``debug share`` upload, so non-CLI callers can render real links."""
-
     urls: dict  # label -> paste URL (e.g. {"Report": "...", "agent.log": "..."})
     failures: list  # human-readable "label: error" strings for optional uploads
     redacted: bool  # whether force-mode redaction was applied before upload
@@ -491,23 +410,20 @@ class DebugShareResult:
 
 
 def build_debug_share(
-    *, log_lines: int = 200, expiry: int = 7, redact: bool = True,
-) -> DebugShareResult:
+    *, log_lines: int = 200, expiry: int = 7, redact: bool = True) -> DebugShareResult:
     """Collect the debug report + full logs, upload each, return the URLs.
 
-    Shared core behind ``hermes debug share`` and the dashboard ``POST /api/ops/debug-share``.
-    Blocking network I/O — callers inside an event loop must run it in a worker thread.
+    Shared by ``hermes debug share`` and the dashboard ``POST /api/ops/debug-share``. Blocking
+    network I/O — callers inside an event loop must run it in a worker thread.
     """
     _best_effort_sweep_expired_pastes()
     bundle = collect_share_bundle(log_lines=log_lines, redact=redact)
     if redact:
         logger.info(
-            "hermes debug share: applied force-mode redaction to log snapshots before upload"
-        )
+            "hermes debug share: applied force-mode redaction to log snapshots before upload")
     report = bundle["report"]
     failures: list[str] = []
-    # Summary report is required — raises on failure so callers can fall back; full logs are
-    # optional — failures are collected, not raised.
+    # The summary report is required (raises so callers can fall back); full logs are optional.
     urls = {"Report": upload_to_pastebin(report, expiry_days=expiry)}
     for label, content in bundle.items():
         if label == "report":
@@ -547,8 +463,7 @@ def run_debug_share(args):
     redact = not getattr(args, "no_redact", False)
 
     if getattr(args, "local", False):
-        # Never uploads — render via the shared collector so the output matches exactly what
-        # would be uploaded, and bail before any network I/O.
+        # Same collector as the upload path so the output matches exactly; no network I/O.
         _best_effort_sweep_expired_pastes()
         print("Collecting debug report...")
         bundle = collect_share_bundle(log_lines=log_lines, redact=redact)
@@ -559,9 +474,7 @@ def run_debug_share(args):
         return
 
     if getattr(args, "nous", False):
-        _run_debug_share_nous(args, log_lines=log_lines, redact=redact)
-        return
-
+        return _run_debug_share_nous(args, log_lines=log_lines, redact=redact)
     print(_PRIVACY_NOTICE)
     if not _confirm_upload(args):
         return
@@ -572,7 +485,6 @@ def run_debug_share(args):
         print(f"\nUpload failed: {exc}", file=sys.stderr)
         print("\nRun `hermes debug share --local` to print the report instead.\n")
         sys.exit(1)
-
     label_width = max(len(k) for k in result.urls)
     print("\nDebug report uploaded:")
     for label, url in result.urls.items():
@@ -616,16 +528,11 @@ def _run_debug_share_nous(args, *, log_lines: int, redact: bool) -> None:
     try:
         res = share_to_nous(build_nous_bundle(bundle, redact=redact))
     except Exception as exc:
-        print(
-            f"\nNous upload failed: {exc}\n"
-            "\nThe Nous diagnostics service may be unavailable or not yet "
-            "provisioned.\n"
-            "Run `hermes debug share --local` to print the report instead, "
-            "or `hermes debug share` to upload to a public paste service.\n",
-            file=sys.stderr,
-        )
+        print(f"\nNous upload failed: {exc}\n"
+              "\nThe Nous diagnostics service may be unavailable or not yet provisioned.\n"
+              "Run `hermes debug share --local` to print the report instead, "
+              "or `hermes debug share` to upload to a public paste service.\n", file=sys.stderr)
         sys.exit(1)
-
     view_url = res.get("viewUrl") or res.get("view_url")
     expires_at = res.get("expiresAt") or res.get("expires_at")
     print("\nDebug bundle uploaded to Nous (private):")
@@ -633,7 +540,6 @@ def _run_debug_share_nous(args, *, log_lines: int, redact: bool) -> None:
           else f"  (no view URL returned; upload id: {res.get('id', '?')})")
     print(f"\n⏱  Auto-deletes at {expires_at} (14-day retention)." if expires_at
           else "\n⏱  Auto-deletes after 14 days.")
-
     print("\nShare this private link with the Nous team — only Nous staff "
           "(via Google login) can open it.\n"
           "\nPick up the discussion in:\n"
@@ -649,7 +555,6 @@ def run_debug_delete(args):
         print("Usage: hermes debug delete <url> [<url> ...]\n"
               "  Deletes paste.rs pastes uploaded by 'hermes debug share'.")
         return
-
     for url in urls:
         try:
             if delete_paste(url):
@@ -663,12 +568,10 @@ def run_debug_delete(args):
 
 
 def run_debug(args):
-    """Route debug subcommands."""
-    # Opportunistic sweep of expired pastes on every ``hermes debug`` call.
+    """Route debug subcommands (sweeping expired pastes opportunistically on every call)."""
     _best_effort_sweep_expired_pastes()
-
-    handlers = {"share": run_debug_share, "delete": run_debug_delete}
-    handler = handlers.get(getattr(args, "debug_command", None))
+    handler = {"share": run_debug_share, "delete": run_debug_delete}.get(
+        getattr(args, "debug_command", None))
     if handler is None:
         print(_DEBUG_USAGE)
     else:
