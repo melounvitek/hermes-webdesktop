@@ -98,22 +98,32 @@ _DIAG_CHILD_ATTRS = (
     "_delegate_role", "_delegate_depth",
 )
 
+def _diag_section(label: str, produce) -> List[str]:
+    """Lines from ``produce()``, or one ``<error: ...>`` line so a broken attribute never aborts the dump."""
+    try:
+        return list(produce())
+    except Exception as exc:
+        return [f"  {label}: <error: {exc}>"]
+
 def _diag_sizes(child: Any) -> List[str]:
-    lines: List[str] = ["## Prompt / schema sizes"]
-    try:
+    def _prompt():
         sys_prompt = getattr(child, "ephemeral_system_prompt", None) or getattr(child, "system_prompt", None) or ""
-        lines.append(f"  system_prompt_bytes: {len(sys_prompt.encode('utf-8')) if isinstance(sys_prompt, str) else 'n/a'}")
-        lines.append(f"  system_prompt_chars: {len(sys_prompt) if isinstance(sys_prompt, str) else 'n/a'}")
-    except Exception as exc:
-        lines.append(f"  system_prompt: <error: {exc}>")
-    try:
+        is_str = isinstance(sys_prompt, str)
+        return [
+            f"  system_prompt_bytes: {len(sys_prompt.encode('utf-8')) if is_str else 'n/a'}",
+            f"  system_prompt_chars: {len(sys_prompt) if is_str else 'n/a'}",
+        ]
+
+    def _tools():
         tools_schema = getattr(child, "tools", None)
-        if tools_schema is not None:
-            lines.append(f"  tool_schema_count: {len(tools_schema)}")
-            lines.append(f"  tool_schema_bytes: {len(json.dumps(tools_schema, default=str).encode('utf-8'))}")
-    except Exception as exc:
-        lines.append(f"  tool_schema: <error: {exc}>")
-    return lines
+        if tools_schema is None:
+            return []
+        return [
+            f"  tool_schema_count: {len(tools_schema)}",
+            f"  tool_schema_bytes: {len(json.dumps(tools_schema, default=str).encode('utf-8'))}",
+        ]
+
+    return ["## Prompt / schema sizes"] + _diag_section("system_prompt", _prompt) + _diag_section("tool_schema", _tools)
 
 def _diag_threads(worker_thread: Optional[threading.Thread]) -> List[str]:
     """Worker stack plus all other live threads (bounded to 40): the worker is
@@ -483,6 +493,13 @@ def _await_child(
     join. The worker installs a non-interactive approval callback so dangerous
     command prompts never fall back to ``input()`` and deadlock the parent TUI
     (deny vs approve follows delegation.subagent_auto_approve).
+
+    On failure: steer acceptance closes BEFORE the stop signal (a concurrent
+    steer is drained into the entry or rejected, never silently lost); a
+    0-API-call timeout gets a diagnostic dump; a timed-out worker that still
+    owns the child gets ``child.close()`` via a Future done-callback
+    (``close_deferred=True``) because closing from this thread races its
+    still-unwinding finally path.
     """
     from tools.delegate_tool import (_get_child_timeout, _get_subagent_approval_callback, _set_subagent_approval_cb)
     from tools.daemon_pool import DaemonThreadPoolExecutor
@@ -502,15 +519,72 @@ def _await_child(
     future = executor.submit(contextvars.copy_context().run, _run_with_thread_capture)
     try:
         return future.result(timeout=child_timeout), None
-    except Exception as exc:
-        return None, _handle_child_wait_failure(
-            exc, child=child, task_index=task_index, goal=goal, subagent_id=subagent_id, child_future=future,
-            child_timeout=child_timeout, child_start=child_start, child_progress_cb=child_progress_cb,
-            worker_thread_holder=worker_thread_holder, worktree=worktree,
-        )
+    except Exception as wait_exc:
+        exc: BaseException = wait_exc  # ``as`` targets are unbound after the except block
     finally:
         # Shut down without waiting — a child stuck on blocking I/O would hang wait=True forever.
         executor.shutdown(wait=False)
+
+    _late_pending_steer = _close_subagent_steering(subagent_id, child) if subagent_id else None
+    _signal_child_stop(child)
+    is_timeout = isinstance(exc, (FuturesTimeoutError, TimeoutError))
+    duration = round(time.monotonic() - child_start, 2)
+    logger.warning("Subagent %d %s after %.1fs", task_index, "timed out" if is_timeout else f"raised {type(exc).__name__}", duration)
+
+    child_api_calls = 0
+    with _quiet(None):
+        child_api_calls = int(child.get_activity_summary().get("api_call_count", 0) or 0)
+    diagnostic_path: Optional[str] = None
+    if is_timeout and child_api_calls == 0:
+        diagnostic_path = _dump_subagent_timeout_diagnostic(
+            child=child, task_index=task_index,
+            # is_timeout implies a cap was configured (result(timeout=None)
+            # never raises FuturesTimeoutError); guard for the type checker.
+            timeout_seconds=float(child_timeout or 0.0), duration_seconds=float(duration),
+            worker_thread=worker_thread_holder.get("t"), goal=goal,
+        )
+        if diagnostic_path:
+            logger.warning("Subagent %d 0-API-call timeout — diagnostic written to %s", task_index, diagnostic_path)
+
+    status = "timeout" if is_timeout else "error"
+    if not is_timeout:
+        _err = str(exc)
+    elif child_api_calls == 0:
+        _err = (
+            f"Subagent timed out after {child_timeout}s without making any API call — the child never reached its "
+            f"first LLM request (prompt construction, credential resolution, or transport may be stuck)."
+        )
+    else:
+        _err = (
+            f"Subagent timed out after {child_timeout}s with {child_api_calls} API call(s) completed — likely "
+            f"stuck on a slow API call, tool call, or unresponsive network request."
+        )
+    if is_timeout and diagnostic_path:
+        _err += f" Diagnostic: {diagnostic_path}"
+    _error_entry = {
+        "task_index": task_index,
+        "status": status,
+        "summary": None,
+        "error": _err,
+        "exit_reason": status,
+        "api_calls": child_api_calls,
+        "duration_seconds": duration,
+        "timeout_seconds": child_timeout if is_timeout else None,
+        "timed_out_after_seconds": duration if is_timeout else None,
+        "timeout_phase": (
+            "before_first_llm_call" if is_timeout and child_api_calls == 0 else "after_llm_calls" if is_timeout else None
+        ),
+        "_child_role": getattr(child, "_delegate_role", None),
+        "diagnostic_path": diagnostic_path,
+    }
+    _finish_failed_entry(
+        _error_entry, _late_pending_steer, child_progress_cb, worktree,
+        preview=f"Timed out after {duration}s" if is_timeout else str(exc),
+    )
+    close_deferred = is_timeout and not future.done()
+    if close_deferred:
+        _defer_close_after_timeout(child, future)
+    return None, _ChildFailure(_error_entry, close_deferred)
 
 def _merge_late_steer(result: Dict[str, Any], subagent_id: Optional[str], child: Any) -> None:
     """Linearization boundary for registry steering: from here the child cannot
@@ -535,89 +609,6 @@ def _finish_failed_entry(
     _append_missed_steer(entry, late_steer)
     worktree.attach(entry)  # no-op when isolation never engaged
     return entry
-
-def _handle_child_wait_failure(
-    exc: BaseException, *, child: Any, task_index: int, goal: str, subagent_id: Optional[str], child_future: Any,
-    child_timeout: Optional[float], child_start: float, child_progress_cb: Any,
-    worker_thread_holder: Dict[str, Optional[threading.Thread]], worktree: _WorktreeReporter,
-) -> _ChildFailure:
-    """Build the error entry for a child whose Future timed out or raised.
-
-    Signals the child to stop, dumps the 0-API-call diagnostic, and on a
-    timeout hands ``child.close()`` to a Future done-callback (returned as
-    ``close_deferred=True``) because closing from this thread races the
-    still-unwinding worker's finally path.
-    """
-    # Steer acceptance must close BEFORE the stop signal so a concurrent steer
-    # is either drained into the entry or rejected — never silently lost.
-    _late_pending_steer = _close_subagent_steering(subagent_id, child) if subagent_id else None
-    _signal_child_stop(child)
-
-    is_timeout = isinstance(exc, (FuturesTimeoutError, TimeoutError))
-    duration = round(time.monotonic() - child_start, 2)
-    logger.warning("Subagent %d %s after %.1fs", task_index, "timed out" if is_timeout else f"raised {type(exc).__name__}", duration)
-
-    # A timeout BEFORE any API call is a black box without a diagnostic dump.
-    diagnostic_path: Optional[str] = None
-    child_api_calls = 0
-    with _quiet(None):
-        child_api_calls = int(child.get_activity_summary().get("api_call_count", 0) or 0)
-    if is_timeout and child_api_calls == 0:
-        diagnostic_path = _dump_subagent_timeout_diagnostic(
-            child=child,
-            task_index=task_index,
-            # is_timeout implies a cap was configured (result(timeout=None)
-            # never raises FuturesTimeoutError); guard for the type checker.
-            timeout_seconds=float(child_timeout or 0.0),
-            duration_seconds=float(duration),
-            worker_thread=worker_thread_holder.get("t"),
-            goal=goal,
-        )
-        if diagnostic_path:
-            logger.warning("Subagent %d 0-API-call timeout — diagnostic written to %s", task_index, diagnostic_path)
-
-    status = "timeout" if is_timeout else "error"
-    if not is_timeout:
-        _err = str(exc)
-    elif child_api_calls == 0:
-        _err = (
-            f"Subagent timed out after {child_timeout}s without making any API call — the child never reached its "
-            f"first LLM request (prompt construction, credential resolution, or transport may be stuck)."
-        )
-    else:
-        _err = (
-            f"Subagent timed out after {child_timeout}s with {child_api_calls} API call(s) completed — likely "
-            f"stuck on a slow API call, tool call, or unresponsive network request."
-        )
-    if is_timeout and diagnostic_path:
-        _err += f" Diagnostic: {diagnostic_path}"
-
-    _error_entry = {
-        "task_index": task_index,
-        "status": status,
-        "summary": None,
-        "error": _err,
-        "exit_reason": status,
-        "api_calls": child_api_calls,
-        "duration_seconds": duration,
-        "timeout_seconds": child_timeout if is_timeout else None,
-        "timed_out_after_seconds": duration if is_timeout else None,
-        "timeout_phase": (
-            "before_first_llm_call" if is_timeout and child_api_calls == 0
-            else "after_llm_calls" if is_timeout
-            else None
-        ),
-        "_child_role": getattr(child, "_delegate_role", None),
-        "diagnostic_path": diagnostic_path,
-    }
-    _finish_failed_entry(
-        _error_entry, _late_pending_steer, child_progress_cb, worktree,
-        preview=f"Timed out after {duration}s" if is_timeout else str(exc),
-    )
-    close_deferred = is_timeout and not child_future.done()
-    if close_deferred:
-        _defer_close_after_timeout(child, child_future)
-    return _ChildFailure(_error_entry, close_deferred)
 
 
 @dataclass
