@@ -85,27 +85,17 @@ def _scratch_workspace(conn: sqlite3.Connection, task_id: str) -> Optional[Path]
 def _is_managed_scratch_path(p: Path) -> bool:
     """Return True iff *p* is a strict descendant of a kanban-managed scratch root.
 
-    A managed root is exclusively a ``workspaces/`` directory — never the
-    broader kanban home, a board root, or sibling subtrees like ``logs/`` or
-    ``boards/<slug>/`` itself. Allowed roots:
-
-    * ``HERMES_KANBAN_WORKSPACES_ROOT`` when set (worker-side override
-      injected by the dispatcher).
-    * ``<kanban_home>/kanban/workspaces`` — legacy default-board scratch root.
-    * ``<kanban_home>/kanban/boards/<slug>/workspaces`` for each board slug
-      that currently exists on disk.
-
-    The check requires strict descendancy: a path equal to one of these
-    roots is NOT managed (deleting the workspaces root would wipe every
-    task's scratch dir at once), and a path that resolves to ``<kanban_home>
-    /kanban`` itself, ``<kanban_home>/kanban/logs``, or
-    ``<kanban_home>/kanban/boards/<slug>`` is rejected because those
-    subtrees hold Hermes' own DB, metadata, and logs, not task workspaces.
-
-    Used by :func:`_cleanup_workspace` to refuse to ``shutil.rmtree`` paths
-    outside Hermes-managed storage. A board ``default_workdir`` pointing at a
-    real source tree can otherwise pair with ``workspace_kind='scratch'`` and
-    cause task completion to delete user data (#28818).
+    A managed root is exclusively a ``workspaces/`` directory:
+    ``HERMES_KANBAN_WORKSPACES_ROOT`` (dispatcher-injected worker override),
+    ``<kanban_home>/kanban/workspaces`` (legacy default board), or
+    ``<kanban_home>/kanban/boards/<slug>/workspaces`` per on-disk board.
+    Strict descendancy: a path EQUAL to a root is not managed (deleting it
+    would wipe every task's scratch dir), and ``<kanban_home>/kanban``,
+    ``.../logs`` or ``.../boards/<slug>`` are rejected because they hold
+    Hermes' own DB, metadata and logs. :func:`_cleanup_workspace` uses this to
+    refuse ``shutil.rmtree`` outside managed storage — a board
+    ``default_workdir`` pointing at a real source tree can otherwise pair with
+    ``workspace_kind='scratch'`` and make task completion delete user data.
     """
     is_managed, _board = _managed_scratch_path_info(p)
     return is_managed
@@ -113,13 +103,10 @@ def _is_managed_scratch_path(p: Path) -> bool:
 
 def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
     """Remove a task's scratch workspace dir and kill its stale tmux session.
-
-    Called from :func:`complete_task` after the DB transaction commits.
-    Best-effort — any error is swallowed so cleanup never blocks task completion.
-    ``scratch`` workspaces are removed; ``worktree`` workspaces are removed only
-    when provably free of work (clean tree, every commit reachable from a
-    remote-tracking ref); ``dir`` workspaces are intentionally preserved.
-    """
+    Called from :func:`complete_task` after the transaction commits; best-effort
+    so cleanup never blocks completion. ``scratch`` is removed; ``worktree``
+    only when provably free of work (clean tree, every commit reachable from a
+    remote-tracking ref); ``dir`` is intentionally preserved."""
     try:
         row = conn.execute(
             "SELECT workspace_kind, workspace_path, branch_name FROM tasks WHERE id = ?",
@@ -130,14 +117,12 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         kind: Optional[str] = row["workspace_kind"]
         path: Optional[str] = row["workspace_path"]
         if kind not in ("scratch", "worktree") or not path:
-            # This task's own workspace isn't a removable scratch dir, but its
-            # completion may still unblock a deferred parent scratch cleanup
-            # (e.g. a 'dir' child whose scratch parent was waiting on it). #33774
+            # Not removable itself, but completing may still unblock a deferred
+            # parent scratch cleanup (e.g. a 'dir' child of a scratch parent).
             _try_cleanup_parent_workspaces(conn, task_id)
             return
-        # Check if this task has children that still need the workspace.
-        # If any child is not yet done/archived, defer cleanup so the
-        # child can read handoff artifacts from the workspace (#33774).
+        # Defer while any child is not yet terminal so it can still read
+        # handoff artifacts from this workspace.
         _active_children = conn.execute(
             "SELECT 1 FROM task_links l "
             "JOIN tasks t ON t.id = l.child_id "
@@ -153,9 +138,8 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
             )
             return
         if kind == "worktree":
-            # Kill the (dead) tmux worker session BEFORE removing the
-            # worktree so a lingering worker never has its cwd deleted out
-            # from under it. Both steps stay best-effort.
+            # Kill the (dead) tmux worker session BEFORE removing the worktree
+            # so a lingering worker never has its cwd deleted from under it.
             _cleanup_worker_tmux(conn, task_id)
             _cleanup_worktree_workspace(task_id, path, row["branch_name"])
             _try_cleanup_parent_workspaces(conn, task_id)
@@ -163,11 +147,9 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
         import shutil
         wp = Path(path)
         if wp.is_dir():
-            # Containment guard (#28818): a board's ``default_workdir`` can
-            # pair ``workspace_kind='scratch'`` with a user-supplied path
-            # pointing at a real source tree. Without this check, task
-            # completion would unconditionally ``shutil.rmtree`` that path
-            # and silently delete the user's source data.
+            # Containment guard: a board's ``default_workdir`` can pair
+            # ``workspace_kind='scratch'`` with a user path pointing at a real
+            # source tree; without this, completion would rmtree the user's data.
             if _is_managed_scratch_path(wp):
                 shutil.rmtree(wp, ignore_errors=True)
                 _kb._log.debug("Removed scratch workspace: %s", wp)
@@ -178,12 +160,9 @@ def _cleanup_workspace(conn: sqlite3.Connection, task_id: str) -> None:
                     "kanban-managed workspaces root)",
                     task_id, wp,
                 )
-        # Also kill the tmux session for the worker that owned this task,
-        # if the tmux session is now dead (worker process exited).
+        # Kill the owning worker's tmux session if it is now dead, then let any
+        # parent whose children are all done run its deferred cleanup.
         _cleanup_worker_tmux(conn, task_id)
-        # After cleaning up this task's workspace, check if any parent
-        # tasks now have all children done — their deferred cleanup can
-        # proceed (#33774).
         _try_cleanup_parent_workspaces(conn, task_id)
     except Exception:
         pass  # best-effort — never block completion
@@ -193,14 +172,11 @@ def _cleanup_worktree_workspace(
     task_id: str, path: str, branch_name: Optional[str] = None
 ) -> None:
     """Remove a finished task's linked git worktree when it holds no work.
-
-    Mirrors the safety judgment of the CLI startup pruner
-    (``cli._prune_stale_worktrees``): removal requires a clean working tree
-    AND every commit reachable from a remote-tracking ref. Any doubt — dirty
-    files, unpushed commits, unresolvable repo, failing git — preserves the
-    worktree. The task's auto-generated ``wt/<task-id>`` branch is deleted
-    with it; custom branches are kept. Best-effort like the scratch path.
-    """
+    Mirrors the CLI startup pruner (``cli._prune_stale_worktrees``): removal
+    requires a clean tree AND every commit reachable from a remote-tracking
+    ref; any doubt (dirty, unpushed, unresolvable repo, failing git) preserves
+    it. The auto-generated ``wt/<task-id>`` branch is deleted with it; custom
+    branches are kept. Best-effort."""
     try:
         from cli import _worktree_has_unpushed_commits, _worktree_is_dirty
     except Exception:
@@ -221,10 +197,8 @@ def _cleanup_worktree_workspace(
                 task_id, wp,
             )
             return
-        # No --force: the dirty/unpushed checks above run before removal, so
-        # git's own dirty guard re-verifies at removal time. If the tree
-        # became dirty between our check and the removal (TOCTOU), removal
-        # fails safe and the worktree is preserved.
+        # No --force: git's own dirty guard re-verifies at removal time, so if
+        # the tree became dirty since our check (TOCTOU) removal fails safe.
         result = subprocess.run(
             ["git", "-C", str(repo_root), "worktree", "remove", str(wp)],
             capture_output=True,
@@ -253,13 +227,9 @@ def _cleanup_worktree_workspace(
 
 
 def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> None:
-    """Clean up parent scratch workspaces now that *task_id* completed.
-
-    When a parent task's cleanup was deferred because it had active children,
-    this function is called after each child completes.  If all children of a
-    parent are now done/archived/failed/cancelled, the parent's scratch
-    workspace is removed (#33774).
-    """
+    """Run the deferred cleanup of any parent scratch/worktree workspace whose
+    children are now all done/archived/failed/cancelled (called after each
+    child completes)."""
     try:
         parents = conn.execute(
             "SELECT parent_id FROM task_links WHERE child_id = ?",
@@ -276,7 +246,6 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
                 or not row["workspace_path"]
             ):
                 continue
-            # Check if ALL children of this parent are terminal
             active = conn.execute(
                 "SELECT 1 FROM task_links l "
                 "JOIN tasks t ON t.id = l.child_id "
@@ -286,7 +255,6 @@ def _try_cleanup_parent_workspaces(conn: sqlite3.Connection, task_id: str) -> No
             ).fetchone()
             if active:
                 continue  # still has active children
-            # All children done — safe to clean up parent workspace
             if row["workspace_kind"] == "worktree":
                 _cleanup_worktree_workspace(
                     parent_id, row["workspace_path"], row["branch_name"]
@@ -312,7 +280,6 @@ def _cleanup_worker_tmux(conn: sqlite3.Connection, task_id: str) -> None:
         assignee: str = row["assignee"]
         # Workers named swarm1-12 use tmux sessions named swarm-swarm1 etc.
         session = f"swarm-{assignee}"
-        # Check if session exists and pane is dead before killing
         out = subprocess.run(
             ["tmux", "list-panes", "-t", session, "-F", "#{pane_dead}"],
             capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5,
@@ -343,9 +310,8 @@ def _scratch_tip_sentinel_path() -> Path:
 
 
 def _scratch_tip_shown() -> bool:
-    """True iff the scratch-workspace tip has already been emitted on this
-    install. Best-effort — any error means we re-emit, which is the safer
-    failure mode for a help message."""
+    """True iff the scratch-workspace tip was already emitted on this install.
+    Best-effort — any error re-emits, the safer failure mode for a help message."""
     try:
         return _scratch_tip_sentinel_path().exists()
     except OSError:
@@ -353,11 +319,8 @@ def _scratch_tip_shown() -> bool:
 
 
 def _mark_scratch_tip_shown() -> None:
-    """Touch the sentinel so future scratch workspaces stay silent.
-
-    Best-effort: a failure here just means the tip might appear once more,
-    which is preferable to crashing dispatch over a help message.
-    """
+    """Touch the sentinel so future scratch workspaces stay silent. Best-effort:
+    a failure means the tip may appear once more, preferable to crashing dispatch."""
     try:
         path = _scratch_tip_sentinel_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -371,12 +334,9 @@ def _maybe_emit_scratch_tip(
     task_id: str,
     workspace_kind: Optional[str],
 ) -> None:
-    """Emit the first-use scratch-workspace tip exactly once per install.
-
-    Called from the dispatcher right after a scratch workspace is
-    materialized. No-op for ``worktree`` / ``dir`` workspaces (they're
-    preserved by design) and no-op after the sentinel exists.
-    """
+    """Emit the first-use scratch-workspace tip once per install, right after a
+    scratch workspace is materialized. No-op for ``worktree``/``dir`` (preserved
+    by design) and once the sentinel exists."""
     if (workspace_kind or "scratch") != "scratch":
         return
     if _scratch_tip_shown():
@@ -497,21 +457,13 @@ def _ensure_git_worktree(repo_root: Path, target: Path, branch_name: str) -> Non
 def _resolve_worktree_workspace(
     task: Task, *, board: Optional[str] = None
 ) -> tuple[Path, str]:
-    """Resolve + materialize a linked git worktree for ``task``.
-
-    When ``task.workspace_path`` is unset, the anchor is the board's
-    ``default_workdir`` (a persistent project checkout). This keeps every
-    worktree task under a meaningful, board-owned repo — ``<repo>/.worktrees/
-    <task-id>`` — instead of silently landing under the dispatcher's current
-    working directory (which is whatever directory the gateway happened to be
-    launched from, e.g. the Hermes checkout). If no anchor is configured
-    anywhere, we fail loudly rather than guess.
-    """
+    """Resolve + materialize a linked git worktree for ``task``. With no
+    ``task.workspace_path`` the anchor is the board's ``default_workdir`` so
+    every worktree lands under a board-owned repo (``<repo>/.worktrees/<id>``)
+    instead of the dispatcher's incidental CWD (whatever dir the gateway was
+    launched from); with no anchor configured we fail loudly rather than guess."""
     branch_name = (task.branch_name or "").strip() or f"wt/{task.id}"
     if not task.workspace_path:
-        # Anchor on the board's configured default_workdir, not Path.cwd().
-        # The dispatcher's CWD is incidental (gateway launch dir) and using it
-        # scatters worktrees under whatever repo the gateway started in.
         board_slug = board if board else _kb.get_current_board()
         board_default = (_kb.read_board_metadata(board_slug).get("default_workdir") or "").strip()
         if not board_default:
@@ -549,22 +501,19 @@ def _resolve_worktree_workspace(
         actual_branch = _git_current_branch(requested)
         if actual_branch == branch_name:
             return requested_resolved, actual_branch
-        # The requested path is an existing checkout of a DIFFERENT
-        # task's branch. Decompose children inherit the root's
-        # workspace_path verbatim, so siblings all point here; reusing
-        # the checkout as-is would run this task on the other task's
-        # branch — silent cross-task provenance corruption, and unsafe
-        # when siblings run concurrently. Fall back to a fresh worktree
-        # of our own under the same repo.
+        # The requested path is an existing checkout of a DIFFERENT task's
+        # branch (decompose children inherit the root's workspace_path
+        # verbatim, so siblings all point here). Reusing it would run this task
+        # on the other task's branch — silent cross-task provenance corruption,
+        # unsafe under concurrency — so fall back to our own worktree.
         fallback_root = _repo_root_for_worktree_target(requested.parent)
         if fallback_root is not None:
             fallback = fallback_root / ".worktrees" / task.id
             if fallback.resolve(strict=False) != requested_resolved:
                 _ensure_git_worktree(fallback_root, fallback, branch_name)
                 return fallback.resolve(strict=False), branch_name
-        # No repo to anchor a fallback on (or the occupied path IS this
-        # task's own canonical worktree): keep the legacy reuse rather
-        # than failing dispatch.
+        # No repo to anchor a fallback on (or the occupied path IS this task's
+        # own canonical worktree): keep the legacy reuse rather than fail dispatch.
         return requested_resolved, actual_branch or branch_name
 
     repo_root = _git_toplevel(requested)
@@ -586,35 +535,25 @@ def _resolve_worktree_workspace(
 def resolve_workspace(task: Task, *, board: Optional[str] = None) -> Path:
     """Resolve (and create if needed) the workspace for a task.
 
-    - ``scratch``: a fresh dir under ``<board-root>/workspaces/<id>/``,
-      where ``<board-root>`` is the active board's root. The path is the
-      same for the dispatcher and every profile worker, so handoff is
+    - ``scratch``: fresh dir under ``<board-root>/workspaces/<id>/`` — the
+      same path for the dispatcher and every profile worker, so handoff is
       path-stable.
-    - ``dir:<path>``: the path stored in ``workspace_path``.  Created
-      if missing.  MUST be absolute — relative paths are rejected to
-      prevent confused-deputy traversal where ``../../../tmp/attacker``
-      resolves against the dispatcher's CWD instead of a meaningful
-      root.  Users who want a kanban-root-relative workspace should
-      compute the absolute path themselves.
-    - ``worktree``: a real linked git worktree. If ``workspace_path`` names
-      a repo root, Hermes treats it as an anchor and materializes a linked
-      worktree at ``<repo>/.worktrees/<task-id>``. If ``workspace_path`` names
-      a concrete target path, Hermes creates/reuses that linked worktree. With
-      no ``workspace_path``, Hermes anchors on the board's ``default_workdir``
-      and materializes ``<repo>/.worktrees/<task-id>`` per task; if no
-      ``default_workdir`` is configured it raises rather than guessing from the
-      dispatcher's CWD. When ``branch_name`` is empty, Hermes uses
-      ``wt/<task-id>``.
+    - ``dir:<path>``: ``workspace_path``, created if missing. MUST be absolute
+      — relative paths are rejected to prevent confused-deputy traversal where
+      ``../../../tmp/attacker`` resolves against the dispatcher's CWD.
+    - ``worktree``: a real linked git worktree. A ``workspace_path`` naming a
+      repo root is an anchor (materializes ``<repo>/.worktrees/<task-id>``);
+      a concrete target path is created/reused; with none, the board's
+      ``default_workdir`` anchors it and raises if unset rather than guessing
+      from the dispatcher's CWD. Empty ``branch_name`` -> ``wt/<task-id>``.
 
-    Persist the resolved path back to the task row via ``set_workspace_path``
-    so subsequent runs reuse the same directory.
+    Persist the resolved path via ``set_workspace_path`` so later runs reuse it.
     """
     kind = task.workspace_kind or "scratch"
     if kind == "scratch":
         if task.workspace_path:
-            # Legacy scratch tasks that were set to an explicit path get the
-            # same absolute-path guard as dir: — consistent with the
-            # threat model.
+            # Legacy explicit-path scratch tasks get the same absolute-path
+            # guard as dir: — same threat model.
             p = Path(task.workspace_path).expanduser()
             if not p.is_absolute():
                 raise ValueError(

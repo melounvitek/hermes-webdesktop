@@ -44,20 +44,16 @@ _SQLITE_HEADER = b"SQLite format 3\x00"
 DEFAULT_BUSY_TIMEOUT_MS = 120_000
 
 
-# Maximum number of ``<db>.corrupt.<hash>.bak`` quarantine files retained per
-# board DB. Content-addressing already dedupes identical corrupt bytes, but
-# repeatedly-mutating corruption (partial repairs, further damage between
-# dispatcher retries) mints a new fingerprint each time; without a cap a user
-# accumulated 124 backups. Oldest-by-mtime files beyond the cap are pruned
-# right after each new backup is created.
+# Cap on ``<db>.corrupt.<hash>.bak`` quarantines per board: content-addressing
+# dedupes identical bytes, but mutating corruption mints a new fingerprint each
+# time (one user hit 124). Oldest-by-mtime beyond the cap are pruned after each
+# new backup.
 _CORRUPT_BACKUP_RETENTION = 10
 
 
-# Bounded acquire for the cross-process init lock (#36644). The original bare
-# blocking flock had no timeout, so a wedged holder blocked the dispatcher's
-# next-tick connect forever. We retry a non-blocking acquire up to this
-# deadline, polling at this interval, then proceed without the cross-process
-# lock (the in-process _INIT_LOCK + idempotent init remain the backstop).
+# Bounded init-lock acquire: a bare blocking flock let a wedged holder block the
+# dispatcher's next-tick connect forever. Poll non-blocking until the deadline,
+# then proceed without the lock (in-process _INIT_LOCK + idempotent init backstop).
 _INIT_LOCK_TIMEOUT_SECONDS = 10.0
 
 
@@ -65,24 +61,17 @@ _INIT_LOCK_POLL_SECONDS = 0.05
 
 
 def _resolve_busy_timeout_ms() -> int:
-    """Return the SQLite busy timeout for Kanban connections.
-
-    Kanban is the shared cross-profile dispatch bus, so worker stampedes are
-    expected.  A long busy timeout lets SQLite serialize writers via WAL rather
-    than surfacing transient ``database is locked`` failures during bursts.
-    """
+    """Return the SQLite busy timeout for Kanban connections. Kanban is the
+    shared cross-profile dispatch bus, so worker stampedes are expected; a
+    long timeout lets WAL serialize writers instead of surfacing transient
+    ``database is locked`` failures."""
     return _kb._env_int("HERMES_KANBAN_BUSY_TIMEOUT_MS", DEFAULT_BUSY_TIMEOUT_MS, minimum=1)
 
 
 def _sqlite_connect(path: Path) -> sqlite3.Connection:
-    """Open a Kanban SQLite connection with consistent lock waiting.
-
-    Uses ``connect_tracked`` so the live-connection registry knows this file
-    is open: while it is, byte-level probes of the same file are refused,
-    because an ``open()``/``close()`` would cancel this process's POSIX
-    advisory locks on the database (see ``hermes_cli.sqlite_safe_read``).
-    The registration is released automatically when the connection closes.
-    """
+    """Open a Kanban SQLite connection via ``connect_tracked``: while registered,
+    byte-level probes of the file are refused because an ``open()``/``close()``
+    would cancel this process's POSIX advisory locks (see ``sqlite_safe_read``)."""
     from hermes_cli.sqlite_safe_read import connect_tracked
 
     busy_timeout_ms = _resolve_busy_timeout_ms()
@@ -93,15 +82,13 @@ def _sqlite_connect(path: Path) -> sqlite3.Connection:
         timeout=busy_timeout_ms / 1000.0,
     )
     try:
-        # ``sqlite3.connect(timeout=...)`` normally maps to busy_timeout, but set
-        # the PRAGMA explicitly so it is observable and survives future wrapper
-        # changes. Parameter binding is not supported for PRAGMA assignments.
+        # Explicit PRAGMA (besides connect(timeout=)) so it is observable and
+        # survives wrapper changes; PRAGMA assignments can't bind parameters.
         conn.execute(f"PRAGMA busy_timeout={busy_timeout_ms}")
     except BaseException:
-        # A half-open connection abandoned here would leak its fd AND leave a
-        # stale entry in the connect_tracked live-connection registry (which
-        # only clears on close), permanently blocking byte-level probes of
-        # this database file. Close before re-raising.
+        # A half-open connection would leak its fd AND leave a stale entry in the
+        # connect_tracked registry (cleared only on close), permanently blocking
+        # byte-level probes of this file.
         with contextlib.suppress(Exception):
             conn.close()
         raise
@@ -110,9 +97,7 @@ def _sqlite_connect(path: Path) -> sqlite3.Connection:
 
 def _try_lock_nb(handle) -> bool:
     """One non-blocking exclusive lock attempt on ``handle``; False when held elsewhere.
-
-    Windows uses a 1-byte ``msvcrt.locking`` range at offset 0, POSIX ``flock``.
-    """
+    Windows: 1-byte ``msvcrt.locking`` range at offset 0; POSIX: ``flock``."""
     if _kb._IS_WINDOWS:
         import msvcrt
 
@@ -145,20 +130,15 @@ def _unlock(handle) -> None:
 def _cross_process_init_lock(path: Path):
     """Serialize first-connect WAL/schema/integrity setup across processes.
 
-    ``_INIT_LOCK`` only protects threads inside one Python process. During a
-    dispatcher burst, many worker processes can all hit a fresh/legacy board at
-    once and each process has an empty ``_INITIALIZED_PATHS`` cache. This file
-    lock keeps header validation, integrity probing, WAL activation, and
-    additive migrations single-file/single-writer across the whole host while
-    leaving normal post-init DB usage concurrent under SQLite WAL.
+    ``_INIT_LOCK`` only covers one process's threads; a dispatcher burst has
+    many worker processes hit a fresh/legacy board with empty
+    ``_INITIALIZED_PATHS`` caches. Post-init usage stays concurrent under WAL.
 
-    The acquire is **bounded**: a blocking ``flock`` let one stalled holder (or
-    a stale lock from a wedged worker) hang every other ``connect()`` — the
-    gateway dispatcher's next tick included — with no traceback. We retry a
-    non-blocking acquire until a deadline, then WARN and proceed WITHOUT the
-    lock. Safe because ``_INIT_LOCK`` still serializes same-process threads
-    and init is idempotent (``CREATE TABLE IF NOT EXISTS`` + additive
-    migrations): two racing first-inits mean redundant work, not corruption.
+    **Bounded** acquire: a blocking ``flock`` let one stalled/stale holder hang
+    every ``connect()`` (the gateway dispatcher's next tick included) with no
+    traceback. After the deadline we WARN and proceed WITHOUT the lock — safe
+    because ``_INIT_LOCK`` still serializes same-process threads and init is
+    idempotent: two racing first-inits mean redundant work, not corruption.
     """
     path.parent.mkdir(parents=True, exist_ok=True)
     lock_path = path.with_name(path.name + ".init.lock")
@@ -193,29 +173,21 @@ def _cross_process_init_lock(path: Path):
 
 @contextlib.contextmanager
 def _dispatch_tick_lock(db_path: Path):
-    """Non-blocking single-writer guard around one dispatcher tick.
+    """Non-blocking single-writer guard around one dispatcher tick; yields
+    ``True`` if this process holds the board's dispatch lock, else ``False``
+    (caller skips the tick).
 
-    Yields ``True`` when this process holds the board's dispatch lock and
-    may proceed with the tick, or ``False`` when another process already
-    holds it (the caller should skip the tick this round).
+    An orphan gateway (``gateway run --replace`` / restart escaping a systemd
+    or launchd service cgroup) becomes a second long-lived writer; two
+    dispatchers both pass ``busy_timeout`` and race on WAL frames — the root
+    cause of multi-writer corruption. ``_guard_supervised_gateway_conflict``
+    blocks the common birth of an orphan; this lock is defense-in-depth.
 
-    An orphan gateway (``gateway run --replace`` / restart on a systemd or
-    launchd host escaping the service cgroup) becomes a second long-lived
-    writer on the same ``kanban.db``; two dispatchers both pass SQLite
-    ``busy_timeout`` and race on WAL frames — the root cause of multi-writer
-    corruption. ``_guard_supervised_gateway_conflict`` blocks the common way
-    an orphan is born; this lock is the defense-in-depth regardless of how
-    the second dispatcher got there.
-
-    **Non-blocking** on purpose: the gateway's async watcher must never stall
-    on a held lock. A loser skips its tick (the winner is making progress on
-    the same board) and tries again next interval.
-
-    Board-scoped: the lock file is a ``.dispatch.lock`` sibling of the
-    board's ``kanban.db``, so unrelated boards tick independently. On
-    platforms without ``fcntl``/``msvcrt`` the guard degrades to a no-op
-    (yields ``True``) — single-writer enforcement is best-effort and the
-    orphan-dispatcher scenario is specific to POSIX service managers.
+    **Non-blocking** on purpose: the gateway's async watcher must never stall;
+    a loser retries next interval while the winner makes progress. Board-scoped
+    via a ``.dispatch.lock`` sibling of ``kanban.db``. Without
+    ``fcntl``/``msvcrt`` it degrades to a no-op (yields ``True``) — the orphan
+    scenario is specific to POSIX service managers.
     """
     lock_path = db_path.with_name(db_path.name + ".dispatch.lock")
     handle = None
@@ -228,8 +200,8 @@ def _dispatch_tick_lock(db_path: Path):
         except (OSError, AttributeError):
             acquired = False
     except OSError:
-        # Could not even open the lock file (permissions, read-only FS).
-        # Degrade to a no-op so a probe failure never blocks dispatch.
+        # Can't even open the lock file (permissions, read-only FS): degrade to
+        # a no-op so a probe failure never blocks dispatch.
         acquired = True
         handle = None
     try:
@@ -245,24 +217,15 @@ def _dispatch_tick_lock(db_path: Path):
                 handle.close()
 
 
-# Periodic WAL checkpoint state for the dispatcher tick path. The kanban
-# connections run with ``wal_autocheckpoint=100``, but a passive
-# autocheckpoint can be starved on a busy multi-process board (any reader
-# with an open snapshot blocks the WAL reset), letting the -wal file grow
-# between gateway restarts. Once per coarse interval the dispatcher issues
-# an explicit ``wal_checkpoint(PASSIVE)``.
-#
-# PASSIVE, not TRUNCATE (same class fix as the state.db checkpoints,
-# #45383/#80255/#44795): the dispatch flock only makes the dispatcher the
-# sole *dispatcher* — CLI kanban commands in other processes write to the
-# same board without taking that flock, so a TRUNCATE here races live
-# writers exactly like the state.db close() path did. PASSIVE never takes
-# the exclusive checkpoint lock; the WAL file size is instead bounded by
-# ``journal_size_limit`` (set at connection init) which truncates the file
-# on the writer's natural post-checkpoint reset.
-# Best-effort: a busy/locked checkpoint is logged at DEBUG and retried next
-# interval. Keyed per resolved DB path so multi-board dispatchers checkpoint
-# each board on its own clock.
+# Periodic explicit WAL checkpoint from the dispatcher tick: a passive
+# autocheckpoint can be starved on a busy multi-process board (any open reader
+# snapshot blocks the WAL reset), letting -wal grow between gateway restarts.
+# PASSIVE, not TRUNCATE (same fix class as state.db): the dispatch flock only
+# makes this the sole *dispatcher* — CLI kanban commands in other processes
+# write to the same board without it, so a TRUNCATE would race live writers.
+# PASSIVE never takes the exclusive checkpoint lock; WAL size is bounded by
+# ``journal_size_limit`` (set at connection init) on the writer's natural
+# post-checkpoint reset. Best-effort, keyed per resolved DB path.
 _WAL_CHECKPOINT_INTERVAL_SECONDS = 300.0
 
 
@@ -273,13 +236,9 @@ _WAL_CHECKPOINT_LOCK = threading.Lock()
 
 
 def _maybe_checkpoint_wal(conn: sqlite3.Connection, db_path: Path) -> None:
-    """Run ``PRAGMA wal_checkpoint(PASSIVE)`` at a coarse interval.
-
-    Called from the dispatcher tick while the board's dispatch lock is
-    held. No-ops (cheaply) until ``_WAL_CHECKPOINT_INTERVAL_SECONDS`` has
-    elapsed since this process last checkpointed this board. Never raises:
-    the checkpoint is pure hygiene and must not fail a dispatch tick.
-    """
+    """``PRAGMA wal_checkpoint(PASSIVE)`` at most once per interval per board,
+    from the dispatcher tick under the dispatch lock. Never raises: pure
+    hygiene, must not fail a tick."""
     try:
         key = str(db_path.resolve())
     except OSError:
@@ -289,8 +248,8 @@ def _maybe_checkpoint_wal(conn: sqlite3.Connection, db_path: Path) -> None:
         last = _kb._LAST_WAL_CHECKPOINT.get(key)
         if last is not None and (now - last) < _WAL_CHECKPOINT_INTERVAL_SECONDS:
             return
-        # Claim the slot before doing the work so concurrent ticks (other
-        # threads in this process) don't double-checkpoint on the boundary.
+        # Claim the slot first so concurrent same-process ticks don't
+        # double-checkpoint on the boundary.
         _kb._LAST_WAL_CHECKPOINT[key] = now
     try:
         row = conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
@@ -321,13 +280,10 @@ def _looks_like_tls_record_at(data: bytes, offset: int) -> bool:
 
 def _validate_sqlite_header(path: Path) -> None:
     """Fail early with an actionable error for non-SQLite Kanban DB files.
-
-    ``sqlite3.connect()`` creates missing and zero-byte files, so those are
-    allowed. Existing non-empty files must have the SQLite header before we
-    hand them to SQLite/WAL setup. This keeps corrupted page-0 failures from
-    being collapsed into a generic PRAGMA error and lets the gateway's corrupt
-    board handling identify the board by fingerprint.
-    """
+    ``sqlite3.connect()`` creates missing and zero-byte files, so those pass;
+    non-empty files must carry the SQLite header, so a corrupt page 0 isn't
+    collapsed into a generic PRAGMA error and the gateway's corrupt-board
+    handling can identify the board by fingerprint."""
     try:
         stat = path.stat()
     except FileNotFoundError:
@@ -336,10 +292,9 @@ def _validate_sqlite_header(path: Path) -> None:
         return
     if stat.st_size == 0:
         return
-    # Byte-level probe, so it must run BEFORE any connection to this path
-    # exists (connect() calls it under the init lock, ahead of _sqlite_connect).
-    # read_header_bytes_preopen refuses once a connection is live, because the
-    # close() would cancel this process's POSIX locks on the file.
+    # Byte-level probe: must run BEFORE any connection to this path exists
+    # (read_header_bytes_preopen refuses once one is live, because the close()
+    # would cancel this process's POSIX locks).
     from hermes_cli.sqlite_safe_read import read_header_bytes_preopen
 
     head = read_header_bytes_preopen(path, length=64)
@@ -359,12 +314,9 @@ def _validate_sqlite_header(path: Path) -> None:
 
 
 class KanbanDbCorruptError(RuntimeError):
-    """Raised when an existing kanban DB file fails integrity checks.
-
-    Fail-closed guard against silent recreation of a corrupt board file,
-    which would otherwise destroy the user's tasks. Carries both the
-    original path and the timestamped backup we made before refusing.
-    """
+    """Raised when an existing kanban DB file fails integrity checks — a
+    fail-closed guard against silently recreating a corrupt board (which would
+    destroy the user's tasks). Carries the path and the backup made first."""
 
     def __init__(self, db_path: Path, backup_path: Optional[Path], reason: str):
         self.db_path = db_path
@@ -380,19 +332,12 @@ class KanbanDbCorruptError(RuntimeError):
 def _prune_corrupt_backups(
     parent: Path, base_name: str, keep: Optional[Path] = None,
 ) -> None:
-    """Cap the number of retained ``<db>.corrupt.<hash>.bak`` files.
-
-    Content-addressed backups dedupe identical corrupt bytes, but a board
-    whose file keeps changing between corruption events (partial repairs,
-    ongoing damage, fleets of retrying dispatchers) can still accumulate
-    backups without bound — a user reported 124 of them. After creating a
-    new backup we keep only the ``_CORRUPT_BACKUP_RETENTION`` most recent
-    (by mtime) and delete the rest, including their copied ``-wal``/``-shm``
-    sidecars. ``keep`` (the just-created backup) is never pruned regardless
-    of its mtime — ``shutil.copy2`` preserves the source file's timestamp,
-    which may be older than existing backups. Best-effort: prune failures
-    never mask the corruption error the caller is about to raise.
-    """
+    """Keep only the ``_CORRUPT_BACKUP_RETENTION`` newest (by mtime)
+    ``<db>.corrupt.<hash>.bak`` files plus their ``-wal``/``-shm`` copies.
+    ``keep`` (the just-created backup) is never pruned regardless of mtime —
+    ``shutil.copy2`` preserves the source timestamp, which may be older than
+    existing backups. Best-effort: prune failures never mask the corruption
+    error the caller is about to raise."""
     try:
         backups = [
             candidate
@@ -424,37 +369,22 @@ def _prune_corrupt_backups(
 
 
 def _backup_corrupt_db(path: Path) -> Optional[Path]:
-    """Copy a corrupt DB (and its WAL/SHM sidecars) to a content-addressed backup.
-
-    The backup filename is deterministic in the main DB's sha256, so repeated
-    quarantines of the same corrupt bytes (gateway restarts, dispatcher retries,
-    multi-profile fleets all hitting the same shared DB) reuse one backup
-    instead of amplifying disk usage by N. If the corrupt bytes actually
-    change between attempts — e.g. a partial repair or further damage — the
-    fingerprint changes and a separate backup is preserved.
-
-    Returns the backup path of the main DB file, or ``None`` if the copy
-    itself failed (the caller still raises loudly in that case).
-
-    Writes are confined to the original DB's parent directory. The backup
-    basename is derived purely from ``path.name`` and a content hash, never
-    from caller-supplied directory segments — no traversal is possible.
-    """
-    # Resolve once and pin the parent so subsequent path operations cannot
-    # escape it. ``Path.resolve()`` collapses any ``..`` segments and
-    # symlinks, and we only ever write inside ``parent``.
+    """Copy a corrupt DB (and WAL/SHM sidecars) to a content-addressed backup.
+    The name is deterministic in the main DB's sha256, so repeated quarantines
+    of the same bytes reuse one backup while changed bytes get a separate one.
+    Returns the main backup path, or ``None`` if the copy failed (the caller
+    still raises loudly). Writes are confined to the DB's parent directory:
+    the basename derives only from ``path.name`` + content hash."""
+    # Pin the resolved parent (``resolve()`` collapses ``..`` and symlinks); we
+    # only ever write inside it.
     resolved = path.resolve()
     parent = resolved.parent
     base_name = resolved.name  # basename only
-    # This reads the whole DB file to fingerprint it. That is a close()-on-a-
-    # database-file hazard (it cancels this process's POSIX advisory locks --
-    # see hermes_cli.sqlite_safe_read), so it must only run once the board has
-    # been taken out of service. Every caller reaches here on the corrupt/
-    # quarantine path after closing its probe connection, but another
-    # SessionDB/kanban connection elsewhere in the process would still be at
-    # risk -- so REFUSE rather than warn-and-proceed. Losing a forensic copy
-    # is strictly better than corrupting the live database we are trying to
-    # rescue.
+    # Fingerprinting reads the whole file — a close()-on-a-database-file hazard
+    # (cancels this process's POSIX advisory locks; see sqlite_safe_read), so it
+    # must only run once the board is out of service. Another SessionDB/kanban
+    # connection in this process would still be at risk — so REFUSE rather than
+    # warn-and-proceed: losing a forensic copy beats corrupting the live DB.
     from hermes_cli.sqlite_safe_read import has_live_connection
 
     if has_live_connection(resolved):
@@ -482,8 +412,8 @@ def _backup_corrupt_db(path: Path) -> Optional[Path]:
             shutil.copy2(resolved, candidate)
         except OSError:
             return None
-        # A NEW backup landed on disk — enforce the retention cap so
-        # mutating-corruption loops can't accumulate quarantines forever.
+        # A NEW backup landed — enforce the retention cap so mutating-corruption
+        # loops can't accumulate quarantines forever.
         _prune_corrupt_backups(parent, base_name, keep=candidate)
     for suffix in ("-wal", "-shm"):
         sidecar = parent / (base_name + suffix)
@@ -497,13 +427,10 @@ def _backup_corrupt_db(path: Path) -> Optional[Path]:
     return candidate
 
 
-# Repairable integrity_check error classes. Both shapes are *index-scoped*:
-# the table b-tree is intact and only a secondary index disagrees with it,
-# which REINDEX rebuilds losslessly from the table data. The index name is
-# parsed generically from the message — no hardcoded index list. Any other
-# integrity_check message (page corruption, "database disk image is
-# malformed", freelist damage, …) is NOT repairable this way and keeps the
-# fail-closed behavior.
+# Repairable integrity_check error classes — both *index-scoped*: the table
+# b-tree is intact and REINDEX rebuilds the index losslessly. The index name is
+# parsed generically (no hardcoded list). Anything else (page corruption,
+# "malformed", freelist damage, …) keeps the fail-closed behavior.
 _REPAIRABLE_INDEX_ERROR_PATTERNS = (
     re.compile(r"^wrong # of entries in index (?P<index>.+)$"),
     re.compile(r"^row \d+ missing from index (?P<index>.+)$"),
@@ -522,12 +449,9 @@ def _run_integrity_check(conn: sqlite3.Connection) -> list[str]:
 
 
 def _probe_integrity(path: Path) -> list[str]:
-    """Open ``path`` read/write and return its ``integrity_check`` messages.
-
-    Opening read/write lets SQLite recover or checkpoint a healthy WAL /
-    hot-journal DB before we judge it. ``sqlite3.OperationalError`` (locked,
-    busy, transient IO) propagates raw — it is not corruption.
-    """
+    """Open ``path`` read/write (so SQLite can recover/checkpoint a healthy WAL
+    / hot-journal DB before we judge it) and return ``integrity_check``
+    messages. ``OperationalError`` (locked/busy) propagates raw — not corruption."""
     probe = _sqlite_connect(path)
     try:
         return _run_integrity_check(probe)
@@ -536,13 +460,9 @@ def _probe_integrity(path: Path) -> list[str]:
 
 
 def _repairable_index_names(messages: list[str]) -> Optional[list[str]]:
-    """Return the distinct index names iff EVERY message is index-repairable.
-
-    ``None`` when any line falls outside the repairable index-class errors
-    (or when there are no messages at all) — the caller must then fail
-    closed exactly as before. Order of first appearance is preserved so the
-    REINDEX pass is deterministic.
-    """
+    """Distinct index names iff EVERY message is index-repairable, else ``None``
+    (caller fails closed; also ``None`` for no messages). First-appearance
+    order is preserved so the REINDEX pass is deterministic."""
     names: list[str] = []
     saw_any = False
     for raw in messages:
@@ -567,15 +487,10 @@ def _repairable_index_names(messages: list[str]) -> Optional[list[str]]:
 def _attempt_index_reindex_repair(
     path: Path, index_names: list[str],
 ) -> tuple[bool, list[str]]:
-    """REINDEX the named indexes, then re-run ``PRAGMA integrity_check``.
-
-    Tries a per-index ``REINDEX "<name>"`` first (cheapest, most targeted);
-    if any per-index statement fails — e.g. the parsed name does not resolve
-    because integrity_check reported an internal/auto index — falls back to
-    a bare ``REINDEX`` of the whole database. Returns
-    ``(clean, post_repair_messages)``; never raises. Callers must hold the
-    board's cross-process init flock so no other process connects mid-repair.
-    """
+    """REINDEX the named indexes (per-index first; bare ``REINDEX`` fallback if
+    a parsed name is an internal/auto index), then re-run integrity_check.
+    Returns ``(clean, post_repair_messages)``; never raises. Callers must hold
+    the board's cross-process init flock so nothing connects mid-repair."""
     try:
         conn = _sqlite_connect(path)
     except sqlite3.Error as exc:
@@ -586,8 +501,7 @@ def _attempt_index_reindex_repair(
                 escaped = name.replace('"', '""')
                 conn.execute(f'REINDEX "{escaped}"')
         except sqlite3.Error:
-            # Per-index rebuild failed (unresolvable parsed name, auto
-            # index, …) — bare REINDEX rebuilds every index in the DB.
+            # Per-index rebuild failed — bare REINDEX rebuilds every index.
             conn.execute("REINDEX")
         messages = _run_integrity_check(conn)
     except sqlite3.Error as exc:
@@ -600,24 +514,16 @@ def _attempt_index_reindex_repair(
 def _guard_existing_db_is_healthy(path: Path) -> None:
     """Run ``PRAGMA integrity_check`` on an existing non-empty DB file.
 
-    The probe opens read/write so SQLite can recover/checkpoint a healthy
-    WAL/hot-journal DB before we declare it corrupt. Narrow auto-repair: when
-    the failure is ONLY index-scoped (``wrong # of entries in index`` / ``row
-    N missing from index``) the table b-trees are intact and REINDEX rebuilds
-    losslessly — take the content-addressed corrupt backup FIRST, REINDEX
-    under the caller-held init flock, re-check, proceed only if clean. Any
-    other failure (page corruption, ``malformed``, unclean re-check) fails
-    closed: copy the file + WAL/SHM sidecars to a backup and raise
-    :class:`KanbanDbCorruptError` so callers never recreate the schema on top
-    of a damaged DB. ``sqlite3.OperationalError`` (lock/busy) is NOT
-    corruption and propagates raw (no spurious ``.corrupt`` backup). No-op for
-    missing / zero-byte (fresh) files and paths already proven healthy this
-    process. ``path`` comes from user-controlled-but-trusted sources; it is
-    resolved here and all writes are confined to its parent so stray ``..``
-    segments collapse before any I/O.
+    Narrow auto-repair when the failure is ONLY index-scoped (table b-trees
+    intact): content-addressed corrupt backup FIRST, REINDEX under the
+    caller-held init flock, re-check, proceed only if clean. Anything else
+    (page corruption, ``malformed``, unclean re-check) fails closed: back up
+    the file + sidecars and raise :class:`KanbanDbCorruptError` so callers
+    never recreate the schema on top of a damaged DB. ``OperationalError``
+    (lock/busy) is NOT corruption and propagates raw (no spurious backup).
+    No-op for missing / zero-byte files and paths already proven healthy this
+    process. All writes are confined to the resolved path's parent.
     """
-    # Resolve before any I/O. ``Path.resolve()`` normalizes ``..`` and
-    # symlinks, giving us a canonical path whose parent dir we can pin.
     try:
         resolved = path.resolve()
     except OSError:
@@ -639,14 +545,14 @@ def _guard_existing_db_is_healthy(path: Path) -> None:
                 f"{messages[0] if messages else '<no row>'!r}"
             )
     except sqlite3.OperationalError:
-        # Lock contention, busy, transient IO — not corruption. Let it propagate.
+        # Lock contention / busy — not corruption. Propagate.
         raise
     except sqlite3.DatabaseError as exc:
         reason = f"sqlite refused to open file: {exc}"
     if reason is None:
         return
-    # Quarantine FIRST — both the repair path and the fail-closed path
-    # preserve the pre-touch bytes before anything mutates the file.
+    # Quarantine FIRST — both the repair and fail-closed paths preserve the
+    # pre-touch bytes before anything mutates the file.
     backup = _backup_corrupt_db(resolved)
     index_names = _repairable_index_names(messages)
     if index_names:
@@ -674,18 +580,10 @@ def _guard_existing_db_is_healthy(path: Path) -> None:
 
 @dataclass
 class RepairResult:
-    """Outcome of :func:`repair_db` for CLI/status reporting.
-
-    ``status`` is one of:
-
-    * ``"ok"``        — integrity_check was already clean; nothing done.
-    * ``"repaired"``  — index-only errors found, REINDEX applied, re-check
-      clean. ``backup_path`` holds the pre-repair quarantine copy.
-    * ``"corrupt"``   — still corrupt: either a non-index error class
-      (fail-closed, no repair attempted) or a REINDEX whose re-check did
-      not come back clean.
-    * ``"missing"``   — no DB file (or zero-byte placeholder); nothing to do.
-    """
+    """Outcome of :func:`repair_db`. ``status``: ``"ok"`` (already clean),
+    ``"repaired"`` (index-only errors, REINDEX applied, re-check clean;
+    ``backup_path`` is the pre-repair copy), ``"corrupt"`` (non-index error
+    class, or re-check still dirty), ``"missing"`` (no / zero-byte file)."""
 
     status: str
     db_path: Path
@@ -701,21 +599,12 @@ def repair_db(
     board: Optional[str] = None,
 ) -> RepairResult:
     """Probe a kanban DB and apply the narrow index-REINDEX repair if needed.
-
-    Shares the exact policy of :func:`_guard_existing_db_is_healthy`: only
-    integrity failures composed *entirely* of index-scoped errors are
-    repairable; the corrupt bytes are quarantined via
-    :func:`_backup_corrupt_db` BEFORE any mutation; the REINDEX runs under
-    the board's cross-process init flock; and anything else stays corrupt
-    (fail-closed) for the caller to surface. Unlike the guard this never
-    raises :class:`KanbanDbCorruptError` — it returns a structured
-    :class:`RepairResult` so ``hermes kanban repair`` can report and choose
-    its own exit code.
-
-    Transient ``sqlite3.OperationalError`` (locked/busy) still propagates
-    raw, exactly like the guard: a locked healthy DB is not corruption and
-    must not be quarantined.
-    """
+    Same policy as :func:`_guard_existing_db_is_healthy` (quarantine BEFORE
+    any mutation; REINDEX under the init flock; anything non-index stays
+    corrupt), but returns a :class:`RepairResult` instead of raising so
+    ``hermes kanban repair`` can pick its exit code. ``OperationalError``
+    (locked/busy) still propagates raw: a locked healthy DB must not be
+    quarantined."""
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
     try:
         resolved = path.resolve()
@@ -735,8 +624,8 @@ def repair_db(
             # Locked/busy — not corruption; let the caller report it raw.
             raise
         except sqlite3.DatabaseError as exc:
-            # Same quarantine the connect-time guard takes for a file
-            # sqlite refuses to open at all (e.g. malformed page 1).
+            # Same quarantine the connect-time guard takes when sqlite
+            # refuses to open the file at all.
             return RepairResult(
                 status="corrupt",
                 db_path=resolved,
@@ -772,20 +661,16 @@ def repair_db(
 
 
 def _schema_is_present(conn: sqlite3.Connection) -> bool:
-    """Whether an open connection actually sees the kanban schema.
-
-    ``tasks`` is the sentinel: :data:`SCHEMA_SQL` always creates it, and
-    SQLite loses tables all-or-nothing (a file is either the one we
-    initialized or a fresh one created by this very open), so one
-    ``sqlite_master`` lookup on the already-resident page 1 is enough. Cheap
-    by design — it runs on every steady-state :func:`connect`.
-    """
+    """Whether an open connection actually sees the kanban schema. ``tasks`` is
+    the sentinel (SCHEMA_SQL always creates it; SQLite loses tables
+    all-or-nothing), so one ``sqlite_master`` lookup on the resident page 1
+    suffices — cheap by design, it runs on every steady-state connect()."""
     try:
         row = conn.execute(
             "SELECT 1 FROM sqlite_master WHERE type='table' AND name='tasks' LIMIT 1"
         ).fetchone()
     except sqlite3.DatabaseError:
-        # Unreadable schema table is not this guard's call — let the full init
+        # Unreadable schema table is not this guard's call — the full init
         # path's header/integrity probes classify and quarantine it.
         return False
     return row is not None
@@ -793,33 +678,28 @@ def _schema_is_present(conn: sqlite3.Connection) -> bool:
 
 def _open_configured(path: Path, under_lock) -> tuple[sqlite3.Connection, Any]:
     """Open ``path`` with the kanban PRAGMA set, then run ``under_lock(conn)``.
-
-    WAL activation and ``under_lock`` share the process-local ``_INIT_LOCK``
-    critical section: WAL setup can take an exclusive lock while SQLite
-    creates sidecar files for a fresh DB, and concurrent gateway startup
-    threads must not race before ``_INITIALIZED_PATHS`` is populated. The
-    connection is closed if anything raises.
-    """
+    WAL activation and ``under_lock`` share the ``_INIT_LOCK`` critical section:
+    WAL setup can take an exclusive lock while SQLite creates sidecars for a
+    fresh DB, and concurrent gateway startup threads must not race before
+    ``_INITIALIZED_PATHS`` is populated. Closed if anything raises."""
     conn = _sqlite_connect(path)
     try:
         conn.row_factory = sqlite3.Row
         with _INIT_LOCK:
-            # WAL doesn't work on network filesystems (NFS/SMB/FUSE); the shared
-            # helper falls back to DELETE with one ERROR log (see
-            # hermes_state._WAL_INCOMPAT_MARKERS).
+            # WAL doesn't work on network filesystems; the helper falls back to
+            # DELETE with one ERROR log (see hermes_state._WAL_INCOMPAT_MARKERS).
             from hermes_state import apply_wal_with_fallback
             apply_wal_with_fallback(conn, db_label=f"kanban.db ({path.name})")
-            # FULL (was NORMAL): fsync before each checkpoint to narrow the
+            # FULL (not NORMAL): fsync before each checkpoint to narrow the
             # crash window that can leave a b-tree page header torn.
             conn.execute("PRAGMA synchronous=FULL")
             conn.execute("PRAGMA wal_autocheckpoint=100")
             # Bound the WAL file: the periodic explicit checkpoint is PASSIVE
-            # (never truncates), so SQLite trims the -wal file to this limit on
-            # the writer's natural post-checkpoint reset. 8 MiB is generous.
+            # (never truncates), so SQLite trims -wal to this limit on the
+            # writer's natural post-checkpoint reset.
             conn.execute("PRAGMA journal_size_limit=8388608")
             conn.execute("PRAGMA foreign_keys=ON")
-            # Zero freed pages so a later torn write cannot expose stale cell
-            # content; persisted in the DB header for new DBs.
+            # Zero freed pages so a later torn write can't expose stale cells.
             conn.execute("PRAGMA secure_delete=ON")
             # Surface corrupt cells as read errors instead of silent wrong data.
             conn.execute("PRAGMA cell_size_check=ON")
@@ -835,40 +715,29 @@ def connect(
     *,
     board: Optional[str] = None,
 ) -> sqlite3.Connection:
-    """Open (and initialize if needed) the kanban DB.
-
-    WAL is (re)enabled on every connection so a re-created file stays robust.
-    The first connection per path auto-runs :func:`init_db` (fresh installs
-    and tests need no separate init step); later ones skip the schema check
-    via ``_INITIALIZED_PATHS``. Path: explicit ``db_path`` as-is, else
-    ``board``, else :func:`kanban_db_path` (``HERMES_KANBAN_DB`` ->
-    ``HERMES_KANBAN_BOARD`` -> ``<root>/kanban/current`` -> ``default``).
-    """
+    """Open (and initialize if needed) the kanban DB. WAL is (re)enabled on
+    every connection so a re-created file stays robust; the first connection
+    per path auto-runs :func:`init_db`, later ones skip via
+    ``_INITIALIZED_PATHS``. Path: explicit ``db_path``, else ``board``, else
+    :func:`kanban_db_path` (``HERMES_KANBAN_DB`` -> ``HERMES_KANBAN_BOARD`` ->
+    ``<root>/kanban/current`` -> ``default``)."""
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
     path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Fast path: once THIS process has initialized this path, the expensive
-    # first-open work (header validation, integrity probe, schema + additive
-    # migrations) is already done and cached in _INITIALIZED_PATHS. Acquiring
-    # the cross-process init lock on every connect is what let a single stalled
+    # Fast path: once THIS process has initialized this path, skip the
+    # cross-process init lock. Taking it on every connect let a single stalled
     # holder (e.g. an external `hermes kanban list` mid-integrity-probe) block
-    # the long-lived gateway dispatcher's next-tick connect() forever — an
-    # unbounded flock with no timeout, no LOCK_NB, no recovery (#36644). On the
-    # steady-state path there is nothing for the cross-process lock to protect
-    # (no schema/migration writes run), so skip it entirely and just open the
-    # connection with WAL/pragmas under the cheap in-process _INIT_LOCK.
+    # the gateway dispatcher's next-tick connect() forever, and steady-state has
+    # nothing for it to protect (no schema/migration writes).
     resolved = str(path.resolve())
     if resolved in _INITIALIZED_PATHS:
         conn, schema_present = _open_configured(path, _schema_is_present)
         if schema_present:
             return conn
-        # The cache says "initialized", the file says otherwise: it was deleted
-        # or replaced under a live process, and the open above silently
-        # recreated an empty DB. Left alone, every query on this path fails
-        # with "no such table: tasks" for the rest of the process's life and
-        # the board just renders empty (#83445). Drop the stale cache entry and
-        # fall through to the full init path, which re-runs the header and
-        # integrity probes and the schema script under the cross-process lock.
+        # Cache says "initialized", file says otherwise: it was deleted or
+        # replaced under a live process and the open silently recreated an empty
+        # DB. Left alone, every query fails with "no such table: tasks" for the
+        # rest of the process's life. Drop the stale entry and re-init.
         conn.close()
         with _INIT_LOCK:
             _INITIALIZED_PATHS.discard(resolved)
@@ -879,26 +748,19 @@ def connect(
         )
 
     with _kb._cross_process_init_lock(path):
-        # Read-only file/sidecar preflight (port of kilocode#12508) —
-        # repair-or-refuse before the header/integrity probes so a stray
-        # read-only kanban.db fails with an actionable message instead of
-        # "attempt to write a readonly database" mid-init.
+        # Read-only file/sidecar preflight first, so a stray read-only kanban.db
+        # fails actionably instead of "attempt to write a readonly database".
         from hermes_state import preflight_db_writability
         preflight_db_writability(path, db_label=f"kanban.db ({path.name})")
-        # Cheap byte-level check first — catches the #29507 TLS-overwrite shape
-        # and other invalid-header cases without opening a sqlite connection.
+        # Cheap byte-level header check before any sqlite connection, then the
+        # full integrity probe (cached per path via _INITIALIZED_PATHS).
         _validate_sqlite_header(path)
-        # Full integrity probe — catches corruption past the header (malformed
-        # pages, broken internal metadata). Cached per-path after first success
-        # via _INITIALIZED_PATHS so it only runs once per process per path.
         _guard_existing_db_is_healthy(path)
         resolved = str(path.resolve())
 
         def _init_if_needed(conn: sqlite3.Connection) -> None:
-            # Idempotent: CREATE TABLE IF NOT EXISTS + the additive migrations,
-            # cached so later connect() calls in this process are cheap. Runs
-            # under _INIT_LOCK so same-process dispatcher threads can't race
-            # through the ALTER TABLE pass with stale PRAGMA snapshots.
+            # Idempotent; runs under _INIT_LOCK so same-process dispatcher
+            # threads can't race the ALTER TABLE pass with stale PRAGMA snapshots.
             if resolved not in _INITIALIZED_PATHS:
                 conn.executescript(_kb.SCHEMA_SQL)
                 _migrate_add_optional_columns(conn)
@@ -914,15 +776,10 @@ def connect_closing(
     *,
     board: Optional[str] = None,
 ):
-    """Open a kanban DB connection and guarantee it is closed on exit.
-
-    Use this instead of ``with kb.connect() as conn:`` — sqlite3's connection
-    context manager only commits/rolls back; it does NOT close the file
-    descriptor. Long-lived processes (gateway, dashboard) that route every
-    kanban operation through ``connect()`` otherwise leak FDs to ``kanban.db``
-    / ``kanban.db-wal`` until ``[Errno 24] Too many open files`` kills them.
-    ``connect()`` itself is unchanged for callers that manage the lifetime.
-    """
+    """Open a kanban DB connection and guarantee it is closed on exit. Use
+    instead of ``with kb.connect() as conn:`` — sqlite3's context manager only
+    commits/rolls back, it does NOT close the fd, so long-lived processes
+    (gateway, dashboard) leak FDs until ``[Errno 24] Too many open files``."""
     conn = _kb.connect(db_path=db_path, board=board)
     try:
         yield conn
@@ -936,21 +793,14 @@ def init_db(
     *,
     board: Optional[str] = None,
 ) -> Path:
-    """Create the schema if it doesn't exist; return the path used.
-
-    Kept as a public entry point so CLI ``hermes kanban init`` and the
-    daemon have something explicit to call. Unlike :func:`connect`'s
-    first-time auto-init (which caches by path), ``init_db`` always
-    re-runs the migration pass. Callers that know the on-disk schema
-    may have drifted — tests that write legacy event kinds directly,
-    external tools that upgrade an old DB file — can call this to
-    force re-migration.
-    """
+    """Create the schema if it doesn't exist; return the path used. Unlike
+    :func:`connect`'s cached first-time auto-init, this always re-runs the
+    migration pass — callers that know the on-disk schema may have drifted
+    (tests writing legacy event kinds, external upgrades) use it to force it."""
     path = db_path if db_path is not None else _kb.kanban_db_path(board=board)
     path.parent.mkdir(parents=True, exist_ok=True)
     resolved = str(path.resolve())
-    # Clear the cache entry so the underlying connect() re-runs the
-    # schema + migration pass unconditionally.
+    # Clear the cache entry so connect() re-runs schema + migrations.
     with _INIT_LOCK:
         _INITIALIZED_PATHS.discard(resolved)
     with contextlib.closing(_kb.connect(path)):
@@ -958,8 +808,8 @@ def init_db(
     return path
 
 
-# Additive ``tasks`` columns, in the order legacy DBs receive them (order is
-# the physical column order for ``SELECT *`` on migrated boards).
+# Additive ``tasks`` columns in the order legacy DBs receive them (= physical
+# column order for ``SELECT *`` on migrated boards).
 _EARLY_TASK_COLUMNS = (
     ("tenant", "tenant TEXT"),
     ("result", "result TEXT"),
@@ -984,9 +834,8 @@ _RENAMED_TASK_COLUMNS = (
 )
 
 
-# NULL / 0 defaults on every column below reproduce the behaviour existing
-# rows had before the column existed (worker-profile model/provider/reasoning,
-# global failure limit, single-shot worker, untyped human block, ...).
+# NULL / 0 defaults below reproduce the behaviour existing rows had before the
+# column existed.
 _LATER_TASK_COLUMNS = (
     ("max_runtime_seconds", "max_runtime_seconds INTEGER"),
     ("last_heartbeat_at", "last_heartbeat_at INTEGER"),
@@ -1004,38 +853,29 @@ _LATER_TASK_COLUMNS = (
     # Ralph-style goal loop toggle; 0 = classic single-shot worker.
     ("goal_mode", "goal_mode INTEGER NOT NULL DEFAULT 0"),
     ("goal_max_turns", "goal_max_turns INTEGER"),
-    # Originating agent/chat session id (``HERMES_SESSION_ID``, e.g. ACP).
     ("session_id", "session_id TEXT"),
     # Typed block reason (VALID_BLOCK_KINDS); NULL = generic human blocker.
     ("block_kind", "block_kind TEXT"),
-    # Unblock-loop counter; existing rows start at 0.
     ("block_recurrences", "block_recurrences INTEGER NOT NULL DEFAULT 0"),
 )
 
 
 def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
-    """Add columns that were introduced after v1 release to legacy DBs.
-
-    Called by ``init_db`` so opening an old DB is always safe.
-    """
+    """Add columns introduced after v1 to legacy DBs (called via ``init_db``)."""
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
     for name, ddl in _EARLY_TASK_COLUMNS:
         if name not in cols:
             _add_column_if_missing(conn, "tasks", name, ddl)
-    # ``idx_tasks_idempotency`` is created unconditionally below alongside
-    # the other additive-column indexes.
 
     # Re-snapshot: DBs partially migrated by older releases may already carry
-    # later columns (e.g. ``consecutive_failures``) even when the first
-    # snapshot did not, so the legacy-column migration stays idempotent.
+    # later columns (e.g. ``consecutive_failures``), keeping the legacy-column
+    # migration idempotent.
     cols = {row["name"] for row in conn.execute("PRAGMA table_info(tasks)")}
 
-    # Legacy column migration: ``spawn_failures`` → ``consecutive_failures``
-    # and ``last_spawn_error`` → ``last_failure_error``. ADD-then-copy rather
-    # than ``RENAME COLUMN``: very old DBs may lack the legacy column entirely
-    # (RENAME raises "no such column"), and RENAME reparses the whole schema,
-    # failing if views/triggers reference the old name. Preserves historical
-    # counter values when the legacy columns do exist.
+    # Legacy renames via ADD-then-copy rather than ``RENAME COLUMN``: very old
+    # DBs may lack the legacy column entirely (RENAME raises "no such column"),
+    # and RENAME reparses the whole schema, failing if views/triggers reference
+    # the old name. Historical counter values are preserved when present.
     for name, ddl, legacy, copy_sql in _RENAMED_TASK_COLUMNS:
         if name not in cols:
             added = _add_column_if_missing(conn, "tasks", name, ddl)
@@ -1048,13 +888,11 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             else:
                 _add_column_if_missing(conn, "tasks", name, ddl)
 
-    # Indexes over additive ``tasks`` columns must be created after the
-    # columns exist. Keeping them in SCHEMA_SQL breaks legacy boards: SQLite
-    # parses each statement in ``executescript`` against the live schema, so a
-    # ``CREATE INDEX`` over a missing column aborts initialization before the
-    # additive ``ALTER TABLE`` migrations below can run. Re-running them here
-    # is cheap thanks to ``IF NOT EXISTS`` and stays correct on fresh DBs
-    # (where the columns already exist from SCHEMA_SQL).
+    # Indexes over additive ``tasks`` columns must be created AFTER the columns
+    # exist: ``executescript`` parses each statement against the live schema,
+    # so a ``CREATE INDEX`` over a missing column in SCHEMA_SQL would abort
+    # init on legacy boards before the ALTER TABLE pass runs. ``IF NOT EXISTS``
+    # keeps re-running here cheap and correct on fresh DBs.
     conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_tenant ON tasks(tenant)")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_tasks_idempotency ON tasks(idempotency_key)"
@@ -1063,15 +901,13 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_tasks_session_id ON tasks(session_id)"
     )
 
-    # task_events gained a run_id column; back-fill it as NULL for
-    # historical events (they predate runs and can't be attributed).
+    # task_events.run_id back-fills as NULL for historical events (they predate
+    # runs and can't be attributed).
     ev_cols = {row["name"] for row in conn.execute("PRAGMA table_info(task_events)")}
     if "run_id" not in ev_cols:
         _add_column_if_missing(conn, "task_events", "run_id", "run_id INTEGER")
 
-    # Same ordering rule as the additive ``tasks`` indexes above: create the
-    # index after the additive column migration so legacy ``task_events``
-    # tables don't fail during SCHEMA_SQL execution before ``run_id`` exists.
+    # Same ordering rule as the ``tasks`` indexes above: index after column.
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_events_run "
         "ON task_events(run_id, id)"
@@ -1090,7 +926,7 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             ("chat_type", "chat_type TEXT"),
             # Platform-specific stable alt ID (Signal UUID, Feishu union_id, ...)
             # so an active-wake replay reconstructs the SAME ``build_session_key``
-            # (which prefers ``user_id_alt`` over ``user_id``). NULL is inert.
+            # (which prefers ``user_id_alt``). NULL is inert.
             ("user_id_alt", "user_id_alt TEXT"),
             ("delivery_metadata", "delivery_metadata TEXT"),
         ):
@@ -1099,23 +935,21 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
             _add_column_if_missing(conn, "kanban_notify_subs", name, ddl)
             if name == "delivery_mode":
                 # Backfill ONLY on first-add: pre-column gateway subscriptions
-                # had de facto active wake (the notifier woke the originating
-                # session whenever the task carried a session_id); defaulting
-                # them to 'notify' would silently disable that on upgrade.
-                # TUI/CLI rows keep 'notify' (matches _maybe_auto_subscribe).
-                # A user's later explicit downgrade is never overwritten.
+                # had de facto active wake; defaulting them to 'notify' would
+                # silently disable that on upgrade. TUI/CLI rows keep 'notify'
+                # (matches _maybe_auto_subscribe). A later explicit downgrade
+                # is never overwritten.
                 conn.execute(
                     "UPDATE kanban_notify_subs SET delivery_mode = 'notify+wake' "
                     "WHERE platform != 'tui'"
                 )
 
-    # One-shot backfill: any task that is 'running' before runs existed
-    # had its claim_lock / claim_expires / worker_pid on the task row.
-    # Synthesize a matching task_runs row so subsequent end-run / heartbeat
-    # calls have something to write to. Wrapped in write_txn to serialize
-    # against any concurrent dispatcher, and the per-row UPDATE uses
-    # ``current_run_id IS NULL`` as a CAS guard so a racing claim can't
-    # produce an orphaned row if it interleaves with the backfill pass.
+    # One-shot backfill: tasks 'running' before runs existed carried
+    # claim_lock / claim_expires / worker_pid on the task row; synthesize a
+    # matching task_runs row so end-run / heartbeat have something to write.
+    # write_txn serializes against concurrent dispatchers, and the per-row
+    # UPDATE uses ``current_run_id IS NULL`` as a CAS guard so a racing claim
+    # can't produce an orphaned row.
     runs_exist = conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table' AND name='task_runs'"
     ).fetchone() is not None
@@ -1145,11 +979,10 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                         started,
                     ),
                 )
-                # CAS: only install the pointer if nothing else claimed
-                # the task between our SELECT and here (shouldn't happen
-                # under the write_txn, but belt-and-suspenders). If the
-                # CAS fails we've got an orphan run_row — mark it
-                # reclaimed so it doesn't look in-flight.
+                # CAS: only install the pointer if nothing claimed the task
+                # since our SELECT (belt-and-suspenders under write_txn). On
+                # failure mark the orphan run row reclaimed so it doesn't
+                # look in-flight.
                 upd = conn.execute(
                     "UPDATE tasks SET current_run_id = ? "
                     "WHERE id = ? AND current_run_id IS NULL",
@@ -1163,10 +996,8 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
                         (int(time.time()), cur.lastrowid),
                     )
 
-    # One-shot event-kind rename pass. The old names ("ready", "priority",
-    # "spawn_auto_blocked") still worked but were awkward on the wire;
-    # rename them in-place so existing DBs migrate cleanly. Fires once
-    # per DB because after the UPDATE no rows match the old kinds.
+    # One-shot event-kind rename: old names still worked but were awkward on
+    # the wire. Fires once per DB — after the UPDATE no rows match.
     for old, new in (
         ("ready", "promoted"),
         ("priority", "reprioritized"),
@@ -1177,19 +1008,17 @@ def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
     _rebuild_drifted_tables(conn)
 
 
-# Legacy DBs defined these tables with a ``TEXT PRIMARY KEY`` id (or, for
-# ``kanban_notify_subs``, a nullable ``TEXT last_event_id``). The current
-# schema uses ``INTEGER PRIMARY KEY AUTOINCREMENT`` / ``INTEGER NOT NULL
-# DEFAULT 0``. ``CREATE TABLE IF NOT EXISTS`` skips existing tables
-# regardless of schema and ``_add_column_if_missing`` only adds columns, so
-# neither can fix a drifted column type — the table must be rebuilt. See
-# #35096.
+# Legacy DBs defined these tables with a ``TEXT PRIMARY KEY`` id (or a nullable
+# ``TEXT last_event_id`` for ``kanban_notify_subs``); the current schema uses
+# ``INTEGER PRIMARY KEY AUTOINCREMENT`` / ``INTEGER NOT NULL DEFAULT 0``.
+# ``CREATE TABLE IF NOT EXISTS`` skips existing tables and
+# ``_add_column_if_missing`` only adds columns, so a drifted column type
+# requires a rebuild.
 #
-# Each entry pairs the canonical CREATE TABLE with the CREATE INDEX
-# statements that DROP TABLE would otherwise take down with it (including
-# ``idx_events_run``, added by the additive pass above). To guard against
-# this list drifting from SCHEMA_SQL, ``test_rebuilt_schema_matches_fresh``
-# asserts a rebuilt legacy DB is byte-identical to a fresh one.
+# Each entry pairs the canonical CREATE TABLE with the CREATE INDEX statements
+# DROP TABLE would take down with it (incl. ``idx_events_run`` from the additive
+# pass). ``test_rebuilt_schema_matches_fresh`` guards this list against
+# drifting from SCHEMA_SQL.
 _REBUILD_SPECS = {
     "task_events": (
         "CREATE TABLE task_events ("
@@ -1255,19 +1084,14 @@ def _rebuild_drifted_tables(conn: sqlite3.Connection) -> None:
     """Rebuild any kanban table whose column types drifted from SCHEMA_SQL.
 
     Old boards crash the gateway notifier (``int(None)`` on a NULL id in
-    ``unseen_events_for_sub``) and never match the ``id > cursor`` filter, so
-    every kanban notification is silently lost (#35096). Each affected table is
-    rebuilt with the standard SQLite pattern — CREATE new → INSERT shared
-    columns → DROP old → RENAME — recreating its indexes too (DROP TABLE takes
-    them down). The legacy TEXT ids are dropped (they aren't valid integers);
-    AUTOINCREMENT assigns fresh ones and ``last_event_id`` cursors reset to 0,
-    so the first post-migration tick replays a task's event history once —
-    the safe failure mode for a feature that was already fully broken.
-
-    The whole pass runs in one transaction so an interruption can't leave a
-    table half-renamed, and under ``connect()``'s init locks so nothing races
-    it. Idempotent: a correctly-typed DB skips every table and returns without
-    opening a transaction.
+    ``unseen_events_for_sub``) and never match ``id > cursor``, so every
+    notification is silently lost. Rebuild is CREATE new → INSERT shared
+    columns → DROP old → RENAME, recreating indexes (DROP TABLE takes them
+    down). Legacy TEXT ids are dropped; AUTOINCREMENT assigns fresh ones and
+    ``last_event_id`` cursors reset to 0, so the first post-migration tick
+    replays a task's event history once — the safe failure mode for a feature
+    that was already fully broken. One transaction so an interruption can't
+    leave a table half-renamed, under ``connect()``'s init locks. Idempotent.
     """
     drifted = [t for t in _REBUILD_SPECS if _table_has_drifted(conn, t)]
     if not drifted:
@@ -1310,26 +1134,19 @@ def _rebuild_drifted_tables(conn: sqlite3.Connection) -> None:
 
 
 def _check_file_length_invariant(conn: sqlite3.Connection) -> None:
-    """Compare SQLite's own page accounting against the file size on disk.
-
-    Raises sqlite3.DatabaseError if the file is shorter than the header claims
-    (torn-extend corruption).
-
-    Both sides are read WITHOUT opening the database file. The header side
-    comes from ``PRAGMA page_count`` over the existing connection; the on-disk
-    side from ``stat()``. An earlier version read the header field with a bare
-    ``open(path,"rb")`` -- but ``close()`` cancels every POSIX advisory lock
-    this process holds on the file, so that probe silently dropped the locks
-    of concurrent writers (and of a running VACUUM) and let other processes
-    write into a database a writer still believed it owned. That is the
-    documented corruption route in sqlite.org/howtocorrupt.html section 2.2.
-    """
+    """Raise ``sqlite3.DatabaseError`` if the file is shorter than its header
+    page count claims (torn-extend). Both sides are read WITHOUT opening the
+    database file (``PRAGMA page_count`` on the existing connection; ``stat()``
+    for disk): an earlier bare ``open(path,"rb")`` probe was wrong because
+    ``close()`` cancels every POSIX advisory lock this process holds on the
+    file, silently dropping concurrent writers' (and a running VACUUM's) locks
+    and letting other processes write into a database a writer still believed
+    it owned (sqlite.org/howtocorrupt.html §2.2)."""
     from hermes_cli.sqlite_safe_read import file_length_matches_header
 
-    # In WAL mode a just-committed page can still live in the -wal file, so
-    # the main file legitimately lags its page count. Only enforce the
-    # invariant under a rollback journal, where every committed page must
-    # already be in the main file.
+    # In WAL mode a just-committed page can still live in -wal, so the main
+    # file legitimately lags its page count; only enforce under a rollback
+    # journal, where every committed page must already be in the main file.
     try:
         row = conn.execute("PRAGMA journal_mode").fetchone()
         journal_mode = str(row[0]).lower() if row and row[0] is not None else ""
@@ -1346,15 +1163,14 @@ def _check_file_length_invariant(conn: sqlite3.Connection) -> None:
         )
 
 
-# SQLite's own busy_timeout uses a near-deterministic backoff, so concurrent
-# writers re-collide in lockstep under a stampede. A jittered retry on the
-# transaction boundary breaks that convoy. Mirrors state.db's _execute_write:
-# a fixed 20-150ms jitter band (a 20ms floor prevents a near-zero retry from
-# busy-spinning back into the collision). Only BEGIN IMMEDIATE and COMMIT are
-# retried -- both are idempotent re-issues that touch no transaction body, so a
-# CAS inside write_txn is never replayed. kanban keeps fewer retries than
-# state.db (5 vs 15) because its 120s busy_timeout already absorbs most waits;
-# the retry is the backstop for the tail SQLite returns BUSY on immediately.
+# SQLite's busy_timeout backoff is near-deterministic, so stampeding writers
+# re-collide in lockstep; a jittered retry on the transaction boundary breaks
+# the convoy (mirrors state.db's _execute_write: 20-150ms band, the 20ms floor
+# prevents busy-spinning back into the collision). Only BEGIN IMMEDIATE and
+# COMMIT are retried — idempotent re-issues that touch no transaction body, so
+# a CAS inside write_txn is never replayed. Fewer retries than state.db (5 vs
+# 15): the 120s busy_timeout absorbs most waits; this is the backstop for the
+# tail where SQLite returns BUSY immediately.
 _BUSY_MAX_RETRIES = 5
 
 
@@ -1384,26 +1200,18 @@ def _execute_boundary_with_retry(conn: sqlite3.Connection, sql: str) -> None:
 
 @contextlib.contextmanager
 def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
-    """Context manager for an IMMEDIATE write transaction.
+    """Context manager for an IMMEDIATE write transaction; a claim CAS inside
+    is atomic — at most one concurrent writer succeeds.
 
-    Use for any multi-statement write (creating a task + link, claiming a
-    task + recording an event, etc.). A claim CAS inside this context is
-    atomic -- at most one concurrent writer can succeed.
-
-    Nesting is an explicit opt-in: a caller already inside a transaction
-    gets a loud ``RuntimeError`` unless it passes ``allow_nested=True``,
-    in which case a SQLite savepoint is used instead of a second
-    ``BEGIN IMMEDIATE``. Only composition primitives that graph builders
-    deliberately run under one outer commit (``create_task``,
-    ``add_comment``) opt in — helpers with post-commit side effects
-    (``complete_task`` & co.) must never run under an open outer
-    transaction, because their side effects (workspace cleanup, ready
+    Nesting is an explicit opt-in (``allow_nested=True`` → savepoint instead
+    of a second ``BEGIN IMMEDIATE``; otherwise a loud ``RuntimeError``). Only
+    composition primitives graph builders run under one outer commit
+    (``create_task``, ``add_comment``) opt in — helpers with post-commit side
+    effects (``complete_task`` & co.) must never run under an open outer
+    transaction, because those side effects (workspace cleanup, ready
     recomputation, failure-counter clears) would fire while the outer
-    transaction can still roll back.
-
-    The explicit ROLLBACK on exception is wrapped in try/except so that
-    a SQLite auto-rollback (which leaves no active transaction) does not
-    shadow the original exception with a spurious rollback error.
+    transaction can still roll back. The ROLLBACK on exception is wrapped so a
+    SQLite auto-rollback doesn't shadow the original exception.
     """
     _kb._assert_not_delegated_child_mutation()
     if getattr(conn, "in_transaction", False):
@@ -1436,9 +1244,8 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
         try:
             conn.execute("ROLLBACK")
         except sqlite3.OperationalError:
-            # SQLite has already auto-rolled-back the transaction (typical
-            # under EIO, lock contention, or corruption). Nothing to undo;
-            # do not let this secondary failure shadow the real one.
+            # SQLite already auto-rolled-back (EIO, contention, corruption);
+            # don't let this secondary failure shadow the real one.
             pass
         raise
     else:
@@ -1450,8 +1257,7 @@ def write_txn(conn: sqlite3.Connection, *, allow_nested: bool = False):
             with contextlib.suppress(sqlite3.OperationalError):
                 conn.execute("ROLLBACK")
             raise
-        # Post-commit file-length check: header page_count must match actual file pages.
-        # A discrepancy means a torn-extend — raise now rather than silently corrupt.
+        # Post-commit torn-extend check — raise now rather than silently corrupt.
         _kb._check_file_length_invariant(conn)
 
 
