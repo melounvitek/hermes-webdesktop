@@ -15,18 +15,14 @@ import time
 from pathlib import Path
 from typing import Any, Dict
 from hermes_cli.auth_constants import (
-    AuthError,
-    DEFAULT_QWEN_BASE_URL,
-    QWEN_ACCESS_TOKEN_REFRESH_SKEW_SECONDS,
-    QWEN_OAUTH_CLIENT_ID,
-    QWEN_OAUTH_TOKEN_URL,
-    _FORM_JSON_HEADERS,
-    _qwen_err,
-    httpx,
+    AuthError, DEFAULT_QWEN_BASE_URL, QWEN_ACCESS_TOKEN_REFRESH_SKEW_SECONDS, QWEN_OAUTH_CLIENT_ID,
+    QWEN_OAUTH_TOKEN_URL, _FORM_JSON_HEADERS, _qwen_err, httpx,
 )
 
 # Log-record parity with the origin module (caplog tests pin "hermes_cli.auth").
 logger = logging.getLogger("hermes_cli.auth")
+
+_RERUN = "Re-run 'qwen auth qwen-oauth'."
 
 
 def _qwen_cli_auth_path() -> Path:
@@ -37,16 +33,12 @@ def _read_qwen_cli_tokens() -> Dict[str, Any]:
     from hermes_cli.auth import _qwen_cli_auth_path
     auth_path = _qwen_cli_auth_path()
     if not auth_path.exists():
-        raise _qwen_err(
-            "Qwen CLI credentials not found. Run 'qwen auth qwen-oauth' first.",
-            "qwen_auth_missing",
-        )
+        raise _qwen_err("Qwen CLI credentials not found. Run 'qwen auth qwen-oauth' first.", "qwen_auth_missing")
     try:
         data = json.loads(auth_path.read_text(encoding="utf-8"))
     except Exception as exc:
         raise _qwen_err(
-            f"Failed to read Qwen CLI credentials from {auth_path}: {exc}",
-            "qwen_auth_read_failed",
+            f"Failed to read Qwen CLI credentials from {auth_path}: {exc}", "qwen_auth_read_failed",
         ) from exc
     if not isinstance(data, dict):
         raise _qwen_err(f"Invalid Qwen CLI credentials in {auth_path}.", "qwen_auth_invalid")
@@ -71,20 +63,13 @@ def _qwen_access_token_is_expiring(expiry_date_ms: Any, skew_seconds: int = QWEN
 def _refresh_qwen_cli_tokens(tokens: Dict[str, Any], timeout_seconds: float = 20.0) -> Dict[str, Any]:
     refresh_token = str(tokens.get("refresh_token", "") or "").strip()
     if not refresh_token:
-        raise _qwen_err(
-            "Qwen OAuth refresh token missing. Re-run 'qwen auth qwen-oauth'.",
-            "qwen_refresh_token_missing",
-        )
+        raise _qwen_err(f"Qwen OAuth refresh token missing. {_RERUN}", "qwen_refresh_token_missing")
 
     try:
         response = httpx.post(
             QWEN_OAUTH_TOKEN_URL,
             headers=_FORM_JSON_HEADERS,
-            data={
-                "grant_type": "refresh_token",
-                "refresh_token": refresh_token,
-                "client_id": QWEN_OAUTH_CLIENT_ID,
-            },
+            data={"grant_type": "refresh_token", "refresh_token": refresh_token, "client_id": QWEN_OAUTH_CLIENT_ID},
             timeout=timeout_seconds,
         )
     except Exception as exc:
@@ -93,28 +78,19 @@ def _refresh_qwen_cli_tokens(tokens: Dict[str, Any], timeout_seconds: float = 20
     if response.status_code >= 400:
         body = response.text.strip()
         raise _qwen_err(
-            "Qwen OAuth refresh failed. Re-run 'qwen auth qwen-oauth'."
-            + (f" Response: {body}" if body else ""),
-            "qwen_refresh_failed",
+            f"Qwen OAuth refresh failed. {_RERUN}" + (f" Response: {body}" if body else ""), "qwen_refresh_failed",
         )
 
     try:
         payload = response.json()
     except Exception as exc:
-        raise _qwen_err(
-            f"Qwen OAuth refresh returned invalid JSON: {exc}",
-            "qwen_refresh_invalid_json",
-        ) from exc
+        raise _qwen_err(f"Qwen OAuth refresh returned invalid JSON: {exc}", "qwen_refresh_invalid_json") from exc
 
     if not isinstance(payload, dict) or not str(payload.get("access_token", "") or "").strip():
-        raise _qwen_err(
-            "Qwen OAuth refresh response missing access_token.",
-            "qwen_refresh_invalid_response",
-        )
+        raise _qwen_err("Qwen OAuth refresh response missing access_token.", "qwen_refresh_invalid_response")
 
-    expires_in = payload.get("expires_in")
     try:
-        expires_in_seconds = int(expires_in)
+        expires_in_seconds = int(payload.get("expires_in"))
     except Exception:
         expires_in_seconds = 6 * 60 * 60
 
@@ -139,9 +115,7 @@ def _mark_qwen_oauth_active(creds: Dict[str, Any]) -> None:
     from hermes_cli.auth import _auth_store_lock, _load_auth_store, _save_auth_store, _save_provider_state
     with _auth_store_lock():
         auth_store = _load_auth_store()
-        state: Dict[str, Any] = {}
-        if creds.get("base_url"):
-            state["base_url"] = str(creds["base_url"])
+        state: Dict[str, Any] = {"base_url": str(creds["base_url"])} if creds.get("base_url") else {}
         _save_provider_state(auth_store, "qwen-oauth", state)
         _save_auth_store(auth_store)
 
@@ -154,23 +128,18 @@ def resolve_qwen_runtime_credentials(
 ) -> Dict[str, Any]:
     from hermes_cli.auth import _qwen_cli_auth_path, _refresh_qwen_cli_tokens
     tokens = _read_qwen_cli_tokens()
-    access_token = str(tokens.get("access_token", "") or "").strip()
     should_refresh = bool(force_refresh)
     if not should_refresh and refresh_if_expiring:
         should_refresh = _qwen_access_token_is_expiring(tokens.get("expiry_date"), refresh_skew_seconds)
     if should_refresh:
         tokens = _refresh_qwen_cli_tokens(tokens)
-        access_token = str(tokens.get("access_token", "") or "").strip()
+    access_token = str(tokens.get("access_token", "") or "").strip()
     if not access_token:
-        raise _qwen_err(
-            "Qwen OAuth access token missing. Re-run 'qwen auth qwen-oauth'.",
-            "qwen_access_token_missing",
-        )
+        raise _qwen_err(f"Qwen OAuth access token missing. {_RERUN}", "qwen_access_token_missing")
 
-    base_url = os.getenv("HERMES_QWEN_BASE_URL", "").strip().rstrip("/") or DEFAULT_QWEN_BASE_URL
     return {
         "provider": "qwen-oauth",
-        "base_url": base_url,
+        "base_url": os.getenv("HERMES_QWEN_BASE_URL", "").strip().rstrip("/") or DEFAULT_QWEN_BASE_URL,
         "api_key": access_token,
         "source": "qwen-cli",
         "expires_at_ms": tokens.get("expiry_date"),
@@ -182,9 +151,9 @@ def get_qwen_auth_status() -> Dict[str, Any]:
     from hermes_cli.auth import _qwen_cli_auth_path, resolve_qwen_runtime_credentials
     auth_path = _qwen_cli_auth_path()
     try:
-        # Validate the runtime credentials, including refresh when the cached
-        # CLI token is expired. Otherwise stale tokens show up as "logged in"
-        # and `hermes model` walks users into a broken Qwen setup flow.
+        # Validate the runtime credentials, including refresh when the cached CLI token is expired;
+        # otherwise stale tokens show up as "logged in" and `hermes model` walks users into a
+        # broken Qwen setup flow.
         creds = resolve_qwen_runtime_credentials(refresh_if_expiring=True)
         return {
             "logged_in": True,
@@ -194,8 +163,4 @@ def get_qwen_auth_status() -> Dict[str, Any]:
             "expires_at_ms": creds.get("expires_at_ms"),
         }
     except AuthError as exc:
-        return {
-            "logged_in": False,
-            "auth_file": str(auth_path),
-            "error": str(exc),
-        }
+        return {"logged_in": False, "auth_file": str(auth_path), "error": str(exc)}
