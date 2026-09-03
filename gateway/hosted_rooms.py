@@ -159,29 +159,13 @@ _SCHEMA_DDL = (
             PRIMARY KEY (room_id, member_id, target_profile)
         )""",
 )
-# (table, required columns) in the order _schema_is_current probes them.
-_REQUIRED_COLUMNS = (
-    ("hosted_rooms", frozenset({
-        "room_id", "name", "members_json", "authority_gateway_id", "authority_epoch",
-        "next_seq", "event_bytes", "revision", "created_at", "updated_at", "disbanded_at",
-    })),
-    ("hosted_room_events", frozenset({
-        "room_id", "seq", "event_id", "kind", "actor_json", "authority_epoch",
-        "payload_json", "created_at",
-    })),
-    ("hosted_room_retired_ids", frozenset({"room_id", "retired_at"})),
-    ("hosted_room_links", frozenset({
-        "room_id", "member_id", "target_url", "target_profile", "grant", "catalog_json",
-        "cancellation_scope_id", "trace_id", "transport_security", "status", "updated_at",
-    })),
-    ("hosted_room_remote_runs", frozenset(
-        (*_REMOTE_RUN_IDENTITY_COLUMNS, "run_id", "session_id", "created_at", "updated_at")
-    )),
-    ("hosted_room_revoked_grants", frozenset({"scope_key", "expires_at", "revoked_before"})),
-    ("hosted_room_peer_reservations", frozenset({
-        "room_id", "member_id", "target_profile", "authority_gateway_id", "authority_epoch",
-        "expires_at", "revoked_at", "created_at", "updated_at",
-    })),
+# (table, required columns) parsed from the DDL, in the order _schema_is_current probes them.
+_REQUIRED_COLUMNS = tuple(
+    (
+        re.search(r"EXISTS (\w+)", ddl).group(1),
+        frozenset(re.findall(r"^\s*(\w+) (?:TEXT|INTEGER|REAL)\b", ddl.split("(", 1)[1], re.M)),
+    )
+    for ddl in _SCHEMA_DDL
 )
 _REMOTE_RUN_SCHEMA_COLUMNS = _REQUIRED_COLUMNS[4][1]
 
@@ -211,6 +195,10 @@ _INSERT_RETIRED = (
 _RETIRE_FROM_ROOMS = (
     "INSERT OR IGNORE INTO hosted_room_retired_ids (room_id, retired_at)"
     " SELECT room_id, disbanded_at FROM hosted_rooms WHERE {where}"
+)
+_LINK_COLUMNS = (
+    "room_id", "member_id", "target_url", "target_profile", "grant", "catalog_json",
+    "cancellation_scope_id", "trace_id", "transport_security", "status", "updated_at",
 )
 _REMOTE_RUN_WHERE = " AND ".join(f"{column}=?" for column in _REMOTE_RUN_IDENTITY_COLUMNS)
 _LIVE_RESERVATION_WHERE = (
@@ -787,12 +775,7 @@ def upsert_room_link_record(
                    transport_security=excluded.transport_security,
                    status=excluded.status,
                    updated_at=excluded.updated_at""",
-            (
-                record["room_id"], record["member_id"], record["target_url"],
-                record["target_profile"], record["grant"], record["catalog_json"],
-                record["cancellation_scope_id"], record["trace_id"],
-                record["transport_security"], record["status"], record["updated_at"],
-            ),
+            tuple(record[column] for column in _LINK_COLUMNS),
         )
 
 
