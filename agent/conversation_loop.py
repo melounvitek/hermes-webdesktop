@@ -650,7 +650,6 @@ def _print_billing_or_entitlement_guidance(
     ))
 
 
-
 def _bot_chat_prompt_stale(agent, stored_prompt: str) -> bool:
     """Bot Chat capability epoch check for a stored prompt.
 
@@ -1585,18 +1584,11 @@ def run_conversation(
     except Exception:
         logger.debug("per-turn env credential refresh failed", exc_info=True)
 
-    # Per-turn setup (the prologue): ``build_turn_context`` (agent/turn_context.py)
-    # mutates ``agent`` as the inline code did and returns the locals the loop reads.
+    # Per-turn setup: build_turn_context mutates ``agent`` and returns the locals the loop reads.
     try:
         _ctx = build_turn_context(
-            agent,
-            user_message,
-            system_message,
-            conversation_history,
-            task_id,
-            stream_callback,
-            persist_user_message,
-            persist_user_timestamp,
+            agent, user_message, system_message, conversation_history, task_id,
+            stream_callback, persist_user_message, persist_user_timestamp,
             persist_user_display_kind=persist_user_display_kind,
             persist_user_display_metadata=persist_user_display_metadata,
             persist_user_platform_id=persist_user_platform_id,
@@ -1614,26 +1606,19 @@ def run_conversation(
     except PreflightCompressionTimedOut as _preflight_timeout_exc:
         return _preflight_timeout_result(agent, _preflight_timeout_exc, conversation_history)
 
-    # Commentary deduplication spans all provider continuations and tool calls
-    # within one user turn, but must not suppress the same phrase next turn.
+    # Per-turn agent state (the gateway caches agents across turns, so none of this may
+    # leak into the next message): interim-commentary dedup spans the whole turn but not
+    # the next; a SessionDB append failure (and its classified cause) halts only this turn;
+    # a failed compression-tip adoption is reported only against its own turn; the
+    # thinking-only-truncation one-shot must not survive an interrupted turn; credential-
+    # pool refresh tallies cap same-entry refreshes on a persistent 401 (#26080); usage
+    # for on_turn_complete() stays None on turns that never reach a response.
     agent._delivered_interim_texts = set()
-    # A configured SessionDB append failure halts only the affected turn. A
-    # cached gateway agent must recover on the next message if storage did.
     agent._incremental_persistence_failed = False
-    # Cause of the last persistence failure this turn ('locked'/'disk'/'unknown', see
-    # hermes_state.classify_persistence_error). Reset so a prior diagnosis cannot leak.
     agent._last_persistence_error_cause = None
-    # Per-turn diagnostic: a failed compression-tip adoption in a previous
-    # turn's flush must not be reported against this turn.
     agent._compression_adoption_failed = False
-    # Turn-scoped one-shot: armed by a thinking-only truncation, consumed by
-    # build_api_kwargs; must not survive an interrupted turn into the next one.
     agent._ephemeral_reasoning_off = False
-    # Per-turn tally of credential-pool refreshes by (provider, pool-entry-id): caps
-    # same-entry refreshes on a persistent 401 so fallback takes over (#26080).
     agent._auth_pool_refresh_counts = {}
-    # Per-turn usage forwarded to the context engine's on_turn_complete() hook; left
-    # None on turns that never reach a response so the hook never sees stale usage.
     agent._last_turn_usage = None
 
     s = _LoopState(
@@ -1658,10 +1643,8 @@ def run_conversation(
     # app-server subprocess (see agent/transports/codex_app_server_session.py).
     if agent.api_mode == "codex_app_server":
         return agent._run_codex_app_server_turn(
-            user_message=s.user_message,
-            original_user_message=s.original_user_message,
-            messages=s.messages,
-            effective_task_id=s.effective_task_id,
+            user_message=s.user_message, original_user_message=s.original_user_message,
+            messages=s.messages, effective_task_id=s.effective_task_id,
             should_review_memory=s._should_review_memory,
         )
 
@@ -1752,23 +1735,10 @@ def run_conversation(
                 break
 
     # Post-loop finalization lives in agent/turn_finalizer.finalize_turn.
-    result = finalize_turn(
-        agent,
-        final_response=s.final_response,
-        api_call_count=s.api_call_count,
-        interrupted=s.interrupted,
-        failed=s.failed,
-        messages=s.messages,
-        conversation_history=s.conversation_history,
-        effective_task_id=s.effective_task_id,
-        turn_id=s.turn_id,
-        user_message=s.user_message,
-        original_user_message=s.original_user_message,
-        _should_review_memory=s._should_review_memory,
-        _turn_exit_reason=s._turn_exit_reason,
-        _pending_verification_response=s._pending_verification_response,
-        _pending_verification_response_previewed=s._pending_verification_response_previewed,
-    )
+    result = finalize_turn(agent, **{
+        name: getattr(s, name)
+        for name in inspect.signature(finalize_turn).parameters if name != "agent"
+    })
     if s._compression_timeout_exhausted:
         # Reuse the gateway's context-recovery contract: transcript stays intact while
         # future input can move to a clean session (#98722).
