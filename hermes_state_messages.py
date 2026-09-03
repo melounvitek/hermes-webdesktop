@@ -1003,9 +1003,9 @@ class SessionMessagesMixin:
             content = self._decode_content(row["content"])
             if row["role"] in {"user", "assistant"} and isinstance(content, str):
                 content = sanitize_context(content).strip()
-            # Underscore-prefixed like ``_row_id``: every transport strips it before the
-            # wire, and compression's assembly copies deliberately strip it so rotated
-            # child handoffs still flush (see _fresh_compaction_message_copy).
+            # The persisted marker is underscore-prefixed like ``_row_id``: every transport
+            # strips it before the wire, and compression's assembly copies deliberately
+            # strip it so rotated child handoffs still flush (see _fresh_compaction_message_copy).
             msg = {"role": row["role"], "content": content, _DB_PERSISTED_MARKER_KEY: True}
             if include_row_ids and row["id"] is not None:
                 msg["_row_id"] = row["id"]
@@ -1344,17 +1344,20 @@ class SessionMessagesMixin:
         return bool(session and self._is_explicit_fork_child_row(session))
 
     def latest_conversation_boundary(self, session_key: str, source: str) -> Optional[int]:
-        """Conversation boundaries (``_RESET_END_REASONS`` ends) this routing peer has
-        crossed, or ``None`` when never reset. The peer is ``(session_key, source)`` — never
-        the key alone (an API caller may reuse a Telegram row's key). Read from
+        """How many conversation boundaries (``_RESET_END_REASONS`` ends) this routing
+        peer has crossed, or ``None`` when never reset.
+
+        The peer is ``(session_key, source)`` — the identity recovery uses — never the
+        key alone (an API caller may legally reuse a Telegram row's key). Read from
         ``conversation_generations`` (advanced inside each boundary's txn), not an
-        aggregate over session rows (deletes/prunes would re-emit a retired pair); rows are
-        never GC'd (dropping one would re-issue generation 1 — the ABA this counter
-        prevents). Wall-clock-free, so a backwards NTP correction cannot reorder it. DBs
-        upgraded mid-conversation start at no generation and take their first from the
-        next boundary written; a conversation that reset before the upgrade shares its
-        predecessor's scope once (costs a warm prompt-cache bucket, never crosses an
-        identity)."""
+        aggregate over session rows: deletes/prunes would let an aggregate re-emit a
+        retired pair. Rows are never garbage-collected, by design (dropping one would
+        re-issue generation 1 — the ABA this counter prevents). Wall-clock-free, so a
+        backwards NTP correction cannot reorder it. DBs upgraded mid-conversation start
+        at no generation and take their first from the next boundary written; a
+        conversation that reset before the upgrade shares its predecessor's scope once
+        (costs a warm prompt-cache bucket, never crosses an identity).
+        """
         if not session_key or not source:
             return None
         row = self._read_one(
