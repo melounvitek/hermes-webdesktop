@@ -2972,8 +2972,7 @@ def _finish_compaction_boundary(
     if _old_sid and session_commit_succeeded:
         with _swallow("failed to clear archived compression parent's activity labels (ignored)", exc_info=True):
             _labels_db = getattr(agent, "_session_db", None)
-            _clear_labels = getattr(type(_labels_db), "clear_session_activity_labels", None)
-            if callable(_clear_labels):
+            if callable(_clear_labels := getattr(type(_labels_db), "clear_session_activity_labels", None)):
                 _clear_labels(_labels_db, _old_sid)
 
     # Plugin engines use boundary_reason="compression" to keep lineage/checkpoint
@@ -3063,7 +3062,8 @@ def _candidate_rejected(
     # Aborted compression returns input unchanged: surface the error, skip rotation
     # (no session ended); auto-compress callers detect no-op via equal lengths.
     if getattr(agent.context_compressor, "_last_compress_aborted", False):
-        _err = getattr(agent.context_compressor, "_last_summary_error", None) or "unknown error"
+        _summary_error = getattr(agent.context_compressor, "_last_summary_error", None)
+        _err = _summary_error or "unknown error"
         if getattr(agent, "_last_compression_summary_warning", None) != _err:
             agent._last_compression_summary_warning = _err
             agent._emit_warning(
@@ -3072,8 +3072,7 @@ def _candidate_rejected(
                 "Run /compress to retry, or /new to start a fresh session."
             )
         _emit_aborted_attempt_telemetry(
-            agent, attempt_started_at,
-            (getattr(agent.context_compressor, "_last_summary_error", None) and "summary_generation_aborted"),
+            agent, attempt_started_at, _summary_error and "summary_generation_aborted"
         )
         return True
 
@@ -3090,9 +3089,8 @@ def _candidate_rejected(
         # Unchanged output would fail identically next turn; arm structural backoff so
         # auto-compress stops re-firing each turn (success lifts it, force overrides).
         with _swallow('no-progress backoff arm failed', exc_info=True):
-            _no_progress_recorder = getattr(agent.context_compressor, "_record_structural_no_op", None)
-            if callable(_no_progress_recorder):
-                _no_progress_recorder("compaction returned the transcript unchanged (no_progress)")
+            if callable(_recorder := getattr(agent.context_compressor, "_record_structural_no_op", None)):
+                _recorder("compaction returned the transcript unchanged (no_progress)")
         _emit_aborted_attempt_telemetry(agent, attempt_started_at, "no_progress")
         return True
 
@@ -3193,6 +3191,9 @@ def _commit_compaction(
                 # Rotation-independent signal; the gateway reads this (not an id diff) to
                 # re-baseline transcript handling.
                 compacted_in_place = True
+                # In-place still updates the current row's prompt; rotation published it atomically above.
+                agent._session_db.update_system_prompt(agent.session_id, new_system_prompt)
+                agent._last_flushed_db_idx = 0
             else:
                 # Bind old_session_id first: it is the rollback key in the handler below.
                 old_session_id = agent.session_id
@@ -3201,13 +3202,6 @@ def _commit_compaction(
                     old_session_id=old_session_id, compressed_user_turn_outcome=compressed_user_turn_outcome,
                 )
                 split_status = "rotated_committed"
-
-            # In-place mode still updates/replaces the current row here.
-            # Rotation already published prompt + compacted handoff atomically.
-            if in_place:
-                agent._session_db.update_system_prompt(agent.session_id, new_system_prompt)
-                agent._last_flushed_db_idx = 0
-            else:
                 agent._last_flushed_db_idx = len(compressed)
                 agent._flushed_db_message_session_id = agent.session_id
             session_commit_succeeded = True
@@ -3276,6 +3270,13 @@ def _run_summary_phase(
     pre_msg_count = len(messages)
     _activity_heartbeat: Optional[_CompressionActivityHeartbeat] = None
     messages_before_compression = None
+
+    def _stop_heartbeat(desc: str) -> None:
+        nonlocal _activity_heartbeat
+        if _activity_heartbeat is not None:
+            _activity_heartbeat.stop(desc)
+            _activity_heartbeat = None
+
     try:
         lease.start_refresher()
 
@@ -3310,9 +3311,7 @@ def _run_summary_phase(
             # Compensation failure must surface, but it must not strand the
             # session lease or retain an in-memory transcript mutation.
             _restore_messages_snapshot(messages, messages_before_compression)
-            if _activity_heartbeat is not None:
-                _activity_heartbeat.stop("context compression rollback failed")
-                _activity_heartbeat = None
+            _stop_heartbeat("context compression rollback failed")
             lease.release()
             _emit_aborted_attempt_telemetry(agent, attempt.started_at, f"rollback:{type(_rollback_exc).__name__}")
             raise
@@ -3323,9 +3322,7 @@ def _run_summary_phase(
             agent, commit_fence=commit_fence, started_at=attempt.started_at, messages=messages,
             approx_tokens=approx_tokens,
         )
-        if _activity_heartbeat is not None:
-            _activity_heartbeat.stop("context compression cancelled")
-            _activity_heartbeat = None
+        _stop_heartbeat("context compression cancelled")
         lease.release()
         _emit_aborted_attempt_telemetry(
             agent, attempt.started_at, (STALL_INTERRUPTED_FAILURE_CLASS if _stall_backoff else "explicit_interrupt")
@@ -3333,15 +3330,12 @@ def _run_summary_phase(
         return _SummaryPhase(messages=messages, abort_prompt=_existing_system_prompt(agent, system_message))
     except BaseException as _compress_exc:
         # Any failure after lock acquisition must release it or the session is permanently blocked from compression.
-        if _activity_heartbeat is not None:
-            _activity_heartbeat.stop("context compression failed")
-            _activity_heartbeat = None
+        _stop_heartbeat("context compression failed")
         lease.release()
         _emit_aborted_attempt_telemetry(agent, attempt.started_at, f"exception:{type(_compress_exc).__name__}")
         raise
     finally:
-        if _activity_heartbeat is not None:
-            _activity_heartbeat.stop("context compression completed")
+        _stop_heartbeat("context compression completed")
     return _SummaryPhase(
         messages=messages, compressed=compressed, messages_before_compression=messages_before_compression,
         approx_tokens=approx_tokens, pre_msg_count=pre_msg_count,
