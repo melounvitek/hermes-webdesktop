@@ -639,11 +639,9 @@ def _cmd_prune_or_archive(db, args, action):
     # direct-open count would misdescribe its effect.
     skipped_open = db.count_open_prune_matches(**filters) if prune else 0
     if skipped_open:
-        print(
-            f"Note: {skipped_open} open session{'' if skipped_open == 1 else 's'} also match these filters but "
-            "will be skipped because prune only deletes ended sessions. Use `hermes sessions delete <id>` "
-            "to remove one explicitly."
-        )
+        print(f"Note: {skipped_open} open session{'' if skipped_open == 1 else 's'} also match these filters but "
+              "will be skipped because prune only deletes ended sessions. Use `hermes sessions delete <id>` "
+              "to remove one explicitly.")
     if not candidates:
         print(f"No sessions match ({describe_filters(filters)}).")
         return
@@ -657,12 +655,9 @@ def _cmd_prune_or_archive(db, args, action):
         shown = candidates if args.dry_run else candidates[:15]
         print(f"{len(candidates)} session(s) match ({describe_filters(filters)}; {_span}):")
         for s in shown:
-            title = (s.get("title") or "")[:36]
             model = (s.get("model") or "-").split("/")[-1][:24]
-            print(
-                f"  {s['id']}  {format_epoch(s.get('last_active')):<17} {s['source']:<10} {model:<24} "
-                f"{s['message_count']:>4} msgs  {title}"
-            )
+            print(f"  {s['id']}  {format_epoch(s.get('last_active')):<17} {s['source']:<10} {model:<24} "
+                  f"{s['message_count']:>4} msgs  {(s.get('title') or '')[:36]}")
         if len(candidates) > len(shown):
             print(f"  … and {len(candidates) - len(shown)} more")
         if args.dry_run:
@@ -712,8 +707,7 @@ def _cmd_pin(db, args, pinning):
             print(f"{'Pinned' if pinning else 'Unpinned'} session '{resolved}'.{f'  ({title})' if title else ''}")
         else:
             failures += _not_found(raw_id)
-    if failures:
-        return 1
+    return 1 if failures else None
 
 
 def _cmd_pinned(db, args):
@@ -738,11 +732,6 @@ def _cmd_retitle_skills(db, args):
     from agent.title_generator import generate_title
     limit = max(1, int(getattr(args, "limit", 200) or 200))
     apply_changes = bool(getattr(args, "apply", False))
-
-    def _is_titlelike(candidate: str) -> bool:
-        """Reject non-titles: an auxiliary model occasionally answers the prompt instead of titling it
-        ('$ df -h /'). This is a REPAIR — never replace a serviceable title with that."""
-        return bool(candidate) and candidate[0].isalnum()
     candidates = db.list_skill_scaffolded_sessions(limit=limit)
     if not candidates:
         print("No sessions were titled from a /skill invocation.")
@@ -756,7 +745,9 @@ def _cmd_retitle_skills(db, args):
         new_title = generate_title(typed)
         if not new_title or new_title == row["title"]:
             continue
-        if not _is_titlelike(new_title):
+        if not new_title[0].isalnum():
+            # Non-title: an auxiliary model occasionally answers the prompt instead of titling it
+            # ('$ df -h /'). This is a REPAIR — never replace a serviceable title with that.
             print(f"  {session_id}\n    kept {row['title']!r} — got {new_title!r}")
             continue
         print(f"  {session_id}\n    {row['title']!r}\n    → {new_title!r}")
