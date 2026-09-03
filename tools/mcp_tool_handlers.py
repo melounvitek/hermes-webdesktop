@@ -115,9 +115,7 @@ def _lookup_reconnectable_server(server_name: str, require_loop: bool = False):
     With *require_loop*, also None unless the MCP loop is running (nothing to wait on)."""
     with _core._lock:
         srv = _core._servers.get(server_name)
-    if srv is None or not hasattr(srv, "_reconnect_event"):
-        return None
-    if require_loop and not _mcp_loop_running():
+    if srv is None or not hasattr(srv, "_reconnect_event") or (require_loop and not _mcp_loop_running()):
         return None
     return srv
 
@@ -481,12 +479,10 @@ def _make_utility_handler(server_name: str, tool_timeout: float, op: str, log_la
                 result = await rpc(server.session, args)
             return json.dumps(render(result, server_name), ensure_ascii=False)
 
-        def _on_failure(exc):
-            logger.error("MCP %s/%s failed: %s", server_name, log_label, exc)
-
         return _invoke_with_recovery(
             server_name, lambda: _core._run_on_mcp_loop(_call, timeout=tool_timeout), op,
-            (_handle_auth_error_and_retry, _handle_session_expired_and_retry), _on_failure,
+            (_handle_auth_error_and_retry, _handle_session_expired_and_retry),
+            lambda exc: logger.error("MCP %s/%s failed: %s", server_name, log_label, exc),
         )
 
     return _handler
