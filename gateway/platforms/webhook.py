@@ -72,10 +72,8 @@ def _is_loopback_host(host: Optional[str]) -> bool:
 
 
 def _hmac_str_equal(provided: str, expected: str) -> bool:
-    """Timing-safe str equality tolerant of non-ASCII.
-
-    ``compare_digest`` raises TypeError on non-ASCII str; ``provided`` is an
-    attacker-controlled header, so compare as UTF-8 bytes to fail closed."""
+    """Timing-safe str equality tolerant of non-ASCII: ``compare_digest`` raises TypeError on non-ASCII
+    str and ``provided`` is an attacker-controlled header, so compare as UTF-8 bytes to fail closed."""
     return hmac.compare_digest(provided.encode(), expected.encode())
 
 
@@ -208,10 +206,9 @@ class WebhookAdapter(BasePlatformAdapter):
         app.router.add_post("/p/{profile}/webhooks/{route_name}", self._handle_webhook)
         self._runner = web.AppRunner(app)
         await self._runner.setup()
-        # SO_REUSEADDR: on macOS (BSD) two wildcard/specific sockets can silently
-        # split traffic while both report success → disable. On Linux it only
-        # permits rebinding past TIME_WAIT (a quick restart would otherwise fail
-        # to bind for ~60s) → keep the default.
+        # SO_REUSEADDR: on macOS (BSD) two wildcard/specific sockets can silently split traffic
+        # while both report success → disable. On Linux it only permits rebinding past TIME_WAIT
+        # (a quick restart would otherwise fail to bind for ~60s) → keep the default.
         site = web.TCPSite(
             self._runner, self._host, self._port, reuse_address=False if sys.platform == "darwin" else None,
         )
@@ -390,10 +387,8 @@ class WebhookAdapter(BasePlatformAdapter):
             logger.error("[webhook] Failed to reload dynamic routes: %s", e)
 
     def _resolve_request_profile(self, request: "web.Request"):
-        """Resolve + validate the /p/<profile>/ URL prefix.
-
-        Returns None (no prefix, or multiplexing off and the prefix names this
-        gateway's own profile), the profile name (served under multiplexing), or
+        """Resolve + validate the /p/<profile>/ URL prefix: None (no prefix, or multiplexing off and the
+        prefix names this gateway's own profile), the profile name (served under multiplexing), or
         ``_PROFILE_REJECTED`` (unknown / not served → 404)."""
         profile = (request.match_info.get("profile") or "").strip()
         if not profile:
@@ -560,19 +555,19 @@ class WebhookAdapter(BasePlatformAdapter):
             or "unknown")
         allowed_events = route_config.get("events", [])
         if allowed_events and event_type not in allowed_events:
-            logger.debug("[webhook] Ignoring event %s for route %s (allowed: %s)", event_type, route_name, allowed_events)
+            logger.debug("[webhook] Ignoring event %s for route %s (allowed: %s)",
+                         event_type, route_name, allowed_events)
             return web.json_response({"status": "ignored", "event": event_type})
         if not self._route_processor.route_filters_match(route_config, payload, event_type, request.headers):
             logger.info("[webhook] filtered event=%s route=%s", event_type, route_name)
             return web.json_response({"status": "ignored", "reason": "filter", "route": route_name})
-        # Script, prompt render and skill lookup read the profile's home (skills/,
-        # config); the runner only enters the routed profile's scope later around
-        # handle_message, so enter it here. Bare routes are unchanged.
+        # Script, prompt render and skill lookup read the profile's home (skills/, config); the runner
+        # only enters the routed profile's scope later around handle_message, so enter it here.
         with self._profile_scope(profile):
             script = route_config.get("script")
             if script:
-                # Shells out (up to its timeout) — worker thread so the event loop
-                # isn't blocked; to_thread copies contextvars so the scope follows.
+                # Shells out (up to its timeout) — worker thread so the loop isn't blocked; to_thread
+                # copies contextvars so the profile scope follows.
                 keep, transformed_payload = await asyncio.to_thread(
                     self._route_processor.run_route_script, script, payload)
                 if not keep:
@@ -583,10 +578,9 @@ class WebhookAdapter(BasePlatformAdapter):
             skills = route_config.get("skills", [])
             if skills:
                 prompt = self._apply_skills(prompt, skills)
-        delivery_id = request.headers.get(
-            "X-GitHub-Delivery",
-            request.headers.get("svix-id", request.headers.get("X-Request-ID", str(int(time.time() * 1000)))),
-        )
+        headers = request.headers
+        delivery_id = headers.get("X-GitHub-Delivery", headers.get(
+            "svix-id", headers.get("X-Request-ID", str(int(time.time() * 1000)))))
         # Idempotency: skip duplicate deliveries (webhook retries).
         now = time.time()
         if not self._record_delivery_id(delivery_id, now):
@@ -594,13 +588,20 @@ class WebhookAdapter(BasePlatformAdapter):
             return web.json_response({"status": "duplicate", "delivery_id": delivery_id}, status=200)
         if route_config.get("deliver_only"):
             return await self._handle_deliver_only(prompt, payload, route_config, route_name, event_type, delivery_id)
+        return self._dispatch_agent_run(request, route_config, route_name, profile, payload, prompt, event_type,
+                                        delivery_id, now)
+
+    def _dispatch_agent_run(
+        self, request, route_config: dict, route_name: str, profile, payload: Any, prompt: str,
+        event_type: str, delivery_id: str, now: float,
+    ) -> "web.Response":
+        """Record delivery info, spawn the agent run, and return 202 immediately."""
         # delivery_id in the session key → concurrent webhooks on one route get
         # independent agent runs (not queued/interrupted).
         session_chat_id = f"webhook:{route_name}:{delivery_id}"
         self._delivery_info[session_chat_id] = {
             "deliver": route_config.get("deliver", "log"),
-            "deliver_extra": self._render_delivery_extra(route_config.get("deliver_extra", {}), payload),
-        }
+            "deliver_extra": self._render_delivery_extra(route_config.get("deliver_extra", {}), payload)}
         self._delivery_info_created[session_chat_id] = now
         self._delivery_info_order.append((now, session_chat_id))
         self._prune_delivery_info(now)
@@ -610,25 +611,20 @@ class WebhookAdapter(BasePlatformAdapter):
         if profile and isinstance(profile, str):
             source.profile = profile
         event = MessageEvent(
-            text=prompt, message_type=MessageType.TEXT, source=source, raw_message=payload, message_id=delivery_id,
-        )
+            text=prompt, message_type=MessageType.TEXT, source=source, raw_message=payload, message_id=delivery_id)
         logger.info("[webhook] %s event=%s route=%s prompt_len=%d delivery=%s",
                     request.method, event_type, route_name, len(prompt), delivery_id)
-        # Return 202 immediately. The per-delivery session is closed by
-        # ``on_processing_complete`` once the run finishes (``handle_message`` is
-        # fire-and-forget, so nothing can be closed here).
+        # The per-delivery session is closed by ``on_processing_complete`` once the run
+        # finishes (``handle_message`` is fire-and-forget, so nothing can be closed here).
         task = asyncio.create_task(self.handle_message(event))
         self._background_tasks.add(task)
         task.add_done_callback(self._background_tasks.discard)
         return web.json_response(
-            {"status": "accepted", "route": route_name, "event": event_type, "delivery_id": delivery_id}, status=202,
-        )
+            {"status": "accepted", "route": route_name, "event": event_type, "delivery_id": delivery_id}, status=202)
 
     async def on_processing_complete(self, event: "MessageEvent", outcome: Any) -> None:
-        """Close the one-shot per-delivery session once its run finishes.
-
-        ``prune_sessions`` only reaps rows with ``ended_at`` set, so unclosed webhook
-        sessions leak unbounded. This hook fires at the true end of the run (success,
+        """Close the one-shot per-delivery session: ``prune_sessions`` only reaps rows with ``ended_at``
+        set, so unclosed webhook sessions leak unbounded. Fires at the true end of the run (success,
         failure, cancellation); ``end_session()`` is first-reason-wins."""
         await self._end_webhook_session(event, event.source.chat_id)
 
@@ -679,9 +675,9 @@ class WebhookAdapter(BasePlatformAdapter):
             return headers.get(name, "") or headers.get(name.lower(), "") or headers.get(name.upper(), "")
 
         # Svix / AgentMail: signed content is "{id}.{timestamp}.{raw_body}".
-        svix_id, svix_timestamp, svix_signature = _header("svix-id"), _header("svix-timestamp"), _header("svix-signature")
-        if svix_id or svix_timestamp or svix_signature:
-            return _validate_svix_signature(body, secret, svix_id, svix_timestamp, svix_signature)
+        svix = [_header(name) for name in ("svix-id", "svix-timestamp", "svix-signature")]
+        if any(svix):
+            return _validate_svix_signature(body, secret, *svix)
         # Linear: linear-signature = hex HMAC-SHA256 of the raw body (no timestamp binding).
         linear_sig = _header("linear-signature")
         if linear_sig:
@@ -734,8 +730,7 @@ class WebhookAdapter(BasePlatformAdapter):
     # --- Prompt rendering ---
 
     def _render_prompt(self, template: str, payload: dict, event_type: str, route_name: str) -> str:
-        """Render a prompt template with dot-notation payload access (``{pull_request.title}``).
-
+        """Render a prompt template with dot-notation payload access (``{pull_request.title}``);
         ``{__raw__}`` dumps the whole payload as indented JSON (truncated to 4000 chars)."""
         if not template:
             truncated = json.dumps(payload, indent=2)[:4000]
