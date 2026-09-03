@@ -395,8 +395,7 @@ def _setup_worktree(repo_root: str = None, sync_base: bool = True,
     wt_path = worktrees_dir / wt_name
     if name and wt_path.exists():
         _cprint(f"\033[31m✗ Worktree already exists: {wt_path}\033[0m")
-        print("  Pick a different name, or remove it with: "
-              f"git worktree remove {wt_path}")
+        print(f"  Pick a different name, or remove it with: git worktree remove {wt_path}")
         return None
 
     _ensure_worktrees_gitignored(repo_root)
@@ -536,9 +535,7 @@ def _worktree_merge_cache_path() -> Path:
 def _load_worktree_merge_cache() -> Dict[str, bool]:
     """Load the ``git cherry`` verdict cache. Missing/corrupt cache = empty."""
     try:
-        raw = json.loads(
-            _worktree_merge_cache_path().read_text(encoding="utf-8")
-        )
+        raw = json.loads(_worktree_merge_cache_path().read_text(encoding="utf-8"))
     except Exception:
         return {}
     if not isinstance(raw, dict):
@@ -560,10 +557,7 @@ def _save_worktree_merge_cache(verdicts: Dict[str, bool]) -> None:
             items = items[-_WORKTREE_MERGE_CACHE_MAX:]
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(f".{os.getpid()}.tmp")
-        tmp.write_text(
-            json.dumps({"version": 1, "verdicts": dict(items)}),
-            encoding="utf-8",
-        )
+        tmp.write_text(json.dumps({"version": 1, "verdicts": dict(items)}), encoding="utf-8")
         os.replace(str(tmp), str(path))
     except Exception as e:
         logger.debug("Could not persist worktree merge cache: %s", e)
@@ -833,9 +827,7 @@ def _classify_prune_candidates(repo_root: str, candidates: list) -> list:
     def _get_remote_heads():
         with _remote_heads_lock:
             if "heads" not in _remote_heads_memo:
-                _remote_heads_memo["heads"] = _fetch_remote_branch_heads(
-                    repo_root, timeout=10
-                )
+                _remote_heads_memo["heads"] = _fetch_remote_branch_heads(repo_root, timeout=10)
             return _remote_heads_memo["heads"]
 
     def _classify(item):
@@ -848,14 +840,10 @@ def _classify_prune_candidates(repo_root: str, candidates: list) -> list:
             # Squash-merge escape hatch: patch-equivalent commits are merged, not unpushed.
             with cache_lock:
                 snapshot = dict(merge_cache)
-            merged = _worktree_commits_all_merged_upstream(
-                str(entry), timeout=30, cache=snapshot
-            )
+            merged = _worktree_commits_all_merged_upstream(str(entry), timeout=30, cache=snapshot)
             if not merged:
                 # Rebase-merge escape hatch: cherry misses changed patch-ids, GitHub knows.
-                merged = _worktree_branch_pr_merged(
-                    str(entry), timeout=15, cache=snapshot
-                )
+                merged = _worktree_branch_pr_merged(str(entry), timeout=15, cache=snapshot)
             with cache_lock:
                 merge_cache.update(snapshot)
             if not merged:
@@ -870,8 +858,7 @@ def _classify_prune_candidates(repo_root: str, candidates: list) -> list:
         lock_state = _worktree_lock_is_live(repo_root, str(entry), timeout=5)
         if lock_state == "live":
             return (entry, mtime, force, "locked-live", None)
-        return (entry, mtime, force,
-                "reap-keep-branch" if keep_branch else "reap", lock_state)
+        return (entry, mtime, force, "reap-keep-branch" if keep_branch else "reap", lock_state)
 
     # Enough workers to hide git's per-process startup latency without dozens of gits.
     workers = max(1, min(8, (os.cpu_count() or 4), len(candidates)))

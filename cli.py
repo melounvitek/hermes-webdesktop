@@ -452,9 +452,7 @@ def _mirror_config_to_env(defaults, _file_has_terminal_config):
         if "cjk_fts" in sessions_config:
             os.environ["HERMES_CJK_FTS"] = str(sessions_config["cjk_fts"])
         if "search_slow_ms" in sessions_config:
-            os.environ["HERMES_SEARCH_SLOW_MS"] = str(
-                sessions_config["search_slow_ms"]
-            )
+            os.environ["HERMES_SEARCH_SLOW_MS"] = str(sessions_config["search_slow_ms"])
 
 
 def _cli_config_defaults():
@@ -823,22 +821,13 @@ def _prepare_deferred_agent_startup() -> None:
 
         discover_plugins()
     except Exception:
-        logger.warning(
-            "plugin discovery failed at deferred CLI startup",
-            exc_info=True,
-        )
+        logger.warning("plugin discovery failed at deferred CLI startup", exc_info=True)
     try:
         from hermes_cli.mcp_startup import start_background_mcp_discovery
 
-        start_background_mcp_discovery(
-            logger=logger,
-            thread_name="termux-cli-mcp-discovery",
-        )
+        start_background_mcp_discovery(logger=logger, thread_name="termux-cli-mcp-discovery")
     except Exception:
-        logger.debug(
-            "MCP tool discovery failed at deferred CLI startup",
-            exc_info=True,
-        )
+        logger.debug("MCP tool discovery failed at deferred CLI startup", exc_info=True)
     try:
         from agent.shell_hooks import register_from_config
         from hermes_cli.config import load_config
@@ -852,10 +841,7 @@ def _prepare_deferred_agent_startup() -> None:
 
         register_outbound_webhooks(_hooks_cfg)
     except Exception:
-        logger.debug(
-            "shell-hook registration failed at deferred CLI startup",
-            exc_info=True,
-        )
+        logger.debug("shell-hook registration failed at deferred CLI startup", exc_info=True)
 
 
 def _exit_watchdog_timeout() -> float:
@@ -914,9 +900,7 @@ def _arm_exit_watchdog(timeout_s: float | None = None, *, from_signal: bool = Fa
         os._exit(0)
 
     try:
-        threading.Thread(
-            target=_watchdog, daemon=True, name="exit-watchdog"
-        ).start()
+        threading.Thread(target=_watchdog, daemon=True, name="exit-watchdog").start()
     except Exception:
         pass  # best-effort — never block shutdown on watchdog setup
 
@@ -1074,11 +1058,7 @@ def _notify_session_finalize(
 ) -> None:
     try:
         from hermes_cli.lifecycle import finalize_session
-        finalize_session(
-            session_id=session_id,
-            platform=platform,
-            reason=reason,
-        )
+        finalize_session(session_id=session_id, platform=platform, reason=reason)
     except Exception:
         pass
 
@@ -1163,9 +1143,7 @@ def _flush_one_shot_session_store(cli) -> None:
     try:
         msgs = getattr(agent, "_session_messages", None)
         if isinstance(msgs, list) and msgs and hasattr(agent, "_persist_session"):
-            agent._persist_session(
-                msgs, getattr(cli, "conversation_history", None)
-            )
+            agent._persist_session(msgs, getattr(cli, "conversation_history", None))
     except Exception:
         logger.debug("one-shot final session persist retry failed", exc_info=True)
     db = getattr(agent, "_session_db", None) or getattr(cli, "_session_db", None)
@@ -1369,9 +1347,7 @@ def _run_state_db_auto_maintenance(session_db) -> None:
                 finalized = session_db.finalize_orphaned_compression_sessions()
                 session_db.set_meta("orphaned_compression_finalize_v1", "1")
                 if finalized:
-                    logger.info(
-                        "Finalized %d orphaned compression sessions", finalized
-                    )
+                    logger.info("Finalized %d orphaned compression sessions", finalized)
         except Exception as _finalize_exc:
             logger.debug("Orphan compression finalize skipped: %s", _finalize_exc)
 
@@ -1590,9 +1566,7 @@ def _heal_cooked_mode_drift(fd: int) -> bool:
         return False  # still raw — nothing to do
     # Same surgery as raw_mode._patch_lflag / _patch_iflag on the *current* attrs so
     # user settings are preserved.
-    attrs[3] = lflag & ~(
-        termios.ECHO | termios.ICANON | termios.IEXTEN | termios.ISIG
-    )
+    attrs[3] = lflag & ~(termios.ECHO | termios.ICANON | termios.IEXTEN | termios.ISIG)
     attrs[0] = attrs[0] & ~(
         termios.IXON
         | termios.IXOFF
@@ -1825,9 +1799,7 @@ def _strip_markdown_syntax(text: str) -> str:
     return plain.strip("\n")
 
 
-_WINDOWS_PATH_WITH_DOT_SEGMENT_RE = re.compile(
-    r"(?i)(?:\b[a-z]:\\|\\\\)[^\s`]*\\\.[^\s`]*"
-)
+_WINDOWS_PATH_WITH_DOT_SEGMENT_RE = re.compile(r"(?i)(?:\b[a-z]:\\|\\\\)[^\s`]*\\\.[^\s`]*")
 
 
 def _preserve_windows_dot_segments_for_markdown(text: str) -> str:
@@ -1868,9 +1840,7 @@ def _render_final_assistant_content(text: str, mode: str = "render"):
     normalized_mode = str(mode or "render").strip().lower()
     if normalized_mode == "strip":
         # Strip first (inline markdown changes cell width), then re-align padding.
-        return _RichText(
-            realign_markdown_tables(_strip_markdown_syntax(text), panel_width)
-        )
+        return _RichText(realign_markdown_tables(_strip_markdown_syntax(text), panel_width))
     if normalized_mode == "raw":
         return _rich_text_from_ansi(text or "")
 
@@ -2313,10 +2283,7 @@ def _format_image_attachment_badges(attached_images: list[Path], image_counter: 
         return f"[📎 {first}] [+{extra}]"
 
     base = image_counter - len(attached_images) + 1
-    return " ".join(
-        f"[📎 Image #{base + i}]"
-        for i in range(len(attached_images))
-    )
+    return " ".join(f"[📎 Image #{base + i}]" for i in range(len(attached_images)))
 
 
 def _should_auto_attach_clipboard_image_on_paste(pasted_text: str) -> bool:
@@ -2409,9 +2376,7 @@ def _apply_bracketed_paste_timeout_patch() -> None:
                         _PtKeyPress(_PtKeys.BracketedPaste, paste_content)
                     )
                     self_parser._in_bracketed_paste = False
-                    remaining = self_parser._paste_buffer[
-                        end_index + len(end_mark):
-                    ]
+                    remaining = self_parser._paste_buffer[end_index + len(end_mark):]
                     self_parser._paste_buffer = ""
                     self_parser._hermes_bp_start = None
                     if remaining:
@@ -2781,10 +2746,7 @@ def _status_bar_visible_from_display_config(display_config: object) -> bool:
     """
     if not isinstance(display_config, dict):
         display_config = {}
-    statusbar_config = display_config.get(
-        "statusbar",
-        display_config.get("tui_statusbar", "top"),
-    )
+    statusbar_config = display_config.get("statusbar", display_config.get("tui_statusbar", "top"))
     if isinstance(statusbar_config, str):
         return statusbar_config.strip().lower() not in {"0", "false", "hidden", "no", "off"}
     return statusbar_config is not False
