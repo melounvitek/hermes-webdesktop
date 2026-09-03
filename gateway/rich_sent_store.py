@@ -1,13 +1,8 @@
-"""Local index of text we've sent via ``sendRichMessage`` (Bot API 10.1).
-
-Telegram does NOT echo a rich message's content back in ``reply_to_message``
-(``.text``/``.caption`` empty, ``.api_kwargs`` None), so replies to rich sends
-arrive with no quotable text. We remember ``message_id -> text`` at send time
-and look it up by ``reply_to_id`` on inbound. This module is the single source
-of truth for that index.
-
-Best-effort and dependency-free: every operation swallows errors and degrades
-to a no-op / ``None`` so it can never break a send or an inbound message.
+"""Local index of text we've sent via ``sendRichMessage`` (Bot API 10.1). Telegram does NOT echo a rich
+message's content back in ``reply_to_message`` (``.text``/``.caption`` empty, ``.api_kwargs`` None), so
+replies to rich sends arrive with no quotable text; we remember ``message_id -> text`` at send time and
+look it up by ``reply_to_id`` on inbound. Best-effort and dependency-free: every operation swallows
+errors and degrades to a no-op / ``None`` so it can never break a send or an inbound message.
 """
 
 from __future__ import annotations
@@ -22,14 +17,8 @@ _MAX_TEXT_CHARS = 2000
 
 
 def _store_path() -> str:
-    # get_hermes_home() honors the active profile override.
-    from hermes_constants import get_hermes_home
-
+    from hermes_constants import get_hermes_home  # honors the active profile override
     return os.path.join(str(get_hermes_home()), "state", "rich_sent_index.json")
-
-
-def _key(chat_id, message_id) -> str:
-    return f"{chat_id}:{message_id}"
 
 
 def _load(path: str) -> dict:
@@ -49,7 +38,7 @@ def record(chat_id, message_id, text: Optional[str]) -> None:
     try:
         os.makedirs(os.path.dirname(path), exist_ok=True)
         data = _load(path)
-        data[_key(chat_id, message_id)] = {"t": text[:_MAX_TEXT_CHARS], "ts": int(time.time())}
+        data[f"{chat_id}:{message_id}"] = {"t": text[:_MAX_TEXT_CHARS], "ts": int(time.time())}
         if len(data) > _MAX_ENTRIES:  # trim oldest by timestamp
             by_age = sorted(data.items(), key=lambda kv: kv[1].get("ts", 0))
             for k, _ in by_age[: len(data) - _MAX_ENTRIES]:
@@ -66,5 +55,5 @@ def lookup(chat_id, message_id) -> Optional[str]:
     """Return stored text for ``(chat_id, message_id)`` or ``None``."""
     if message_id is None or chat_id is None:
         return None
-    entry = _load(_store_path()).get(_key(chat_id, message_id))
+    entry = _load(_store_path()).get(f"{chat_id}:{message_id}")
     return (entry.get("t") or None) if isinstance(entry, dict) else None
