@@ -1,21 +1,12 @@
 #!/usr/bin/env python3
 """Write-approval gate + pending store for memory and skill writes.
 
-The agent writes to two cross-session stores — **memory** (MEMORY.md / USER.md,
-small entries) and **skills** (SKILL.md + files, potentially 10-100 KB) — from
-two origins: **foreground** (a normal turn) and **background_review** (the
-autonomous self-improvement fork). A per-subsystem boolean ``write_approval``
-gates those writes: ``false`` (default) writes freely; ``true`` never commits
-directly — it prompts inline (memory, interactive CLI only) or **stages** the
-write to a pending store for out-of-band review.
-
-Staging is mandatory for background writes (a daemon thread cannot block on a
-prompt), gateway sessions (no inline channel — review via ``/memory pending``),
-and all skill writes (too big to eyeball mid-loop). Memory shows full content;
-skills show metadata + a gist + a ``diff`` escape hatch.
-
-Pending records live under ``<HERMES_HOME>/pending/{memory,skills}/<id>.json``
-so they survive restarts and can be reviewed from CLI, gateway, or dashboard.
+A per-subsystem boolean ``write_approval`` gates the agent's cross-session writes —
+**memory** (MEMORY.md / USER.md) and **skills** (SKILL.md + files) — from either
+origin (**foreground** turn or **background_review** fork). ``false`` (default)
+writes freely; ``true`` never commits directly: it prompts inline (memory,
+interactive CLI only) or **stages** the write under
+``<HERMES_HOME>/pending/{memory,skills}/<id>.json`` for out-of-band review.
 """
 
 from __future__ import annotations
@@ -40,9 +31,8 @@ MEMORY = "memory"
 SKILLS = "skills"
 _SUBSYSTEMS = (MEMORY, SKILLS)
 
-# Per-subsystem config key. Intentionally a single boolean with no "block all
-# writes" state — to disable a subsystem use its own enable flag
-# (e.g. ``memory.memory_enabled: false``).
+# Per-subsystem config key. Intentionally a single boolean with no "block all writes"
+# state — to disable a subsystem use its own enable flag (e.g. ``memory.memory_enabled``).
 CONFIG_KEY = "write_approval"
 
 
@@ -61,11 +51,8 @@ def write_approval_enabled(subsystem: str) -> bool:
 
 
 def _normalize_enabled(value: Any) -> bool:
-    """Coerce a config value to bool; unknown → False (gate off).
-
-    YAML already parses bare on/off/yes/no as bools; the string branch covers
-    hand-edited configs.
-    """
+    """Coerce a config value to bool; unknown → False (gate off). The string branch
+    covers hand-edited configs (YAML already parses bare on/off/yes/no)."""
     if isinstance(value, bool):
         return value
     if isinstance(value, str):
@@ -87,15 +74,13 @@ def _read_record(path: Path) -> Dict[str, Any]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def stage_write(subsystem: str, payload: Dict[str, Any],
-                *, summary: str, origin: str) -> Dict[str, Any]:
+def stage_write(subsystem: str, payload: Dict[str, Any], *, summary: str, origin: str) -> Dict[str, Any]:
     """Persist a pending write and return its record (``id`` + metadata).
 
-    ``payload`` is the exact kwargs to replay the write on approval; ``summary``
-    is the one-line description shown in pending lists; ``origin`` is
-    ``foreground`` or ``background_review`` (audit). Best-effort: on disk
-    failure it logs and still returns a record — the write is lost, which is
-    the safe failure for an approval gate (nothing silently committed).
+    ``payload`` is the exact kwargs to replay the write on approval; ``origin`` is
+    ``foreground`` or ``background_review`` (audit). Best-effort: on disk failure it
+    logs and still returns a record — the write is lost, which is the safe failure
+    for an approval gate (nothing silently committed).
     """
     pid = uuid.uuid4().hex[:8]
     record = {
@@ -136,10 +121,8 @@ def list_pending(subsystem: str) -> List[Dict[str, Any]]:
 def get_pending(subsystem: str, pending_id: str) -> Optional[Dict[str, Any]]:
     """Return a single pending record by id, or None."""
     path = _pending_path(subsystem, pending_id)
-    if not path.exists():
-        return None
     try:
-        return _read_record(path)
+        return _read_record(path) if path.exists() else None
     except Exception:
         return None
 
@@ -159,10 +142,8 @@ def discard_pending(subsystem: str, pending_id: str) -> bool:
 def pending_count(subsystem: str) -> int:
     """Cheap count of pending records (for notification badges)."""
     d = _pending_dir(subsystem)
-    if not d.exists():
-        return 0
     try:
-        return sum(1 for _ in d.glob("*.json"))
+        return sum(1 for _ in d.glob("*.json")) if d.exists() else 0
     except Exception:
         return 0
 
@@ -170,11 +151,8 @@ def pending_count(subsystem: str) -> int:
 # --- Write origin ---
 
 def current_origin() -> str:
-    """Return ``foreground`` or ``background_review``.
-
-    Reuses the skill-provenance ContextVar the background review fork sets;
-    foreground turns leave it at the default.
-    """
+    """``foreground`` or ``background_review`` — reuses the skill-provenance ContextVar
+    the background review fork sets; foreground turns leave it at the default."""
     try:
         from tools.skill_provenance import get_current_write_origin
         return get_current_write_origin()
@@ -188,9 +166,9 @@ def current_origin() -> str:
 class GateDecision:
     """Result of evaluating the write gate. Exactly one flag is True.
 
-    ``allow`` proceed with the real write; ``blocked`` the user denied an inline
-    prompt (``message`` explains why); ``stage`` the caller must ``stage_write``
-    the payload (``message`` is the user-facing "staged for approval" note).
+    ``allow`` proceed with the real write; ``blocked`` the user denied an inline prompt
+    (``message`` explains why); ``stage`` the caller must ``stage_write`` the payload
+    (``message`` is the user-facing "staged for approval" note).
     """
 
     allow: bool = False
@@ -201,59 +179,39 @@ class GateDecision:
 
 def _staged(subsystem: str) -> GateDecision:
     where = "/skills pending" if subsystem == SKILLS else "/memory pending"
-    return GateDecision(
-        stage=True,
-        message=(
-            f"Staged for approval ({subsystem}.write_approval is on). "
-            f"Not yet saved — review with {where}."
-        ),
-    )
+    return GateDecision(stage=True, message=(f"Staged for approval ({subsystem}.write_approval is on). "
+                                             f"Not yet saved — review with {where}."))
 
 
-def evaluate_gate(subsystem: str, *, inline_summary: str = "",
-                  inline_detail: str = "") -> GateDecision:
+def evaluate_gate(subsystem: str, *, inline_summary: str = "", inline_detail: str = "") -> GateDecision:
     """Decide what to do with a pending write for ``subsystem``.
 
-    Decision matrix:
-        gate off (default)                    → allow
-        gate on, memory + interactive CLI     → inline approve/deny prompt
-        gate on, memory + gateway/script/bg   → stage
-        gate on, skills (any origin)          → stage (too big to review inline)
-
-    The gate only ever delays a write, never silently refuses it; ``blocked``
-    is produced only when the user actively denies the inline prompt.
-    ``inline_summary``/``inline_detail`` feed the memory inline prompt.
+    gate off → allow; gate on + skills (any origin) or background → stage; gate on +
+    memory + foreground → inline prompt when an interactive channel exists, else stage.
+    The gate only ever delays a write, never silently refuses it; ``blocked`` is
+    produced only when the user actively denies the inline prompt.
     """
     if not write_approval_enabled(subsystem):
         return GateDecision(allow=True)
-
-    # Skills always stage; a background write runs in a daemon thread with no user.
+    # Skills are too big to review inline; a background write runs in a daemon thread with no user.
     if subsystem == SKILLS or current_origin() == "background_review":
         return _staged(subsystem)
-
-    # Memory + foreground: prompt inline if an interactive channel exists;
-    # otherwise (gateway, script, prompt failure) stage instead of blind-denying.
     granted = _prompt_inline_memory_approval(inline_summary, inline_detail)
     if granted is True:
         return GateDecision(allow=True)
     if granted is False:
-        return GateDecision(
-            blocked=True,
-            message="Memory write denied by user. The change was not saved.",
-        )
+        return GateDecision(blocked=True, message="Memory write denied by user. The change was not saved.")
     return _staged(MEMORY)
 
 
 def _prompt_inline_memory_approval(summary: str, detail: str) -> Optional[bool]:
     """Prompt inline for a memory write: True approved, False denied, None → stage.
 
-    Uses the per-thread CLI approval callback registered for dangerous
-    commands (``tools.terminal_tool.set_approval_callback``), invoked directly
-    rather than via ``prompt_dangerous_approval``: that wrapper falls back to
-    ``input()`` (deadlock-prone under prompt_toolkit; silent deny in gateway
-    sessions, whose ``/approve`` round-trip lives in the pending-approval
-    queue) and converts callback errors into a deny. Here a missing channel or
-    failed prompt must stage instead.
+    Uses the per-thread CLI approval callback (``tools.terminal_tool.set_approval_callback``)
+    directly rather than ``prompt_dangerous_approval``: that wrapper falls back to
+    ``input()`` (deadlock-prone under prompt_toolkit; silent deny in gateway sessions)
+    and turns callback errors into a deny, whereas here a missing channel or failed
+    prompt must stage instead.
     """
     try:
         from tools.terminal_tool import _get_approval_callback
@@ -262,32 +220,30 @@ def _prompt_inline_memory_approval(summary: str, detail: str) -> Optional[bool]:
     callback = _get_approval_callback()
     if callback is None:
         return None
-
     header = summary.strip() or "Save to memory?"
-    body = detail.strip()
     try:
-        choice = callback(body or header, f"Save to memory: {header}", allow_permanent=False)
+        choice = callback(detail.strip() or header, f"Save to memory: {header}", allow_permanent=False)
     except Exception as e:
         logger.error("Inline memory approval prompt failed: %s", e)
         return None
-
     if choice in {"once", "session"}:
         return True
-    if choice == "deny":
-        return False
-    return None  # unknown outcome → no decision, stage rather than drop
+    return False if choice == "deny" else None  # unknown outcome → stage rather than drop
 
 
 # --- Skill-specific helpers (gist + diff for the review affordances) ---
 
-def skill_gist(action: str, name: str, *, content: str = "",
-               file_path: str = "", old_string: str = "",
-               new_string: str = "") -> str:
-    """Build a one-line heuristic gist (no model call) for a pending skill write.
+_GIST_TEMPLATES = {
+    "write_file": "write {file_path} in '{name}'",
+    "remove_file": "remove {file_path} from '{name}'",
+    "delete": "delete skill '{name}'",
+}
 
-    create/edit use the frontmatter ``description:``; patch/write_file describe
-    the size of the change. The full diff stays behind /skills diff.
-    """
+
+def skill_gist(action: str, name: str, *, content: str = "", file_path: str = "",
+               old_string: str = "", new_string: str = "") -> str:
+    """One-line heuristic gist (no model call) for a pending skill write: create/edit use
+    the frontmatter ``description:``; patch/write_file describe the size of the change."""
     if action in {"create", "edit"} and content:
         desc = _frontmatter_description(content)
         size = f"{len(content) // 1024 + 1} KB" if len(content) >= 1024 else f"{len(content)} chars"
@@ -297,13 +253,8 @@ def skill_gist(action: str, name: str, *, content: str = "",
         removed = old_string.count("\n") + 1 if old_string else 0
         added = new_string.count("\n") + 1 if new_string else 0
         return f"patch '{name}' {file_path or 'SKILL.md'} (+{added}/-{removed} lines)"
-    if action == "write_file":
-        return f"write {file_path} in '{name}'"
-    if action == "remove_file":
-        return f"remove {file_path} from '{name}'"
-    if action == "delete":
-        return f"delete skill '{name}'"
-    return f"{action} '{name}'"
+    template = _GIST_TEMPLATES.get(action, "{action} '{name}'")
+    return template.format(action=action, name=name, file_path=file_path)
 
 
 def _frontmatter_description(content: str) -> str:
@@ -323,15 +274,11 @@ def _find_skill_path(name: str) -> Optional[Path]:
 
 
 def skill_pending_diff(record: Dict[str, Any]) -> str:
-    """Full content (create) or unified diff vs. the on-disk skill (edit/patch/write_file).
-
-    Rendered by /skills diff <id> on surfaces that can show it (CLI pager,
-    dashboard, pending JSON file).
-    """
+    """Full content (create) or unified diff vs. the on-disk skill (edit/patch/write_file),
+    rendered by /skills diff <id> on surfaces that can show it."""
     payload = record.get("payload", {})
     action = payload.get("action", "")
     name = payload.get("name", "")
-
     if action == "create":
         return payload.get("content") or ""
     if action == "remove_file":
@@ -350,24 +297,17 @@ def skill_pending_diff(record: Dict[str, Any]) -> str:
             target_label = payload.get("file_path") or "SKILL.md"
         try:
             p = skill_dir / target_label
-            if p.exists():
-                current = p.read_text(encoding="utf-8")
+            current = p.read_text(encoding="utf-8") if p.exists() else ""
         except Exception:
             current = ""
 
     if action == "edit":
         new = payload.get("content") or ""
     elif action == "patch":
-        old_s = payload.get("old_string") or ""
-        new_s = payload.get("new_string") or ""
+        old_s, new_s = payload.get("old_string") or "", payload.get("new_string") or ""
         new = current.replace(old_s, new_s) if current else f"(patch {old_s!r} → {new_s!r})"
     else:
         new = payload.get("file_content") or ""
-
-    diff = difflib.unified_diff(
-        current.splitlines(keepends=True),
-        new.splitlines(keepends=True),
-        fromfile=f"a/{target_label}",
-        tofile=f"b/{target_label}",
-    )
+    diff = difflib.unified_diff(current.splitlines(keepends=True), new.splitlines(keepends=True),
+                                fromfile=f"a/{target_label}", tofile=f"b/{target_label}")
     return "".join(diff) or "(no textual change)"
