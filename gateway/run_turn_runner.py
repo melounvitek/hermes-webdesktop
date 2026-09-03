@@ -76,8 +76,11 @@ class TurnRunner:
             ctx._cleanup_msg_ids.append(str(result.message_id))
 
     def _track_future_cleanup_id(self, fut) -> None:
-        with suppress(Exception):
-            self._track_progress_result(fut.result())
+        try:
+            res = fut.result()
+        except Exception:
+            return
+        self._track_progress_result(res)
 
     # ── progress_callback (agent thread → progress queue) ───────────────────────────────────
 

@@ -70,10 +70,11 @@ class _ShellContext:  # one `(` / `$(` / backtick nesting level and its live quo
 
 def get_running_source_root() -> Path | None:
     """The source checkout backing this process, if there is one."""
-    with contextlib.suppress(OSError, RuntimeError):
+    try:
         root = Path(__file__).resolve().parent.parent
-        return root if (root / ".git").exists() else None
-    return None
+    except (OSError, RuntimeError):
+        return None
+    return root if (root / ".git").exists() else None
 
 
 def _resolve(path_str: str, base: Path) -> Path:
@@ -373,10 +374,11 @@ def _inspect_git(
         return None
     if alias.startswith("!"):  # shell alias: scan it as a command
         return _find_mutation(alias[1:], target, root, depth + 1)
-    with contextlib.suppress(ValueError):
+    try:
         alias_args = shlex.split(alias, posix=True)
-        return _inspect_git(executable, [*alias_args, *sub_args], target, {}, root, depth + 1)
-    return None
+    except ValueError:
+        return None
+    return _inspect_git(executable, [*alias_args, *sub_args], target, {}, root, depth + 1)
 
 
 def _inspect_github_cli(

@@ -205,7 +205,8 @@ def _stale_error_types() -> tuple:
         ("botocore.exceptions", ("ConnectionError", "HTTPClientError")),
         ("urllib3.exceptions", ("ProtocolError", "NewConnectionError", "ConnectionError")),
     ):
-        with suppress(ImportError):  # pragma: no cover — both present with boto3
+        # AttributeError too: ``from mod import Name`` raised ImportError for a missing name.
+        with suppress(ImportError, AttributeError):  # pragma: no cover — both present with boto3
             types += [getattr(importlib.import_module(module), name) for name in names]
     return tuple(types)
 
