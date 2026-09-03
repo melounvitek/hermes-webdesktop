@@ -8,6 +8,7 @@ avoids an import cycle).
 """
 
 import logging
+import contextlib
 import hashlib
 import json
 import os
@@ -20,8 +21,7 @@ import time as _time
 from pathlib import Path
 from typing import Callable
 from hermes_cli.main_tui_launch import (
-    _npm_lifecycle_env, _termux_workspace_install_context, _workspace_root
-)
+    _npm_lifecycle_env, _termux_workspace_install_context, _workspace_root)
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("hermes_cli.main")
@@ -99,12 +99,10 @@ def _hash_source_tree(project_root: Path, tree_dir: Path) -> str:
     def _hash_file(path: Path) -> None:
         h.update(str(path.relative_to(project_root)).encode())
         h.update(b"\0")
-        try:
+        with contextlib.suppress(OSError):
             with open(path, "rb") as f:
                 for chunk in iter(lambda: f.read(65536), b""):
                     h.update(chunk)
-        except OSError:
-            pass
         h.update(b"\0")
 
     from pathspec import PathSpec
@@ -172,14 +170,10 @@ def _web_ui_build_needed(web_dir: Path) -> bool:
     """
     project_root = _web_project_root(web_dir)
     dist_dir = _web_dist_dir(web_dir)
-    sentinel = dist_dir / ".vite" / "manifest.json"
-    if not sentinel.exists():
-        sentinel = dist_dir / "index.html"
-    if not sentinel.exists():
+    if not any(p.exists() for p in (dist_dir / ".vite" / "manifest.json", dist_dir / "index.html")):
         return True
     return not _stamp_is_current(
-        _web_ui_stamp_path(), lambda: _compute_web_ui_content_hash(project_root, web_dir)
-    )
+        _web_ui_stamp_path(), lambda: _compute_web_ui_content_hash(project_root, web_dir))
 
 
 def _compute_web_ui_content_hash(project_root: Path, web_dir: Path) -> str:
@@ -196,8 +190,7 @@ def _web_ui_stamp_path() -> Path:
 def _write_web_ui_build_stamp(project_root: Path, web_dir: Path) -> None:
     """Write the web UI build stamp after a successful build."""
     _write_build_stamp(
-        _web_ui_stamp_path(), "web UI", lambda: _compute_web_ui_content_hash(project_root, web_dir)
-    )
+        _web_ui_stamp_path(), "web UI", lambda: _compute_web_ui_content_hash(project_root, web_dir))
 
 
 def _console_print(text: str) -> None:
@@ -211,8 +204,7 @@ def _console_print(text: str) -> None:
 
 def _run_with_idle_timeout(
     cmd: list[str], cwd: Path, *, idle_timeout_seconds: int = 180, indent: str = "    ",
-    env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess:
+    env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     """Stream a subprocess, killing it after *idle_timeout_seconds* of silence (a silent captured
     Vite build on a low-memory host looks like a hang and users reboot mid-install). Returns merged
     stdout, empty stderr, rc 124 if terminate raced a clean exit; never raises on idle timeout."""
@@ -223,8 +215,7 @@ def _run_with_idle_timeout(
     try:
         proc = subprocess.Popen(
             cmd, cwd=cwd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-            text=True, encoding="utf-8", errors="replace", bufsize=1, env=env,
-        )
+            text=True, encoding="utf-8", errors="replace", bufsize=1, env=env)
     except OSError as exc:
         # E.g. npm not on PATH between the which() check and now.
         return subprocess.CompletedProcess(cmd, 127, stdout="", stderr=str(exc))
@@ -292,7 +283,8 @@ def _nixos_build_env() -> dict[str, str] | None:
         if venv_python.exists():
             return {**os.environ, "PYTHON": str(venv_python)}
 
-    try:
+    # nix-shell not available — caller will get None
+    with contextlib.suppress(Exception):
         result = subprocess.run(
             ["nix-shell", "-p", "python3", "--run", "which python3"],
             capture_output=True, text=True, encoding="utf-8", errors="replace", check=False, timeout=15,
@@ -301,16 +293,13 @@ def _nixos_build_env() -> dict[str, str] | None:
             python3_path = result.stdout.strip()
             if python3_path and Path(python3_path).exists():
                 return {**os.environ, "PYTHON": python3_path}
-    except Exception:
-        pass  # nix-shell not available — caller will get None
 
     return None
 
 
 def _run_npm_install_deterministic(
     npm: str, cwd: Path, *, extra_args: tuple[str, ...] = (), capture_output: bool = True,
-    env: dict[str, str] | None = None,
-) -> subprocess.CompletedProcess:
+    env: dict[str, str] | None = None) -> subprocess.CompletedProcess:
     """Deterministic npm install that never mutates ``package-lock.json``.
 
     ``npm ci`` when a lockfile exists, else/on failure ``npm install --no-save``

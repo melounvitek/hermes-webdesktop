@@ -8,6 +8,7 @@ avoids an import cycle).
 """
 
 import logging
+import contextlib
 import argparse
 import os
 import re
@@ -22,7 +23,8 @@ import time as _time_mod
 from pathlib import Path
 from typing import Optional
 from hermes_cli.main_tui_launch import _npm_lifecycle_env
-from hermes_cli.main_web_build import _hash_source_tree, _nixos_build_env, _stamp_is_current, _write_build_stamp
+from hermes_cli.main_web_build import (
+    _hash_source_tree, _nixos_build_env, _stamp_is_current, _write_build_stamp)
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("hermes_cli.main")
@@ -122,8 +124,7 @@ def _write_desktop_build_stamp(project_root: Path, *, source_mode: bool) -> None
     from hermes_cli.main import _desktop_stamp_path
     _write_build_stamp(
         _desktop_stamp_path(), "desktop",
-        lambda: _compute_desktop_content_hash(project_root), sourceMode=source_mode,
-    )
+        lambda: _compute_desktop_content_hash(project_root), sourceMode=source_mode)
 
 
 def _desktop_packaged_executable(desktop_dir: Path) -> Optional[Path]:
@@ -233,24 +234,27 @@ _PE_MACHINE_TO_NAME = {_PE_MACHINE_ARM64: "ARM64", _PE_MACHINE_AMD64: "AMD64", _
 _MACHINE_ATTRIBUTE_USER_ENABLED = 0x00000001
 
 
+def _kernel32():
+    import ctypes
+    return ctypes.WinDLL("kernel32", use_last_error=True)
+
+
 def _windows_native_machine_from_iswow64() -> Optional[str]:
     """IsWow64Process2's OS-native machine, or None. HANDLE types are bound explicitly: ctypes'
     default ``c_int`` truncates the ``(HANDLE)-1`` pseudo-handle → ``ERROR_INVALID_HANDLE`` on Win64."""
     import ctypes
     from ctypes import wintypes
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = _kernel32()
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
     kernel32.GetCurrentProcess.argtypes = []
     kernel32.IsWow64Process2.argtypes = [
-        wintypes.HANDLE, ctypes.POINTER(wintypes.USHORT), ctypes.POINTER(wintypes.USHORT),
-    ]
+        wintypes.HANDLE, ctypes.POINTER(wintypes.USHORT), ctypes.POINTER(wintypes.USHORT)]
     kernel32.IsWow64Process2.restype = wintypes.BOOL
 
     process_machine = wintypes.USHORT(0)
     native_machine = wintypes.USHORT(0)
     if not kernel32.IsWow64Process2(
-        kernel32.GetCurrentProcess(), ctypes.byref(process_machine), ctypes.byref(native_machine)
-    ):
+        kernel32.GetCurrentProcess(), ctypes.byref(process_machine), ctypes.byref(native_machine)):
         return None
     return _PE_MACHINE_TO_NAME.get(native_machine.value)
 
@@ -260,7 +264,7 @@ def _windows_user_runnable_pe_machines() -> Optional[set]:
     AMD64-on-ARM64 emulation); None when unavailable (pre-Win11 22000) so callers fall back."""
     import ctypes
     from ctypes import wintypes
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32 = _kernel32()
     kernel32.GetMachineTypeAttributes.argtypes = [wintypes.USHORT, ctypes.POINTER(ctypes.c_int)]
     kernel32.GetMachineTypeAttributes.restype = ctypes.c_long
 
@@ -422,16 +426,13 @@ def _ensure_desktop_exe_launchable(desktop_dir: Path, packaged_executable: Optio
     if error is None:
         return packaged_executable, False
 
-    print(f"✗ The built Hermes.exe failed its integrity check: {error}")
-    print(f"    at: {packaged_executable}")
+    print(f"✗ The built Hermes.exe failed its integrity check: {error}\n    at: {packaged_executable}")
 
     # Only the exe's OWN output dir is purged (a staging dir), never the live
     # release/ tree that still holds the last working app.
     _purge_electron_build_cache(desktop_dir, release_dir=packaged_executable.parent.parent)
-    try:
+    with contextlib.suppress(OSError):
         _desktop_stamp_path().unlink()
-    except OSError:
-        pass
 
     restored = _rollback_desktop_from_backup(packaged_executable)
     if restored is not None:
@@ -451,24 +452,18 @@ def _electron_download_cache_dirs() -> list[Path]:
     first): ``unpack-electron`` extracts from a zip here, NOT node_modules, so a corrupt zip poisons
     the build."""
     home = Path.home()
-    candidates: list[Path] = []
     override = os.environ.get("electron_config_cache") or os.environ.get("ELECTRON_CACHE")
-    if override:
-        candidates.append(Path(override))
+    candidates: list[Optional[str | Path]] = [override]
     if sys.platform == "darwin":
         candidates.append(home / "Library" / "Caches" / "electron")
     elif sys.platform == "win32":
         local = os.environ.get("LOCALAPPDATA")
-        if local:
-            candidates.append(Path(local) / "electron" / "Cache")
-        candidates.append(home / "AppData" / "Local" / "electron" / "Cache")
+        candidates += [Path(local) / "electron" / "Cache" if local else None,
+                       home / "AppData" / "Local" / "electron" / "Cache"]
     else:
         xdg = os.environ.get("XDG_CACHE_HOME")
-        if xdg:
-            candidates.append(Path(xdg) / "electron")
-        candidates.append(home / ".cache" / "electron")
-
-    return list(dict.fromkeys(c.expanduser() for c in candidates))
+        candidates += [Path(xdg) / "electron" if xdg else None, home / ".cache" / "electron"]
+    return list(dict.fromkeys(Path(c).expanduser() for c in candidates if c))
 
 
 def _purge_electron_build_cache(desktop_dir: Path, release_dir: Optional[Path] = None) -> list[Path]:
@@ -489,21 +484,18 @@ def _purge_electron_build_cache(desktop_dir: Path, release_dir: Optional[Path] =
         if not cache_dir.is_dir():
             continue
         for zip_path in sorted(cache_dir.rglob("electron-*.zip")):
-            try:
+            # locked/permission-denied: let the build report its own error
+            with contextlib.suppress(OSError):
                 zip_path.unlink()
                 removed.append(zip_path)
-            except OSError:
-                pass  # locked/permission-denied: let the build report its own error
 
     if release_dir is None:
         release_dir = desktop_dir / "release"
     if release_dir.is_dir():
         for unpacked in release_dir.glob("*-unpacked"):
-            try:
+            with contextlib.suppress(OSError):
                 shutil.rmtree(unpacked, ignore_errors=True)
                 removed.append(unpacked)
-            except OSError:
-                pass
 
     return removed
 
@@ -547,8 +539,7 @@ def _electron_pkg_staged_missing_dist(project_root: Path) -> bool:
     return (
         (electron_dir / "package.json").is_file()
         and (electron_dir / "install.js").is_file()
-        and not _electron_dist_ok(project_root)
-    )
+        and not _electron_dist_ok(project_root))
 
 
 def _redownload_electron_dist(project_root: Path, env: dict, *, mirror: Optional[str] = None) -> bool:
@@ -567,10 +558,8 @@ def _redownload_electron_dist(project_root: Path, env: dict, *, mirror: Optional
         return False
 
     shutil.rmtree(electron_dir / "dist", ignore_errors=True)
-    try:
+    with contextlib.suppress(OSError):
         (electron_dir / "path.txt").unlink()
-    except OSError:
-        pass
 
     dl_env = with_hermes_node_path(env)
     if mirror:
@@ -634,15 +623,13 @@ def _stop_desktop_processes_locking_build(desktop_dir: Path) -> list[int]:
             continue
     if stopped:
         # Wait for the handles (and thus the file locks) to actually release.
-        try:
+        with contextlib.suppress(Exception):
             _, alive = psutil.wait_procs(victims, timeout=5)
             for proc in alive:
                 try:
                     proc.kill()
                 except Exception:
                     continue
-        except Exception:
-            pass
     return stopped
 
 
@@ -652,8 +639,7 @@ def _desktop_macos_bundle_id(bundle: Path) -> Optional[str]:
     info = bundle / "Contents" / "Info.plist"
     if not info.exists() and bundle.suffix == ".framework":
         candidates = list(bundle.glob("Versions/*/Resources/Info.plist")) + list(
-            bundle.glob("Resources/Info.plist")
-        )
+            bundle.glob("Resources/Info.plist"))
         if candidates:
             info = candidates[0]
     if not info.exists():
@@ -690,8 +676,7 @@ def _desktop_macos_local_signing_identity() -> Optional[str]:
 
 def _codesign_verify(codesign: str, app: Path, **kwargs) -> subprocess.CompletedProcess:
     return subprocess.run(
-        [codesign, "--verify", "--deep", "--strict", str(app)], capture_output=True, **kwargs
-    )
+        [codesign, "--verify", "--deep", "--strict", str(app)], capture_output=True, **kwargs)
 
 
 def _desktop_macos_has_valid_real_signature(app: Path) -> bool:
@@ -702,8 +687,7 @@ def _desktop_macos_has_valid_real_signature(app: Path) -> bool:
         return False
     try:
         info = subprocess.run(
-            [codesign, "-dv", str(app)], check=False, capture_output=True, text=True
-        )
+            [codesign, "-dv", str(app)], check=False, capture_output=True, text=True)
         output = f"{info.stdout}\n{info.stderr}"
         if info.returncode != 0 or "TeamIdentifier=" not in output or "TeamIdentifier=not set" in output:
             return False
@@ -731,8 +715,7 @@ def _desktop_macos_local_codesign(app: Path, *, desktop_dir: Path, identity: str
 
     def sign_path(
         path: Path, *, entitlements: Optional[Path] = None, identifier: Optional[str] = None,
-        runtime: bool = True,
-    ) -> None:
+        runtime: bool = True) -> None:
         args = [codesign, "--force", "--sign", identity, "--timestamp=none"]
         if runtime:
             args += ["--options", "runtime"]
@@ -808,8 +791,7 @@ def _macos_legacy_adhoc_resign(codesign: str, app: Path) -> bool:
 
 def _desktop_macos_relaunchable_fixup(
     desktop_dir: Path, *, publisher_signing_configured: Optional[bool] = None,
-    release_dir: Optional[Path] = None,
-) -> bool:
+    release_dir: Optional[Path] = None) -> bool:
     """Re-sign a locally-built macOS app so in-place self-update doesn't reset TCC grants.
 
     A rebuilt ad-hoc bundle (new cdhash, no stable Designated Requirement) reports
@@ -825,8 +807,7 @@ def _desktop_macos_relaunchable_fixup(
         return True
     if publisher_signing_configured is None:
         publisher_signing_configured = bool(
-            os.environ.get("CSC_LINK") or os.environ.get("APPLE_SIGNING_IDENTITY")
-        )
+            os.environ.get("CSC_LINK") or os.environ.get("APPLE_SIGNING_IDENTITY"))
     if publisher_signing_configured:
         return True
     exe = _desktop_packaged_executable_in(release_dir or (desktop_dir / "release"))
@@ -872,8 +853,7 @@ def _macos_codesigning_identity_valid(security: str, identity: str) -> bool:
 
 
 def _macos_create_signing_identity(
-    openssl: str, security: str, codesign: str, keychain: str, identity: str
-) -> bool:
+    openssl: str, security: str, codesign: str, keychain: str, identity: str) -> bool:
     """Create a self-signed code-signing cert (10 years), import it with codesign access, trust it for codeSign."""
     tmp_dir = Path(tempfile.mkdtemp(prefix="hermes-tcc-"))
     try:
@@ -890,8 +870,7 @@ def _macos_create_signing_identity(
                 "-addext", "keyUsage=critical,digitalSignature,keyCertSign",
                 "-addext", "extendedKeyUsage=codeSigning",
             ],
-            capture_output=True, check=True,
-        )
+            capture_output=True, check=True)
 
         # OpenSSL 3 defaults to AES/SHA-2 PKCS#12 that `security import` rejects
         # with "MAC verification failed". `-legacy` restores the accepted
@@ -904,8 +883,7 @@ def _macos_create_signing_identity(
                     "-inkey", str(key), "-in", str(crt),
                     "-out", str(p12), "-passout", "pass:hermeslocal",
                 ],
-                capture_output=True, check=True,
-            )
+                capture_output=True, check=True)
 
         def _import_p12():
             return subprocess.run(
@@ -914,17 +892,15 @@ def _macos_create_signing_identity(
                     "-P", "hermeslocal",
                     "-T", codesign, "-T", "/usr/bin/codesign_allocate",
                 ],
-                capture_output=True, text=True, check=False,
-            )
+                capture_output=True, text=True, check=False)
 
         _export_p12([])
         imported = _import_p12()
         if imported.returncode != 0 and "MAC verification failed" in (imported.stderr or ""):
-            try:
+            # older OpenSSL without -legacy: keep the original failure
+            with contextlib.suppress(subprocess.CalledProcessError):
                 _export_p12(["-legacy"])
                 imported = _import_p12()
-            except subprocess.CalledProcessError:
-                pass  # older OpenSSL without -legacy: keep the original failure
         if imported.returncode != 0:
             print(f"  (could not import signing identity into keychain: {imported.stderr.strip()})")
             return False
@@ -935,8 +911,7 @@ def _macos_create_signing_identity(
         # command exists to front-load.
         trusted = subprocess.run(
             [security, "add-trusted-cert", "-r", "trustRoot", "-p", "codeSign", "-k", keychain, str(crt)],
-            capture_output=True, text=True, check=False,
-        )
+            capture_output=True, text=True, check=False)
         if trusted.returncode != 0:
             print(
                 "  (could not trust the certificate for code signing: "
@@ -1062,8 +1037,7 @@ def _desktop_linux_userns_sandbox_available() -> bool:
                 [unshare, "--user", "--map-root-user", "true"],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=5, check=False,
             ).returncode
-            == 0
-        )
+            == 0)
     except (OSError, subprocess.TimeoutExpired):
         return False
 
@@ -1138,6 +1112,8 @@ def _desktop_linux_needs_disable_setuid_sandbox(packaged_executable: Path) -> bo
 
 _LINUX_PASSWORD_STORES = frozenset({"gnome-libsecret", "kwallet", "kwallet5", "kwallet6", "basic"})
 
+_GPU_FLAG_WORDS = {**dict.fromkeys(("1", "true", "yes", "on"), "1"), **dict.fromkeys(("0", "false", "no", "off"), "0")}
+
 
 def _detect_linux_password_store() -> str | None:
     """Chromium password-store backend for this Linux session (KDE env → GNOME Keyring socket → D-Bus
@@ -1150,7 +1126,7 @@ def _detect_linux_password_store() -> str | None:
         return "kwallet"
     if os.environ.get("GNOME_KEYRING_CONTROL"):
         return "gnome-libsecret"
-    try:
+    with contextlib.suppress(Exception):
         result = subprocess.run(
             [
                 "dbus-send", "--session", "--print-reply", "--reply-timeout=2000",
@@ -1159,12 +1135,9 @@ def _detect_linux_password_store() -> str | None:
                 "org.freedesktop.DBus.Peer.Ping",
             ],
             capture_output=True,
-            timeout=5,
-        )
+            timeout=5)
         if result.returncode == 0:
             return "gnome-libsecret"
-    except Exception:
-        pass
     return None
 
 
@@ -1186,23 +1159,18 @@ def _desktop_launch_options() -> tuple[list[str], str, str, str]:
     elif isinstance(raw_flags, (list, tuple)):
         flags = [str(f) for f in raw_flags if str(f).strip()]
 
+    def _choice(key: str, allowed) -> str:
+        raw = desktop_cfg.get(key, "auto")
+        low = raw.strip().lower() if isinstance(raw, str) else ""
+        return low if low in allowed else "auto"
+
     raw_gpu = desktop_cfg.get("disable_gpu", "auto")
     if isinstance(raw_gpu, bool):
         disable_gpu = "1" if raw_gpu else "0"
     elif isinstance(raw_gpu, str):
-        low = raw_gpu.strip().lower()
-        if low in ("1", "true", "yes", "on"):
-            disable_gpu = "1"
-        elif low in ("0", "false", "no", "off"):
-            disable_gpu = "0"
-
-    raw_store = desktop_cfg.get("password_store", "auto")
-    if isinstance(raw_store, str) and raw_store.strip().lower() in _LINUX_PASSWORD_STORES:
-        password_store = raw_store.strip().lower()
-
-    raw_ozone = desktop_cfg.get("ozone_platform_hint", "auto")
-    if isinstance(raw_ozone, str) and raw_ozone.strip().lower() in ("auto", "x11", "wayland"):
-        ozone_hint = raw_ozone.strip().lower()
+        disable_gpu = _GPU_FLAG_WORDS.get(raw_gpu.strip().lower(), "auto")
+    password_store = _choice("password_store", _LINUX_PASSWORD_STORES)
+    ozone_hint = _choice("ozone_platform_hint", ("auto", "x11", "wayland"))
     return flags, disable_gpu, password_store, ozone_hint
 
 
@@ -1238,8 +1206,7 @@ def _install_desktop_workspace_deps(npm: str, env: dict) -> None:
     if install_result.returncode == 0:
         return
     if not _electron_pkg_staged_missing_dist(PROJECT_ROOT):
-        print("✗ Desktop dependency install failed")
-        print(f"  Run manually:  cd {PROJECT_ROOT} && npm ci")
+        print(f"✗ Desktop dependency install failed\n  Run manually:  cd {PROJECT_ROOT} && npm ci")
         sys.exit(install_result.returncode or 1)
     if _try_redownload_electron_dist(PROJECT_ROOT, env):
         print("  ⚠ Dependency install failed with a missing Electron dist; "
@@ -1285,8 +1252,7 @@ def _run_desktop_pack_with_recovery(
         build_result.returncode != 0
         and staging_dir is not None
         and not env.get("ELECTRON_MIRROR")
-        and _staged_exe() is None
-    ):
+        and _staged_exe() is None):
         print("  ⚠ Desktop build still failing; the Electron download from "
               "GitHub looks blocked. Re-downloading via a public mirror "
               "(npmmirror.com)... (set ELECTRON_MIRROR to use another mirror)")
@@ -1384,20 +1350,17 @@ def _desktop_launch_env(args: argparse.Namespace) -> tuple[dict, list[str]]:
     from hermes_constants import with_hermes_node_path
     # with_hermes_node_path() copies os.environ when called with no arg.
     env = with_hermes_node_path()
-    if getattr(args, "fake_boot", False):
-        env["HERMES_DESKTOP_BOOT_FAKE"] = "1"
-    if getattr(args, "ignore_existing", False):
-        env["HERMES_DESKTOP_IGNORE_EXISTING"] = "1"
+    for attr, key in (
+        ("fake_boot", "HERMES_DESKTOP_BOOT_FAKE"), ("ignore_existing", "HERMES_DESKTOP_IGNORE_EXISTING")):
+        if getattr(args, attr, False):
+            env[key] = "1"
     if getattr(args, "hermes_root", None):
         env["HERMES_DESKTOP_HERMES_ROOT"] = str(Path(args.hermes_root).expanduser().resolve())
-    if getattr(args, "cwd", None):
-        env["HERMES_DESKTOP_CWD"] = str(Path(args.cwd).expanduser().resolve())
-    else:
-        env["HERMES_DESKTOP_CWD"] = os.getcwd()
+    cwd = getattr(args, "cwd", None)
+    env["HERMES_DESKTOP_CWD"] = str(Path(cwd).expanduser().resolve()) if cwd else os.getcwd()
 
     config_electron_flags, config_disable_gpu, config_password_store, config_ozone_hint = (
-        _desktop_launch_options()
-    )
+        _desktop_launch_options())
     if config_disable_gpu != "auto" and "HERMES_DESKTOP_DISABLE_GPU" not in os.environ:
         env["HERMES_DESKTOP_DISABLE_GPU"] = config_disable_gpu
     if config_ozone_hint != "auto" and "ELECTRON_OZONE_PLATFORM_HINT" not in os.environ:
@@ -1463,11 +1426,9 @@ def cmd_gui(args: argparse.Namespace):
         print(f"Desktop GUI source not found at: {desktop_dir}")
         sys.exit(1)
 
-    try:
+    with contextlib.suppress(Exception):
         from hermes_logging import setup_logging as _setup_logging_gui
         _setup_logging_gui(mode="gui")
-    except Exception:
-        pass
 
     env, config_electron_flags = _desktop_launch_env(args)
 

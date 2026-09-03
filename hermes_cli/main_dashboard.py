@@ -7,6 +7,7 @@ Names that stay in main are imported lazily inside the functions that use them
 avoids an import cycle).
 """
 
+import contextlib
 import os
 import re
 import shlex
@@ -70,8 +71,7 @@ _SYSTEMCTL_ERRORS = (FileNotFoundError, subprocess.TimeoutExpired, OSError)
 def _run_probe(cmd: list[str], *, timeout: int) -> subprocess.CompletedProcess:
     """Captured, text-decoded ``subprocess.run`` for short local probes (systemctl, ps)."""
     return subprocess.run(
-        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout
-    )
+        cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=timeout)
 
 
 def _restart_managed_dashboard_service(reason: str, unit: str = _DASHBOARD_SYSTEMD_UNIT) -> bool:
@@ -120,8 +120,7 @@ def _restart_managed_dashboard_service(reason: str, unit: str = _DASHBOARD_SYSTE
     }:
         return False
 
-    print()
-    print(f"⟲ Restarting managed dashboard service ({reason})")
+    print(f"\n⟲ Restarting managed dashboard service ({reason})")
 
     scope_label = "systemctl --user" if scope else "sudo systemctl"
     commands = [("systemctl", *scope, "restart", unit)]
@@ -249,10 +248,8 @@ def _respawn_dashboard_processes(commands: list[list[str]]) -> list[list[str]]:
     respawned: list[list[str]] = []
     failed: list[tuple[list[str], str]] = []
     log_path = get_hermes_home() / "logs" / "dashboard-restart.log"
-    try:
+    with contextlib.suppress(OSError):
         log_path.parent.mkdir(parents=True, exist_ok=True)
-    except OSError:
-        pass
 
     for command in commands:
         try:
@@ -263,8 +260,7 @@ def _respawn_dashboard_processes(commands: list[list[str]]) -> list[list[str]]:
             with open(log_path, "ab") as log_f:
                 subprocess.Popen(
                     command, stdin=subprocess.DEVNULL, stdout=log_f, stderr=subprocess.STDOUT,
-                    start_new_session=True, close_fds=True,
-                )
+                    start_new_session=True, close_fds=True)
             respawned.append(command)
         except (OSError, ValueError) as exc:
             failed.append((command, str(exc)))
@@ -290,10 +286,8 @@ class _UpdateOutputStream:
     def write(self, data):
         # Mirror to the log file first — it's the most reliable destination.
         if self._log is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._log.write(data)
-            except Exception:
-                pass
         if not self._original_broken:
             try:
                 return self._original.write(data)
@@ -303,10 +297,8 @@ class _UpdateOutputStream:
 
     def flush(self):
         if self._log is not None:
-            try:
+            with contextlib.suppress(Exception):
                 self._log.flush()
-            except Exception:
-                pass
         if self._original_broken:
             return
         try:
@@ -335,8 +327,7 @@ def _install_hangup_protection(gateway_mode: bool = False):
     (stdio wrapped in ``_UpdateOutputStream``). SIGINT/SIGTERM are left alone — legitimate cancels.
     No-op in gateway mode (already detached). Returns state for ``_finalize_update_output``."""
     state = {
-        "prev_stdout": sys.stdout, "prev_stderr": sys.stderr, "log_file": None, "installed": False
-    }
+        "prev_stdout": sys.stdout, "prev_stderr": sys.stderr, "log_file": None, "installed": False}
 
     if gateway_mode:
         return state
@@ -344,10 +335,9 @@ def _install_hangup_protection(gateway_mode: bool = False):
     import signal as _signal
 
     if hasattr(_signal, "SIGHUP"):
-        try:
+        # Non-main thread: update still runs, just without hangup protection.
+        with contextlib.suppress(ValueError, OSError):
             _signal.signal(_signal.SIGHUP, _signal.SIG_IGN)
-        except (ValueError, OSError):
-            pass  # non-main thread — update still runs, just without hangup protection
 
     # Any failure here is non-fatal; we just skip the wrap.
     try:
@@ -377,21 +367,15 @@ def _finalize_update_output(state):
     if not state:
         return
     if state.get("installed"):
-        try:
+        with contextlib.suppress(Exception):
             sys.stdout = state.get("prev_stdout", sys.stdout)
-        except Exception:
-            pass
-        try:
+        with contextlib.suppress(Exception):
             sys.stderr = state.get("prev_stderr", sys.stderr)
-        except Exception:
-            pass
     log_file = state.get("log_file")
     if log_file is not None:
-        try:
+        with contextlib.suppress(Exception):
             log_file.flush()
             log_file.close()
-        except Exception:
-            pass
 
 
 def _report_dashboard_status() -> int:
@@ -464,8 +448,7 @@ def _maybe_setup_dashboard_auth_interactively(args) -> None:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         return
 
-    print()
-    print(f"⚠ Dashboard authentication is required for this configuration ({host}).")
+    print(f"\n⚠ Dashboard authentication is required for this configuration ({host}).")
     print(
         "  Non-loopback binds and configured external dashboard.public_url "
         "values require authentication (--insecure does not bypass this)."
@@ -473,9 +456,7 @@ def _maybe_setup_dashboard_auth_interactively(args) -> None:
     print()
     print("  How do you want to authenticate the dashboard?")
     print("    [1] Username & password (quickest; for a trusted LAN / VPN)")
-    print("    [2] OAuth via Nous Portal (run `hermes dashboard register`)")
-    print("    [3] Cancel")
-    print()
+    print("    [2] OAuth via Nous Portal (run `hermes dashboard register`)\n    [3] Cancel\n")
 
     try:
         choice = input("  Choice [1]: ").strip() or "1"
@@ -552,8 +533,7 @@ def _maybe_setup_dashboard_auth_interactively(args) -> None:
     print()
     print(f"  ✓ Username/password auth configured (user: {username}).")
     print("    Saved to config.yaml under dashboard.basic_auth.")
-    print("    Sign in at the dashboard with these credentials.")
-    print()
+    print("    Sign in at the dashboard with these credentials.\n")
 
 
 def _read_ssh_session_token_file(path: str) -> str:
@@ -632,10 +612,8 @@ def _read_ssh_session_token_file(path: str) -> str:
         if file_fd >= 0:
             os.close(file_fd)
         if directory_fd >= 0:
-            try:
+            with contextlib.suppress(OSError):
                 os.unlink(relative.parts[1], dir_fd=directory_fd)
-            except OSError:
-                pass
             os.close(directory_fd)
         if root_fd >= 0:
             os.close(root_fd)
@@ -652,7 +630,8 @@ def _is_electron_packaged_web_dist(path: str) -> bool:
     return "app.asar" in path.replace("\\", "/")
 
 
-def _route_named_profile_dashboard(args, _headless_backend: bool, _ssh_owner_nonce: str, _token_file: str) -> None:
+def _route_named_profile_dashboard(
+    args, _headless_backend: bool, _ssh_owner_nonce: str, _token_file: str) -> None:
     """Route a named-profile launch to the single MACHINE dashboard (per-request ``?profile=`` scoping
     makes one server per profile pure fragmentation).
 
@@ -681,11 +660,9 @@ def _route_named_profile_dashboard(args, _headless_backend: bool, _ssh_owner_non
         print(f"Machine dashboard already running on port {args.port}.")
         print(f"  Managing profile '{_launch_profile}': {url}")
         if not args.no_open:
-            try:
+            with contextlib.suppress(Exception):
                 import webbrowser
                 webbrowser.open(url)
-            except Exception:
-                pass
         sys.exit(0)
 
     print(
@@ -700,18 +677,15 @@ def _route_named_profile_dashboard(args, _headless_backend: bool, _ssh_owner_non
         "serve" if _headless_backend else "dashboard",
         "--port", str(args.port),
         "--host", args.host,
-        "--open-profile", _launch_profile,
-    ]
-    if _ssh_owner_nonce:
-        reexec_argv.extend(["--ssh-owner-nonce", _ssh_owner_nonce])
-    if _token_file:
-        reexec_argv.extend(["--ssh-session-token-file", _token_file])
-    if args.no_open:
-        reexec_argv.append("--no-open")
-    if getattr(args, "insecure", False):
-        reexec_argv.append("--insecure")
-    if getattr(args, "skip_build", False):
-        reexec_argv.append("--skip-build")
+        "--open-profile", _launch_profile]
+    for enabled, extra in (
+        (_ssh_owner_nonce, ["--ssh-owner-nonce", _ssh_owner_nonce]),
+        (_token_file, ["--ssh-session-token-file", _token_file]),
+        (args.no_open, ["--no-open"]),
+        (getattr(args, "insecure", False), ["--insecure"]),
+        (getattr(args, "skip_build", False), ["--skip-build"])):
+        if enabled:
+            reexec_argv.extend(extra)
     from tools.environments.local import build_subprocess_env
     # HERMES_HOME is pinned to the machine root below — the factory must not
     # re-inject a profile home.

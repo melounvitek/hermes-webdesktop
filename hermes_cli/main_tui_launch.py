@@ -8,6 +8,7 @@ avoids an import cycle).
 """
 
 import logging
+import contextlib
 import json
 import os
 import shutil
@@ -54,21 +55,17 @@ def _print_tui_exit_summary(session_id: Optional[str], active_session_file: Opti
             return  # No real conversation — don't show resume info
         tokens = {
             k: int(session.get(f"{k}_tokens") or 0)
-            for k in ("input", "output", "cache_read", "cache_write", "reasoning")
-        }
+            for k in ("input", "output", "cache_read", "cache_write", "reasoning")}
     except Exception:
         return
     finally:
         if db is not None:
             db.close()
 
-    print()
-    print("Resume this session with:")
-    print(f"  hermes --tui --resume {target}")
+    print(f"\nResume this session with:\n  hermes --tui --resume {target}")
     if title:
         print(f'  hermes --tui -c "{title}"')
-    print()
-    print(f"Session:        {target}")
+    print(f"\nSession:        {target}")
     if title:
         print(f"Title:          {title}")
     print(f"Messages:       {message_count}")
@@ -99,8 +96,7 @@ def _workspace_root(dir: Path) -> Path:
     if (
         (dir / "package.json").is_file()
         and not (dir / "package-lock.json").is_file()
-        and (dir.parent / "package-lock.json").is_file()
-    ):
+        and (dir.parent / "package-lock.json").is_file()):
         return dir.parent
     return dir
 
@@ -115,7 +111,8 @@ def _child_workspace_dirs(dir: Path):
             yield child
 
 
-def _termux_workspace_install_context(dir: Path, *, include_child_workspaces: bool = False) -> tuple[Path, tuple[str, ...]]:
+def _termux_workspace_install_context(
+    dir: Path, *, include_child_workspaces: bool = False) -> tuple[Path, tuple[str, ...]]:
     """Return Termux-only ``(cwd, npm_args)`` for installing deps for *dir* only."""
     ws_root = _workspace_root(dir)
     if ws_root == dir:
@@ -340,20 +337,14 @@ def _ensure_tui_node() -> None:
         result = subprocess.run(
             ["bash", "-c", f'source "{helper}" >&2 && ensure_node >&2 && command -v node'],
             env={**os.environ, "HERMES_HOME": hermes_home},
-            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False,
-        )
+            capture_output=True, text=True, encoding="utf-8", errors="replace", check=False)
     except (OSError, subprocess.SubprocessError):
         return
 
     parts = os.environ.get("PATH", "").split(os.pathsep)
-    extras: list[Path] = []
-
     resolved = (result.stdout or "").strip()
-    if resolved:
-        extras.append(Path(resolved).resolve().parent)
-
-    extras.extend([Path(hermes_home) / "node" / "bin", Path.home() / ".local" / "bin"])
-
+    extras = [Path(resolved).resolve().parent] if resolved else []
+    extras += [Path(hermes_home) / "node" / "bin", Path.home() / ".local" / "bin"]
     for extra in extras:
         s = str(extra)
         if extra.is_dir() and s not in parts:
@@ -378,8 +369,7 @@ def _restore_tui_workspace(tui_dir: Path) -> bool:
     try:
         subprocess.run(
             [git, "restore", "--", tui_dir.name], cwd=str(tui_dir.parent), capture_output=True,
-            text=True, encoding="utf-8", errors="replace", check=False,
-        )
+            text=True, encoding="utf-8", errors="replace", check=False)
     except OSError:
         return False
     return tui_dir.is_dir()
@@ -405,8 +395,7 @@ def _ensure_tui_workspace(tui_dir: Path) -> None:
         "  2. Run `npm install --silent --no-fund --no-audit --progress=false`\n"
         "  3. Retry `hermes --tui`\n"
         "If the checkout is still inconsistent, run `hermes update --force`.",
-        file=sys.stderr,
-    )
+        file=sys.stderr)
     sys.exit(1)
 
 
@@ -429,12 +418,10 @@ def _tui_node_bin(bin: str) -> str:
     from hermes_constants import find_node_executable
     path = find_node_executable(bin)
     if not path and bin == "node":
-        try:
+        with contextlib.suppress(Exception):
             from hermes_cli.dep_ensure import ensure_dependency
             if ensure_dependency("node"):
                 path = find_node_executable("node")
-        except Exception:
-            pass
     if not path:
         print(f"{bin} not found — install Node.js to use the TUI.")
         sys.exit(1)
@@ -457,8 +444,7 @@ def _run_tui_npm_build(npm: str, cwd: Path, failure_message: str) -> None:
     """``npm run build`` in *cwd*; exit with *failure_message* + output tail on failure."""
     result = subprocess.run(
         [npm, "run", "build"], cwd=str(cwd), capture_output=True, text=True, encoding="utf-8",
-        errors="replace", env=_npm_lifecycle_env(),
-    )
+        errors="replace", env=_npm_lifecycle_env())
     _exit_on_npm_failure(result, failure_message, sep="")
 
 
@@ -489,8 +475,7 @@ def _install_tui_dependencies(tui_dir: Path, *, termux_startup: bool) -> None:
         return subprocess.run(
             npm_install_cmd, cwd=str(npm_cwd), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
             text=True, encoding="utf-8", errors="replace",
-            env=_npm_lifecycle_env(with_hermes_node_path()),
-        )
+            env=_npm_lifecycle_env(with_hermes_node_path()))
 
     result = _run_tui_install()
     if result.returncode != 0:
@@ -517,8 +502,7 @@ def _make_tui_argv(tui_dir: Path, tui_dev: bool) -> tuple[list[str], Path]:
             f"Error: --dev is incompatible with HERMES_TUI_DIR={ext_dir}\n"
             f"The prebuilt TUI has no source code to hot-reload.\n"
             f"Unset HERMES_TUI_DIR (e.g. `unset HERMES_TUI_DIR`) to use --dev from a checkout.",
-            file=sys.stderr,
-        )
+            file=sys.stderr)
         sys.exit(1)
 
     # 1. Prebuilt bundle (nix / packaged release / Docker image): just run it.
@@ -686,7 +670,8 @@ def _setup_tui_worktree() -> dict:
             # multi-agent box; on a thread so it can't block launch.
             import threading as _threading
 
-            _threading.Thread(target=_maintain_pack_health, args=(repo,), name="pack-maintenance", daemon=True).start()
+            _threading.Thread(
+                target=_maintain_pack_health, args=(repo,), name="pack-maintenance", daemon=True).start()
         wt_info = _setup_worktree()
     except Exception as exc:
         print(f"✗ Failed to create TUI worktree: {exc}", file=sys.stderr)
@@ -700,8 +685,7 @@ def _launch_tui(
     provider: Optional[str] = None, toolsets: object = None, skills: object = None,
     verbose: Optional[bool] = None, quiet: bool = False, query: Optional[str] = None,
     image: Optional[str] = None, worktree: bool = False, checkpoints: bool = False,
-    pass_session_id: bool = False, max_turns: Optional[int] = None, accept_hooks: bool = False,
-):
+    pass_session_id: bool = False, max_turns: Optional[int] = None, accept_hooks: bool = False):
     """Replace current process with the TUI."""
     from hermes_cli.main import PROJECT_ROOT, _apply_tui_python_env, _make_tui_argv, _resolve_tui_heap_mb
     tui_dir = PROJECT_ROOT / "ui-tui"
@@ -716,7 +700,8 @@ def _launch_tui(
         apply_terminal_config_to_env(env=env)
     except Exception:
         logger.debug("Failed to apply terminal config bridge for TUI launch", exc_info=True)
-    active_session_fd, active_session_file = tempfile.mkstemp(prefix="hermes-tui-active-session-", suffix=".json")
+    active_session_fd, active_session_file = tempfile.mkstemp(
+        prefix="hermes-tui-active-session-", suffix=".json")
     os.close(active_session_fd)
     env["HERMES_TUI_ACTIVE_SESSION_FILE"] = active_session_file
     env.setdefault("NODE_ENV", "development" if tui_dev else "production")
@@ -729,27 +714,21 @@ def _launch_tui(
 
     _apply_tui_python_env(env)
 
-    if model:
-        env["HERMES_MODEL"] = model
-        env["HERMES_INFERENCE_MODEL"] = model
-    if provider:
-        env["HERMES_TUI_PROVIDER"] = provider
-        env["HERMES_INFERENCE_PROVIDER"] = provider
-    tui_toolsets = _normalize_tui_toolsets(toolsets)
-    if tui_toolsets:
-        env["HERMES_TUI_TOOLSETS"] = ",".join(tui_toolsets)
+    skills_value = ""
     if skills:
-        value = ",".join(_split_comma_items(skills)) if isinstance(skills, (list, tuple)) else str(skills).strip()
-        if value:
-            env["HERMES_TUI_SKILLS"] = value
+        skills_value = (
+            ",".join(_split_comma_items(skills)) if isinstance(skills, (list, tuple)) else str(skills).strip())
     for key, value in (
+        ("HERMES_MODEL", model), ("HERMES_INFERENCE_MODEL", model),
+        ("HERMES_TUI_PROVIDER", provider), ("HERMES_INFERENCE_PROVIDER", provider),
+        ("HERMES_TUI_TOOLSETS", ",".join(_normalize_tui_toolsets(toolsets))),
+        ("HERMES_TUI_SKILLS", skills_value),
         ("HERMES_TUI_QUERY", query), ("HERMES_TUI_IMAGE", image),
         ("HERMES_TUI_CHECKPOINTS", "1" if checkpoints else None),
         ("HERMES_TUI_PASS_SESSION_ID", "1" if pass_session_id else None),
         ("HERMES_TUI_MAX_TURNS", str(max_turns) if max_turns is not None else None),
         ("HERMES_TUI_TOOL_PROGRESS", "verbose" if verbose else "off" if quiet else None),
-        ("HERMES_ACCEPT_HOOKS", "1" if accept_hooks else None),
-    ):
+        ("HERMES_ACCEPT_HOOKS", "1" if accept_hooks else None)):
         if value:
             env[key] = value
     # Generous V8 heap (8GB target; default cap can fatal-OOM on long sessions),
@@ -780,24 +759,18 @@ def _launch_tui(
         if code in {0, 130}:
             _print_tui_exit_summary(resume_session_id, active_session_file)
     finally:
-        try:
+        with contextlib.suppress(OSError):
             os.unlink(active_session_file)
-        except OSError:
-            pass
         if wt_info:
-            try:
+            with contextlib.suppress(Exception):
                 from cli import _cleanup_worktree
                 _cleanup_worktree(wt_info)
-            except Exception:
-                pass
 
     # Exit code 42 = TUI requested an update. Relaunch as `hermes update`;
     # preserve_inherited=False keeps --tui and other flags out of the subcommand.
     if code == 42:
         from hermes_cli.relaunch import relaunch
-        print()
-        print("⚕ Launching update...")
-        print()
+        print("\n⚕ Launching update...\n")
         relaunch(["update"], preserve_inherited=False)
 
     sys.exit(code)
@@ -808,21 +781,17 @@ def _pin_kanban_board_env() -> None:
     ``hermes kanban`` calls agree even if a concurrent ``boards switch`` flips the file mid-turn."""
     if os.environ.get("HERMES_KANBAN_BOARD"):
         return
-    try:
+    with contextlib.suppress(Exception):
         from hermes_cli.kanban_db import get_current_board
         os.environ["HERMES_KANBAN_BOARD"] = get_current_board()
-    except Exception:
-        pass
 
 
 def _sync_bundled_skills_quietly() -> None:
     """Seed ``~/.hermes/skills/`` with the bundled library (idempotent, milliseconds when synced).
     Failures are swallowed: skills are an enhancement, not a hard dependency."""
-    try:
+    with contextlib.suppress(Exception):
         from tools.skills_sync import sync_skills
         sync_skills(quiet=True)
-    except Exception:
-        pass
 
 
 def _resolve_use_tui(args) -> bool:
