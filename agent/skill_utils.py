@@ -15,31 +15,13 @@ from hermes_constants import get_config_path, get_skills_dir, is_termux
 
 logger = logging.getLogger(__name__)
 
-PLATFORM_MAP = {
-    "macos": "darwin",
-    "linux": "linux",
-    "windows": "win32",
-}
+PLATFORM_MAP = {"macos": "darwin", "linux": "linux", "windows": "win32"}
 
-EXCLUDED_SKILL_DIRS = frozenset(
-    (
-        ".git",
-        ".github",
-        ".hub",
-        ".archive",
-        ".curator_backups",
-        ".venv",
-        "venv",
-        "node_modules",
-        "site-packages",
-        "__pycache__",
-        ".tox",
-        ".nox",
-        ".pytest_cache",
-        ".mypy_cache",
-        ".ruff_cache",
-    )
-)
+EXCLUDED_SKILL_DIRS = frozenset((
+    ".git", ".github", ".hub", ".archive", ".curator_backups",
+    ".venv", "venv", "node_modules", "site-packages", "__pycache__",
+    ".tox", ".nox", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+))
 
 # Progressive-disclosure support dirs inside a skill package: loaded explicitly
 # via skill_view(skill, file_path=...), never scanned as standalone skills.
@@ -56,11 +38,9 @@ ORG_BASELINE_FILE = ".org-baseline.json"  # upstream fingerprint; detects local 
 
 def read_active_org_id(skills_dir: Path) -> Optional[str]:
     """The org id whose mirror may resolve, or None (no org skills load)."""
+    marker = skills_dir / ORG_MIRROR_DIR_NAME / ORG_ACTIVE_MARKER
     try:
-        marker = skills_dir / ORG_MIRROR_DIR_NAME / ORG_ACTIVE_MARKER
-        if not marker.exists():
-            return None
-        return marker.read_text(encoding="utf-8").strip() or None
+        return (marker.read_text(encoding="utf-8").strip() or None) if marker.exists() else None
     except OSError:
         return None
 
@@ -100,16 +80,13 @@ def is_skill_support_path(path, *, root: Optional[Path] = None) -> bool:
     """
     path_obj = path if isinstance(path, Path) else Path(str(path))
     parts = path_obj.parts
+    base = root if root is not None and not path_obj.is_absolute() else Path()
     # Only components before the leaf can be containing support directories.
-    for idx, part in enumerate(parts[:-1]):
-        if part not in SKILL_SUPPORT_DIRS or idx == 0:
-            continue
-        skill_root = Path(*parts[:idx])
-        if root is not None and not path_obj.is_absolute():
-            skill_root = root / skill_root
-        if (skill_root / "SKILL.md").exists():
-            return True
-    return False
+    return any(
+        part in SKILL_SUPPORT_DIRS and (base / Path(*parts[:idx]) / "SKILL.md").exists()
+        for idx, part in enumerate(parts[:-1])
+        if idx > 0
+    )
 
 
 _yaml_load_fn = None
@@ -212,15 +189,11 @@ def _detect_docker() -> bool:
         return False
 
 
-def _detect_s6() -> bool:
-    # The Hermes Docker image runs s6-overlay as PID 1.
-    return os.path.isdir("/run/s6") or os.path.isdir("/package/admin/s6-overlay")
-
-
 _ENV_DETECTORS: Dict[str, Callable[[], bool]] = {
     "kanban": _detect_kanban,
     "docker": _detect_docker,
-    "s6": _detect_s6,
+    # The Hermes Docker image runs s6-overlay as PID 1.
+    "s6": lambda: os.path.isdir("/run/s6") or os.path.isdir("/package/admin/s6-overlay"),
 }
 
 
@@ -245,9 +218,7 @@ def skill_matches_environment(frontmatter: Dict[str, Any]) -> bool:
     environments = frontmatter.get("environments")
     if not environments:
         return True
-    if not isinstance(environments, list):
-        environments = [environments]
-    tags = [str(env).lower().strip() for env in environments]
+    tags = [str(env).lower().strip() for env in (environments if isinstance(environments, list) else [environments])]
     return any(_detect_environment(tag) for tag in tags if tag)
 
 
@@ -294,14 +265,26 @@ def _load_raw_config() -> Dict[str, Any]:
 
 def _skills_cfg() -> Optional[Dict[str, Any]]:
     """The ``skills:`` mapping from config.yaml, or None when absent/malformed."""
-    parsed = _load_raw_config()
-    skills_cfg = parsed.get("skills") if parsed else None
+    skills_cfg = _load_raw_config().get("skills")
     return skills_cfg if isinstance(skills_cfg, dict) else None
+
+
+def _skills_cfg_get(key: str) -> Any:
+    """``skills.<key>`` from config.yaml, or None when the section is absent/malformed."""
+    skills_cfg = _skills_cfg()
+    return skills_cfg.get(key) if skills_cfg is not None else None
 
 
 def _expand_path(entry: str) -> Path:
     """Expand ``~`` and ``${VAR}`` in a config path entry."""
     return Path(os.path.expanduser(os.path.expandvars(entry)))
+
+
+def _home_relative(p: Path) -> Path:
+    """Anchor a relative config path at HERMES_HOME; absolute paths pass through."""
+    from hermes_constants import get_hermes_home
+
+    return p if p.is_absolute() else get_hermes_home() / p
 
 
 # Never disableable: `hermes-agent` is the agent's own operating manual and the
@@ -335,18 +318,15 @@ def parse_config_string_list(value) -> List[str]:
     string still means one name.
     """
     if isinstance(value, str):
-        stripped = value.strip()
-        if stripped.startswith("["):
+        if value.strip().startswith("["):
             try:
-                parsed = ast.literal_eval(stripped)
+                parsed = ast.literal_eval(value.strip())
             except (ValueError, SyntaxError):
                 parsed = None
             if isinstance(parsed, list):
                 return [str(item) for item in parsed]
         return [value]
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [str(item) for item in value]
-    return []
+    return [str(item) for item in value] if isinstance(value, (list, tuple, set, frozenset)) else []
 
 
 def _normalize_string_set(values) -> Set[str]:
@@ -387,26 +367,20 @@ def get_external_skills_dirs() -> List[Path]:
     cached = _EXTERNAL_DIRS_CACHE.get(cache_key) if cache_key is not None else None
     if cached is not None:
         return list(cached)  # copy so callers can't mutate the cache
-
     skills_cfg = _skills_cfg()
     if skills_cfg is None:
         return []
 
-    from hermes_constants import get_hermes_home
-
-    hermes_home = get_hermes_home()
     local_skills = get_skills_dir().resolve()
     result: List[Path] = []
     for entry in _config_str_list(skills_cfg.get("external_dirs")):
-        p = _expand_path(entry)
-        p = (hermes_home / p).resolve() if not p.is_absolute() else p.resolve()
+        p = _home_relative(_expand_path(entry)).resolve()
         if p == local_skills or p in result:
             continue
         if p.is_dir():
             result.append(p)
         else:
             logger.debug("External skills dir does not exist, skipping: %s", p)
-
     if cache_key is not None:
         _EXTERNAL_DIRS_CACHE[cache_key] = list(result)
     return result
@@ -418,17 +392,11 @@ def get_skill_create_dir() -> Optional[Path]:
     Relative paths resolve against HERMES_HOME; a value equal to the local
     skills dir counts as unset.
     """
-    skills_cfg = _skills_cfg()
-    raw = skills_cfg.get("create_dir") if skills_cfg is not None else None
+    raw = _skills_cfg_get("create_dir")
     entry = str(raw).strip() if raw and isinstance(raw, (str, os.PathLike)) else ""
     if not entry:
         return None
-
-    from hermes_constants import get_hermes_home
-
-    p = _expand_path(entry)
-    if not p.is_absolute():
-        p = get_hermes_home() / p
+    p = _home_relative(_expand_path(entry))
     try:
         resolved = p.resolve()
     except OSError:
@@ -462,9 +430,7 @@ def get_all_skills_dirs() -> List[Path]:
     create_dir = get_skill_create_dir()
     if create_dir is not None and create_dir.is_dir():
         dirs.append(create_dir)
-    for d in get_external_skills_dirs():
-        if d not in dirs:
-            dirs.append(d)
+    dirs.extend(d for d in get_external_skills_dirs() if d not in dirs)
     return dirs
 
 
@@ -476,10 +442,7 @@ def get_all_skills_dirs() -> List[Path]:
 # skills. cwd and the trust list are session-fixed so the skills index stays
 # byte-stable.
 
-PROJECT_SKILLS_SUBDIRS = (
-    os.path.join(".hermes", "skills"),
-    os.path.join(".agents", "skills"),
-)
+PROJECT_SKILLS_SUBDIRS = (os.path.join(".hermes", "skills"), os.path.join(".agents", "skills"))
 
 _PROJECT_ROOT_MAX_DEPTH = 64  # walk-up bound for pathological cwds
 
@@ -517,9 +480,8 @@ def find_project_root(start: Optional[Path] = None) -> Optional[Path]:
 
 def _project_trusted_dirs_from_config() -> Set[Path]:
     """Resolved set of trusted project roots from ``skills.trusted_project_dirs``."""
-    skills_cfg = _skills_cfg()
     result: Set[Path] = set()
-    for entry in _config_str_list(skills_cfg.get("trusted_project_dirs") if skills_cfg is not None else None):
+    for entry in _config_str_list(_skills_cfg_get("trusted_project_dirs")):
         try:
             result.add(_expand_path(entry).resolve())
         except OSError:
@@ -536,10 +498,8 @@ def is_project_root_trusted(root: Path) -> bool:
 
 
 def _candidate_project_skills_dirs(root: Path) -> List[Path]:
-    """Existing skill dirs under *root*, excluding the profile's own skills dir.
-
-    Matters when HERMES_HOME itself lives inside a git checkout.
-    """
+    """Existing skill dirs under *root*, excluding the profile's own skills dir
+    (HERMES_HOME itself may live inside a git checkout)."""
     local_skills = get_skills_dir().resolve()
     dirs: List[Path] = []
     for sub in PROJECT_SKILLS_SUBDIRS:
@@ -554,13 +514,10 @@ def _candidate_project_skills_dirs(root: Path) -> List[Path]:
 
 def _current_project_root(trusted: bool) -> Optional[Path]:
     """cwd's project root when discovery is on and its trust state == *trusted*."""
-    skills_cfg = _skills_cfg()
-    if skills_cfg is not None and skills_cfg.get("project_discovery") is False:
+    if _skills_cfg_get("project_discovery") is False:
         return None
     root = find_project_root()
-    if root is None or is_project_root_trusted(root) != trusted:
-        return None
-    return root
+    return root if root is not None and is_project_root_trusted(root) == trusted else None
 
 
 def get_project_skills_dirs() -> List[Path]:
@@ -594,28 +551,22 @@ _PROJECT_QUARANTINE_CACHE: Dict[str, bool] = {}  # skill_dir -> quarantined
 
 
 def is_quarantined_project_skill(skill_md) -> bool:
-    """True when a project skill's scan verdict is ``dangerous``.
-
-    Fail-closed: a scanner crash or missing scanner quarantines the skill.
-    Scans unconditionally — non-project callers should not call this.
-    """
+    """True when a project skill's scan verdict is ``dangerous``. Fail-closed: a
+    scanner crash or missing scanner quarantines the skill. Scans
+    unconditionally — non-project callers should not call this."""
     skill_dir = Path(skill_md).parent
     try:
         key = str(skill_dir.resolve())
     except OSError:
         key = str(skill_dir)
-    cached = _PROJECT_QUARANTINE_CACHE.get(key)
-    if cached is not None:
-        return cached
+    if key in _PROJECT_QUARANTINE_CACHE:
+        return _PROJECT_QUARANTINE_CACHE[key]
     try:
         from tools.skills_guard import scan_skill_cached
-
         from hermes_constants import get_hermes_home
 
         result, _prov = scan_skill_cached(
-            skill_dir,
-            source=_PROJECT_SCAN_SOURCE,
-            cache_dir=get_hermes_home() / "cache" / "project_skill_scans",
+            skill_dir, source=_PROJECT_SCAN_SOURCE, cache_dir=get_hermes_home() / "cache" / "project_skill_scans",
         )
         quarantined = result.verdict == "dangerous"
         if quarantined:
@@ -631,7 +582,7 @@ def iter_project_skill_files(project_dir: Path):
     """Yield non-quarantined SKILL.md files under a trusted project dir — the
     single iteration chokepoint for the project tier, so the quarantine cannot
     be bypassed by a call site forgetting the check."""
-    return (p for p in iter_skill_index_files(project_dir, "SKILL.md") if not is_quarantined_project_skill(p))
+    yield from (p for p in iter_skill_index_files(project_dir, "SKILL.md") if not is_quarantined_project_skill(p))
 
 
 def normalize_skill_lookup_name(identifier: str) -> str:
@@ -666,11 +617,8 @@ def normalize_skill_lookup_name(identifier: str) -> str:
     # ~/.hermes/skills/<name> may be a symlink to a checkout elsewhere, and
     # resolving first would turn that trusted path into one skill_view rejects.
     for root in trusted_roots:
-        try:
+        if identifier_path.is_relative_to(root):
             return str(identifier_path.relative_to(root))
-        except ValueError:
-            continue
-
     try:
         return str(identifier_path.resolve().relative_to(primary_root.resolve()))
     except Exception:
@@ -706,24 +654,19 @@ def is_external_skill_path(path) -> bool:
 def _hermes_metadata(frontmatter: Dict[str, Any]) -> Dict[str, Any]:
     """``metadata.hermes`` mapping from frontmatter, or ``{}`` when malformed."""
     metadata = frontmatter.get("metadata")
-    if not isinstance(metadata, dict):
-        return {}
-    hermes = metadata.get("hermes") or {}
+    hermes = metadata.get("hermes") if isinstance(metadata, dict) else None
     return hermes if isinstance(hermes, dict) else {}
 
 
+# ``session_platforms`` is the gateway-channel gate: session platforms the skill
+# is FOR (hidden from the index elsewhere), unlike ``platforms:`` (host OS).
+_CONDITION_KEYS = ("fallback_for_toolsets", "requires_toolsets", "fallback_for_tools", "requires_tools", "session_platforms")
+
+
 def extract_skill_conditions(frontmatter: Dict[str, Any]) -> Dict[str, List]:
-    """Extract conditional activation fields from parsed frontmatter."""
+    """Extract conditional activation fields from parsed frontmatter (absent = ``[]``)."""
     hermes = _hermes_metadata(frontmatter)
-    return {
-        "fallback_for_toolsets": hermes.get("fallback_for_toolsets", []),
-        "requires_toolsets": hermes.get("requires_toolsets", []),
-        "fallback_for_tools": hermes.get("fallback_for_tools", []),
-        "requires_tools": hermes.get("requires_tools", []),
-        # Gateway-channel gate: session platforms the skill is FOR (hidden from
-        # the index elsewhere). Unlike ``platforms:`` (host OS). Empty = everywhere.
-        "session_platforms": hermes.get("session_platforms", []),
-    }
+    return {key: hermes.get(key, []) for key in _CONDITION_KEYS}
 
 
 def extract_skill_config_vars(frontmatter: Dict[str, Any]) -> List[Dict[str, Any]]:
@@ -734,24 +677,21 @@ def extract_skill_config_vars(frontmatter: Dict[str, Any]) -> List[Dict[str, Any
         raw = [raw]
     if not raw or not isinstance(raw, list):
         return []
-
-    result: List[Dict[str, Any]] = []
-    seen: set = set()
+    result: Dict[str, Dict[str, Any]] = {}
     for item in raw:
         if not isinstance(item, dict):
             continue
         key = str(item.get("key", "")).strip()
         desc = str(item.get("description", "")).strip()
-        if not key or key in seen or not desc:
+        if not key or key in result or not desc:
             continue
         entry: Dict[str, Any] = {"key": key, "description": desc}
         if item.get("default") is not None:
             entry["default"] = item["default"]
         prompt_text = item.get("prompt")
         entry["prompt"] = prompt_text.strip() if isinstance(prompt_text, str) and prompt_text.strip() else desc
-        seen.add(key)
-        result.append(entry)
-    return result
+        result[key] = entry
+    return list(result.values())
 
 
 def discover_all_skill_config_vars() -> List[Dict[str, Any]]:
@@ -819,9 +759,7 @@ def _normalize_skill_description(frontmatter: Dict[str, Any]) -> str:
 def extract_skill_description(frontmatter: Dict[str, Any]) -> str:
     """Extract a system-prompt-length description from parsed frontmatter."""
     desc = _normalize_skill_description(frontmatter)
-    if len(desc) > SKILL_PROMPT_DESC_LIMIT:
-        return desc[:SKILL_PROMPT_DESC_LIMIT - 3] + "..."
-    return desc
+    return desc[:SKILL_PROMPT_DESC_LIMIT - 3] + "..." if len(desc) > SKILL_PROMPT_DESC_LIMIT else desc
 
 
 def is_skill_description_truncated_for_prompt(frontmatter: Dict[str, Any]) -> bool:
@@ -846,16 +784,10 @@ def iter_skill_index_files(skills_dir: Path, filename: str):
             dirs.remove(ORG_MIRROR_DIR_NAME)
         elif root == org_root:
             dirs[:] = [d for d in dirs if d == active_org]
-        dirs[:] = [
-            d
-            for d in dirs
-            if d not in EXCLUDED_SKILL_DIRS
-            and not (has_skill_md and d in SKILL_SUPPORT_DIRS)
-        ]
+        dirs[:] = [d for d in dirs if d not in EXCLUDED_SKILL_DIRS and not (has_skill_md and d in SKILL_SUPPORT_DIRS)]
         if filename in files:
             matches.append(os.path.join(root, filename))
-    for path in sorted(matches):
-        yield Path(path)
+    yield from map(Path, sorted(matches))
 
 
 # Namespace helpers for plugin-provided skills.
