@@ -7,13 +7,17 @@ from __future__ import annotations
 
 import contextlib
 import inspect
+import logging
 import threading
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 # Cap for exponential tick backoff during fd exhaustion (interval doubled per failure).
-_EMFILE_BACKOFF_MAX_SECONDS = 15 * 60  # 15 minutes
+_EMFILE_BACKOFF_MAX_SECONDS = 15 * 60
+DEFAULT_MISFIRE_GRACE_MINUTES = 10
 
 
 def _backoff_wait_seconds(interval: float, consecutive_failures: int) -> float:
@@ -35,7 +39,8 @@ def _note_tick_failure(exc: BaseException, consecutive_failures: int) -> int:
 
 
 def _profile_entry(entry) -> tuple:
-    """Normalize a ``profile_homes`` entry (``(name, home)`` tuple or bare home) to ``(name, home)``."""
+    """Normalize a ``profile_homes`` entry (``(name, home)`` tuple or bare home) to ``(name,
+    home)``."""
     return entry if isinstance(entry, tuple) else (None, entry)
 
 
@@ -74,11 +79,7 @@ class CronScheduler(ABC):
 
     @abstractmethod
     def start(
-        self,
-        stop_event: threading.Event,
-        *,
-        adapters: Any = None,
-        loop: Any = None,
+        self, stop_event: threading.Event, *, adapters: Any = None, loop: Any = None,
         interval: int = 60,
     ) -> None:
         """Begin firing due jobs. Built-in BLOCKS until stop_event is set (run in a daemon thread);
@@ -111,12 +112,7 @@ class CronScheduler(ABC):
         return provider_supports_force_fire(self)
 
     def fire_due(
-        self,
-        job_id: str,
-        *,
-        adapters: Any = None,
-        loop: Any = None,
-        force: bool = False,
+        self, job_id: str, *, adapters: Any = None, loop: Any = None, force: bool = False,
     ) -> bool:
         """Run one job NOW (inbound fire webhook entry). Store CAS claim (multi-machine
         at-most-once) then shared ``run_one_job``. True if THIS caller claimed and processed the
@@ -140,8 +136,7 @@ class CronScheduler(ABC):
             claimed_job = claim_job_for_fire(job_id, **claim_kwargs)
         except BaseException as exc:
             finish_execution(
-                execution["id"],
-                success=False,
+                execution["id"], success=False,
                 error=f"Fire claim failed before dispatch: {type(exc).__name__}: {exc}",
             )
             raise
@@ -152,11 +147,7 @@ class CronScheduler(ABC):
         return claimed_job
 
     def fire_claimed(
-        self,
-        claimed_job: dict,
-        *,
-        adapters: Any = None,
-        loop: Any = None,
+        self, claimed_job: dict, *, adapters: Any = None, loop: Any = None,
         cancel_event: Any = None,
     ) -> bool:
         """Run an exact ``claim_fire`` snapshot; ``cancel_event`` lets the transport stop it
@@ -172,19 +163,18 @@ class CronScheduler(ABC):
 
 
 def provider_supports_force_fire(provider: Any) -> bool:
-    """Return whether a provider can safely receive ``fire_due(force=...)``."""
+    """Return whether a provider can safely receive ``fire_due(force=...)`` (signature-detected)."""
     try:
         parameters = inspect.signature(provider.fire_due).parameters.values()
     except (TypeError, ValueError):
         return False
     return any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
+        p.kind is inspect.Parameter.VAR_KEYWORD
         or (
-            parameter.name == "force"
-            and parameter.kind
-            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
+            p.name == "force"
+            and p.kind in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
         )
-        for parameter in parameters
+        for p in parameters
     )
 
 
@@ -193,34 +183,14 @@ def provider_supports_split_fire(provider: Any) -> bool:
     ``fire_due`` must keep being driven through it — routing around the override would drop its
     custom claim/re-arm/telemetry behavior."""
     cls = type(provider)
-    fire_due_impl = getattr(cls, "fire_due", None)
-    claim_fire_impl = getattr(cls, "claim_fire", None)
-    fire_claimed_impl = getattr(cls, "fire_claimed", None)
-    if claim_fire_impl is not None and claim_fire_impl is not CronScheduler.claim_fire:
+
+    def overrides(name: str) -> bool:
+        impl = getattr(cls, name, None)
+        return impl is not None and impl is not getattr(CronScheduler, name)
+
+    if overrides("claim_fire") or overrides("fire_claimed"):
         return True
-    if fire_claimed_impl is not None and fire_claimed_impl is not CronScheduler.fire_claimed:
-        return True
-    return fire_due_impl is None or fire_due_impl is CronScheduler.fire_due
-
-
-def provider_supports_fire_cancel(provider: Any) -> bool:
-    """Return whether ``fire_claimed`` accepts a ``cancel_event`` kwarg."""
-    try:
-        parameters = inspect.signature(provider.fire_claimed).parameters.values()
-    except (TypeError, ValueError):
-        return False
-    return any(
-        parameter.kind is inspect.Parameter.VAR_KEYWORD
-        or (
-            parameter.name == "cancel_event"
-            and parameter.kind
-            in (inspect.Parameter.POSITIONAL_OR_KEYWORD, inspect.Parameter.KEYWORD_ONLY)
-        )
-        for parameter in parameters
-    )
-
-
-DEFAULT_MISFIRE_GRACE_MINUTES = 10
+    return not overrides("fire_due")
 
 
 def _misfire_grace_minutes() -> float:
@@ -228,24 +198,16 @@ def _misfire_grace_minutes() -> float:
     try:
         from hermes_cli.config import cfg_get, load_config
 
+        config = load_config()
         return float(
-            cfg_get(
-                load_config(),
-                "cron",
-                "misfire_grace_minutes",
-                default=DEFAULT_MISFIRE_GRACE_MINUTES,
-            )
+            cfg_get(config, "cron", "misfire_grace_minutes", default=DEFAULT_MISFIRE_GRACE_MINUTES)
         )
     except Exception:
         return float(DEFAULT_MISFIRE_GRACE_MINUTES)
 
 
 def fire_overdue_jobs(
-    provider: "CronScheduler",
-    *,
-    adapters: Any = None,
-    loop: Any = None,
-    now: Any = None,
+    provider: "CronScheduler", *, adapters: Any = None, loop: Any = None, now: Any = None,
 ) -> int:
     """Misfire backstop (gateway housekeeping loop): fire jobs whose external HTTP fire never
     arrived, else ``next_run_at`` stays parked in the past forever. No-op for the built-in (its tick
@@ -253,11 +215,7 @@ def fire_overdue_jobs(
     concurrent late external retry is de-duplicated by the store CAS; waits out
     ``cron.misfire_grace_minutes`` so the external retry gets first right. Returns jobs dispatched.
     """
-    import logging
-    import threading
     from datetime import datetime
-
-    logger = logging.getLogger("cron.scheduler_provider")
 
     if isinstance(provider, InProcessCronScheduler):
         return 0
@@ -266,7 +224,9 @@ def fire_overdue_jobs(
     if grace_minutes <= 0:
         return 0
 
-    from cron.jobs import _ensure_aware, _hermes_now, is_job_runnable, load_jobs
+    from cron.jobs import (
+        ONESHOT_GRACE_SECONDS, _ensure_aware, _hermes_now, is_job_runnable, load_jobs,
+    )
 
     if now is None:
         now = _hermes_now()
@@ -288,21 +248,18 @@ def fire_overdue_jobs(
         job_id = str(job.get("id") or "")
         # One-shots past ONESHOT_GRACE_SECONDS "will never fire"; don't resurrect them hours late.
         schedule = job.get("schedule") or {}
-        if str(schedule.get("kind") or "") == "once":
-            from cron.jobs import ONESHOT_GRACE_SECONDS
-
-            if overdue_seconds > ONESHOT_GRACE_SECONDS:
-                logger.warning(
-                    "Misfire catch-up: one-shot job %s (%s) was due %s "
-                    "(%.0f min overdue) — outside the %ss one-shot grace "
-                    "window, not firing.",
-                    job_id,
-                    job.get("name") or "unnamed",
-                    next_run_at,
-                    overdue_seconds / 60,
-                    ONESHOT_GRACE_SECONDS,
-                )
-                continue
+        if str(schedule.get("kind") or "") == "once" and overdue_seconds > ONESHOT_GRACE_SECONDS:
+            logger.warning(
+                "Misfire catch-up: one-shot job %s (%s) was due %s "
+                "(%.0f min overdue) — outside the %ss one-shot grace "
+                "window, not firing.",
+                job_id,
+                job.get("name") or "unnamed",
+                next_run_at,
+                overdue_seconds / 60,
+                ONESHOT_GRACE_SECONDS,
+            )
+            continue
         logger.warning(
             "Misfire catch-up: job %s (%s) was due %s (%.0f min overdue) and "
             "no external fire arrived — firing locally.",
@@ -317,10 +274,8 @@ def fire_overdue_jobs(
             if claimed is None:
                 continue
             threading.Thread(
-                target=provider.fire_claimed,
-                args=(claimed,),
-                kwargs={"adapters": adapters, "loop": loop},
-                daemon=True,
+                target=provider.fire_claimed, args=(claimed,),
+                kwargs={"adapters": adapters, "loop": loop}, daemon=True,
                 name=f"cron-misfire-{job_id[:12]}",
             ).start()
             fired += 1
@@ -335,10 +290,6 @@ def fire_overdue_jobs(
 def resolve_cron_scheduler() -> "CronScheduler":
     """Resolve ``cron.provider``; missing/failing/unavailable providers fall back to the built-in
     with a warning — cron must never be left without a trigger."""
-    import logging
-
-    logger = logging.getLogger("cron.scheduler_provider")
-
     name = ""
     try:
         from hermes_cli.config import cfg_get, load_config
@@ -372,10 +323,7 @@ def scheduler_for_profile_mode(
     stores: fail closed to the built-in multiplex ticker until the API carries profile identity."""
     if not multiplex_profiles or isinstance(provider, InProcessCronScheduler):
         return provider
-
-    import logging
-
-    logging.getLogger("cron.scheduler_provider").warning(
+    logger.warning(
         "cron.provider '%s' does not support multiplex_profiles; using built-in ticker",
         provider.name,
     )
@@ -391,50 +339,28 @@ class InProcessCronScheduler(CronScheduler):
         return "builtin"
 
     def start(
-        self,
-        stop_event,
-        *,
-        adapters=None,
-        loop=None,
-        interval=60,
-        can_dispatch=None,
-        profile_homes=None,
-        profile_adapters=None,
-        default_profile=None,
-        profile_gate=None,
+        self, stop_event, *, adapters=None, loop=None, interval=60, can_dispatch=None,
+        profile_homes=None, profile_adapters=None, default_profile=None, profile_gate=None,
     ):
-        import logging
         from cron.scheduler import CronTickYielded
         from cron.scheduler import tick as cron_tick
-        from cron.jobs import (
-            clear_ticker_error,
-            record_ticker_error,
-            record_ticker_heartbeat,
-        )
+        from cron.jobs import clear_ticker_error, record_ticker_error, record_ticker_heartbeat
 
-        logger = logging.getLogger("cron.scheduler_provider")
         logger.info("In-process cron scheduler started (interval=%ds)", interval)
 
         # Multiplex: tick EACH profile's store every cycle, heartbeats/recovery scoped per profile.
         if profile_homes:
             self._start_multiplex(
-                stop_event,
-                profile_homes=profile_homes,
-                adapters=adapters,
-                loop=loop,
-                interval=interval,
-                can_dispatch=can_dispatch,
-                profile_adapters=profile_adapters,
-                default_profile=default_profile,
-                profile_gate=profile_gate,
+                stop_event, profile_homes=profile_homes, adapters=adapters, loop=loop,
+                interval=interval, can_dispatch=can_dispatch, profile_adapters=profile_adapters,
+                default_profile=default_profile, profile_gate=profile_gate,
             )
             return
 
         recovered = self.recover_interrupted()
         if recovered:
             logger.warning(
-                "Marked %d interrupted cron execution(s) unknown after restart",
-                recovered,
+                "Marked %d interrupted cron execution(s) unknown after restart", recovered
             )
         # Heartbeat before the first sleep so `hermes cron status` sees a live ticker immediately.
         record_ticker_heartbeat()
@@ -447,10 +373,7 @@ class InProcessCronScheduler(CronScheduler):
                     logger.debug("Cron dispatch paused while gateway drains existing work")
                 else:
                     cron_tick(
-                        verbose=False,
-                        adapters=adapters,
-                        loop=loop,
-                        sync=False,
+                        verbose=False, adapters=adapters, loop=loop, sync=False,
                         can_dispatch=can_dispatch,
                     )
                 ok = True
@@ -473,41 +396,35 @@ class InProcessCronScheduler(CronScheduler):
             stop_event.wait(_backoff_wait_seconds(interval, consecutive_failures))
 
     def _start_multiplex(
-        self,
-        stop_event,
-        *,
-        profile_homes,
-        adapters=None,
-        loop=None,
-        interval=60,
-        can_dispatch=None,
-        profile_adapters=None,
-        default_profile=None,
-        profile_gate=None,
+        self, stop_event, *, profile_homes, adapters=None, loop=None, interval=60,
+        can_dispatch=None, profile_adapters=None, default_profile=None, profile_gate=None,
     ):
         """Tick every profile's store, each scoped via ``_profile_cron_scope``. ``profile_gate(name,
         home)``, when given, is consulted every cycle; a rejected profile is neither ticked nor
         heartbeated."""
-        import logging
         from cron.scheduler import tick as cron_tick
         from cron.scheduler import (
-            CronTickYielded,
-            SharedRouteAdapters,
-            _is_fd_exhaustion,
+            CronTickYielded, SharedRouteAdapters, _is_fd_exhaustion,
             _primary_profile_routes_for_current_home,
         )
-        from cron.jobs import (
-            clear_ticker_error,
-            record_ticker_error,
-            record_ticker_heartbeat,
-        )
+        from cron.jobs import clear_ticker_error, record_ticker_error, record_ticker_heartbeat
 
-        logger = logging.getLogger("cron.scheduler_provider")
         logger.info(
             "Multiplex cron scheduler started for %d profile(s): %s",
             len(profile_homes),
             [p[0] if isinstance(p, tuple) else p for p in profile_homes],
         )
+
+        def tick_adapters_for(profile_name):
+            # Deliver via the profile's OWN adapters; NEVER fall back to the default profile's
+            # (wrong bot). A credentialless satellite may ride the PRIMARY adapter only for targets
+            # an exact enabled route maps here; else fail closed (delivery skipped this tick).
+            if profile_name is None or profile_name == default_profile:
+                return adapters
+            tick_adapters = (profile_adapters or {}).get(profile_name) or {}
+            if not tick_adapters and adapters:
+                return SharedRouteAdapters(adapters, _primary_profile_routes_for_current_home())
+            return tick_adapters
 
         # Recovery + heartbeat per profile; one broken store must not abort startup for the others.
         for entry in _existing_profile_homes(profile_homes):
@@ -518,16 +435,12 @@ class InProcessCronScheduler(CronScheduler):
                     if recovered:
                         logger.warning(
                             "Marked %d interrupted cron execution(s) for profile at %s",
-                            recovered,
-                            home,
+                            recovered, home,
                         )
                     record_ticker_heartbeat()
             except BaseException as e:
                 logger.error(
-                    "Cron startup recovery error for profile at %s: %s",
-                    home,
-                    e,
-                    exc_info=True,
+                    "Cron startup recovery error for profile at %s: %s", home, e, exc_info=True
                 )
 
         consecutive_failures = 0
@@ -539,7 +452,9 @@ class InProcessCronScheduler(CronScheduler):
             _cycle_exc: BaseException | None = None
             cycle_homes = [_profile_entry(e) for e in _existing_profile_homes(profile_homes)]
             if profile_gate is not None:
-                cycle_homes = [(name, home) for name, home in cycle_homes if profile_gate(name, home)]
+                cycle_homes = [
+                    (name, home) for name, home in cycle_homes if profile_gate(name, home)
+                ]
             try:
                 if can_dispatch is not None and not can_dispatch():
                     logger.debug("Cron dispatch paused while gateway drains existing work")
@@ -547,26 +462,9 @@ class InProcessCronScheduler(CronScheduler):
                     for _pname, home in cycle_homes:
                         try:
                             with _profile_cron_scope(home):
-                                # Deliver via the profile's OWN adapters; NEVER fall back to the
-                                # default profile's (wrong bot) — just skip delivery this tick.
-                                if _pname is None or _pname == default_profile:
-                                    _tick_adapters = adapters
-                                else:
-                                    _tick_adapters = (profile_adapters or {}).get(_pname) or {}
-                                    if not _tick_adapters and adapters:
-                                        # Credentialless satellite may ride the PRIMARY adapter only
-                                        # for targets an exact enabled route maps here; else fail
-                                        # closed.
-                                        _tick_adapters = SharedRouteAdapters(
-                                            adapters,
-                                            _primary_profile_routes_for_current_home(),
-                                        )
                                 cron_tick(
-                                    verbose=False,
-                                    adapters=_tick_adapters,
-                                    loop=loop,
-                                    sync=False,
-                                    can_dispatch=can_dispatch,
+                                    verbose=False, adapters=tick_adapters_for(_pname), loop=loop,
+                                    sync=False, can_dispatch=can_dispatch,
                                 )
                         except CronTickYielded as e:
                             # Yield for THIS profile only; one fresh gateway must not stop others.
@@ -575,10 +473,7 @@ class InProcessCronScheduler(CronScheduler):
                         except BaseException as e:
                             # THIS profile only; BaseException as in the single-profile loop.
                             logger.error(
-                                "Cron tick error for profile at %s: %s",
-                                home,
-                                e,
-                                exc_info=True,
+                                "Cron tick error for profile at %s: %s", home, e, exc_info=True
                             )
                             _profile_errors[str(home)] = f"{type(e).__name__}: {e}"
                             if _cycle_exc is None or _is_fd_exhaustion(e):
