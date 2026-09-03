@@ -1,13 +1,12 @@
 """Org-shared skills: org pull + propose (``~/.hermes/skills/_org/<org_id>/``).
 
-Org skills live under a DISTINCT local namespace (read-only to the runtime; a
-local edit is a personal fork until proposed). The canonical set is
-``refs/org/<org_id>/HEAD`` -- the SAME object model as personal sync.
-PERSONAL-ORG GATE: NAS stamps ``org_role`` ONLY for multi-member orgs; no
-claim => pull/propose raise SyncInertError and personal sync is untouched.
-``propose_skill`` must stay non-interactive (automation will drive it).
-Module state (``_skills_dir``, ``_org_dir``, base URL, device id) stays in
-``tools.skills_sync_client`` and is read lazily so tests can monkeypatch it.
+Org skills live under a DISTINCT local namespace (read-only to the runtime; a local edit is a
+personal fork until proposed). The canonical set is ``refs/org/<org_id>/HEAD`` -- the SAME
+object model as personal sync. PERSONAL-ORG GATE: NAS stamps ``org_role`` ONLY for multi-member
+orgs; no claim => pull/propose raise SyncInertError and personal sync is untouched.
+``propose_skill`` must stay non-interactive (automation will drive it). Module state
+(``_skills_dir``, ``_org_dir``, base URL, device id) stays in ``tools.skills_sync_client`` and
+is read lazily so tests can monkeypatch it.
 """
 
 from __future__ import annotations
@@ -29,8 +28,8 @@ logger = logging.getLogger("tools.skills_sync_client")
 
 ORG_DIR_NAME = "_org"
 
-# Propose re-splices onto a moved org HEAD at most this many times. Small:
-# contention means other members are actively proposing; unbounded would spin.
+# Propose re-splices onto a moved org HEAD at most this many times. Small: contention means
+# other members are actively proposing; unbounded would spin.
 _ORG_CAS_MAX_ATTEMPTS = 5
 
 
@@ -45,11 +44,8 @@ def org_head_ref(org_id: str) -> str:
 
 
 def resolve_org_identity() -> Dict[str, Any]:
-    """``resolve_identity()`` extended with ``org_id`` + ``org_role``.
-
-    Raises SyncInertError when the token carries no ``org_role`` claim (personal
-    org / issuer predates org support): org sync is unavailable, NOT an error.
-    """
+    """``resolve_identity()`` extended with ``org_id`` + ``org_role``. Raises SyncInertError when
+    the token carries no ``org_role`` claim (personal org / old issuer): unavailable, NOT an error."""
     from tools.skills_sync_client import SyncInertError, resolve_identity
 
     identity = resolve_identity()
@@ -66,8 +62,8 @@ def resolve_org_identity() -> Dict[str, Any]:
 
 
 def _org_client(identity: Optional[Dict[str, Any]], client: Optional[SyncClient]):
-    """Resolve (identity, client, caps) for an org operation; raises SyncInertError
-    when the base URL is missing or the server lacks the ``org`` feature."""
+    """(identity, client, caps) for an org operation; SyncInertError when the base URL is
+    missing or the server lacks the ``org`` feature."""
     ssc = _ssc()
     identity = identity or resolve_org_identity()
     if client is None:
@@ -104,8 +100,8 @@ def _write_sidecar(what: str, path_fn: Callable[[], Path], text: str) -> None:
 
 
 def _skill_dir_fingerprint(path: Path) -> str:
-    """Stable content hash of a materialized skill dir (sorted relative path +
-    bytes, independent of filesystem order and mtimes). "" on read failure."""
+    """Stable content hash of a materialized skill dir (sorted relative path + bytes,
+    independent of filesystem order and mtimes). "" on read failure."""
     h = hashlib.sha256()
     try:
         for f in sorted(p for p in path.rglob("*") if p.is_file()):
@@ -139,15 +135,11 @@ def _read_org_baseline(org_id: str) -> Dict[str, Any]:
 
 
 def _write_org_baseline(org_id: str, baseline: Dict[str, Any]) -> None:
-    _write_sidecar(
-        "baseline", lambda: _org_baseline_path(org_id), json.dumps(baseline, indent=2, sort_keys=True)
-    )
+    _write_sidecar("baseline", lambda: _org_baseline_path(org_id), json.dumps(baseline, indent=2, sort_keys=True))
 
 
 def _write_org_provenance(org_id: str, data: Dict[str, Any]) -> None:
-    _write_sidecar(
-        "org provenance", lambda: _sidecar_path(org_id, "ORG_PROVENANCE_FILE"), json.dumps(data, indent=2)
-    )
+    _write_sidecar("org provenance", lambda: _sidecar_path(org_id, "ORG_PROVENANCE_FILE"), json.dumps(data, indent=2))
 
 
 def _write_active_org_marker(org_id: str) -> None:
@@ -170,9 +162,8 @@ def _clear_active_org_marker() -> None:
 
 
 def org_skill_is_locally_modified(skill_rel_path: str, org_id: str) -> bool:
-    """True when the local copy of an org skill differs from what upstream sent.
-    No recorded baseline (pre-existing mirror) => unmodified; the next pull
-    records one."""
+    """True when the local copy of an org skill differs from what upstream sent. No recorded
+    baseline (pre-existing mirror) => unmodified; the next pull records one."""
     dest = _mirror_root(org_id) / PurePosixPath(skill_rel_path)
     if not dest.is_dir():
         return False
@@ -218,10 +209,9 @@ def list_org_skill_names() -> List[str]:
 def pull_org_skills(
     client: Optional[SyncClient] = None, *, identity: Optional[Dict[str, Any]] = None
 ) -> Dict[str, Any]:
-    """Pull the org canonical set into the local mirror (fast-forward only; no
-    client merge on the org path). A mirrored skill with LOCAL edits is never
-    clobbered: it is skipped, and reported in ``conflicted`` when upstream also
-    moved; the member's change of record is ``propose_skill``.
+    """Pull the org canonical set into the local mirror (fast-forward only; no client merge on
+    the org path). A mirrored skill with LOCAL edits is never clobbered: skipped, and reported
+    in ``conflicted`` when upstream also moved; the member's change of record is ``propose_skill``.
     Returns ``{ok, org_id, head, updated, conflicted}``."""
     identity = identity or resolve_org_identity()
     if "org_id" not in identity:
@@ -230,16 +220,14 @@ def pull_org_skills(
     org_id = identity["org_id"]
 
     head = _read_org_head(client, org_id)
-    # Token-gated marker: written HERE because this runs only after the token's
-    # org_id + org_role were verified. A stale mirror from a previous org stops
-    # resolving the moment a pull runs under a different org.
+    # Token-gated marker: written HERE because this runs only after the token's org_id + org_role
+    # were verified. A stale mirror from a previous org stops resolving on a pull under another org.
     _write_active_org_marker(org_id)
     if not head:
         return {"ok": True, "org_id": org_id, "head": None, "updated": []}
 
     head_commit = client.get_commit_json(head, org_scope=True)
     skill_trees = skill_trees_of_root(client, head_commit["tree"], org_scope=True)
-
     dest_root = _mirror_root(org_id)
     updated: List[str] = []
     conflicted: List[str] = []
@@ -259,8 +247,8 @@ def pull_org_skills(
             updated.append(rel_path)
         except Exception as e:
             logger.warning("skills_sync_client: org skill materialize failed for %s: %s", rel_path, e)
-    # Provenance for the skill_view header: the HEAD author is token-verified
-    # by the plane at push time, so it is trustworthy to display.
+    # Provenance for the skill_view header: the HEAD author is token-verified by the plane at
+    # push time, so it is trustworthy to display.
     author = head_commit.get("author") or {}
     _write_org_provenance(org_id, {
         "org_id": org_id, "head": head, "author_user_id": author.get("owner", ""),
@@ -284,16 +272,13 @@ def propose_skill(
 ) -> Dict[str, Any]:
     """Propose a local (personal) skill's content to the org canonical set.
 
-    Snapshots the skill dir as an org-scoped commit splicing that ONE skill
-    subtree into the current org HEAD (proposals are per-skill deltas, never a
-    wholesale replace), uploads with ``?scope=org``, then CAS-es the org HEAD:
-    ADMIN/OWNER -> server merges -> ``{ok, merged: True}``; MEMBER -> 202
-    proposal -> ``{ok, proposal_pending: True, proposal_id, ref}``, never
-    presented as live.
-
-    If HEAD moves between read and CAS, the skill is re-spliced onto the NEW
-    head (not replayed from the old root, which would drop the other member's
-    skill) up to ``_ORG_CAS_MAX_ATTEMPTS`` times.
+    Snapshots the skill dir as an org-scoped commit splicing that ONE skill subtree into the
+    current org HEAD (proposals are per-skill deltas, never a wholesale replace), uploads with
+    ``?scope=org``, then CAS-es the org HEAD: ADMIN/OWNER -> server merges -> ``{ok, merged:
+    True}``; MEMBER -> 202 proposal -> ``{ok, proposal_pending: True, proposal_id, ref}``, never
+    presented as live. If HEAD moves between read and CAS the skill is re-spliced onto the NEW
+    head (not replayed from the old root, which would drop the other member's skill) up to
+    ``_ORG_CAS_MAX_ATTEMPTS`` times.
     """
     ssc = _ssc()
     identity, client, caps = _org_client(identity, client)
@@ -309,13 +294,11 @@ def propose_skill(
 
     objects = ObjectSet()
     skill_tree = build_tree(skill_dir, objects, max_object_bytes=max_bytes)
-
     for attempt in range(1, _ORG_CAS_MAX_ATTEMPTS + 1):
         base_head = _read_org_head(client, org_id)
         skill_map = (
             skill_trees_of_root(client, root_tree_of_commit(client, base_head, org_scope=True), org_scope=True)
-            if base_head
-            else {}
+            if base_head else {}
         )
         skill_map[str(rel)] = skill_tree
         root_hash = assemble_root_from_skill_trees(skill_map, objects)
@@ -335,30 +318,22 @@ def propose_skill(
                     "the race — run the command again",
                     status=409,
                 ) from conflict
-            logger.debug(
-                "propose_skill: org HEAD moved (actual=%r), re-splicing (attempt %d)", conflict.actual, attempt
-            )
+            logger.debug("propose_skill: org HEAD moved (actual=%r), re-splicing (attempt %d)", conflict.actual, attempt)
 
     if result.get("proposal_pending"):
         return {
             "ok": True, "proposal_pending": True, "proposal_id": result.get("proposal_id"),
             "ref": result.get("ref"), "commit": commit_hash, "org_id": org_id,
         }
-    return {
-        "ok": True, "merged": True, "head": result.get("hash", commit_hash),
-        "commit": commit_hash, "org_id": org_id,
-    }
+    return {"ok": True, "merged": True, "head": result.get("hash", commit_hash), "commit": commit_hash, "org_id": org_id}
 
 
 def maybe_pull_org_skills() -> Optional[Dict[str, Any]]:
-    """Best-effort org pull if all gates hold (logged in, org_role claim,
-    feature enabled, base URL). Never raises; None when inert.
-
-    Marker hygiene: when the token VERIFIABLY lacks the org claim (personal org
-    / left the org) the active-org marker is cleared so mirrored org skills stop
-    resolving. When identity cannot be resolved at all (offline, logged out) the
-    marker is left alone -- offline grace keeps pulled org skills working.
-    """
+    """Best-effort org pull if all gates hold (logged in, org_role claim, feature enabled, base
+    URL). Never raises; None when inert. Marker hygiene: when the token VERIFIABLY lacks the org
+    claim (personal org / left the org) the active-org marker is cleared so mirrored org skills
+    stop resolving; when identity cannot be resolved at all (offline, logged out) the marker is
+    left alone -- offline grace keeps pulled org skills working."""
     ssc = _ssc()
     try:
         identity = resolve_org_identity()
