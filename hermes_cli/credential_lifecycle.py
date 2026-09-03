@@ -14,8 +14,7 @@ from typing import Any, Dict, List
 __all__ = [
     "save_provider_env_credential",
     "remove_provider_env_credential",
-    "purge_env_credential_references",
-]
+    "purge_env_credential_references"]
 
 
 def _providers_for_env_var(env_var: str) -> List[str]:
@@ -153,8 +152,7 @@ def _scrub_config_yaml_mirrors(old_value: str, new_value: str | None) -> List[st
 
 
 def purge_env_credential_references(
-    env_var: str, *, clear_models_cache: bool = True
-) -> Dict[str, Any]:
+    env_var: str, *, clear_models_cache: bool = True) -> Dict[str, Any]:
     """Remove non-.env references to an env-var credential.
 
     Prunes env-seeded pool entries and (optionally) the affected ``provider_models_cache.json`` rows
@@ -223,5 +221,4 @@ def remove_provider_env_credential(env_var: str) -> Dict[str, Any]:
         "pool_pruned": refs["pool_pruned"],
         "providers": refs["providers"],
         "config_scrubbed": config_scrubbed,
-        "found": bool(removed_from_env or refs["pool_pruned"] or config_scrubbed),
-    }
+        "found": bool(removed_from_env or refs["pool_pruned"] or config_scrubbed)}

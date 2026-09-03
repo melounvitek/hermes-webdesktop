@@ -15,8 +15,7 @@ VALID_RUNTIMES = ("auto", "codex_app_server")
 # Human-friendly synonyms accepted by parse_args.
 _ARG_SYNONYMS = {
     "on": "codex_app_server", "codex": "codex_app_server", "enable": "codex_app_server",
-    "off": "auto", "default": "auto", "disable": "auto", "hermes": "auto",
-}
+    "off": "auto", "default": "auto", "disable": "auto", "hermes": "auto"}
 
 _HERMES_TOOLS_CALLBACK_NOTE = (
     "Hermes tool callback registered: codex can now use "
@@ -25,8 +24,7 @@ _HERMES_TOOLS_CALLBACK_NOTE = (
     "kanban_* (worker + orchestrator) via MCP.",
     "  (delegate_task, memory, session_search, todo run "
     "only on the default Hermes runtime — they need the "
-    "agent loop context.)",
-)
+    "agent loop context.)")
 
 
 @dataclass
@@ -99,15 +97,13 @@ def _migration_lines(config: dict) -> list[str]:
         if mig_report.migrated_plugins:
             lines.append(
                 f"Migrated {len(mig_report.migrated_plugins)} native "
-                f"Codex plugin(s): {', '.join(mig_report.migrated_plugins)}"
-            )
+                f"Codex plugin(s): {', '.join(mig_report.migrated_plugins)}")
         elif mig_report.plugin_query_error:
             lines.append(f"Codex plugin discovery skipped: {mig_report.plugin_query_error}")
         if mig_report.wrote_permissions_default:
             lines.append(
                 f"Default sandbox: {mig_report.wrote_permissions_default} "
-                f"(no approval prompt on every write)"
-            )
+                f"(no approval prompt on every write)")
         if "hermes-tools" in mig_report.migrated:
             lines.extend(_HERMES_TOOLS_CALLBACK_NOTE)
         lines.append(f"  (config: {mig_report.target_path})")
@@ -119,11 +115,7 @@ def _migration_lines(config: dict) -> list[str]:
 
 
 def apply(
-    config: dict,
-    new_value: Optional[str],
-    *,
-    persist_callback=None,
-) -> CodexRuntimeStatus:
+    config: dict, new_value: Optional[str], *, persist_callback=None) -> CodexRuntimeStatus:
     """Top-level entry point used by both CLI and gateway handlers.
 
     ``config`` is mutated in place when ``new_value`` is set (None means show current state only).
@@ -151,8 +143,7 @@ def apply(
     if new_value == current and not reapplying_enable:
         return CodexRuntimeStatus(
             success=True, new_value=current, old_value=current,
-            message=f"openai_runtime already set to {current}",
-        )
+            message=f"openai_runtime already set to {current}")
 
     # Switching ON: verify codex CLI before persisting — an opt-in toggle that silently fails on
     # the first turn is the worst possible UX.
@@ -164,9 +155,7 @@ def apply(
                 message=(
                     "Cannot enable codex_app_server runtime: "
                     f"{ver_or_msg or 'codex CLI not available'}\n"
-                    "Install with: npm i -g @openai/codex"
-                ),
-            )
+                    "Install with: npm i -g @openai/codex"))
 
     if not reapplying_enable:
         set_runtime(config, new_value)
@@ -177,14 +166,12 @@ def apply(
                 logger.exception("failed to persist openai_runtime change")
                 return CodexRuntimeStatus(
                     success=False, new_value=new_value, old_value=current,
-                    message=f"updated config in memory but persist failed: {exc}",
-                )
+                    message=f"updated config in memory but persist failed: {exc}")
 
     msg_lines = [
         f"openai_runtime already set to {current} — re-applying migration"
         if reapplying_enable
-        else f"openai_runtime: {current} → {new_value}"
-    ]
+        else f"openai_runtime: {current} → {new_value}"]
     if new_value == "codex_app_server":
         ok, ver = _check_binary_cached()
         if ok:
@@ -195,16 +182,13 @@ def apply(
         msg_lines.append(
             "OpenAI/Codex turns now run through `codex app-server` "
             "(terminal/file ops/patching inside Codex; "
-            "Hermes tools available via MCP callback)."
-        )
+            "Hermes tools available via MCP callback).")
         msg_lines.append(
             "Effective on next session — current cached agent keeps "
-            "the prior runtime to preserve prompt cache."
-        )
+            "the prior runtime to preserve prompt cache.")
     else:
         msg_lines.append("OpenAI/Codex turns will use the default Hermes runtime.")
         msg_lines.append("Effective on next session.")
     return CodexRuntimeStatus(
         success=True, new_value=new_value, old_value=current,
-        message="\n".join(msg_lines), requires_new_session=True,
-    )
+        message="\n".join(msg_lines), requires_new_session=True)

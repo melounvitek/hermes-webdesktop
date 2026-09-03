@@ -50,8 +50,7 @@ _API_MODE_ALIASES = {
     "anthropic-messages": "anthropic_messages",
     "messages": "anthropic_messages",
     "bedrock": "bedrock_converse",
-    "bedrock-converse": "bedrock_converse",
-}
+    "bedrock-converse": "bedrock_converse"}
 
 _FALSE_WORDS = frozenset({"false", "0", "no", "off"})
 _TRUE_WORDS = frozenset({"true", "1", "yes", "on"})
@@ -111,8 +110,7 @@ _CAMEL_ALIASES: Dict[str, str] = {
     "apiKeyEnv": "key_env",  # OpenClaw-compatible + docs variant
     "defaultModel": "default_model",
     "contextLength": "context_length",
-    "rateLimitDelay": "rate_limit_delay",
-}
+    "rateLimitDelay": "rate_limit_delay"}
 
 
 _KNOWN_PROVIDER_KEYS = {
@@ -122,8 +120,7 @@ _KNOWN_PROVIDER_KEYS = {
     "name", "api", "url", "base_url", "api_key", "key_env", "api_key_env", "key_cmd",
     "api_mode", "transport", "model", "default_model", "models", "models_discovered",
     "context_length", "rate_limit_delay", "request_timeout_seconds", "stale_timeout_seconds",
-    "discover_models", "extra_body", "extra_headers", "capabilities", "ssl_ca_cert", "ssl_verify",
-}
+    "discover_models", "extra_body", "extra_headers", "capabilities", "ssl_ca_cert", "ssl_verify"}
 
 
 def _pick_provider_base_url(entry: Dict[str, Any], provider_key: str) -> str:
@@ -146,8 +143,7 @@ def _pick_provider_base_url(entry: Dict[str, Any], provider_key: str) -> str:
         logger.warning(
             "providers.%s: '%s' value '%s' is not a valid URL "
             "(no scheme or host) — skipped",
-            provider_key or "?", url_key, candidate,
-        )
+            provider_key or "?", url_key, candidate)
     return ""
 
 
@@ -181,17 +177,13 @@ def _normalize_provider_models(models: Any) -> Tuple[Dict[str, Any], bool]:
             if not isinstance(model_id, str) or not model_id.strip():
                 continue
             normalized_models[model_id.strip()] = {
-                k: v for k, v in item.items() if k not in {"id", "name"}
-            }
+                k: v for k, v in item.items() if k not in {"id", "name"}}
         return normalized_models, discovered
     return {}, discovered
 
 
 def _normalize_custom_provider_entry(
-    entry: Any,
-    *,
-    provider_key: str = "",
-) -> Optional[Dict[str, Any]]:
+    entry: Any, *, provider_key: str = "") -> Optional[Dict[str, Any]]:
     """Return a runtime-compatible custom provider entry or ``None``."""
     if not isinstance(entry, dict):
         return None
@@ -211,16 +203,14 @@ def _normalize_custom_provider_entry(
                 provider_key, f"camel:{camel}",
                 "providers.%s: camelCase key '%s' auto-mapped to '%s' "
                 "(use snake_case to avoid this warning)",
-                provider_key or "?", camel, snake,
-            )
+                provider_key or "?", camel, snake)
             entry[snake] = entry[camel]
     unknown = set(entry.keys()) - _KNOWN_PROVIDER_KEYS - set(_CAMEL_ALIASES.keys())
     if unknown:
         _warn_once_per_provider(
             provider_key, "unknown:" + ",".join(sorted(unknown)),
             "providers.%s: unknown config keys ignored: %s",
-            provider_key or "?", ", ".join(sorted(unknown)),
-        )
+            provider_key or "?", ", ".join(sorted(unknown)))
 
     base_url = _pick_provider_base_url(entry, provider_key)
     if not base_url:
@@ -243,38 +233,30 @@ def _normalize_custom_provider_entry(
                 break
         return val.strip() if isinstance(val, str) else ""
 
-    if _stripped("api_key"):
-        normalized["api_key"] = _stripped("api_key")
+    def _put(field: str, value: Any) -> None:
+        if value:
+            normalized[field] = value
 
+    _put("api_key", _stripped("api_key"))
     key_env = _stripped("key_env", "api_key_env")
-    if key_env:
-        normalized["key_env"] = key_env
-        if entry.get("api_key_env") and not entry.get("key_env"):
-            normalized["api_key_env"] = key_env
-
+    _put("key_env", key_env)
+    if key_env and entry.get("api_key_env") and not entry.get("key_env"):
+        normalized["api_key_env"] = key_env
     api_mode = _stripped("api_mode", "transport")
-    if api_mode:
-        normalized["api_mode"] = _canonical_api_mode(api_mode)
-
-    model_name = _stripped("model", "default_model")
-    if model_name:
-        normalized["model"] = model_name
+    _put("api_mode", _canonical_api_mode(api_mode) if api_mode else "")
+    _put("model", _stripped("model", "default_model"))
 
     # ``models_discovered`` marks a mapping auto-discovered by Hermes, not hand-curated.
     models_dict, discovered = _normalize_provider_models(entry.get("models"))
-    if models_dict:
-        normalized["models"] = models_dict
+    _put("models", models_dict)
     if entry.get("models_discovered") is True or discovered:
         normalized["models_discovered"] = True
 
     capabilities = entry.get("capabilities")
     if isinstance(capabilities, dict):
-        normalized_capabilities = {
+        _put("capabilities", {
             key: value for key, value in capabilities.items()
-            if isinstance(key, str) and isinstance(value, bool)
-        }
-        if normalized_capabilities:
-            normalized["capabilities"] = normalized_capabilities
+            if isinstance(key, str) and isinstance(value, bool)})
 
     context_length = entry.get("context_length")
     if isinstance(context_length, int) and context_length > 0:
@@ -291,13 +273,8 @@ def _normalize_custom_provider_entry(
         normalized["extra_body"] = dict(entry["extra_body"])
 
     # Per-provider extra HTTP headers may carry credentials — never log them downstream.
-    normalized_headers = normalize_extra_headers(entry.get("extra_headers"))
-    if normalized_headers:
-        normalized["extra_headers"] = normalized_headers
-
-    ssl_ca_cert = _stripped("ssl_ca_cert")
-    if ssl_ca_cert:
-        normalized["ssl_ca_cert"] = ssl_ca_cert
+    _put("extra_headers", normalize_extra_headers(entry.get("extra_headers")))
+    _put("ssl_ca_cert", _stripped("ssl_ca_cert"))
 
     ssl_verify = entry.get("ssl_verify")
     if isinstance(ssl_verify, bool):
@@ -309,10 +286,7 @@ def _normalize_custom_provider_entry(
 
 
 def _custom_provider_entry_to_provider_config(
-    entry: Any,
-    *,
-    provider_key: str = "",
-) -> Optional[Dict[str, Any]]:
+    entry: Any, *, provider_key: str = "") -> Optional[Dict[str, Any]]:
     """Translate a legacy custom provider entry to the v12 providers shape."""
     normalized = _normalize_custom_provider_entry(entry, provider_key=provider_key)
     if normalized is None:
@@ -322,8 +296,7 @@ def _custom_provider_entry_to_provider_config(
     for field in (
         "name", "api_key", "key_env", "models", "models_discovered", "context_length",
         "rate_limit_delay", "discover_models", "extra_body", "extra_headers",
-        "ssl_ca_cert", "ssl_verify",
-    ):
+        "ssl_ca_cert", "ssl_verify"):
         if field in normalized:
             provider_entry[field] = normalized[field]
     if "model" in normalized:
@@ -348,8 +321,7 @@ def providers_dict_to_custom_providers(providers_dict: Any) -> List[Dict[str, An
 
 
 def get_compatible_custom_providers(
-    config: Optional[Dict[str, Any]] = None,
-) -> List[Dict[str, Any]]:
+    config: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """Deduplicated list-shaped view over legacy ``custom_providers`` and v12+ ``providers``.
 
     Runtime and picker flows need one list; the compatibility layer is never materialised back
@@ -359,48 +331,41 @@ def get_compatible_custom_providers(
     if config is None:
         config = load_config()
 
+    custom_providers = config.get("custom_providers")
+    if custom_providers is not None and not isinstance(custom_providers, list):
+        return []
+    candidates = [_normalize_custom_provider_entry(e) for e in (custom_providers or [])]
+    candidates += providers_dict_to_custom_providers(config.get("providers"))
+
+    def _norm(entry: Dict[str, Any], field: str) -> str:
+        return str(entry.get(field, "") or "").strip().lower()
+
     compatible: List[Dict[str, Any]] = []
     seen_provider_keys: set = set()
     seen_name_url_pairs: set = set()
-
-    def _append_if_new(entry: Optional[Dict[str, Any]]) -> None:
+    for entry in candidates:
         if entry is None:
-            return
-        provider_key = str(entry.get("provider_key", "") or "").strip().lower()
-        name = str(entry.get("name", "") or "").strip().lower()
+            continue
+        provider_key = _norm(entry, "provider_key")
+        name = _norm(entry, "name")
         base_url = str(entry.get("base_url", "") or "").strip().rstrip("/").lower()
-        model = str(entry.get("model", "") or "").strip().lower()
-        pair = (name, base_url, model)
-
+        pair = (name, base_url, _norm(entry, "model"))
         if provider_key and provider_key in seen_provider_keys:
-            return
+            continue
         if name and base_url and pair in seen_name_url_pairs:
-            return
-
+            continue
         compatible.append(entry)
         if provider_key:
             seen_provider_keys.add(provider_key)
         if name and base_url:
             seen_name_url_pairs.add(pair)
-
-    custom_providers = config.get("custom_providers")
-    if custom_providers is not None:
-        if not isinstance(custom_providers, list):
-            return []
-        for entry in custom_providers:
-            _append_if_new(_normalize_custom_provider_entry(entry))
-
-    for entry in providers_dict_to_custom_providers(config.get("providers")):
-        _append_if_new(entry)
-
     return compatible
 
 
 def _entries_for_route(
     base_url: str,
     custom_providers: Optional[List[Dict[str, Any]]],
-    config: Optional[Dict[str, Any]],
-):
+    config: Optional[Dict[str, Any]]):
     """Yield custom-provider entries whose normalized route identity equals *base_url*.
 
     Loads ``get_compatible_custom_providers(config)`` when *custom_providers* is None (failures →
@@ -438,8 +403,7 @@ def _route_model_cfgs(
     model: str,
     base_url: str,
     custom_providers: Optional[List[Dict[str, Any]]],
-    config: Optional[Dict[str, Any]],
-) -> Iterator[Dict[str, Any]]:
+    config: Optional[Dict[str, Any]]) -> Iterator[Dict[str, Any]]:
     """Yield the ``models.<model>`` mapping of every entry matching *base_url*."""
     for entry in _entries_for_route(base_url, custom_providers, config):
         model_cfg = _route_model_cfg(entry, model)
@@ -464,8 +428,7 @@ def _coerce_ssl_verify(value: Any) -> Optional[bool]:
 def get_custom_provider_tls_settings(
     base_url: str,
     custom_providers: Optional[List[Dict[str, Any]]] = None,
-    config: Optional[Dict[str, Any]] = None,
-) -> Dict[str, Any]:
+    config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Return TLS settings from a matching ``custom_providers`` / ``providers`` entry."""
     for entry in _entries_for_route(base_url, custom_providers, config):
         out: Dict[str, Any] = {}
@@ -483,8 +446,7 @@ def apply_custom_provider_tls_to_client_kwargs(
     client_kwargs: Dict[str, Any],
     base_url: str,
     custom_providers: Optional[List[Dict[str, Any]]] = None,
-    config: Optional[Dict[str, Any]] = None,
-) -> None:
+    config: Optional[Dict[str, Any]] = None) -> None:
     """Attach per-provider TLS knobs to OpenAI client kwargs when matched."""
     tls = get_custom_provider_tls_settings(base_url, custom_providers, config)
     if tls.get("ssl_ca_cert"):
@@ -507,8 +469,7 @@ def normalize_extra_headers(extra_headers: Any) -> Dict[str, str]:
 def get_custom_provider_extra_headers(
     base_url: str,
     custom_providers: Optional[List[Dict[str, Any]]] = None,
-    config: Optional[Dict[str, Any]] = None,
-) -> Dict[str, str]:
+    config: Optional[Dict[str, Any]] = None) -> Dict[str, str]:
     """Return ``extra_headers`` of the first route-matching entry that declares any, else ``{}``.
 
     SECURITY: values may carry credentials — callers must never log them.
@@ -524,8 +485,7 @@ def apply_custom_provider_extra_headers_to_client_kwargs(
     client_kwargs: Dict[str, Any],
     base_url: str,
     custom_providers: Optional[List[Dict[str, Any]]] = None,
-    config: Optional[Dict[str, Any]] = None,
-) -> None:
+    config: Optional[Dict[str, Any]] = None) -> None:
     """Merge per-provider ``extra_headers`` onto OpenAI client ``default_headers``.
 
     Provider-specific headers win over SDK/provider defaults already in ``client_kwargs`` (they
@@ -543,8 +503,7 @@ def get_custom_provider_context_length(
     model: str,
     base_url: str,
     custom_providers: Optional[List[Dict[str, Any]]] = None,
-    config: Optional[Dict[str, Any]] = None,
-) -> Optional[int]:
+    config: Optional[Dict[str, Any]] = None) -> Optional[int]:
     """Per-model ``context_length`` override from a route-matching entry, or ``None``."""
     from hermes_cli.config import get_compatible_custom_providers
     if not model or not base_url:
@@ -576,8 +535,7 @@ def get_custom_provider_model_capability(
     base_url: str,
     capability: str,
     custom_providers: Optional[List[Dict[str, Any]]] = None,
-    config: Optional[Dict[str, Any]] = None,
-) -> Optional[bool]:
+    config: Optional[Dict[str, Any]] = None) -> Optional[bool]:
     """Explicit boolean capability for one custom-provider model, or ``None``.
 
     Matching is scoped to the normalized route and exact runtime model id so aliases can declare

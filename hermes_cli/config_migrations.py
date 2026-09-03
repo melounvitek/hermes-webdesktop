@@ -28,8 +28,7 @@ def support_floor_message() -> str:
         "and can no longer be auto-migrated. Back up "
         f"{display_hermes_home()}/config.yaml and run `hermes setup` to "
         f"regenerate, or manually set _config_version: {SUPPORT_FLOOR_VERSION} "
-        "after reviewing the changelog."
-    )
+        "after reviewing the changelog.")
 
 
 def _cfg():
@@ -58,8 +57,7 @@ def _commit(
     results: Dict[str, Any],
     quiet: bool,
     added: Optional[str],
-    message: Optional[str],
-) -> None:
+    message: Optional[str]) -> None:
     """Persist *config*, record *added* under ``config_added`` and print *message* unless quiet."""
     _persist_migration(config)
     if added:
@@ -68,32 +66,49 @@ def _commit(
         print(message)
 
 
-def _rewrite_stale_default(
+def _rewrite_key(
     results: Dict[str, Any],
     quiet: bool,
     *,
     section: str,
     key: str,
-    old: Any,
+    match: Callable[[Any], bool],
     new: Any,
     added: str,
     message: str,
     extra_guard: Callable[[Dict[str, Any]], bool] = lambda _m: True,
-) -> None:
-    """Rewrite ``<section>.<key>`` only when it still equals the OLD default.
+    create_section: bool = False) -> None:
+    """Rewrite ``<section>.<key>`` to *new* when ``match(current_value)`` holds.
 
-    Never clobbers a value the user deliberately customized; unset keys inherit the new default at
-    read time. ``new=None`` deletes the key instead of assigning.
+    ``new=None`` deletes the key. A missing/non-mapping section is skipped unless
+    *create_section* (then ``match(None)`` decides).
     """
     config = read_raw_config()
     raw = config.get(section)
-    if isinstance(raw, dict) and raw.get(key) == old and extra_guard(raw):
+    if not isinstance(raw, dict):
+        if not create_section:
+            return
+        raw = {}
+    if match(raw.get(key)) and extra_guard(raw):
         if new is None:
             del raw[key]
         else:
             raw[key] = new
         config[section] = raw
         _commit(config, results, quiet, added, message)
+
+
+def _rewrite_stale_default(results: Dict[str, Any], quiet: bool, *, old: Any, **kw: Any) -> None:
+    """Rewrite a key only while it still equals the OLD default.
+
+    Never clobbers a value the user deliberately customized; unset keys inherit the new default at
+    read time.
+    """
+    _rewrite_key(results, quiet, match=lambda cur: cur == old, **kw)
+
+
+def _lower_is(word: str) -> Callable[[Any], bool]:
+    return lambda cur: isinstance(cur, str) and cur.strip().lower() == word
 
 
 def _migrate_to_12(results: Dict[str, Any], quiet: bool) -> None:
@@ -173,8 +188,7 @@ _LOCAL_WHISPER_MODELS = frozenset({
     "medium.en", "medium", "large-v1", "large-v2", "large-v3",
     "large", "distil-large-v2", "distil-medium.en",
     "distil-small.en", "distil-large-v3", "distil-large-v3.5",
-    "large-v3-turbo", "turbo",
-})
+    "large-v3-turbo", "turbo"})
 
 
 def _migrate_to_14(results: Dict[str, Any], quiet: bool) -> None:
@@ -203,8 +217,7 @@ def _migrate_to_14(results: Dict[str, Any], quiet: bool) -> None:
         _place(provider)
     config["stt"] = stt
     _commit(
-        config, results, quiet, None, "  ✓ Migrated legacy stt.model to provider-specific config"
-    )
+        config, results, quiet, None, "  ✓ Migrated legacy stt.model to provider-specific config")
 
 
 def _migrate_to_16(results: Dict[str, Any], quiet: bool) -> None:
@@ -226,8 +239,7 @@ def _migrate_to_16(results: Dict[str, Any], quiet: bool) -> None:
     _commit(
         config, results, quiet,
         "display.platforms (migrated from tool_progress_overrides)",
-        f"  ✓ Migrated tool_progress_overrides → display.platforms: {migrated}",
-    )
+        f"  ✓ Migrated tool_progress_overrides → display.platforms: {migrated}")
 
 
 def _migrate_to_17(results: Dict[str, Any], quiet: bool) -> None:
@@ -253,8 +265,7 @@ def _migrate_to_17(results: Dict[str, Any], quiet: bool) -> None:
         message = (
             "  ✓ Migrated compression.summary_* → auxiliary.compression: "
             f"{', '.join(migrated_keys)}"
-            if migrated_keys else "  ✓ Removed unused compression.summary_* keys"
-        )
+            if migrated_keys else "  ✓ Removed unused compression.summary_* keys")
         _commit(config, results, quiet, None, message)
 
 
@@ -302,12 +313,10 @@ def _migrate_to_21(results: Dict[str, Any], quiet: bool) -> None:
         f"{len(grandfathered)} existing plugin(s) into plugins.enabled"
         if grandfathered else
         "  ✓ Plugins now opt-in: no existing plugins to grandfather. "
-        "Use `hermes plugins enable <name>` to activate."
-    )
+        "Use `hermes plugins enable <name>` to activate.")
     _commit(
         config, results, quiet,
-        f"plugins.enabled (opt-in allow-list, {len(grandfathered)} grandfathered)", message,
-    )
+        f"plugins.enabled (opt-in allow-list, {len(grandfathered)} grandfathered)", message)
 
 
 def _migrate_to_23(results: Dict[str, Any], quiet: bool) -> None:
@@ -339,8 +348,7 @@ def _migrate_to_23(results: Dict[str, Any], quiet: bool) -> None:
     raw_aux = _dict_at(config, "auxiliary")
     raw_aux_curator = _dict_at(raw_aux, "curator")
     added_aux = _seed_missing(
-        raw_aux_curator, DEFAULT_CONFIG.get("auxiliary", {}).get("curator", {})
-    )
+        raw_aux_curator, DEFAULT_CONFIG.get("auxiliary", {}).get("curator", {}))
     if added_aux:
         raw_aux["curator"] = raw_aux_curator
         config["auxiliary"] = raw_aux
@@ -354,8 +362,7 @@ def _migrate_to_23(results: Dict[str, Any], quiet: bool) -> None:
             if not quiet:
                 print(
                     f"  ✓ {'Curator' if label == 'curator' else label} settings now available "
-                    f"({', '.join(added)}) — edit via `hermes config set`"
-                )
+                    f"({', '.join(added)}) — edit via `hermes config set`")
 
 
 def _migrate_to_25(results: Dict[str, Any], quiet: bool) -> None:
@@ -363,8 +370,7 @@ def _migrate_to_25(results: Dict[str, Any], quiet: bool) -> None:
     _rewrite_stale_default(
         results, quiet, section="model_catalog", key="ttl_hours", old=24, new=1,
         added="model_catalog.ttl_hours 24→1",
-        message="  ✓ Lowered model_catalog.ttl_hours to 1 (hourly picker refresh)",
-    )
+        message="  ✓ Lowered model_catalog.ttl_hours to 1 (hourly picker refresh)")
 
 
 def _migrate_to_29(results: Dict[str, Any], quiet: bool) -> None:
@@ -383,13 +389,10 @@ def _migrate_to_29(results: Dict[str, Any], quiet: bool) -> None:
         config[subsystem] = sub
         touched = True
         results["config_added"].append(
-            f"{subsystem}.write_mode → write_approval={sub['write_approval']}"
-        )
+            f"{subsystem}.write_mode → write_approval={sub['write_approval']}")
     if touched:
-        _commit(
-            config, results, quiet, None,
-            "  ✓ Renamed write_mode → write_approval (boolean gate)",
-        )
+        _commit(config, results, quiet, None,
+                "  ✓ Renamed write_mode → write_approval (boolean gate)")
 
 
 # 29 → 30 (curator.consolidate defaults to false) is schema-default-only: deep-merge supplies it
@@ -399,18 +402,14 @@ def _migrate_to_29(results: Dict[str, Any], quiet: bool) -> None:
 def _migrate_to_31(results: Dict[str, Any], quiet: bool) -> None:
     # 30 → 31: verify_on_stop OFF (one-time). The "auto" sentinel was more noise than signal.
     # Rewrite only when missing or still "auto" — an explicit user true/false is preserved.
-    config = read_raw_config()
-    raw_agent = _dict_at(config, "agent")
-    cur = raw_agent.get("verify_on_stop")
-    if cur is None or (isinstance(cur, str) and cur.strip().lower() == "auto"):
-        raw_agent["verify_on_stop"] = False
-        config["agent"] = raw_agent
-        _commit(
-            config, results, quiet, "agent.verify_on_stop=false",
+    _rewrite_key(
+        results, quiet, section="agent", key="verify_on_stop", new=False, create_section=True,
+        match=lambda cur: cur is None or _lower_is("auto")(cur),
+        added="agent.verify_on_stop=false",
+        message=(
             "  ✓ Turned off verify-on-stop (agent.verify_on_stop: false). "
             "Set it to true to re-enable, or \"auto\" for the legacy "
-            "surface-aware behavior.",
-        )
+            "surface-aware behavior."))
 
 
 def _migrate_to_32(results: Dict[str, Any], quiet: bool) -> None:
@@ -425,10 +424,8 @@ def _migrate_to_32(results: Dict[str, Any], quiet: bool) -> None:
             "  ✓ Turned off verify-on-stop (agent.verify_on_stop: false) — "
             "the old default was written into your config as a literal "
             "true. Set it to true again to re-enable, or \"auto\" for the "
-            "legacy surface-aware behavior."
-        ),
-        extra_guard=lambda raw: raw.get("verify_on_stop") is True,
-    )
+            "legacy surface-aware behavior."),
+        extra_guard=lambda raw: raw.get("verify_on_stop") is True)
 
 
 def _migrate_to_33(results: Dict[str, Any], quiet: bool) -> None:
@@ -452,15 +449,13 @@ def _migrate_to_33(results: Dict[str, Any], quiet: bool) -> None:
             raw_deleg["max_concurrent_children"] = old_async_i
             results["config_added"].append(
                 f"delegation.max_concurrent_children={old_async_i} "
-                f"(folded from deprecated max_async_children)"
-            )
+                f"(folded from deprecated max_async_children)")
     config["delegation"] = raw_deleg
     _commit(
         config, results, quiet, None,
         "  ✓ Removed deprecated delegation.max_async_children — "
         "delegation.max_concurrent_children now caps background "
-        "delegations too.",
-    )
+        "delegations too.")
 
 
 def _migrate_to_34(results: Dict[str, Any], quiet: bool) -> None:
@@ -470,11 +465,7 @@ def _migrate_to_34(results: Dict[str, Any], quiet: bool) -> None:
     # had turned off. Reset display.personality → "" and scrub agent.system_prompt ONLY when it
     # verbatim-equals a known personality's rendered text; any other text is user-owned.
     from hermes_cli.personality import (
-        available_personalities,
-        normalize_personality_name,
-        prompt_text,
-        render_personality_prompt,
-    )
+        available_personalities, normalize_personality_name, prompt_text, render_personality_prompt)
 
     config = read_raw_config()
     touched = False
@@ -494,8 +485,7 @@ def _migrate_to_34(results: Dict[str, Any], quiet: bool) -> None:
         manual = prompt_text(raw_agent.get("system_prompt", ""))
         if manual:
             rendered = {
-                render_personality_prompt(defn)
-                for defn in available_personalities(config).values()
+                render_personality_prompt(defn) for defn in available_personalities(config).values()
             }
             if manual in rendered:
                 raw_agent["system_prompt"] = ""
@@ -513,36 +503,27 @@ def _migrate_to_34(results: Dict[str, Any], quiet: bool) -> None:
             f"  ✓ Personality reset to none (was '{old_name}'). Personality "
             "state was previously saved inconsistently across surfaces and "
             "could re-enable a personality you had turned off. "
-            f"Run /personality {old_name} to turn it back on."
-        )
+            f"Run /personality {old_name} to turn it back on.")
     if scrubbed_text:
         print(
             "  ✓ Removed personality text from agent.system_prompt (written "
             "by an older /personality). That field is now reserved for "
-            "manual system prompts; personalities live in display.personality."
-        )
+            "manual system prompts; personalities live in display.personality.")
 
 
 def _migrate_to_35(results: Dict[str, Any], quiet: bool) -> None:
     # 34 → 35: background_process_notifications 'all' (old implicit default, rarely chosen on
     # purpose) → 'concise'. Explicit result/error/off choices are preserved.
-    config = read_raw_config()
-    raw_display = config.get("display")
-    if not isinstance(raw_display, dict):
-        return
-    raw_val = raw_display.get("background_process_notifications")
-    if isinstance(raw_val, str) and raw_val.strip().lower() == "all":
-        raw_display["background_process_notifications"] = "concise"
-        config["display"] = raw_display
-        _commit(
-            config, results, quiet,
-            "display.background_process_notifications=concise (was: all)",
+    _rewrite_key(
+        results, quiet, section="display", key="background_process_notifications",
+        match=_lower_is("all"), new="concise",
+        added="display.background_process_notifications=concise (was: all)",
+        message=(
             "  ✓ Background process notifications switched from 'all' to "
             "'concise' — completions now show a one-line status message "
             "instead of the raw output dump. Set "
             "display.background_process_notifications: all to restore "
-            "the old behavior.",
-        )
+            "the old behavior."))
 
 
 def _migrate_to_36(results: Dict[str, Any], quiet: bool) -> None:
@@ -554,9 +535,7 @@ def _migrate_to_36(results: Dict[str, Any], quiet: bool) -> None:
             "  ✓ Raised delegation.max_iterations from 50 to 250 — subagents "
             "now get a larger per-child tool-call budget so delegated work "
             "finishes instead of truncating. Set delegation.max_iterations "
-            "back to 50 to restore the old cap."
-        ),
-    )
+            "back to 50 to restore the old cap."))
 
 
 def _migrate_to_37(results: Dict[str, Any], quiet: bool) -> None:
@@ -568,9 +547,7 @@ def _migrate_to_37(results: Dict[str, Any], quiet: bool) -> None:
             "  ✓ Raised delegation.max_concurrent_children from 3 to 10 — "
             "independent delegated children now fan out wider in parallel. "
             "Each child consumes API tokens independently; set "
-            "delegation.max_concurrent_children back to 3 to restore the old cap."
-        ),
-    )
+            "delegation.max_concurrent_children back to 3 to restore the old cap."))
 
 
 def _migrate_to_38(results: Dict[str, Any], quiet: bool) -> None:
@@ -593,8 +570,7 @@ def _migrate_to_38(results: Dict[str, Any], quiet: bool) -> None:
     message = (
         "Removed legacy Relay plugin from plugins.enabled: "
         f"{', '.join(removed)}. Configure native Relay plugins with "
-        "HERMES_NEMO_RELAY_PLUGINS_TOML."
-    )
+        "HERMES_NEMO_RELAY_PLUGINS_TOML.")
     results["warnings"].append(message)
     if not quiet:
         print(f"  ⚠ {message}")
@@ -621,8 +597,7 @@ def _migrate_to_39(results: Dict[str, Any], quiet: bool) -> None:
             "removed retired 'bfl' toolset from saved toolset lists",
             "  ✓ Removed the retired BFL FLUX 3 toolset from saved toolset "
             "lists — video generation now lives under `hermes tools` → "
-            "Video Generation (Nous Subscription or FAL).",
-        )
+            "Video Generation (Nous Subscription or FAL).")
 
 
 def _migrate_to_40(results: Dict[str, Any], quiet: bool) -> None:
@@ -632,8 +607,7 @@ def _migrate_to_40(results: Dict[str, Any], quiet: bool) -> None:
         results, quiet, section="model_catalog", key="ttl_hours", old=1, new=None,
         added="model_catalog.ttl_hours 1 → ttl_minutes 20 (default)",
         message="  ✓ Model catalog now refreshes every 20 minutes (model_catalog.ttl_minutes)",
-        extra_guard=lambda raw: "ttl_minutes" not in raw,
-    )
+        extra_guard=lambda raw: "ttl_minutes" not in raw)
 
 
 #: Registry of (target_version, step), strictly ascending. Later steps observe earlier steps'
@@ -660,8 +634,7 @@ MIGRATIONS: Tuple[Tuple[int, Callable[[Dict[str, Any], bool], None]], ...] = (
     (37, _migrate_to_37),
     (38, _migrate_to_38),
     (39, _migrate_to_39),
-    (40, _migrate_to_40),
-)
+    (40, _migrate_to_40))
 
 
 def run_migrations(current_ver: int, results: Dict[str, Any], quiet: bool) -> None:
