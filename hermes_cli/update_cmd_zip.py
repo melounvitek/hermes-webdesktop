@@ -18,6 +18,23 @@ from hermes_cli.update_cmd_common import _best_effort
 # Log-record parity with the origin module.
 logger = logging.getLogger("hermes_cli.update_cmd")
 
+_ZIP_STAGING_ARTIFACT_SUFFIXES = ".hermes-update-staging", ".hermes-update-old"
+
+# Single source of truth for entries the ZIP swap preserves — used by the dirty-tree filter and the swap loop.
+_ZIP_PRESERVED_TOP_LEVEL = {"venv", "node_modules", ".git", ".env"}
+
+
+def _remove_path(path: str, *, ignore_errors: bool = False) -> None:
+    """Remove a dir or file; missing paths are a no-op."""
+    if os.path.isdir(path):
+        shutil.rmtree(path, ignore_errors=True)
+    elif os.path.exists(path):
+        if ignore_errors:
+            with suppress(OSError):
+                os.remove(path)
+        else:
+            os.remove(path)
+
 
 def _atomic_replace_dir(src: str, dst: str) -> None:
     """Replace *dst* with *src* without a half-deleted window: naive ``rmtree; copytree`` loses the old
@@ -38,10 +55,7 @@ def _stage_replacement(src: str, dst: str) -> str:
     if not os.path.exists(dst) and os.path.exists(backup):
         os.rename(backup, dst)
     for leftover in (staging, backup):
-        if os.path.isdir(leftover):
-            shutil.rmtree(leftover, ignore_errors=True)
-        elif os.path.exists(leftover):
-            os.remove(leftover)
+        _remove_path(leftover)
     if os.path.isdir(src):
         shutil.copytree(src, staging)
     else:
@@ -55,10 +69,7 @@ def _discard_staged(staged) -> None:
     """
     for staging, _dst in staged:
         try:
-            if os.path.isdir(staging):
-                shutil.rmtree(staging, ignore_errors=True)
-            elif os.path.exists(staging):
-                os.remove(staging)
+            _remove_path(staging)
         except OSError as exc:  # best-effort cleanup, never fatal
             logger.warning("could not remove staging path %s: %s", staging, exc)
 
@@ -86,10 +97,7 @@ def _commit_staged_replacements(staged) -> None:
         # Undo every swap already made so the install stays self-consistent.
         for dst, backup in reversed(swapped):
             try:
-                if os.path.isdir(dst):
-                    shutil.rmtree(dst, ignore_errors=True)
-                elif os.path.exists(dst):
-                    os.remove(dst)
+                _remove_path(dst)
                 if backup and os.path.exists(backup):
                     os.rename(backup, dst)
             except OSError as exc:
@@ -98,16 +106,11 @@ def _commit_staged_replacements(staged) -> None:
         raise
     # All swaps succeeded — drop the backups (best-effort, never fatal).
     for _dst, backup in swapped:
-        if backup and os.path.isdir(backup):
-            shutil.rmtree(backup, ignore_errors=True)
-        elif backup and os.path.exists(backup):
-            with suppress(OSError):
-                os.remove(backup)
+        if backup:
+            _remove_path(backup, ignore_errors=True)
 
 
-def _zip_overlay_block_reason(
-    root: Path, *, ignore_staging_artifacts: bool = False
-) -> Optional[str]:
+def _zip_overlay_block_reason(root: Path, *, ignore_staging_artifacts: bool = False) -> Optional[str]:
     """Why overlaying a ZIP onto ``root`` would destroy work, or None if safe.
 
     The swap replaces every top-level entry (minus a tiny preserve set) and deletes backups, so uncommitted
@@ -135,22 +138,21 @@ def _zip_overlay_block_reason(
         detail = (result.stderr or result.stdout or "").strip().splitlines()
         suffix = f" ({detail[0]})" if detail else ""
         return f"could not check the working tree{suffix}"
-    lines = [line for line in (result.stdout or "").splitlines() if line.strip()]
     # Preserved entries (venv, node_modules are gitignored on every normal install) are never touched by the
     # swap, so they must not cause a false refusal. Everything else — including ignored files — blocks.
-    lines = [line for line in lines if not _is_zip_preserved_entry_status_line(line)]
-    if ignore_staging_artifacts:
-        lines = [line for line in lines if not _is_zip_staging_artifact_status_line(line)]
+    lines = [
+        line for line in (result.stdout or "").splitlines()
+        if line.strip()
+        and not _is_zip_preserved_entry_status_line(line)
+        and not (ignore_staging_artifacts and _is_zip_staging_artifact_status_line(line))
+    ]
     if lines:
         return "the working tree has uncommitted changes or untracked files"
     return None
 
 
-_ZIP_STAGING_ARTIFACT_SUFFIXES = ".hermes-update-staging", ".hermes-update-old"
-
-
-# Single source of truth for entries the ZIP swap preserves — used by the dirty-tree filter and the swap loop.
-_ZIP_PRESERVED_TOP_LEVEL = {"venv", "node_modules", ".git", ".env"}
+def _status_top_level(path: str) -> str:
+    return path.strip().strip('"').replace("\\", "/").rstrip("/").split("/", 1)[0]
 
 
 def _is_zip_preserved_entry_status_line(line: str) -> bool:
@@ -163,18 +165,13 @@ def _is_zip_preserved_entry_status_line(line: str) -> bool:
     status, payload = (line[:2], line[3:]) if len(line) >= 3 else ("", line)
     is_rename = any(code in "RC" for code in status)
     paths = payload.split(" -> ") if is_rename else [payload]
-    for path in paths:
-        top_level = path.strip().strip('"').replace("\\", "/").rstrip("/").split("/", 1)[0]
-        if top_level not in _ZIP_PRESERVED_TOP_LEVEL:
-            return False
-    return True
+    return all(_status_top_level(path) in _ZIP_PRESERVED_TOP_LEVEL for path in paths)
 
 
 def _is_zip_staging_artifact_status_line(line: str) -> bool:
     """True when a porcelain status line is our own two-phase-swap artifact."""
     payload = line[3:] if len(line) >= 3 else line
-    top_level = payload.strip().strip('"').replace("\\", "/").rstrip("/").split("/", 1)[0]
-    return top_level.endswith(_ZIP_STAGING_ARTIFACT_SUFFIXES)
+    return _status_top_level(payload).endswith(_ZIP_STAGING_ARTIFACT_SUFFIXES)
 
 
 def _abort_zip_update_if_dirty_tree() -> None:
@@ -184,13 +181,27 @@ def _abort_zip_update_if_dirty_tree() -> None:
     if reason is None:
         return
     print(f"✗ ZIP fallback refused: {reason}.")
-    print(
-        "  Overlaying the ZIP would overwrite uncommitted edits and permanently "
-        "delete untracked files."
-    )
+    print("  Overlaying the ZIP would overwrite uncommitted edits and permanently delete untracked files.")
     print("  Stash or commit your changes, then rerun `hermes update`.")
     print("  To inspect: git status --porcelain")
     _m().sys.exit(1)
+
+
+def _extract_zip_safely(zip_path: str, tmp_dir: str) -> None:
+    """Extract, rejecting zip-slip AND symlink members: a source ZIP never legitimately contains
+    symlinks, and a compromised mirror could use them to plant files anywhere."""
+    import stat as _stat
+    import zipfile
+    with zipfile.ZipFile(zip_path, "r") as zf:
+        tmp_dir_real = os.path.realpath(tmp_dir)
+        for member in zf.infolist():
+            member_path = os.path.realpath(os.path.join(tmp_dir, member.filename))
+            if not member_path.startswith(tmp_dir_real + os.sep) and member_path != tmp_dir_real:
+                raise ValueError(f"Zip-slip detected: {member.filename} escapes extraction directory")
+            # Unix mode lives in the upper 16 bits of external_attr; mask to the file-type bits.
+            if _stat.S_ISLNK((member.external_attr >> 16) & 0o170000):
+                raise ValueError(f"ZIP contains unsupported symlink member: {member.filename}")
+        zf.extractall(tmp_dir)
 
 
 def _download_and_swap_zip(branch: str, zip_url: str) -> None:
@@ -200,9 +211,7 @@ def _download_and_swap_zip(branch: str, zip_url: str) -> None:
     from hermes_cli.update_cmd import _m
 
     import tempfile
-    import zipfile
     from urllib.request import urlretrieve
-
     print("→ Downloading latest version...")
     tmp_dir = tempfile.mkdtemp(prefix="hermes-update-")
     try:
@@ -210,25 +219,7 @@ def _download_and_swap_zip(branch: str, zip_url: str) -> None:
         urlretrieve(zip_url, zip_path)
 
         print("→ Extracting...")
-        import stat as _stat
-        with zipfile.ZipFile(zip_path, "r") as zf:
-            # Reject zip-slip AND symlink members: a source ZIP never legitimately contains symlinks,
-            # and a compromised mirror could use them to plant files anywhere.
-            tmp_dir_real = os.path.realpath(tmp_dir)
-            for member in zf.infolist():
-                member_path = os.path.realpath(os.path.join(tmp_dir, member.filename))
-                if (
-                    not member_path.startswith(tmp_dir_real + os.sep)
-                    and member_path != tmp_dir_real
-                ):
-                    raise ValueError(
-                        f"Zip-slip detected: {member.filename} escapes extraction directory"
-                    )
-                # Unix mode lives in the upper 16 bits of external_attr; mask to the file-type bits.
-                mode = (member.external_attr >> 16) & 0o170000
-                if _stat.S_ISLNK(mode):
-                    raise ValueError(f"ZIP contains unsupported symlink member: {member.filename}")
-            zf.extractall(tmp_dir)
+        _extract_zip_safely(zip_path, tmp_dir)
 
         # GitHub ZIPs extract to hermes-agent-<branch>/
         extracted = os.path.join(tmp_dir, f"hermes-agent-{branch}")
@@ -239,8 +230,7 @@ def _download_and_swap_zip(branch: str, zip_url: str) -> None:
                     extracted = candidate
                     break
 
-        preserve = _ZIP_PRESERVED_TOP_LEVEL
-        entries = [i for i in os.listdir(extracted) if i not in preserve]
+        entries = [i for i in os.listdir(extracted) if i not in _ZIP_PRESERVED_TOP_LEVEL]
 
         # Two-phase replace: stage every entry (dirs AND top-level files) beside its target, then swap all
         # in with same-filesystem renames, rolling back on failure — one-at-a-time replacement left a
@@ -277,9 +267,7 @@ def _download_and_swap_zip(branch: str, zip_url: str) -> None:
                 if item == "apps":
                     live_release = os.path.join(dst, "desktop", "release")
                     staged_release = os.path.join(staged[-1][0], "desktop", "release")
-                    if os.path.isdir(live_release) and not os.path.exists(
-                        staged_release
-                    ):
+                    if os.path.isdir(live_release) and not os.path.exists(staged_release):
                         os.makedirs(os.path.dirname(staged_release), exist_ok=True)
                         shutil.copytree(live_release, staged_release)
         except Exception:
@@ -290,9 +278,7 @@ def _download_and_swap_zip(branch: str, zip_url: str) -> None:
         try:
             # TOCTOU re-check right before the swap: download + extract + staging can take minutes and
             # work created meanwhile would be destroyed. Our own staging siblings are filtered out.
-            recheck_reason = _zip_overlay_block_reason(
-                _m().PROJECT_ROOT, ignore_staging_artifacts=True
-            )
+            recheck_reason = _zip_overlay_block_reason(_m().PROJECT_ROOT, ignore_staging_artifacts=True)
             if recheck_reason is not None:
                 _discard_staged(staged)
                 print(f"✗ ZIP fallback aborted before the swap: {recheck_reason}.")
@@ -309,9 +295,8 @@ def _download_and_swap_zip(branch: str, zip_url: str) -> None:
             # Safe post-rollback: _discard_staged skips paths that no longer exist.
             _discard_staged(staged)
             raise
-        update_count = len(staged)
 
-        print(f"✓ Updated {update_count} items from ZIP")
+        print(f"✓ Updated {len(staged)} items from ZIP")
 
     except Exception as e:
         print(f"✗ ZIP update failed: {e}")
@@ -337,7 +322,6 @@ def _reinstall_python_deps_after_zip(active_tool_dependencies) -> None:
     )
 
     from hermes_cli.managed_uv import ensure_uv, update_managed_uv
-
     # Keep managed uv current — runs `uv self update` if we already have one.
     update_managed_uv()
 
@@ -350,7 +334,6 @@ def _reinstall_python_deps_after_zip(active_tool_dependencies) -> None:
         # Same UV-env isolation as the main update path: a user-level UV_PYTHON_INSTALL_DIR / UV_PYTHON
         # from unrelated software must not steer which interpreter uv resolves here.
         from hermes_cli.managed_uv import managed_python_env
-
         uv_env = managed_python_env()
         uv_env["VIRTUAL_ENV"] = str(_m().PROJECT_ROOT / "venv")
         if _m()._is_termux_env(uv_env):
@@ -369,11 +352,7 @@ def _reinstall_python_deps_after_zip(active_tool_dependencies) -> None:
 
     install_prefix = [uv_bin, "pip"] if uv_bin else pip_cmd
     install_env = uv_env if uv_bin else None
-    _m()._restore_active_tool_dependencies(
-        active_tool_dependencies,
-        install_prefix,
-        env=install_env,
-    )
+    _m()._restore_active_tool_dependencies(active_tool_dependencies, install_prefix, env=install_env)
 
     # Parity with git-pull path: heal the active memory provider's bridge packages after the reinstall.
     _m()._refresh_active_memory_provider_dependencies()
@@ -406,7 +385,7 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
     # prevent. Refuse rather than lie.
     branch = _m()._resolve_update_branch(args)
     if branch != "main":
-        print(f"✗ --branch={branch} is not supported on the Windows ZIP-fallback " "update path.")
+        print(f"✗ --branch={branch} is not supported on the Windows ZIP-fallback update path.")
         print(
             "  This path runs when git file I/O is broken on the system. "
             "Either resolve the git-side breakage (typically an antivirus "
@@ -456,7 +435,6 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
     # Seed the model-catalog disk cache from the fresh checkout (same rationale as _cmd_update_impl). Non-fatal.
     with _best_effort('Model catalog seed during zip update failed: %s'):
         from hermes_cli.model_catalog import seed_cache_from_checkout
-
         if seed_cache_from_checkout(_m().PROJECT_ROOT):
             print("  ✓ Model catalog cache refreshed from checkout")
 
@@ -477,6 +455,5 @@ def _update_via_zip(args, *, had_desktop_app_before_update: bool = False) -> boo
     _finish_dashboard_update_cleanup(node_failures)
     with _best_effort('Update receipt finalize (zip path) failed: %s'):
         from hermes_cli.update_receipt import finalize_update_receipt
-
         finalize_update_receipt("success" if update_complete and not node_failures else "partial")
     return update_complete
