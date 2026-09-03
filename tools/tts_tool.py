@@ -60,8 +60,8 @@ from tools.tts_tool_delivery import (  # noqa: F401 — historical names re-expo
     FALLBACK_MAX_TEXT_LENGTH, PROVIDER_MAX_TEXT_LENGTH, _resolve_max_text_length,
     AudioDeliveryProfile, _build_audio_delivery_files, _concat_audio_files, _convert_to_opus,
     _pack_audio_files_for_delivery, _remove_quietly, _repair_ogg_container,
-    _resolve_audio_delivery_profile, _sniff_audio_container, _split_oversized_sentence, _split_text_for_tts, _wrap_pcm_as_wav,
-)
+    _resolve_audio_delivery_profile, _sniff_audio_container, _split_oversized_sentence,
+    _split_text_for_tts, _wrap_pcm_as_wav)
 from tools.tts_tool_providers import (  # noqa: F401 — historical names re-exported
     DEFAULT_ELEVENLABS_MODEL_ID, DEFAULT_ELEVENLABS_VOICE_ID, DEFAULT_GEMINI_TTS_MODEL,
     DEFAULT_GEMINI_TTS_VOICE, DEFAULT_MINIMAX_BASE_URL, DEFAULT_MINIMAX_CN_BASE_URL,

@@ -34,7 +34,7 @@ def _align_int16_chunks(chunks: Iterable[bytes], stop_evt: threading.Event, *, p
         aligned_len = len(buf) - (len(buf) % 2)
         if aligned_len >= 2:
             yield buf[:aligned_len]
-        leftover = buf[aligned_len:] if aligned_len < len(buf) else b""
+        leftover = buf[aligned_len:]
     if leftover and pad_tail:
         yield b"\x00"
 
@@ -219,7 +219,6 @@ class _StreamerPlayback:
 
     def _write_pcm(self, buf: bytes) -> None:
         self._current_stream.write(self._np.frombuffer(buf, dtype="<i2").reshape(-1, 1))
-
     def _recover_stream(self) -> bool:
         """Close the broken PortAudio stream and open a fresh one after a failed write; False once
         ``_MAX_REINIT`` is exhausted (remaining sentences go through temp files)."""
@@ -265,9 +264,7 @@ class _StreamerPlayback:
             from tools.voice_mode import mark_audio_output_active
         except Exception:
             mark_audio_output_active = lambda _active: None  # noqa: E731
-        self._np = _np
-        self._reinit_count = 0
-        self._current_stream = self.output_stream
+        self._np, self._reinit_count, self._current_stream = _np, 0, self.output_stream
         mark_audio_output_active(True)
         try:
             self._for_each_sentence(self._play_sentence_via_stream)

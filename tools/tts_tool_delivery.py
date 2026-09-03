@@ -139,13 +139,13 @@ def _resolve_audio_delivery_profile(
     """Resolve upload constraints, including optional ``tts.delivery_profiles`` overrides."""
     key = (platform or "default").lower().strip() or "default"
     defaults = dict(_PLATFORM_AUDIO_DEFAULTS.get(key) or _PLATFORM_AUDIO_DEFAULTS["default"])
-    profiles = (tts_config or {}).get("delivery_profiles")
-    overrides = profiles.get(key, {}) if isinstance(profiles, dict) else {}
-    if isinstance(overrides, dict):
-        defaults.update({k: v for k, v in overrides.items() if v is not None})
-    max_file_bytes = _positive_int(defaults.get("max_file_bytes")) or _PLATFORM_AUDIO_DEFAULTS["default"]["max_file_bytes"]
+    overrides = _section(_section(tts_config, "delivery_profiles"), key)
+    defaults.update({k: v for k, v in overrides.items() if v is not None})
+    max_file_bytes = (_positive_int(defaults.get("max_file_bytes"))
+                      or _PLATFORM_AUDIO_DEFAULTS["default"]["max_file_bytes"])
     safety_ratio = defaults.get("safety_ratio", 0.85)
-    if isinstance(safety_ratio, bool) or not isinstance(safety_ratio, (int, float)) or not 0 < safety_ratio <= 1:
+    if (isinstance(safety_ratio, bool) or not isinstance(safety_ratio, (int, float))
+            or not 0 < safety_ratio <= 1):
         safety_ratio = 0.85
     return AudioDeliveryProfile(platform=key, max_file_bytes=max_file_bytes, safety_ratio=float(safety_ratio))
 
@@ -189,10 +189,7 @@ def _split_text_for_tts(text: str, max_chars: int) -> List[str]:
     if len(normalized) <= max_chars:
         return [normalized]
     expanded: List[str] = []
-    for sentence in re.split(r"(?<=[.!?;:,])\s+", normalized):
-        sentence = sentence.strip()
-        if not sentence:
-            continue
+    for sentence in filter(None, (s.strip() for s in re.split(r"(?<=[.!?;:,])\s+", normalized))):
         if len(sentence) <= max_chars:
             expanded.append(sentence)
         else:
@@ -204,20 +201,15 @@ def _pack_audio_files_for_delivery(audio_paths: List[str], profile: AudioDeliver
     """Group final-encoded chunks under the size target; never mixes suffixes (can't concat-copy)."""
     groups: List[List[str]] = []
     current: List[str] = []
-    current_size = 0
-    current_suffix = ""
+    current_size, current_suffix = 0, ""
     for path in audio_paths:
-        size = Path(path).stat().st_size
-        suffix = Path(path).suffix.lower()
+        size, suffix = Path(path).stat().st_size, Path(path).suffix.lower()
         if current and (current_size + size > profile.target_file_bytes or suffix != current_suffix):
             groups.append(current)
             current, current_size = [], 0
         current.append(path)
-        current_size += size
-        current_suffix = suffix
-    if current:
-        groups.append(current)
-    return groups
+        current_size, current_suffix = current_size + size, suffix
+    return groups + [current] if current else groups
 
 
 # --- ffmpeg encoding helpers ---
@@ -225,10 +217,8 @@ def _ffmpeg_run(
     ffmpeg: str, args: List[str], *, timeout: int = 30, check: bool = False, capture: bool = True,
 ) -> subprocess.CompletedProcess:
     """Run ``ffmpeg <args>`` headless (no stdin, hidden window on Windows)."""
-    return subprocess.run(
-        [ffmpeg, *args],
-        capture_output=capture, check=check, timeout=timeout, stdin=subprocess.DEVNULL, creationflags=windows_hide_flags(),
-    )
+    return subprocess.run([ffmpeg, *args], capture_output=capture, check=check, timeout=timeout,
+                          stdin=subprocess.DEVNULL, creationflags=windows_hide_flags())
 
 
 def _remove_quietly(path: Optional[str]) -> None:
@@ -251,13 +241,12 @@ def _finalize_wav_output(wav_path: str, output_path: str) -> str:
     if wav_path == output_path:
         return output_path
     ffmpeg = shutil.which("ffmpeg")
-    if ffmpeg:
-        _ffmpeg_run(
-            ffmpeg, ["-i", wav_path, "-y", "-loglevel", "error", output_path], check=True,
-            capture=False)
-        _remove_quietly(wav_path)
-    else:
+    if not ffmpeg:
         os.rename(wav_path, output_path)
+        return output_path
+    _ffmpeg_run(ffmpeg, ["-i", wav_path, "-y", "-loglevel", "error", output_path],
+                check=True, capture=False)
+    _remove_quietly(wav_path)
     return output_path
 
 
@@ -318,7 +307,7 @@ def _ffmpeg_transcode_to_opus(input_path: str, ogg_path: str) -> Optional[str]:
         result = _ffmpeg_run("ffmpeg", ["-i", input_path, *_OPUS_VOICE_ARGS, "-f", "ogg", work_path, "-y"])
         if result.returncode != 0:
             logger.warning("ffmpeg conversion failed with return code %d: %s",
-                          result.returncode, result.stderr.decode('utf-8', errors='ignore')[:200])
+                           result.returncode, result.stderr.decode('utf-8', errors='ignore')[:200])
             return None
         if os.path.exists(work_path) and os.path.getsize(work_path) > 0:
             if in_place:
@@ -401,8 +390,7 @@ def _concat_audio_files(audio_paths: List[str], output_path: str, *, voice_compa
             args += ["-c:a", "libopus", "-ac", "1", "-b:a", "64k", "-vbr", "off"]
         elif suffix == ".mp3" and all(Path(path).suffix.lower() == ".mp3" for path in audio_paths):
             args += ["-c:a", "copy"]
-        args.append(str(temp_output))
-        result = _ffmpeg_run(ffmpeg, args, timeout=120)
+        result = _ffmpeg_run(ffmpeg, [*args, str(temp_output)], timeout=120)
         if result.returncode == 0 and temp_output.exists() and temp_output.stat().st_size > 0:
             os.replace(temp_output, destination)
             return str(destination)
@@ -433,8 +421,7 @@ def _build_audio_delivery_files(
                 f"limit ({size} > {profile.max_file_bytes} bytes): {path}")
     base = Path(output_path)
     scratch_outputs: List[str] = []
-    combined_any = False
-    combine_index = 0
+    combined_any, combine_index = False, 0
 
     def emit(group: List[str]) -> List[str]:
         nonlocal combined_any, combine_index
