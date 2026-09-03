@@ -110,10 +110,9 @@ def _ws_orphan_setting(env_var: str, cfg_key: str, default: float) -> float:
         with contextlib.suppress(Exception):
             from hermes_cli.config import load_config
             raw = (load_config().get("dashboard") or {}).get(cfg_key)
-    try:
+    with contextlib.suppress(ValueError, TypeError):
         return max(0.0, float(raw) if raw is not None else default)
-    except (ValueError, TypeError):
-        return max(0.0, default)
+    return max(0.0, default)
 
 
 def _resolve_ws_orphan_reap_grace() -> float:
@@ -370,7 +369,7 @@ def _transfer_db_to_agent(agent, db) -> bool:
     False = agent not holding *this* handle (build failed before ``_make_agent`` or got a different db):
     the caller still owns it. The shared launch handle never transfers — it outlives every agent, and
     ownership would let session.close() tear down the process-wide database."""
-    try:
+    with contextlib.suppress(Exception):
         if agent is None or db is None or getattr(agent, "_session_db", None) is not db:
             return False
         if db is _get_db():
@@ -379,8 +378,7 @@ def _transfer_db_to_agent(agent, db) -> bool:
             return False
         agent._owns_session_db = True
         return True
-    except Exception:
-        return False
+    return False
 
 
 def _open_profile_session_db(profile_home):
@@ -488,21 +486,19 @@ def _profile_configured_cwd(profile_home: Path | None) -> str | None:
     read the file directly through the _load_cfg pipeline."""
     if profile_home is None:
         return None
-    try:
+    with contextlib.suppress(Exception):
         from hermes_cli.config import read_user_config_raw
         p = Path(profile_home) / "config.yaml"
         return _configured_cwd_from_cfg(_expand_cfg(_apply_managed(read_user_config_raw(p)))) if p.exists() else None
-    except Exception:
-        return None
+    return None
 
 
 def _launch_configured_cwd() -> str | None:
     """Launch profile's ``terminal.cwd`` from config.yaml: the dashboard's in-memory gateway gets no bridged
     ``TERMINAL_CWD`` env (only the Node PTY child does), so a fresh /chat would otherwise start in ``os.getcwd()``."""
-    try:
+    with contextlib.suppress(Exception):
         return _configured_cwd_from_cfg(_load_cfg())
-    except Exception:
-        return None
+    return None
 
 
 def _default_session_cwd() -> str:
@@ -1063,7 +1059,7 @@ def _load_cfg_raw() -> dict:
     expansion applied here would be persisted on the next save). Behavioral reads use :func:`_load_cfg`.
     Cache keyed on the resolved path so profiles don't clobber."""
     global _cfg_cache, _cfg_mtime, _cfg_path
-    try:
+    with contextlib.suppress(Exception):
         p = _active_config_path()
         mtime = p.stat().st_mtime if p.exists() else None
         with _cfg_lock:
@@ -1074,8 +1070,7 @@ def _load_cfg_raw() -> dict:
         with _cfg_lock:  # cache the RAW config: _save_cfg writes _cfg_cache back to disk
             _cfg_cache, _cfg_mtime, _cfg_path = copy.deepcopy(data), mtime, p
         return data
-    except Exception:
-        return {}
+    return {}
 
 
 def _expand_cfg(cfg: dict) -> dict:
@@ -1099,11 +1094,10 @@ def _apply_managed(cfg: dict) -> dict:
     """Overlay administrator-pinned managed-scope values (read-side only, fail-open): this backend builds
     config independently of load_config, so managed skin/reasoning_effort/service_tier/provider_routing
     would otherwise be silently ignored."""
-    try:
+    with contextlib.suppress(Exception):
         from hermes_cli import managed_scope
         return managed_scope.apply_managed_overlay(cfg if isinstance(cfg, dict) else {})
-    except Exception:
-        return cfg
+    return cfg
 
 
 def _save_cfg(cfg: dict):
@@ -1128,7 +1122,7 @@ def _session_for_key(session_key: str) -> dict | None:
 
 
 def _set_session_context(session_key: str, cwd: str | None = None, *, ui_session_id: str = "") -> list:
-    try:
+    with contextlib.suppress(Exception):
         from gateway.session_context import set_session_vars
         sess = _session_for_key(session_key) if session_key else None
         # Ephemeral task ids aren't in `_sessions` (reverse-map → "" would clear the cwd override);
@@ -1151,8 +1145,7 @@ def _set_session_context(session_key: str, cwd: str | None = None, *, ui_session
             browser_control_principal=browser_control_principal,
             browser_control_transport_family=browser_control_transport_family, cwd=resolved,
             ui_session_id=ui_session_id, cron_session="")
-    except Exception:
-        return []
+    return []
 
 
 def _clear_session_context(tokens: list) -> None:
@@ -1223,12 +1216,11 @@ def _block(event: str, sid: str, payload: dict, timeout: float | None = 300, bat
 def _clarify_timeout_seconds() -> float | None:
     """Clarify wait for the TUI/desktop bridge from the canonical config (gateway/CLI parity); 300s
     historical default if config can't be read; ``<= 0`` = unlimited → None (never auto-skip)."""
-    try:
+    with contextlib.suppress(Exception):
         from tools.clarify_gateway import get_clarify_timeout
         timeout = get_clarify_timeout()
         return timeout if timeout > 0 else None
-    except Exception:
-        return 300
+    return 300
 
 
 def _clarify_block(sid: str, q, c, multi_select=False, questions=None) -> str:
@@ -1266,7 +1258,9 @@ def _tour_request(sid: str, payload: dict) -> str:
     an older app nobody calls ``tour.respond`` and each action would block the full deadline, stacking per
     turn. First action per session gets the short probe deadline; unanswered → bridge marked unavailable
     for that session; once answered, the full deadline. Verdict lives on the record, so a new session re-probes."""
-    session = _sessions.get(sid) or {}  # detached caller: throwaway record, plain bridge, unprobed
+    session = _sessions.get(sid)
+    if session is None:  # detached caller: throwaway record, plain bridge, unprobed ({} is falsy but a REAL record)
+        session = {}
     state = session.get("tour_bridge")
     if state == "unanswered":
         return _TOUR_BRIDGE_UNAVAILABLE
@@ -1306,11 +1300,10 @@ def _resolve_model() -> str:
     if isinstance(m, str) and m:
         return m.strip()
     # No env seed / config preference: the cost-safe silent default (cache-only read), never an unpicked flagship.
-    try:
+    with contextlib.suppress(Exception):
         from hermes_cli.models import get_preferred_silent_default_model
         return get_preferred_silent_default_model()
-    except Exception:
-        return "z-ai/glm-5.2"
+    return "z-ai/glm-5.2"
 
 
 def _resolve_session_platform() -> str:
@@ -1364,11 +1357,10 @@ from hermes_state import _BARE_BILLING_PROVIDERS
 
 
 def _is_routable_provider(provider: str) -> bool:
-    try:
+    with contextlib.suppress(Exception):
         from hermes_cli.runtime_provider import is_routable_provider
         return is_routable_provider(provider)
-    except Exception:
-        return False
+    return False
 
 
 def _overrides_have_routable_provider(overrides: dict) -> bool:
@@ -1653,10 +1645,9 @@ def _load_service_tier() -> str | None:
 
 def _load_provider_routing() -> dict:
     """OpenRouter ``provider_routing`` prefs (gateway/CLI parity — without them OpenRouter picks an effectively random provider)."""
-    try:
+    with contextlib.suppress(Exception):
         return _load_cfg().get("provider_routing", {}) or {}
-    except Exception:
-        return {}
+    return {}
 
 
 def _load_show_reasoning() -> bool:
@@ -1900,11 +1891,10 @@ def _probe_config_health(cfg: dict) -> str:
 
 
 def _current_profile_name() -> str:
-    try:
+    with contextlib.suppress(Exception):
         from hermes_cli.profiles import get_active_profile_name
         return get_active_profile_name() or "default"
-    except Exception:
-        return "default"
+    return "default"
 
 
 # Monotonic GUI<->backend contract version: the desktop refuses a backend reporting less (or none) with a
@@ -2023,11 +2013,10 @@ def _session_info(agent, session: dict | None = None) -> dict:
 def _tool_ctx(name: str, args: dict) -> str:
     """Argument preview for a tool row — never a phrased label: clients own their phrasing, so
     ``build_tool_label`` here would stutter ("Running Running …") and leak into the desktop's ``args.context``."""
-    try:
+    with contextlib.suppress(Exception):
         from agent.display import build_tool_preview
         return build_tool_preview(name, args, max_len=80) or ""
-    except Exception:
-        return ""
+    return ""
 
 
 def _emit_session_info_for_session(sid: str, session: dict) -> None:
@@ -2661,11 +2650,10 @@ _pet_payload_cache: dict[tuple, dict] = {}
 
 def _pet_sheet_revision(spritesheet) -> str:
     """Stable revision id for one spritesheet file."""
-    try:
+    with contextlib.suppress(Exception):
         stat = spritesheet.stat()
         return f"{stat.st_mtime_ns}:{stat.st_size}"
-    except Exception:  # noqa: BLE001
-        return "0:0"
+    return "0:0"
 
 
 def _clone_pet_payload(payload: dict) -> dict:
@@ -2679,7 +2667,7 @@ def _clone_pet_payload(payload: dict) -> dict:
 
 def _pet_row_frame_counts(spritesheet) -> dict:
     """Real frame count per concrete spritesheet row name."""
-    try:
+    with contextlib.suppress(Exception):
         from PIL import Image
         from agent.pet import constants, render
         with Image.open(spritesheet) as opened:
@@ -2694,28 +2682,25 @@ def _pet_row_frame_counts(spritesheet) -> dict:
             blank = lambda col: render._frame_is_blank(image.crop((col * W, top, col * W + W, top + H)))
             out[name] = next((col for col in range(cols) if blank(col)), cols)  # frames before the first blank cell
         return out
-    except Exception:  # noqa: BLE001
-        return {}
+    return {}
 
 
 def _pet_cfg() -> dict:
     """``display.pet`` from the canonical config ({} on any failure)."""
-    try:
+    with contextlib.suppress(Exception):
         from hermes_cli.config import load_config
         display = load_config().get("display")
         pet = display.get("pet") if isinstance(display, dict) else None
         return pet if isinstance(pet, dict) else {}
-    except Exception:  # noqa: BLE001
-        return {}
+    return {}
 
 
 def _pet_config_scale() -> float:
     """Configured ``display.pet.scale`` (or the engine default), never raises."""
     from agent.pet import constants
-    try:
+    with contextlib.suppress(Exception):
         return float(_pet_cfg().get("scale", constants.DEFAULT_SCALE) or constants.DEFAULT_SCALE)
-    except Exception:  # noqa: BLE001
-        return constants.DEFAULT_SCALE
+    return constants.DEFAULT_SCALE
 
 
 def _pet_sprite_payload(pet, *, scale: float) -> dict:
@@ -2769,13 +2754,12 @@ def _pet_active_selection():
 def _pet_state_rows(spritesheet) -> list[str]:
     """Row taxonomy for the concrete sheet (legacy 8-row or current 9-row atlas), in the renderer's `PetState` names."""
     from agent.pet import constants
-    try:
+    with contextlib.suppress(Exception):
         from PIL import Image
         with Image.open(spritesheet) as image:
             row_count = max(1, image.height // constants.FRAME_H)
         return list(constants.state_rows_for_grid(row_count))
-    except Exception:  # noqa: BLE001
-        return list(constants.STATE_ROWS)
+    return list(constants.STATE_ROWS)
 
 
 def _pet_gen_root():
@@ -2999,12 +2983,11 @@ _MCP_RELOAD_MAX_PASSES = 3
 def _compute_mcp_rev() -> str:
     """Hash of mcp_servers (definitions — omitting it meant an edited server never bumped the rev) + mcp +
     tools. ``config.get mtime`` ships it so cosmetic writes don't reload; ``reload.mcp`` coalesces on it. "" = unknown."""
-    try:
+    with contextlib.suppress(Exception):
         cfg = _load_cfg()
         rev_src = json.dumps({k: cfg.get(k) for k in ("mcp", "mcp_servers", "tools")}, sort_keys=True, default=str)
         return hashlib.sha1(rev_src.encode()).hexdigest()[:12]
-    except Exception:
-        return ""
+    return ""
 
 
 def _finish_reload(rid, params: dict, *, coalesced: bool) -> dict:
@@ -3049,10 +3032,9 @@ def _skill_usage_lookup():
         return (lambda _name: 0), (lambda _name: "local")
 
     def usage(name: str) -> int:
-        try:
+        with contextlib.suppress(Exception):
             return activity_count(records.get(name) or {})
-        except Exception:
-            return 0
+        return 0
 
     def origin(name: str) -> str:
         return "hub" if name in hub else "bundled" if name in bundled else "local"
@@ -3095,11 +3077,10 @@ def _cli_exec_blocked(argv: list[str]) -> str | None:
 
 
 def _resolve_name(name: str) -> str:
-    try:
+    with contextlib.suppress(Exception):
         from hermes_cli.commands import resolve_command
         return r.name if (r := resolve_command(name)) else name
-    except Exception:
-        return name
+    return name
 
 
 _paste_counter = 0
