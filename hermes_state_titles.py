@@ -79,8 +79,7 @@ class SessionTitlesMixin:
         nothing overwrites a user name, re-running the titler on an llm row is a no-op).
         No writer may move a hidden canonical Bot Chat off its title. Read and write are
         one compare-and-swap transaction, so a manual ``/title`` racing an in-flight
-        generation is not clobbered.
-        """
+        generation is not clobbered."""
         title = self.sanitize_title(title)
         is_user = source == self.TITLE_SOURCE_USER
         new_rank = self._title_rank(source) if not is_user else None
@@ -166,21 +165,16 @@ class SessionTitlesMixin:
         if source not in self._TITLE_SOURCE_RANK:
             raise ValueError(f"invalid title source: {source!r}")
         return self._write_rowcount(
-            "UPDATE sessions SET title_source = ? "
-            "WHERE id = ? AND title IS NOT NULL",
+            "UPDATE sessions SET title_source = ? WHERE id = ? AND title IS NOT NULL",
             (source, session_id),
         ) > 0
 
     def get_session_by_title(self, title: str) -> Optional[Dict[str, Any]]:
         """Look up a session by exact title. Returns session dict or None."""
         row = self._read_one(
-            "SELECT s.*, "
-            "COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
-            "FROM sessions s "
-            "LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
-            "WHERE s.title = ?",
-            (title,),
-        )
+            "SELECT s.*, COALESCE(sp.prompt, s.system_prompt) AS _system_prompt_resolved "
+            "FROM sessions s LEFT JOIN system_prompts sp ON sp.hash = s.system_prompt_hash "
+            "WHERE s.title = ?", (title,))
         return self._session_row_dict(row) if row else None
 
     def resolve_session_by_title(self, title: str) -> Optional[str]:
@@ -191,8 +185,7 @@ class SessionTitlesMixin:
         numbered = self._read_all(
             "SELECT id, title, started_at FROM sessions "
             "WHERE title LIKE ? ESCAPE '\\' ORDER BY started_at DESC",
-            (f"{_escape_like(title)} #%",),
-        )
+            (f"{_escape_like(title)} #%",))
         if numbered:
             return numbered[0]["id"]
         return exact["id"] if exact else None
@@ -204,13 +197,9 @@ class SessionTitlesMixin:
         base = match.group(1) if match else base_title
         rows = self._read_all(
             "SELECT title FROM sessions WHERE title = ? OR title LIKE ? ESCAPE '\\'",
-            (base, f"{_escape_like(base)} #%"),
-        )
+            (base, f"{_escape_like(base)} #%"))
         if not rows:
             return base
-        max_num = 1  # the unnumbered original counts as #1
-        for row in rows:
-            m = re.match(r'^.* #(\d+)$', row["title"])
-            if m:
-                max_num = max(max_num, int(m.group(1)))
-        return f"{base} #{max_num + 1}"
+        # The unnumbered original counts as #1.
+        numbers = [int(m.group(1)) for m in (re.match(r'^.* #(\d+)$', row["title"]) for row in rows) if m]
+        return f"{base} #{max([1, *numbers]) + 1}"

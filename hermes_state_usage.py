@@ -78,6 +78,14 @@ _MODEL_USAGE_UPSERT_SQL = """INSERT INTO session_model_usage (
                    last_seen = excluded.last_seen"""
 
 
+# Kwargs forwarded verbatim from update_token_counts / record_auxiliary_usage into
+# _record_model_usage (the per-route attribution row).
+_MODEL_USAGE_FIELDS = frozenset((
+    "model", "billing_provider", "billing_base_url", "billing_mode", "input_tokens", "output_tokens",
+    "cache_read_tokens", "cache_write_tokens", "reasoning_tokens", "estimated_cost_usd",
+    "actual_cost_usd", "cost_status", "cost_source", "api_call_count"))
+
+
 class SessionUsageMixin:
     """Coalesced token writer, per-model usage rows, billing route."""
 
@@ -110,16 +118,16 @@ class SessionUsageMixin:
         to the synchronous path and may raise."""
         with self._token_queue_cond:
             thread = self._token_writer_thread
-            writer_stopped = self._token_writer_stop and (thread is None or not thread.is_alive())
+            writer_alive = thread is not None and thread.is_alive()
+            writer_stopped = self._token_writer_stop and not writer_alive
             if not writer_stopped:
                 self._token_queue.append((session_id, kwargs))
-                if thread is None or not thread.is_alive():
+                if not writer_alive:
                     # Daemon so exit never hangs on accounting; the atexit hook drains
                     # leftovers. ``not is_alive()`` (not ``is None``) respawns a writer
                     # that died from an unexpected escape.
                     thread = threading.Thread(
-                        target=self._token_writer_loop, name="session-db-token-writer", daemon=True,
-                    )
+                        target=self._token_writer_loop, name="session-db-token-writer", daemon=True)
                     self._token_writer_thread = thread
                     thread.start()
                     if self._token_atexit_hook is None:
@@ -245,9 +253,7 @@ class SessionUsageMixin:
                 # Writer stuck mid-apply: leave deltas unapplied rather than race it.
                 logger.warning(
                     "async token accounting: writer did not stop within %.0fs; "
-                    "%d queued delta(s) not persisted",
-                    join_timeout, len(self._token_queue),
-                )
+                    "%d queued delta(s) not persisted", join_timeout, len(self._token_queue))
                 return
         # Writer gone: apply leftovers synchronously under the same busy protocol. Wait
         # out a flush caller-drain that already claimed busy — close() nulls the
@@ -260,8 +266,7 @@ class SessionUsageMixin:
                     logger.warning(
                         "async token accounting: concurrent drain did not "
                         "finish within %.0fs; %d queued delta(s) not persisted",
-                        join_timeout, len(self._token_queue),
-                    )
+                        join_timeout, len(self._token_queue))
                     return
                 self._token_queue_cond.wait(remaining)
             # busy BEFORE clearing the queue (same ordering as the writer loop).
@@ -290,6 +295,7 @@ class SessionUsageMixin:
         """Update token counters and backfill model if unset. *absolute*=False
         increments (per-API-call deltas, CLI path); *absolute*=True sets directly
         (gateway path, where the cached agent holds cumulative totals)."""
+        usage = {k: v for k, v in locals().items() if k in _MODEL_USAGE_FIELDS}
         # Ensure the row exists: under concurrent load create_session() may have failed
         # on locking, and the UPDATE would silently affect 0 rows.
         self._insert_session_row(session_id, "unknown", model=model)
@@ -305,8 +311,7 @@ class SessionUsageMixin:
             billing_provider if has_accounted_usage else None,
             billing_base_url if has_accounted_usage else None,
             billing_mode if has_accounted_usage else None, model if has_accounted_usage else None,
-            api_call_count, session_id,
-        )
+            api_call_count, session_id)
         # Per-model attribution: the sessions row keeps one (model, provider) pair, so a
         # mid-session /model switch would attribute every token to the initial model.
         # Only the incremental path records here — absolute cumulative updates cannot be
@@ -317,18 +322,14 @@ class SessionUsageMixin:
             row = conn.execute(
                 "SELECT model, billing_provider, api_call_count FROM sessions WHERE id = ?", (session_id,),
             ).fetchone()
-            existing_model = row["model"] if row is not None else None
-            existing_provider = row["billing_provider"] if row is not None else None
-            existing_api_calls = int((row["api_call_count"] if row is not None else 0) or 0)
+            existing = dict(row) if row is not None else {}
             # create_session records the requested route before any API call. If that
             # fails and fallback succeeds, the first accounted usage is the authoritative
             # route; after that keep the row as is (one row cannot represent mixed usage).
             first_accounted_route = (
-                existing_api_calls == 0
-                and has_accounted_usage
-                and bool(model)
+                int(existing.get("api_call_count") or 0) == 0 and has_accounted_usage and bool(model)
                 and bool(billing_provider)
-                and (existing_model != model or existing_provider != billing_provider)
+                and (existing.get("model") != model or existing.get("billing_provider") != billing_provider)
             )
             if first_accounted_route:
                 conn.execute(
@@ -340,51 +341,39 @@ class SessionUsageMixin:
                 )
             conn.execute(sql, params)
             if record_model_usage:
-                self._record_model_usage(
-                    conn, session_id, model=model, billing_provider=billing_provider,
-                    billing_base_url=billing_base_url, billing_mode=billing_mode,
-                    input_tokens=input_tokens, output_tokens=output_tokens,
-                    cache_read_tokens=cache_read_tokens, cache_write_tokens=cache_write_tokens,
-                    reasoning_tokens=reasoning_tokens, estimated_cost_usd=estimated_cost_usd,
-                    actual_cost_usd=actual_cost_usd, cost_status=cost_status, cost_source=cost_source,
-                    api_call_count=api_call_count,
-                )
+                self._record_model_usage(conn, session_id, **usage)
         self._execute_write(_do)
 
     def _record_model_usage(
-        self, conn, session_id: str, *, model: Optional[str], billing_provider: Optional[str],
-        billing_base_url: Optional[str], billing_mode: Optional[str], input_tokens: int,
-        output_tokens: int, cache_read_tokens: int, cache_write_tokens: int, reasoning_tokens: int,
-        estimated_cost_usd: Optional[float], actual_cost_usd: Optional[float],
-        cost_status: Optional[str], cost_source: Optional[str], api_call_count: int, task: str = "",
+        self, conn, session_id: str, *, model: Optional[str] = None, billing_provider: Optional[str] = None,
+        billing_base_url: Optional[str] = None, billing_mode: Optional[str] = None, input_tokens: int = 0,
+        output_tokens: int = 0, cache_read_tokens: int = 0, cache_write_tokens: int = 0,
+        reasoning_tokens: int = 0, estimated_cost_usd: Optional[float] = None,
+        actual_cost_usd: Optional[float] = None, cost_status: Optional[str] = None,
+        cost_source: Optional[str] = None, api_call_count: int = 0, task: str = "",
     ) -> None:
         """Accumulate a per-API-call usage delta into session_model_usage, inside the
         caller's write txn after the ``sessions`` UPDATE. A missing model/provider falls
         back to the session row (same COALESCE behaviour as the summary update) — except
         for aux rows (``task`` set), which must NOT inherit the main-loop route (vision
-        on gemini while the main loop runs anthropic): missing info stays 'unknown'/empty.
-        """
+        on gemini while the main loop runs anthropic): missing info stays 'unknown'/empty."""
         row = conn.execute(
             "SELECT model, billing_provider, billing_base_url, billing_mode "
-            "FROM sessions WHERE id = ?",
-            (session_id,),
+            "FROM sessions WHERE id = ?", (session_id,),
         ).fetchone()
         sess = dict(row) if (row is not None and not task) else {}
-        eff_model = model or sess.get("model") or "unknown"
-        eff_provider = billing_provider or sess.get("billing_provider") or ""
-        eff_base_url = billing_base_url or sess.get("billing_base_url") or ""
-        eff_billing_mode = billing_mode or sess.get("billing_mode") or ""
         counts = [v or 0 for v in (input_tokens, output_tokens, cache_read_tokens, cache_write_tokens, reasoning_tokens)]
         now = time.time()
         conn.execute(
             _MODEL_USAGE_UPSERT_SQL,
             (
-                session_id, eff_model, eff_provider, eff_base_url, eff_billing_mode, task or "",
+                session_id, model or sess.get("model") or "unknown",
+                billing_provider or sess.get("billing_provider") or "",
+                billing_base_url or sess.get("billing_base_url") or "",
+                billing_mode or sess.get("billing_mode") or "", task or "",
                 api_call_count or 0, *counts,
                 float(estimated_cost_usd or 0.0), float(actual_cost_usd or 0.0),
-                cost_status, cost_source, now, now,
-            ),
-        )
+                cost_status, cost_source, now, now))
 
     def record_auxiliary_usage(
         self, session_id: str, task: str, *, model: Optional[str] = None,
@@ -398,22 +387,13 @@ class SessionUsageMixin:
         touching the ``sessions`` summary row (the gateway overwrites those counters with
         absolute main-loop totals). ``api_call_count`` may aggregate N calls. Best-effort:
         callers must never fail an aux call over accounting."""
+        usage = {k: v for k, v in locals().items() if k in _MODEL_USAGE_FIELDS}
         if not session_id or not task:
             return
+        usage["api_call_count"] = 1 if api_call_count is None else int(api_call_count)
         # FK to sessions.id: same INSERT OR IGNORE guard as update_token_counts.
         self._insert_session_row(session_id, "unknown")
-
-        def _do(conn):
-            self._record_model_usage(
-                conn, session_id, model=model, billing_provider=billing_provider,
-                billing_base_url=billing_base_url, billing_mode=None,
-                input_tokens=input_tokens or 0, output_tokens=output_tokens or 0,
-                cache_read_tokens=cache_read_tokens or 0, cache_write_tokens=cache_write_tokens or 0,
-                reasoning_tokens=reasoning_tokens or 0, estimated_cost_usd=estimated_cost_usd,
-                actual_cost_usd=None, cost_status=None, cost_source=None,
-                api_call_count=1 if api_call_count is None else int(api_call_count), task=task,
-            )
-        self._execute_write(_do)
+        self._execute_write(lambda conn: self._record_model_usage(conn, session_id, task=task, **usage))
 
     def usage_totals(self, *, min_message_count: int = 1, include_archived: bool = False) -> Dict[str, float]:
         """Tokens and spend across the whole store (one scan), so the sidebar total does
