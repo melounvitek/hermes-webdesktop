@@ -10,8 +10,6 @@ from typing import Any, Dict, Optional
 from utils import is_truthy_value
 
 logger = logging.getLogger(__name__)
-
-
 _DEFAULT_BROWSER_PROVIDER = "local"
 _DEFAULT_MODAL_MODE = "auto"
 _VALID_MODAL_MODES = {"auto", "direct", "managed"}
@@ -83,19 +81,14 @@ def resolve_modal_backend_state(
     if managed_enabled is None:
         managed_enabled = managed_nous_tools_enabled()
     managed_ok = managed_enabled and managed_ready
-    if requested_mode == "managed":
-        selected_backend = "managed" if managed_ok else None
-    elif requested_mode == "direct":
-        selected_backend = "direct" if has_direct else None
-    else:
-        selected_backend = "managed" if managed_ok else "direct" if has_direct else None
-    return {
-        "requested_mode": requested_mode,
-        "mode": requested_mode,
-        "has_direct": has_direct,
-        "managed_ready": managed_ready,
-        "managed_mode_blocked": requested_mode == "managed" and not managed_enabled,
-        "selected_backend": selected_backend}
+    exclusive = {"managed": "managed" if managed_ok else None,
+                 "direct": "direct" if has_direct else None}
+    selected_backend = exclusive.get(
+        requested_mode, "managed" if managed_ok else "direct" if has_direct else None)
+    return {"requested_mode": requested_mode, "mode": requested_mode, "has_direct": has_direct,
+            "managed_ready": managed_ready,
+            "managed_mode_blocked": requested_mode == "managed" and not managed_enabled,
+            "selected_backend": selected_backend}
 
 
 def _scoped_credential(name: str) -> str:

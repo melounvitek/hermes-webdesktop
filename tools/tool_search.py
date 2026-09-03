@@ -17,25 +17,21 @@ from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 from tools.registry import tool_error
-from tools.tool_search_names import (  # noqa: F401 — re-exported public names
-    BRIDGE_TOOL_NAMES, TOOL_CALL_NAME, TOOL_DESCRIBE_NAME, TOOL_SEARCH_NAME)
 from tools.tool_search_catalog import (  # noqa: F401 — re-exported public/test names
-    CHARS_PER_TOKEN, CatalogEntry, _corpus_stats, _entry_search_text, _fn,
-    _listing_group_label, _registry_entry, _short_desc, _stem, _tokenize,
-    build_catalog, build_catalog_listing_with_form, search_catalog)
+    BRIDGE_TOOL_NAMES, CHARS_PER_TOKEN, TOOL_CALL_NAME, TOOL_DESCRIBE_NAME, TOOL_SEARCH_NAME,
+    CatalogEntry, _corpus_stats, _entry_search_text, _fn, _listing_group_label,
+    _registry_entry, _short_desc, _stem, _tokenize, build_catalog,
+    build_catalog_listing_with_form, search_catalog)
 from tools.tool_search_validation import validate_deferred_call_args  # noqa: F401
 
 logger = logging.getLogger("tools.tool_search")
-
-# Bound the work one bridge call can request.
-_MAX_QUERIES_PER_CALL = 10
+_MAX_QUERIES_PER_CALL = 10  # bound the work one bridge call can request
 _MAX_DESCRIBE_NAMES_PER_CALL = 10
 
 
 @dataclass(frozen=True)
 class ToolSearchConfig:
     """Resolved, validated tool-search configuration for a single assembly."""
-
     enabled: str  # "auto" | "on" | "off" — "auto" is an alias of "on" today
     # Listing budget as % of context; does NOT gate activation, only bounds how much
     # the embedded manifest may consume before it degrades (full -> names -> bare).
@@ -313,7 +309,6 @@ def bridge_tool_schemas(
 @dataclass
 class AssemblyResult:
     """Outcome of one assembly (tests and observability)."""
-
     tool_defs: List[Dict[str, Any]]
     activated: bool
     deferred_count: int = 0

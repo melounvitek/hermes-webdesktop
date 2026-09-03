@@ -13,8 +13,12 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import snowballstemmer
 
-from tools.tool_search_names import TOOL_CALL_NAME, TOOL_DESCRIBE_NAME, TOOL_SEARCH_NAME
-
+# Reserved bridge names: a user/plugin/MCP tool may not take them (registry override
+# protection rejects such registrations).
+TOOL_SEARCH_NAME = "tool_search"
+TOOL_DESCRIBE_NAME = "tool_describe"
+TOOL_CALL_NAME = "tool_call"
+BRIDGE_TOOL_NAMES = frozenset({TOOL_SEARCH_NAME, TOOL_DESCRIBE_NAME, TOOL_CALL_NAME})
 # Chars-per-token rule of thumb; 4.0 slightly underestimates (fewer false activations).
 CHARS_PER_TOKEN = 4.0
 

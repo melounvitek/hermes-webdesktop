@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Point at something in the Hermes desktop GUI and say one line about it — the quiet
 sibling of ``tour`` (same ``data-tour`` handles) with no scrim/spotlight/paging.
 Fire-and-forget: a tip is not a question, so blocking on a round-trip would stall the
@@ -76,11 +75,7 @@ def check_tips_enabled() -> bool:
 
 
 registry.register(
-    name="show_tip",
-    toolset="desktop_ui",
-    schema=TIP_SCHEMA,
+    name="show_tip", toolset="desktop_ui", schema=TIP_SCHEMA, check_fn=check_tips_enabled,
     handler=lambda args, **kw: tip_tool(
         **{k: args.get(k, "") for k in ("text", "selector", "title", "side")}),
-    check_fn=check_tips_enabled,
-    emoji="💡",
-)
+    emoji="💡")

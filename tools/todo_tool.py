@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Todo tool: in-memory, revisioned task list for multi-step work. State lives on the
 AIAgent (one per session), is re-injected after context compression, and every write bumps
 a monotonic revision so UI clients can reject stale updates. One ``todo_list`` tool: pass
@@ -293,11 +292,7 @@ TODO_SCHEMA = {
 from tools.registry import registry, tool_error
 
 registry.register(
-    name="todo_list",
-    toolset="todo",
-    schema=TODO_SCHEMA,
+    name="todo_list", toolset="todo", schema=TODO_SCHEMA, check_fn=check_todo_requirements,
     handler=lambda args, **kw: todo_tool(
         todos=args.get("todos"), merge=args.get("merge", False), store=kw.get("store")),
-    check_fn=check_todo_requirements,
-    emoji="📋",
-)
+    emoji="📋")

@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """Guided tour (highlight + narrate UI elements) in the Hermes desktop GUI. Generic:
 the agent discovers targets (``action="targets"``), then highlights one step at a
 time (``show``) or hands over a step list the user pages (``start``). Round-trips
@@ -139,14 +138,9 @@ def check_tours_enabled() -> bool:
 
 
 registry.register(
-    name="gui_tour",
-    toolset="desktop_ui",
-    schema=TOUR_SCHEMA,
+    name="gui_tour", toolset="desktop_ui", schema=TOUR_SCHEMA, check_fn=check_tours_enabled,
     handler=lambda args, **kw: tour_tool(
-        action=args.get("action", ""),
-        **{k: args.get(k) for k in ("surface", "selector", "title", "text", "side", "steps", "step_index")},
-        callback=kw.get("callback"),
-    ),
-    check_fn=check_tours_enabled,
-    emoji="🧭",
-)
+        action=args.get("action", ""), callback=kw.get("callback"),
+        **{k: args.get(k) for k in ("surface", "selector", "title", "text", "side", "steps",
+                                    "step_index")}),
+    emoji="🧭")
