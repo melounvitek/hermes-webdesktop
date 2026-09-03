@@ -21,8 +21,7 @@ from tools.transcription_audio import _transcode_audio_for_stt
 from tools.transcription_common import (
     DEFAULT_GROQ_STT_MODEL, DEFAULT_STT_MODEL, ELEVENLABS_STT_BASE_URL, GROQ_BASE_URL, GROQ_MODELS,
     OPENAI_BASE_URL, OPENAI_MODELS, XAI_STT_BASE_URL, _error_result, _get_stt_section,
-    _lazy_ensure_quietly, _log_prompt_unsupported, _ok_result,
-)
+    _lazy_ensure_quietly, _log_prompt_unsupported, _ok_result)
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("tools.transcription_tools")
@@ -110,8 +109,7 @@ def _transcribe_groq(
 def _transcribe_openai(
     file_path: str, model_name: str, *, api_key: Optional[str] = None,
     base_url: Optional[str] = None, provider_label: str = "openai", language: Optional[str] = None,
-    prompt: Optional[str] = None,
-) -> Dict[str, Any]:
+    prompt: Optional[str] = None) -> Dict[str, Any]:
     """Transcribe via the OpenAI ``audio.transcriptions.create`` SDK shape.
 
     Shared by every OpenAI-compatible endpoint (DeepInfra etc.): explicit ``api_key``/
@@ -189,8 +187,7 @@ def _transcribe_mistral(
             language = language or _resolve_stt_language("mistral")
             result = client.audio.transcriptions.complete(
                 model=model_name, file={"content": audio_file, "file_name": Path(file_path).name},
-                **_sdk_prompt_kwargs(language, prompt),
-            )
+                **_sdk_prompt_kwargs(language, prompt))
         transcript_text = _extract_transcript_text(result)
         logger.info("Transcribed %s via Mistral API (%s, %d chars)",
                     Path(file_path).name, model_name, len(transcript_text))
@@ -210,8 +207,7 @@ def _post_audio_multipart(url: str, headers: Dict[str, str], file_path: str, dat
 
 def _rest_provider(
     file_path: str, provider: str, label: str, post: Callable[[], Any], extract_detail,
-    extract_text, log: Callable[[str, Dict[str, Any]], None],
-) -> Dict[str, Any]:
+    extract_text, log: Callable[[str, Dict[str, Any]], None]) -> Dict[str, Any]:
     """Shared multipart REST flow: ``post()`` -> ``log(text, body)`` -> ok envelope.
 
     Non-200 -> ``"<label> API error (HTTP n): detail"`` (JSON detail via *extract_detail*, else
@@ -327,8 +323,7 @@ def _transcribe_elevenlabs(
             "model_id": model_name,
             "tag_audio_events": str(is_truthy_value(elevenlabs_config.get("tag_audio_events", False))).lower(),
             "diarize": str(is_truthy_value(elevenlabs_config.get("diarize", False))).lower(),
-            **({"language_code": language_code} if language_code else {}),
-        }
+            **({"language_code": language_code} if language_code else {})}
         return _post_audio_multipart(f"{base_url}/speech-to-text", {"xi-api-key": api_key}, file_path, data)
 
     def _log(transcript_text: str, _body: Dict[str, Any]) -> None:
@@ -354,8 +349,7 @@ def _transcribe_deepinfra(
     if not model_name:
         return _error_result(
             "No DeepInfra STT model available. Pin one in config.yaml under stt.deepinfra.model, "
-            "or check connectivity to api.deepinfra.com so the live catalog can be fetched."
-        )
+            "or check connectivity to api.deepinfra.com so the live catalog can be fetched.")
     return _transcribe_openai(file_path, model_name, api_key=api_key, base_url=base_url,
                               provider_label="deepinfra", language=language, prompt=prompt)
 
@@ -396,8 +390,7 @@ def _resolve_openai_audio_client_config() -> tuple[str, str]:
     legacy ladder: direct credentials, then the managed gateway. Failures raise ValueError."""
     from tools.transcription_tools import (
         _load_stt_config, managed_nous_tools_enabled, nous_tool_gateway_unavailable_message,
-        resolve_managed_tool_gateway,
-    )
+        resolve_managed_tool_gateway)
     from tools.tool_backend_helpers import NOUS_MANAGED_PROVIDER, read_selection, selection_error
     openai_cfg = _load_stt_config().get("openai") or {}
     selected = read_selection("stt")

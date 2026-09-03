@@ -19,11 +19,9 @@ from tools.tts_command_provider import (
     _command_output_format, _command_timeout, _is_command_provider_config as _is_command_stt_provider_config,
     _named_provider_config, _resolve_command_config, command_env_passthrough as _command_stt_env_passthrough,
     command_failure_detail, render_command_template as _render_command_stt_template,
-    run_command_provider as _run_command_stt,
-)
+    run_command_provider as _run_command_stt)
 from tools.transcription_common import (
-    BUILTIN_STT_PROVIDERS, _error_result, _log_prompt_unsupported, _ok_result,
-)
+    BUILTIN_STT_PROVIDERS, _error_result, _log_prompt_unsupported, _ok_result)
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("tools.transcription_tools")
@@ -72,8 +70,7 @@ def _read_command_stt_output(output_path: Path, stdout: str, fmt: str) -> str:
 def _transcribe_command_stt(
     file_path: str, provider_name: str, config: Dict[str, Any], stt_config: Dict[str, Any],
     model_override: Optional[str] = None, language_override: Optional[str] = None,
-    prompt: Optional[str] = None,
-) -> Dict[str, Any]:
+    prompt: Optional[str] = None) -> Dict[str, Any]:
     """Transcribe via a user-declared ``stt.providers.<name>: type: command``.
 
     Placeholders (shell-quote-aware; ``{{``/``}}`` stay literal): ``{input_path}``,
@@ -130,8 +127,7 @@ def _unregistered_stt_provider_error(provider: str) -> Dict[str, Any]:
         "installed STT plugins, or configure a command provider under "
         f"`stt.providers.{key}.command`.",
         provider=key,
-        error_type="provider_not_registered",
-    )
+        error_type="provider_not_registered")
 
 
 def _dispatch_to_plugin_provider(
@@ -178,8 +174,7 @@ def _dispatch_to_plugin_provider(
         logger.info("STT plugin provider '%s' reports not available; returning unavailability envelope.", key)
         return _error_result(
             f"STT plugin '{key}' is not available — check that its required credentials / dependencies are configured.",
-            provider=key,
-        )
+            provider=key)
     logger.info("Transcribing with plugin STT provider '%s'...", key)
     # The prompt travels via the ABC's ``**extra`` kwargs and is only sent when
     # set, so pre-prompt providers see byte-identical calls on the no-prompt path.
@@ -215,8 +210,7 @@ def _enforce_prompt_length_limit(prompt: Optional[str], provider: str) -> Option
     logger.warning(
         "Transcription prompt is ~%d tokens; whisper-family provider '%s' "
         "only uses the final ~%d — truncating to the last %d characters.",
-        len(prompt) // _PROMPT_CHARS_PER_TOKEN, provider, _WHISPER_PROMPT_TOKEN_CAP, max_chars,
-    )
+        len(prompt) // _PROMPT_CHARS_PER_TOKEN, provider, _WHISPER_PROMPT_TOKEN_CAP, max_chars)
     return prompt[-max_chars:]
 
 
@@ -237,16 +231,14 @@ def _apply_pre_transcription_hook(
             return model, None, prompt
         hook_results = invoke_hook(
             "pre_transcription", file_path=file_path, provider=provider,
-            model=model, language=language, prompt=prompt, source=source,
-        )
+            model=model, language=language, prompt=prompt, source=source)
         overrides: Dict[str, Any] = {}
         for hook_result in hook_results:
             for key, value in (hook_result.items() if isinstance(hook_result, dict) else ()):
                 if key == "file_path":
                     logger.warning(
                         "pre_transcription hook attempted to change "
-                        "file_path (read-only) — ignoring the attempt."
-                    )
+                        "file_path (read-only) — ignoring the attempt.")
                 elif key not in _PRE_TRANSCRIPTION_MUTABLE_FIELDS:
                     logger.debug("pre_transcription hook returned unsupported field %r — ignoring.", key)
                 elif not isinstance(value, str):

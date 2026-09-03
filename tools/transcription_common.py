@@ -45,8 +45,7 @@ GROQ_MODELS = {"whisper-large-v3", "whisper-large-v3-turbo", "distil-whisper-lar
 # (a regression test fails on drift); plugins may not register under these names and the
 # dispatcher short-circuits them before command/plugin lookup.
 BUILTIN_STT_PROVIDERS = frozenset({
-    "local", "local_command", "groq", "openai", "mistral", "xai", "elevenlabs", "deepinfra",
-})
+    "local", "local_command", "groq", "openai", "mistral", "xai", "elevenlabs", "deepinfra"})
 # Built-in providers that upload audio to a remote API.
 CLOUD_STT_PROVIDERS = frozenset(BUILTIN_STT_PROVIDERS - {"local", "local_command"})
 

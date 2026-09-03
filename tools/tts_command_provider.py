@@ -255,8 +255,7 @@ def _is_command_provider_config(config: Dict[str, Any]) -> bool:
 
 
 def _resolve_command_config(
-    provider: str, config: Dict[str, Any], reserved: FrozenSet[str],
-) -> Optional[Dict[str, Any]]:
+    provider: str, config: Dict[str, Any], reserved: FrozenSet[str]) -> Optional[Dict[str, Any]]:
     """Config of a user-declared command provider; None for *reserved* names, unknown or non-command."""
     key = (provider or "").lower().strip()
     if not key or key in reserved:
@@ -287,8 +286,7 @@ def _command_output_format(config: Dict[str, Any], formats: FrozenSet[str], defa
 # Any ``tts.provider`` value NOT in this set refers to ``tts.providers.<name>``.
 BUILTIN_TTS_PROVIDERS = frozenset({
     "edge", "elevenlabs", "openai", "minimax", "xai", "mistral", "gemini",
-    "neutts", "kittentts", "piper", "deepinfra",
-})
+    "neutts", "kittentts", "piper", "deepinfra"})
 
 DEFAULT_COMMAND_TTS_TIMEOUT_SECONDS = 120
 DEFAULT_COMMAND_TTS_OUTPUT_FORMAT = "mp3"

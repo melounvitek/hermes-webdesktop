@@ -35,8 +35,7 @@ _DEGREE_UNITS = (("C", "Celsius"), ("F", "Fahrenheit"))
 # Unit suffix (regex, after a digit) -> spoken word; km/h variants before the bare "m".
 _UNIT_WORDS = (
     (r"km\s*/\s*h", "kilometres per hour"), (r"km/h", "kilometres per hour"),
-    (r"mm", "millimetres"), (r"cm", "centimetres"), (r"m", "metres"),
-)
+    (r"mm", "millimetres"), (r"cm", "centimetres"), (r"m", "metres"))
 # Currency prefix (regex) -> spoken word; order matters (NZ$/A$/US$ before bare $).
 _CURRENCY_WORDS = (
     (r"NZ\$", "New Zealand dollars", re.IGNORECASE), (r"A\$", "Australian dollars", re.IGNORECASE),
@@ -48,8 +47,7 @@ _EMOJI_RE = re.compile(
     "[\U0001F1E6-\U0001F1FF\U0001F300-\U0001F5FF\U0001F600-\U0001F64F\U0001F680-\U0001F6FF"
     "\U0001F700-\U0001F77F\U0001F780-\U0001F7FF\U0001F800-\U0001F8FF\U0001F900-\U0001F9FF"
     "\U0001FA00-\U0001FAFF☀-➿]+",
-    flags=re.UNICODE,
-)
+    flags=re.UNICODE)
 _VARIATION_SELECTOR_RE = re.compile("[︎️]")
 
 
@@ -86,8 +84,7 @@ def _normalize_temperature_ranges(text: str) -> str:
             lambda m, w=word: (
                 f"{m.group(1).replace(chr(0x2212), '-')} to {m.group(2).replace(chr(0x2212), '-')} degrees {w}"
             ),
-            text, flags=re.IGNORECASE,
-        )
+            text, flags=re.IGNORECASE)
     return text
 
 
@@ -233,8 +230,7 @@ _LEGACY_TTS_STRIP_STEPS = (
     (re.compile(r'---+'), ''),
     # Emoji + variation selectors/ZWJ: providers speak them as awkward labels.
     (re.compile('[\U0001F000-\U0001FAFF\u2600-\u27BF\uFE0F\u200D\U000E0020-\U000E007F]+'), ' '),
-    (re.compile(r'\n{3,}'), '\n\n'),
-)
+    (re.compile(r'\n{3,}'), '\n\n'))
 
 
 def _strip_markdown_for_tts(text: str) -> str:

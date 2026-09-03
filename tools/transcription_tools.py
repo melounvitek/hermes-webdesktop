@@ -25,42 +25,36 @@ from hermes_cli._subprocess_compat import windows_hide_flags  # noqa: F401  (imp
 from utils import is_truthy_value
 from tools.managed_tool_gateway import resolve_managed_tool_gateway  # noqa: F401  (patched by tests)
 from tools.tool_backend_helpers import (  # noqa: F401  (patched by tests; read lazily by transcription_cloud)
-    managed_nous_tools_enabled, nous_tool_gateway_unavailable_message, resolve_openai_audio_api_key,
-)
+    managed_nous_tools_enabled, nous_tool_gateway_unavailable_message, resolve_openai_audio_api_key)
 from tools.transcription_common import (  # noqa: F401  (re-exported; tests patch tools.transcription_tools.<name>)
     BUILTIN_STT_PROVIDERS, CLOUD_STT_PROVIDERS, DEFAULT_ELEVENLABS_STT_MODEL,
     DEFAULT_GROQ_STT_MODEL, DEFAULT_LOCAL_MODEL, DEFAULT_MISTRAL_STT_MODEL, DEFAULT_PROVIDER,
     DEFAULT_STT_MODEL, ELEVENLABS_STT_BASE_URL, GROQ_MODELS, LOCAL_STT_COMMAND_ENV,
     LOCAL_STT_LANGUAGE_ENV, MAX_FILE_SIZE, OPENAI_MODELS, SUPPORTED_FORMATS, XAI_STT_BASE_URL,
-    _error_result, _get_stt_section, _ok_result,
-)
+    _error_result, _get_stt_section, _ok_result)
 from tools.transcription_audio import (  # noqa: F401  (re-exported; tests patch tools.transcription_tools.<name>)
     _CLOUD_TRIM_KEEP_MS_DEFAULT, _CLOUD_TRIM_MIN_INPUT_SECONDS, _CLOUD_TRIM_THRESHOLD_DB_DEFAULT,
     _cloud_trim_settings, _convert_caf_to_wav, _find_ffmpeg_binary, _find_ffprobe_binary,
     _find_whisper_binary, _prepare_audio_for_transcription, _prepare_local_audio,
     _probe_audio_duration, _run_ffmpeg_stt_encode, _trim_silence_for_cloud_stt,
-    _validate_audio_file, _validate_audio_file_size, _validate_audio_source_file,
-)
+    _validate_audio_file, _validate_audio_file_size, _validate_audio_source_file)
 from tools.transcription_local import (  # noqa: F401  (re-exported; tests patch tools.transcription_tools.<name>)
     _LOGPROB_THRESHOLD_DEFAULT, _NO_SPEECH_PROB_THRESHOLD_DEFAULT, _get_idle_unload_seconds,
     _get_local_command_template, _has_local_command, _is_hallucinated_segment,
     _join_confident_segments, _load_local_whisper_model, _looks_like_cuda_lib_error,
     _normalize_local_model, _transcribe_local_command, _try_lazy_install_stt,
-    build_local_transcribe_kwargs,
-)
+    build_local_transcribe_kwargs)
 from tools.transcription_cloud import (  # noqa: F401  (re-exported; tests patch tools.transcription_tools.<name>)
     _extract_transcript_text, _has_xai_stt_credentials, _is_local_or_private_url,
     _resolve_openai_audio_client_config, _transcribe_deepinfra, _transcribe_elevenlabs,
-    _transcribe_groq, _transcribe_mistral, _transcribe_openai, _transcribe_xai,
-)
+    _transcribe_groq, _transcribe_mistral, _transcribe_openai, _transcribe_xai)
 from tools.transcription_command import (  # noqa: F401  (re-exported; tests patch tools.transcription_tools.<name>)
     COMMAND_STT_OUTPUT_FORMATS, DEFAULT_COMMAND_STT_LANGUAGE, DEFAULT_COMMAND_STT_OUTPUT_FORMAT,
     DEFAULT_COMMAND_STT_TIMEOUT_SECONDS, _PROMPT_CHARS_PER_TOKEN, _WHISPER_PROMPT_TOKEN_CAP,
     _apply_pre_transcription_hook, _dispatch_to_plugin_provider, _enforce_prompt_length_limit,
     _get_command_stt_output_format, _get_command_stt_timeout, _get_named_stt_provider_config,
     _render_command_stt_template, _resolve_command_stt_provider_config, _run_command_stt,
-    _transcribe_command_stt, _unregistered_stt_provider_error,
-)
+    _transcribe_command_stt, _unregistered_stt_provider_error)
 
 logger = logging.getLogger(__name__)
 
@@ -245,15 +239,13 @@ _CLOUD_PROVIDER_SPECS = {
                    "No local STT available, using ElevenLabs Scribe STT API"),
     "deepinfra": (_has_deepinfra_key, _has_deepinfra_key,
                   "STT provider 'deepinfra' configured but DEEPINFRA_API_KEY not set (or openai package missing)",
-                  "No local STT available, using DeepInfra Whisper API"),
-}
+                  "No local STT available, using DeepInfra Whisper API")}
 
 # Explicit selections whose resolution is more than a probe + warning.
 _EXPLICIT_RESOLVERS = {
     "local": _resolve_explicit_local,
     "local_command": _resolve_explicit_local_command,
-    "openai": _resolve_explicit_openai,
-}
+    "openai": _resolve_explicit_openai}
 
 
 def _resolve_explicit_provider(provider: str) -> str:
@@ -429,8 +421,7 @@ def _read_block_error(file_path: str) -> Optional[Dict[str, Any]]:
 
 
 def _transcribe_prepared_audio(
-    file_path: str, model: Optional[str] = None, source: Optional[str] = None
-) -> Dict[str, Any]:
+    file_path: str, model: Optional[str] = None, source: Optional[str] = None) -> Dict[str, Any]:
     """Transcribe a validated audio file with the configured STT provider.
 
     ``model`` overrides the config default; ``source`` is a caller-surface label
@@ -477,8 +468,7 @@ _BUILTIN_MODEL_KEYS = {
     "openai": ("openai", "model", DEFAULT_STT_MODEL, False),
     "mistral": ("mistral", "model", DEFAULT_MISTRAL_STT_MODEL, False),
     "elevenlabs": ("elevenlabs", "model_id", DEFAULT_ELEVENLABS_STT_MODEL, False),
-    "deepinfra": ("deepinfra", "model", "", True),
-}
+    "deepinfra": ("deepinfra", "model", "", True)}
 
 
 def _builtin_model_name(provider: str, stt_config: Dict[str, Any], model: Optional[str]) -> str:
@@ -494,8 +484,7 @@ def _builtin_model_name(provider: str, stt_config: Dict[str, Any], model: Option
 
 def _dispatch_stt_provider(
     file_path: str, provider: str, stt_config: Dict[str, Any], model: Optional[str] = None,
-    source: Optional[str] = None,
-) -> Dict[str, Any]:
+    source: Optional[str] = None) -> Dict[str, Any]:
     """Route *file_path* to the handler for *provider* (built-in > command > plugin)."""
     # Static ``stt.prompt`` is the base; hook results mutate on top (last hook to set a field wins).
     prompt = stt_config.get("prompt")
@@ -522,8 +511,7 @@ def _dispatch_stt_provider(
     # Plugin backend: reads ``stt.<provider>`` like built-ins; the ``model`` argument overrides it.
     plugin_result = _dispatch_to_plugin_provider(
         file_path, provider, stt_config, model=model or _get_stt_section(stt_config, provider).get("model"),
-        language=language or _resolve_stt_language(provider, stt_config), prompt=prompt,
-    )
+        language=language or _resolve_stt_language(provider, stt_config), prompt=prompt)
     return plugin_result if plugin_result is not None else _no_provider_error(provider, stt_config)
 
 
@@ -543,13 +531,11 @@ def _no_provider_error(provider: str, stt_config: Dict[str, Any]) -> Dict[str, A
         "set GROQ_API_KEY for free Groq Whisper, set MISTRAL_API_KEY for Mistral "
         "Voxtral Transcribe, configure xAI OAuth or set XAI_API_KEY for xAI Grok STT, "
         "set ELEVENLABS_API_KEY for ElevenLabs Scribe, or set VOICE_TOOLS_OPENAI_KEY "
-        "or OPENAI_API_KEY for the OpenAI Whisper API."
-    )
+        "or OPENAI_API_KEY for the OpenAI Whisper API.")
 
 
 def transcribe_audio(
-    file_path: str, model: Optional[str] = None, source: Optional[str] = None
-) -> Dict[str, Any]:
+    file_path: str, model: Optional[str] = None, source: Optional[str] = None) -> Dict[str, Any]:
     """Validate, preprocess supported inputs, and dispatch transcription.
 
     ``source`` is a caller-surface label (``"gateway"``, ``"voice_mode"``) forwarded to

@@ -23,8 +23,7 @@ from tools.transcription_audio import _run_quiet
 from tools.transcription_common import (
     DEFAULT_LOCAL_MODEL, DEFAULT_LOCAL_STT_LANGUAGE, GROQ_MODELS, LOCAL_STT_COMMAND_ENV,
     OPENAI_MODELS, _config_number, _error_result, _log_prompt_unsupported, _ok_result,
-    _process_error_detail,
-)
+    _process_error_detail)
 
 # Log-record parity with the origin module.
 logger = logging.getLogger("tools.transcription_tools")
@@ -53,8 +52,7 @@ def _normalize_local_model(model_name: Optional[str]) -> str:
             "STT model '%s' is a cloud-only name and cannot be used with the local "
             "provider. Falling back to '%s'. Set stt.local.model to a valid "
             "faster-whisper size (tiny, base, small, medium, large-v3).",
-            model_name, DEFAULT_LOCAL_MODEL,
-        )
+            model_name, DEFAULT_LOCAL_MODEL)
         return DEFAULT_LOCAL_MODEL
     return model_name
 
@@ -77,8 +75,7 @@ def _try_lazy_install_stt() -> bool:
             "venv owner: `stat -c '%%u' '$(dirname $(dirname $(which python3)))'` "
             "then `su - <owner> -c 'VIRTUAL_ENV=/opt/hermes/.venv "
             "uv pip install faster-whisper==1.2.1'`",
-            exc,
-        )
+            exc)
     return False
 
 
@@ -89,8 +86,7 @@ def _try_lazy_install_stt() -> bool:
 _CUDA_LIB_ERROR_MARKERS = (
     "libcublas", "libcudnn", "libcudart", "cannot be loaded", "cannot open shared object",
     "no kernel image is available", "CUBLAS_STATUS_NOT_SUPPORTED", "no CUDA-capable device",
-    "CUDA driver version is insufficient",
-)
+    "CUDA driver version is insufficient")
 
 
 def _looks_like_cuda_lib_error(exc: BaseException) -> bool:
@@ -172,8 +168,7 @@ def build_local_transcribe_kwargs(stt_config: Optional[Dict[str, Any]] = None) -
     kwargs: Dict[str, Any] = {
         "beam_size": 5,
         "condition_on_previous_text": False,
-        "vad_filter": vad_enabled is None or bool(vad_enabled),
-    }
+        "vad_filter": vad_enabled is None or bool(vad_enabled)}
     if kwargs["vad_filter"]:
         kwargs["vad_parameters"] = {
             "min_silence_duration_ms": _config_number(local_cfg, "vad_min_silence_ms", _VAD_MIN_SILENCE_MS_DEFAULT, int)
@@ -246,8 +241,7 @@ def _transcribe_local_command(
                 return _error_result(prep_error)
             command = command_template.format(
                 input_path=shlex.quote(prepared_input), output_dir=shlex.quote(output_dir),
-                language=shlex.quote(language), model=shlex.quote(normalized_model),
-            )
+                language=shlex.quote(language), model=shlex.quote(normalized_model))
             # Scrub Hermes secrets from the child env (same policy as _run_command_stt).
             from tools.environments.local import hermes_subprocess_env
             _run_quiet(shlex.split(command), timeout=300, env=hermes_subprocess_env(inherit_credentials=False))

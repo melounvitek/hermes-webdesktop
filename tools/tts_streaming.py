@@ -150,8 +150,7 @@ _PROVIDER_PRIORITY: List[str] = ["elevenlabs", "gemini", "openai", "xai"]
 
 
 def resolve_streaming_provider(
-    tts_config: Dict, preferred: Optional[str] = None
-) -> Optional[StreamingTTSProvider]:
+    tts_config: Dict, preferred: Optional[str] = None) -> Optional[StreamingTTSProvider]:
     """Return a ready streamer for the *configured* provider, else ``None``.
 
     ``tts.streaming.provider`` when set: a name pins that exact streamer (``None``
@@ -199,8 +198,7 @@ class ElevenLabsStreamer(StreamingTTSProvider):
             text=text, voice_id=self.section.get("voice_id", DEFAULT_ELEVENLABS_VOICE_ID),
             model_id=self.section.get("streaming_model_id",
                                       self.section.get("model_id", DEFAULT_ELEVENLABS_STREAMING_MODEL_ID)),
-            output_format="pcm_24000",
-        )
+            output_format="pcm_24000")
 
 
 def _openai_config_api_key() -> str:
@@ -225,8 +223,7 @@ class OpenAIStreamer(StreamingTTSProvider):
         from openai import OpenAI
         client = OpenAI(
             api_key=(self.section.get("api_key") or resolve_openai_audio_api_key()),
-            base_url=(self.section.get("base_url") or get_env_value("OPENAI_BASE_URL") or None),
-        )
+            base_url=(self.section.get("base_url") or get_env_value("OPENAI_BASE_URL") or None))
         with client.audio.speech.with_streaming_response.create(
             model=self.section.get("model", "gpt-4o-mini-tts"), voice=self.section.get("voice", "alloy"),
             input=text, response_format="pcm",
@@ -249,8 +246,7 @@ class GeminiStreamer(StreamingTTSProvider):
         import json as _json
         import requests
         from tools.tts_tool_providers import (
-            DEFAULT_GEMINI_TTS_BASE_URL, DEFAULT_GEMINI_TTS_MODEL, DEFAULT_GEMINI_TTS_VOICE,
-        )
+            DEFAULT_GEMINI_TTS_BASE_URL, DEFAULT_GEMINI_TTS_MODEL, DEFAULT_GEMINI_TTS_VOICE)
         api_key = _gemini_key()
         model = str(self.section.get("model", DEFAULT_GEMINI_TTS_MODEL)).strip() or DEFAULT_GEMINI_TTS_MODEL
         voice = str(self.section.get("voice", DEFAULT_GEMINI_TTS_VOICE)).strip() or DEFAULT_GEMINI_TTS_VOICE
@@ -261,9 +257,7 @@ class GeminiStreamer(StreamingTTSProvider):
             "contents": [{"parts": [{"text": text}]}],
             "generationConfig": {
                 "responseModalities": ["AUDIO"],
-                "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}},
-            },
-        }
+                "speechConfig": {"voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}}}
         url = f"{base_url}/models/{model}:streamGenerateContent"
 
         def _sse_chunks() -> Iterator[bytes]:
