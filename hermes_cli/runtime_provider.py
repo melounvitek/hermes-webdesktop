@@ -185,10 +185,8 @@ def _copilot_runtime_api_mode(model_cfg: Dict[str, Any], api_key: str, *, target
     # Use the model being resolved, not the persisted default: a Claude MoA slot inheriting
     # codex_responses from a GPT-5 default fails with "model ... does not support Responses API".
     model_name = str(_effective_model(model_cfg, target_model)).strip()
-    if not model_name:
-        return "chat_completions"
     try:
-        return _models.copilot_model_api_mode(model_name, api_key=api_key)
+        return _models.copilot_model_api_mode(model_name, api_key=api_key) if model_name else "chat_completions"
     except Exception:
         return "chat_completions"
 
@@ -199,10 +197,9 @@ def _azure_inferred_api_mode(effective_model: str, api_mode: str) -> str:
     if not effective_model or api_mode == "anthropic_messages":
         return api_mode
     try:
-        inferred = _models.azure_foundry_model_api_mode(effective_model)
+        return _models.azure_foundry_model_api_mode(effective_model) or api_mode
     except Exception:
-        inferred = None
-    return inferred or api_mode
+        return api_mode
 
 
 def _configured_or_fallback_api_mode(provider: str, model_cfg: Dict[str, Any], base_url: str, effective_model: Any, *,
@@ -722,11 +719,10 @@ def _azure_anthropic_env_key(model_cfg: Dict[str, Any]) -> str:
 def _anthropic_env_runtime(requested_provider: str, model_cfg: Dict[str, Any]) -> Dict[str, Any]:
     """Native Anthropic (Messages API) from env/auth store; ``model.base_url`` honoured only when
     the configured provider is anthropic (else a Codex endpoint would leak into Anthropic requests)."""
-    cfg_base_url = _anthropic_cfg_base_url(model_cfg)
-    base_url = cfg_base_url or _ANTHROPIC_DEFAULT_BASE_URL
+    base_url = _anthropic_cfg_base_url(model_cfg) or _ANTHROPIC_DEFAULT_BASE_URL
     # Microsoft Foundry endpoints reject Claude Code OAuth tokens, which resolve_anthropic_token()
     # would return first — use the env key directly.
-    if base_url_host_matches(base_url, "azure.com") or (cfg_base_url and base_url_host_matches(cfg_base_url, "azure.com")):
+    if base_url_host_matches(base_url, "azure.com"):
         token = _azure_anthropic_env_key(model_cfg)
         if not token:
             raise AuthError("No Azure Anthropic API key found. Set AZURE_ANTHROPIC_KEY or "
