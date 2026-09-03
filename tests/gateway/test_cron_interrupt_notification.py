@@ -251,10 +251,12 @@ class TestDeliveryErrorIsRecordedWhenTheNoticeCannotBeSent:
 
         import cron.scheduler as sched
 
-        src = inspect.getsource(sched._run_one_job_body)
+        body_src = inspect.getsource(sched._run_one_job_body)
+        src = inspect.getsource(sched._finish_interrupted_run)
         assert 'update_job(job["id"], {"last_delivery_error": delivery_error})' in src, (
             "interrupted runs must still persist the delivery failure"
         )
         # The recovery branch hangs off the interrupted-flag short-circuit,
         # not off a second mark_job_run call.
-        assert "if interrupted:" in src and "if delivery_error:" in src
+        assert "_consume_interrupted_flag(" in body_src and "_finish_interrupted_run(" in body_src
+        assert "if delivery_error:" in src and "mark_job_run(" not in src
