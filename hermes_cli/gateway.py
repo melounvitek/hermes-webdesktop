@@ -1151,11 +1151,6 @@ def _parse_kv_pairs(items) -> dict[str, str]:
     return {k: v.strip() for k, v in (item.split("=", 1) for item in items if "=" in item)}
 
 
-def _read_systemd_unit_environment(system: bool = False) -> dict[str, str]:
-    """Parse ``systemctl show -p Environment`` (one line of unquoted space-separated KEY=VALUE pairs)."""
-    return _parse_kv_pairs(_systemctl_show(("Environment",), system=system).get("Environment", "").split())
-
-
 def _systemctl_show(properties: tuple[str, ...], *, system: bool) -> dict[str, str]:
     """``systemctl show --property a,b`` for the gateway unit as ``{key: value}``; {} on failure."""
     try:
@@ -1197,7 +1192,9 @@ def _sync_hermes_home_from_systemd_unit(system: bool) -> None:
         return
     # On-disk unit first; ``systemctl show`` for units that only exist in the manager.
     unit_home = (_hermes_home_from_systemd_unit_file(system=True) or "").strip()
-    unit_home = unit_home or _read_systemd_unit_environment(system=True).get("HERMES_HOME", "").strip()
+    if not unit_home:
+        env_line = _systemctl_show(("Environment",), system=True).get("Environment", "")
+        unit_home = _parse_kv_pairs(env_line.split()).get("HERMES_HOME", "").strip()
     if unit_home and os.environ.get("HERMES_HOME", "").strip() != unit_home:
         os.environ["HERMES_HOME"] = unit_home
 
@@ -1238,13 +1235,6 @@ def _read_gateway_runtime_status() -> dict | None:
     except Exception:
         return None
     return state if isinstance(state, dict) else None
-
-
-def _gateway_runtime_status_for_pid(pid: int | None) -> dict | None:
-    if not pid:
-        return None
-    state = _read_gateway_runtime_status()
-    return state if state and _runtime_state_pid(state) == pid else None
 
 
 def _systemd_cli_bits(system: bool) -> tuple[str, str, str]:
@@ -1292,7 +1282,9 @@ def _wait_for_systemd_service_restart(
 
         if active_state == "active" and new_pid and (previous_pid is None or new_pid != previous_pid):
             if runtime_pid != new_pid:
-                runtime_state = _gateway_runtime_status_for_pid(new_pid)
+                runtime_state = _read_gateway_runtime_status()
+                if runtime_state and _runtime_state_pid(runtime_state) != new_pid:
+                    runtime_state = None
             gateway_state = (runtime_state or {}).get("gateway_state")
             if gateway_state == "running":
                 print(f"✓ {scope_label} service restarted (PID {new_pid})")
@@ -1577,7 +1569,6 @@ def _print_other_profiles_gateway_status() -> None:
         other_processes = [p for p in find_profile_gateway_processes() if p.profile != current]
         if not other_processes:
             return
-
         print()
         print("Other profiles:")
         for proc in other_processes:
@@ -1817,9 +1808,8 @@ def _await_gateway_exit(
     poll_s: float = _ORPHAN_EXIT_POLL_SECONDS,
 ):
     """Poll up to *grace_s* for *pids* to exit; return survivors. ``pid_exists``/``sleep`` injectable for tests."""
-    if sleep is None:
-        sleep = time.sleep
-    survivors = [p for p in pids]
+    sleep = sleep or time.sleep
+    survivors = list(pids)
     for _ in range(max(1, int(grace_s / poll_s))):
         survivors = [p for p in survivors if pid_exists(p)]
         if not survivors:
@@ -1834,10 +1824,7 @@ def _await_gateway_exit(
 def _force_kill_survivors(survivors, *, kill=None) -> None:
     """SIGKILL processes that outlasted the grace period, loudly — a force-kill can tear the store, so
     it must leave a trace."""
-    if not survivors:
-        return
-    if kill is None:
-        kill = os.kill
+    kill = kill or os.kill
     for pid in survivors:
         logger.warning(
             "Gateway PID %s did not exit within %.0fs of SIGTERM — sending "
@@ -1999,11 +1986,8 @@ def _windows_gateway_should_absorb_console_controls() -> bool:
     or no interactive stdin); foreground runs stay interruptible."""
     if not is_windows():
         return False
-
-    detached = os.getenv("HERMES_GATEWAY_DETACHED", "").strip().lower()
-    if detached in {"1", "true", "yes", "on"}:
+    if os.getenv("HERMES_GATEWAY_DETACHED", "").strip().lower() in {"1", "true", "yes", "on"}:
         return True
-
     try:
         return not bool(sys.stdin and sys.stdin.isatty())
     except (ValueError, OSError):
@@ -2080,16 +2064,6 @@ def _profile_arg(hermes_home: str | None = None, default_root: str | Path | None
         return ""
     name = _profile_name_from_home(home, default)
     return f"--profile {name}" if name else ""
-
-
-def _profile_arg_for_target_user(hermes_home: str, target_home_dir: str) -> str:
-    """Return the profile arg for a system service running as another user."""
-    target_root = Path(target_home_dir) / ".hermes"
-    try:
-        Path(hermes_home).resolve().relative_to(target_root.resolve())
-        return _profile_arg(hermes_home, default_root=target_root)
-    except ValueError:
-        return _profile_arg(hermes_home)
 
 
 def get_service_name() -> str:
@@ -2476,11 +2450,7 @@ def _system_service_identity(run_as_user: str | None = None) -> tuple[str, str, 
     import pwd
 
     username = (
-        run_as_user
-        or os.getenv("SUDO_USER")
-        or os.getenv("USER")
-        or os.getenv("LOGNAME")
-        or getpass.getuser()
+        run_as_user or os.getenv("SUDO_USER") or os.getenv("USER") or os.getenv("LOGNAME") or getpass.getuser()
     ).strip()
     if not username:
         raise ValueError("Could not determine which user the gateway service should run as")
@@ -2496,19 +2466,15 @@ def _system_service_identity(run_as_user: str | None = None) -> tuple[str, str, 
         user_info = pwd.getpwnam(username)
     except KeyError as e:
         raise ValueError(f"Unknown user: {username}") from e
-
-    group_name = grp.getgrgid(user_info.pw_gid).gr_name
-    return username, group_name, user_info.pw_dir
+    return username, grp.getgrgid(user_info.pw_gid).gr_name, user_info.pw_dir
 
 
 def _read_systemd_user_from_unit(unit_path: Path) -> str | None:
     if not unit_path.exists():
         return None
-
     for line in unit_path.read_text(encoding="utf-8").splitlines():
         if line.startswith("User="):
-            value = line.split("=", 1)[1].strip()
-            return value or None
+            return line.split("=", 1)[1].strip() or None
     return None
 
 
@@ -2557,20 +2523,16 @@ def install_linux_gateway_from_setup(force: bool = False, enable_on_startup: boo
     if scope == "system":
         run_as_user = _default_system_service_user()
         if os.geteuid() != 0:  # windows-footgun: ok — Linux systemd install wizard, never invoked on Windows
-            # Unreachable from the wizard (system scope only offered to root). Defensive
-            # guard for direct callers — no self-elevation recipe is printed.
+            # Unreachable from the wizard (system scope only offered to root); defensive guard for direct callers.
             print_warning(
                 "  System service install requires root. Re-run setup from a "
                 "root shell, or install a user service instead: hermes gateway install"
             )
             return scope, False
 
-        if not run_as_user:
-            while True:
-                run_as_user = prompt("  Run the system gateway service as which user?", default="")
-                run_as_user = (run_as_user or "").strip()
-                if run_as_user:
-                    break
+        while not run_as_user:
+            run_as_user = (prompt("  Run the system gateway service as which user?", default="") or "").strip()
+            if not run_as_user:
                 print_error("  Enter a username.")
 
         systemd_install(force=force, system=True, run_as_user=run_as_user, enable_on_startup=enable_on_startup)
@@ -2687,33 +2649,15 @@ def get_systemd_linger_status() -> tuple[bool | None, str]:
     return None, f"unexpected loginctl output: {value or '<empty>'}"
 
 
-def print_systemd_linger_guidance() -> None:
-    """Print the current linger status and the fix when it is disabled."""
-    linger_enabled, linger_detail = get_systemd_linger_status()
-    if linger_enabled is True:
-        print("✓ Systemd linger is enabled (service survives logout)")
-    elif linger_enabled is False:
-        print("⚠ Systemd linger is disabled (gateway may stop when you log out)")
-        print("  Run: sudo loginctl enable-linger $USER")
-    else:
-        print(f"⚠ Could not verify systemd linger ({linger_detail})")
-        print("  If you want the gateway user service to survive logout, run:")
-        print("  sudo loginctl enable-linger $USER")
-
-
-def _launchd_user_home() -> Path:
-    """Real macOS account home for launchd artifacts (profile mode may point HOME at a profile dir)."""
+def get_launchd_plist_path() -> Path:
+    """``~/Library/LaunchAgents/ai.hermes.gateway[-<profile>].plist`` under the real account home."""
     import pwd
 
-    return Path(pwd.getpwuid(os.getuid()).pw_dir)  # windows-footgun: ok — POSIX launchd (macOS) helper, never invoked on Windows
-
-
-def get_launchd_plist_path() -> Path:
-    """launchd plist path: ``ai.hermes.gateway.plist`` for default HERMES_HOME,
-    ``ai.hermes.gateway-<profile>.plist`` otherwise."""
     suffix = _profile_suffix()
     name = f"ai.hermes.gateway-{suffix}" if suffix else "ai.hermes.gateway"
-    return _launchd_user_home() / "Library" / "LaunchAgents" / f"{name}.plist"
+    # Real account home: profile mode may point HOME at a profile dir.
+    home = Path(pwd.getpwuid(os.getuid()).pw_dir)  # windows-footgun: ok — POSIX launchd (macOS) helper, never invoked on Windows
+    return home / "Library" / "LaunchAgents" / f"{name}.plist"
 
 
 def launchd_gateway_labels_for_install() -> list[str]:
@@ -2904,14 +2848,6 @@ def _systemd_watchdog_seconds(hermes_home: str | Path | None = None) -> int:
             reset_home_override(override_token)
 
 
-def _systemd_watchdog_service_fields(hermes_home: str | Path | None = None) -> tuple[str, str]:
-    """Return systemd service fields for the effective gateway config."""
-    seconds = _systemd_watchdog_seconds(hermes_home)
-    if seconds <= 0:
-        return "simple", ""
-    return "notify", f"NotifyAccess=main\nWatchdogSec={seconds}s\n"
-
-
 def _append_node_dir_for_service(path_entries: list[str], hermes_root: Path | None = None) -> None:
     """Append the Node dir a service unit should use to *path_entries*.
 
@@ -2971,7 +2907,13 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
     if system:
         username, group_name, home_dir = _system_service_identity(run_as_user)
         hermes_home = _hermes_home_for_target_user(home_dir)
-        profile_arg = _profile_arg_for_target_user(hermes_home, home_dir)
+        # Profile arg relative to the TARGET user's ~/.hermes when hermes_home lives under it.
+        target_root = Path(home_dir) / ".hermes"
+        try:
+            Path(hermes_home).resolve().relative_to(target_root.resolve())
+            profile_arg = _profile_arg(hermes_home, default_root=target_root)
+        except ValueError:
+            profile_arg = _profile_arg(hermes_home)
         # Remap all paths that may resolve under the calling user's home (e.g. /root/) to the target
         # user's home so the service can actually access them.
         python_path = _remap_path_for_user(python_path, home_dir)
@@ -2999,7 +2941,9 @@ def generate_systemd_unit(system: bool = False, run_as_user: str | None = None) 
         identity_lines = env_lines = ""
         wanted_by = "default.target"
 
-    systemd_type, systemd_watchdog_directives = _systemd_watchdog_service_fields(hermes_home)
+    watchdog_seconds = _systemd_watchdog_seconds(hermes_home)
+    systemd_type = "notify" if watchdog_seconds > 0 else "simple"
+    systemd_watchdog_directives = f"NotifyAccess=main\nWatchdogSec={watchdog_seconds}s\n" if watchdog_seconds > 0 else ""
     path_entries.extend(_build_user_local_paths(user_home, path_entries))
     path_entries.extend(_build_wsl_interop_paths(path_entries))
     path_entries.extend(["/usr/local/sbin", "/usr/local/bin", "/usr/sbin", "/usr/bin", "/sbin", "/bin"])
@@ -3115,14 +3059,8 @@ def _refuse_temp_home_service_write(definition: str, kind: str) -> bool:
     temp_home = _temp_home_in_service_definition(definition)
     if temp_home is None:
         return False
-    print(
-        f"✗ Refusing to write the gateway {kind}: HERMES_HOME resolves to a "
-        f"temporary directory ({temp_home})."
-    )
-    print(
-        "  This usually means a test/E2E environment exported HERMES_HOME. "
-        "Unset it (or run from a clean shell) and retry."
-    )
+    print(f"✗ Refusing to write the gateway {kind}: HERMES_HOME resolves to a temporary directory ({temp_home}).")
+    print("  This usually means a test/E2E environment exported HERMES_HOME. Unset it (or run from a clean shell) and retry.")
     return True
 
 
@@ -3252,16 +3190,12 @@ def _get_cron_drain_timeout() -> float:
     return _agent_timeout_setting("HERMES_CRON_DRAIN_TIMEOUT", "cron_drain_timeout", parse_cron_drain_timeout)
 
 
-def _get_restart_after_turn_timeout() -> float:
-    """Return the in-band restart wait-for-idle timeout in seconds."""
-    return _agent_timeout_setting(
-        "HERMES_RESTART_AFTER_TURN_TIMEOUT", "restart_after_turn_timeout", parse_restart_after_turn_timeout
-    )
-
-
 def _get_restart_exit_wait_budget() -> float:
     """CLI wait for gateway exit after SIGUSR1 / self-restart (#77184)."""
-    return resolve_restart_exit_wait_budget(_get_restart_drain_timeout(), _get_restart_after_turn_timeout())
+    return resolve_restart_exit_wait_budget(
+        _get_restart_drain_timeout(),
+        _agent_timeout_setting("HERMES_RESTART_AFTER_TURN_TIMEOUT", "restart_after_turn_timeout", parse_restart_after_turn_timeout),
+    )
 
 
 def systemd_install(
@@ -3545,15 +3479,17 @@ def systemd_status(deep: bool = False, system: bool = False, full: bool = False)
 
     if system:
         print("✓ System service starts at boot without requiring systemd linger")
-    elif deep:
-        print_systemd_linger_guidance()
     else:
-        linger_enabled, _ = get_systemd_linger_status()
+        linger_enabled, linger_detail = get_systemd_linger_status()
         if linger_enabled is True:
             print("✓ Systemd linger is enabled (service survives logout)")
         elif linger_enabled is False:
             print("⚠ Systemd linger is disabled (gateway may stop when you log out)")
             print("  Run: sudo loginctl enable-linger $USER")
+        elif deep:
+            print(f"⚠ Could not verify systemd linger ({linger_detail})")
+            print("  If you want the gateway user service to survive logout, run:")
+            print("  sudo loginctl enable-linger $USER")
 
     if deep:
         print()
@@ -3617,16 +3553,13 @@ def _launchd_domain() -> str:
     return _resolved_launchd_domain
 
 
-# Exit 125 ("Domain does not support specified action") and 3/113 ("Could not find service") all
-# mean the job isn't loaded in the target domain: re-bootstrap the plist and retry.
+# 125 ("Domain does not support specified action") and 3/113 ("Could not find service") all mean
+# the job isn't loaded in the target domain: re-bootstrap the plist and retry.
 _LAUNCHD_JOB_UNLOADED_EXIT_CODES = frozenset({3, 113, 125})
 
-# Exit 5 (EIO) or a persistent 125 is NOT on its own proof the domain is broken:
-#   1. the label is still registered (stale load from an interrupted restart) — recoverable by
-#      bootout + bootstrap again;
-#   2. the domain genuinely can't manage services (macOS 26+) — degrade to a detached process.
-# `_launchctl_bootstrap()` tries case 1 first; only when that retry ALSO returns 5/125 do callers
-# treat the domain as unsupported via `_launchctl_domain_unsupported`.
+# 5 (EIO) / persistent 125 mean either a stale still-registered label (recoverable: bootout +
+# bootstrap, which `_launchctl_bootstrap()` tries first) or a domain that genuinely can't manage
+# services (macOS 26+). Only when the retry ALSO fails do callers degrade to a detached process.
 _LAUNCHCTL_DOMAIN_UNSUPPORTED_CODES = frozenset({5, 125})
 
 
@@ -3636,13 +3569,11 @@ def _launchd_error_indicates_unloaded(exc: subprocess.CalledProcessError) -> boo
 
 
 def _launchctl_domain_unsupported(returncode: int) -> bool:
-    """True when launchctl can't manage the domain even after a fresh bootstrap (5/125 persist on macOS
-    26+) — degrade to detached."""
+    """True when launchctl can't manage the domain even after a fresh bootstrap (macOS 26+) — degrade to detached."""
     return returncode in _LAUNCHCTL_DOMAIN_UNSUPPORTED_CODES
 
 
-# `launchctl bootstrap` returns EIO when the label is *already* registered (stale load). That is
-# recoverable, NOT proof the domain is unmanageable; only a failed bootout + retry is.
+# EIO from `launchctl bootstrap` = label *already* registered (stale load); recoverable, not proof of an unmanageable domain.
 _LAUNCHCTL_BOOTSTRAP_EIO = 5
 
 
@@ -3725,11 +3656,8 @@ def _retry_launchctl_bootstrap_until_registered(
         time.sleep(2)
 
 
-# launchd-unsupported marker: persisted when the domain can't be managed (exit 5/125, macOS 26+)
-# so `launchd_status()` can explain the missing supervision; cleared when bootstrap/kickstart
-# succeeds so an OS fix recovers automatically.
-
-
+# launchd-unsupported marker: written when the domain can't be managed (exit 5/125, macOS 26+) so
+# `launchd_status()` can explain missing supervision; cleared on successful bootstrap/kickstart.
 def _launchd_unsupported_marker_path() -> Path:
     return get_hermes_home() / ".gateway-launchd-unsupported"
 
@@ -3758,12 +3686,7 @@ def _launchd_unsupported_marker_exists() -> bool:
 
 def _gateway_run_command() -> list[str]:
     """Build ``python -m hermes_cli.main [--profile X] gateway run --replace``, honoring the active profile."""
-    cmd = [get_python_path(), "-m", "hermes_cli.main"]
-    profile_arg = _profile_arg()
-    if profile_arg:
-        cmd.extend(profile_arg.split())
-    cmd.extend(["gateway", "run", "--replace"])
-    return cmd
+    return [get_python_path(), "-m", "hermes_cli.main", *_profile_arg().split(), "gateway", "run", "--replace"]
 
 
 def _timestamped_stderr_gateway_command(error_log: Path, *, external_supervisor: bool = False) -> list[str]:
@@ -4109,13 +4032,10 @@ def launchd_install(force: bool = False):
 
 def launchd_uninstall():
     plist_path = get_launchd_plist_path()
-    label = get_launchd_label()
-    subprocess.run(["launchctl", "bootout", f"{_launchd_domain()}/{label}"], check=False, timeout=90)
-
+    subprocess.run(["launchctl", "bootout", f"{_launchd_domain()}/{get_launchd_label()}"], check=False, timeout=90)
     if plist_path.exists():
         plist_path.unlink()
         print(f"✓ Removed {plist_path}")
-
     print("✓ Service uninstalled")
 
 
