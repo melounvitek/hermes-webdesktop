@@ -13,9 +13,11 @@ import asyncio
 import contextlib
 import json
 import logging
+import mimetypes
 import os
 import re
 from pathlib import Path
+from urllib.parse import unquote as _unquote
 from typing import Any, Dict, List, Optional, Tuple
 
 from gateway.config import Platform, PlatformConfig
@@ -88,12 +90,10 @@ def check_mattermost_requirements() -> bool:
 def validate_mattermost_config(config: PlatformConfig) -> bool:
     """Return True when Mattermost has enough config to connect."""
     extra = getattr(config, "extra", {}) or {}
-    token = (getattr(config, "token", None) or _get_scoped_secret("MATTERMOST_TOKEN", "")).strip()
-    url = (extra.get("url", "") or _get_scoped_secret("MATTERMOST_URL", "")).strip()
-    if not token:
+    if not (getattr(config, "token", None) or _get_scoped_secret("MATTERMOST_TOKEN", "")).strip():
         logger.debug("Mattermost: MATTERMOST_TOKEN not set")
         return False
-    if not url:
+    if not (extra.get("url", "") or _get_scoped_secret("MATTERMOST_URL", "")).strip():
         logger.warning("Mattermost: MATTERMOST_URL not set")
         return False
     return True
@@ -117,8 +117,7 @@ class MattermostAdapter(BasePlatformAdapter):
         self._closing = False
         # Reply mode: "thread" to nest replies, "off" for flat messages.
         self._reply_mode: str = (
-            config.extra.get("reply_mode", "") or _get_scoped_secret("MATTERMOST_REPLY_MODE", "off")
-        ).lower()
+            config.extra.get("reply_mode", "") or _get_scoped_secret("MATTERMOST_REPLY_MODE", "off")).lower()
         self._last_post_status: Optional[int] = None
         self._last_post_error: str = ""
         self._dedup = MessageDeduplicator()
@@ -182,22 +181,15 @@ class MattermostAdapter(BasePlatformAdapter):
         return rootish and broken
 
     async def _post_preserving_thread(
-        self, chat_id: str, payload: Dict[str, Any], metadata: _Metadata
-    ) -> Dict[str, Any]:
+        self, chat_id: str, payload: Dict[str, Any], metadata: _Metadata) -> Dict[str, Any]:
         """Post once, optionally falling back flat for final notify content."""
         data = await self._api_post("posts", payload)
-        if data or "root_id" not in payload:
+        if (data or "root_id" not in payload or not (isinstance(metadata, dict) and metadata.get("notify"))
+                or not self._last_post_failure_is_broken_thread_root()):
             return data
-        if not (isinstance(metadata, dict) and metadata.get("notify")):
-            return data
-        if not self._last_post_failure_is_broken_thread_root():
-            return data
-        flat_payload = dict(payload)
-        flat_payload.pop("root_id", None)
-        original = str(flat_payload.get("message") or "")
-        flat_payload["message"] = (
-            "⚠️ Mattermost thread delivery failed; posting final reply in channel.\n\n" + original
-        ).strip()
+        flat_payload = {k: v for k, v in payload.items() if k != "root_id"}
+        flat_payload["message"] = ("⚠️ Mattermost thread delivery failed; posting final reply in channel.\n\n"
+                                   + str(flat_payload.get("message") or "")).strip()
         logger.warning("Mattermost: falling back to flat channel delivery for notify-worthy post in %s", chat_id)
         return await self._api_post("posts", flat_payload)
 
@@ -266,8 +258,7 @@ class MattermostAdapter(BasePlatformAdapter):
         self._bot_user_id = me["id"]
         self._bot_username = me.get("username", "")
         logger.info(
-            "Mattermost: authenticated as @%s (%s) on %s", self._bot_username, self._bot_user_id, self._base_url
-        )
+            "Mattermost: authenticated as @%s (%s) on %s", self._bot_username, self._bot_user_id, self._base_url)
 
         self._ws_task = asyncio.create_task(self._ws_loop())
         self._mark_connected()
@@ -297,8 +288,7 @@ class MattermostAdapter(BasePlatformAdapter):
         return data["root_id"] if data and data.get("root_id") else post_id
 
     async def send(
-        self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: _Metadata = None
-    ) -> SendResult:
+        self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: _Metadata = None) -> SendResult:
         """Send a message (or multiple chunks) to a channel."""
         if not content:
             return SendResult(success=True)
@@ -396,10 +386,6 @@ class MattermostAdapter(BasePlatformAdapter):
                 logger.warning("Mattermost: failed to download %s after %d attempts: %s", url, attempt + 1, exc)
                 return await fallback()
 
-        if file_data is None:
-            logger.warning("Mattermost: download returned no data for %s", url)
-            return await fallback()
-
         file_id = await self._upload_file(chat_id, file_data, _url_filename(url, f"{kind}.png"), ct)
         if not file_id:
             return await fallback()
@@ -409,8 +395,6 @@ class MattermostAdapter(BasePlatformAdapter):
         self, chat_id: str, file_path: str, caption: Optional[str], reply_to: Optional[str],
         file_name: Optional[str] = None, metadata: _Metadata = None) -> SendResult:
         """Upload a local file and attach it to a post."""
-        import mimetypes
-
         p = Path(file_path)
         if not p.exists():
             logger.warning("Mattermost: local file not found, skipping: %s", file_path)
@@ -425,9 +409,7 @@ class MattermostAdapter(BasePlatformAdapter):
 
     async def _load_batch_image(self, image_url: str, index: int) -> Optional[Tuple[bytes, str, str]]:
         """Read a file:// or remote image for a batch post → (data, filename, content_type), or None to skip."""
-        import mimetypes
         import aiohttp
-        from urllib.parse import unquote as _unquote
 
         if image_url.startswith("file://"):
             local_path = _unquote(image_url[7:])
@@ -505,9 +487,8 @@ class MattermostAdapter(BasePlatformAdapter):
             except Exception as exc:
                 if self._closing:
                     return
-                # Permanent auth/permission failure: escalate via the fatal-error hook (a bare
-                # return would leave is_connected() healthy with a dead listener). Type-based
-                # only — substring matching on "401" misclassified transient errors.
+                # Permanent auth failure: escalate via the fatal-error hook (a bare return leaves is_connected()
+                # healthy with a dead listener). Type-based: substring "401" matching misclassified transient errors.
                 import aiohttp
                 if isinstance(exc, aiohttp.WSServerHandshakeError) and exc.status in {401, 403}:
                     logger.error("Mattermost WS auth failed (HTTP %d) — stopping reconnect", exc.status)
@@ -598,12 +579,11 @@ class MattermostAdapter(BasePlatformAdapter):
                         continue
                     file_data = await resp.read()
                     if mime.startswith("image/"):
-                        local_path = cache_image_from_bytes(file_data, ext or ".png")
+                        media_urls.append(cache_image_from_bytes(file_data, ext or ".png"))
                     elif mime.startswith("audio/"):
-                        local_path = cache_audio_from_bytes(file_data, ext or ".ogg")
+                        media_urls.append(cache_audio_from_bytes(file_data, ext or ".ogg"))
                     else:
-                        local_path = cache_document_from_bytes(file_data, fname)
-                    media_urls.append(local_path)
+                        media_urls.append(cache_document_from_bytes(file_data, fname))
                     media_types.append(mime)
             except Exception as exc:
                 logger.warning("Mattermost: error downloading file %s: %s", fid, exc)
@@ -613,11 +593,8 @@ class MattermostAdapter(BasePlatformAdapter):
         if event.get("event") != "posted":
             return
         data = event.get("data", {})
-        raw_post_str = data.get("post")
-        if not raw_post_str:
-            return
         try:
-            post = json.loads(raw_post_str)
+            post = json.loads(data.get("post") or "")
         except (json.JSONDecodeError, TypeError):
             return
         # Ignore own messages and system posts.
@@ -667,7 +644,6 @@ class MattermostAdapter(BasePlatformAdapter):
 
 
 # --- Plugin standalone-send (out-of-process cron delivery via Mattermost REST) ---
-
 
 async def _standalone_send(
     pconfig, chat_id: str, message: str, *, thread_id: Optional[str] = None,
@@ -734,7 +710,6 @@ async def _standalone_send(
 
 # --- Interactive setup wizard ---
 
-
 def interactive_setup() -> None:
     """Guide the user through Mattermost bot setup (URL + token, allowlist, home channel)."""
     from hermes_cli.config import get_env_value, remove_env_value, save_env_value
@@ -746,9 +721,9 @@ def interactive_setup() -> None:
         if not prompt_yes_no("Reconfigure Mattermost?", False):
             return
 
-    print_info("Works with any self-hosted Mattermost instance.")
-    print_info("   1. In Mattermost: Integrations → Bot Accounts → Add Bot Account")
-    print_info("   2. Copy the bot token")
+    for line in ("Works with any self-hosted Mattermost instance.",
+                 "   1. In Mattermost: Integrations → Bot Accounts → Add Bot Account", "   2. Copy the bot token"):
+        print_info(line)
     print()
     mm_url = prompt("Mattermost server URL (e.g. https://mm.example.com)")
     if mm_url:
@@ -760,9 +735,9 @@ def interactive_setup() -> None:
     print_success("Mattermost token saved")
 
     print()
-    print_info("🔒 Security: Restrict who can use your bot")
-    print_info("   To find your user ID: click your avatar → Profile")
-    print_info("   or use the API: GET /api/v4/users/me")
+    for line in ("🔒 Security: Restrict who can use your bot", "   To find your user ID: click your avatar → Profile",
+                 "   or use the API: GET /api/v4/users/me"):
+        print_info(line)
     print()
     allowed_users = prompt("Allowed user IDs (comma-separated, leave empty for open access)")
     if allowed_users:
@@ -772,9 +747,10 @@ def interactive_setup() -> None:
         print_info("⚠️  No allowlist set - anyone who can message the bot can use it!")
 
     print()
-    print_info("📬 Home Channel: where Hermes delivers cron job results and notifications.")
-    print_info("   To get a channel ID: click channel name → View Info → copy the ID")
-    print_info("   You can also set this later by typing /set-home in a Mattermost channel.")
+    for line in ("📬 Home Channel: where Hermes delivers cron job results and notifications.",
+                 "   To get a channel ID: click channel name → View Info → copy the ID",
+                 "   You can also set this later by typing /set-home in a Mattermost channel."):
+        print_info(line)
     home_channel = prompt("Home channel ID (leave empty to set later with /set-home)").strip()
     if home_channel:
         save_env_value("MATTERMOST_HOME_CHANNEL", home_channel)
@@ -784,7 +760,6 @@ def interactive_setup() -> None:
 
 
 # --- YAML → env config bridge (apply_yaml_config_fn) ---
-
 
 def _apply_yaml_config(yaml_cfg: dict, mattermost_cfg: dict) -> dict | None:
     """Translate ``config.yaml`` ``mattermost:`` keys into env vars + ``PlatformConfig.extra``.
@@ -824,7 +799,6 @@ def _is_connected(config) -> bool:
 
 
 # --- Plugin registration entry point ---
-
 
 def register(ctx) -> None:
     """Plugin entry point — called by the Hermes plugin system."""
