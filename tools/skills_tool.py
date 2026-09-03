@@ -13,9 +13,10 @@ import json
 import logging
 import os
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from hermes_constants import get_hermes_home
 from tools.registry import registry, tool_error
@@ -63,16 +64,11 @@ def _skills_scan_signature(dirs_to_scan, disabled) -> tuple:
             m = d.stat().st_mtime
         except OSError:
             continue
-        try:
-            with os.scandir(d) as it:
-                for entry in it:
-                    try:
-                        if entry.is_dir(follow_symlinks=False):
-                            m = max(m, entry.stat(follow_symlinks=False).st_mtime)
-                    except OSError:
-                        continue
-        except OSError:
-            pass
+        with suppress(OSError), os.scandir(d) as it:
+            for entry in it:
+                with suppress(OSError):
+                    if entry.is_dir(follow_symlinks=False):
+                        m = max(m, entry.stat(follow_symlinks=False).st_mtime)
         sig.append((str(d), m))
     return (tuple(sig), frozenset(disabled), platform)
 
@@ -135,28 +131,22 @@ def set_secret_capture_callback(callback) -> None:
     _secret_capture_callback = callback
 
 
-# Lazy delegates to ``agent.skill_utils`` — public re-exports so existing
-# callers (and tests patching either module) don't need updating.
-def skill_matches_platform(frontmatter: Dict[str, Any]) -> bool:
-    from agent.skill_utils import skill_matches_platform as _impl
-    return _impl(frontmatter)
+def _skill_utils_delegate(attr: str):
+    """Lazy call-time delegate to ``agent.skill_utils.<attr>`` — public re-exports so
+    existing callers (and tests patching either module) don't need updating."""
+    def _delegate(*args):
+        from agent import skill_utils
+        return getattr(skill_utils, attr)(*args)
+    _delegate.__name__ = _delegate.__qualname__ = attr
+    return _delegate
 
 
-def skill_matches_environment(frontmatter: Dict[str, Any]) -> bool:
-    """Offer-time relevance gate (kanban/docker/s6), NOT a hard-compatibility
-    gate; explicit skill loads bypass it."""
-    from agent.skill_utils import skill_matches_environment as _impl
-    return _impl(frontmatter)
-
-
-def _parse_frontmatter(content: str) -> Tuple[Dict[str, Any], str]:
-    from agent.skill_utils import parse_frontmatter
-    return parse_frontmatter(content)
-
-
-def _get_disabled_skill_names() -> Set[str]:
-    from agent.skill_utils import get_disabled_skill_names
-    return get_disabled_skill_names()
+skill_matches_platform = _skill_utils_delegate("skill_matches_platform")
+# Offer-time relevance gate (kanban/docker/s6), NOT a hard-compatibility gate;
+# explicit skill loads bypass it.
+skill_matches_environment = _skill_utils_delegate("skill_matches_environment")
+_parse_frontmatter = _skill_utils_delegate("parse_frontmatter")
+_get_disabled_skill_names = _skill_utils_delegate("get_disabled_skill_names")
 
 
 def check_skills_requirements() -> bool:
@@ -168,18 +158,14 @@ def _get_category_from_path(skill_path: Path) -> Optional[str]:
     """``~/.hermes/skills/mlops/axolotl/SKILL.md`` -> ``"mlops"``; active profile
     dir first (respects test monkeypatching), then skills.external_dirs."""
     dirs_to_check = [_skills_dir()]
-    try:
+    with suppress(Exception):
         from agent.skill_utils import get_external_skills_dirs
         dirs_to_check.extend(get_external_skills_dirs())
-    except Exception:
-        pass
     for skills_dir in dirs_to_check:
-        try:
+        with suppress(ValueError):
             parts = skill_path.relative_to(skills_dir).parts
-        except ValueError:
-            continue
-        if len(parts) >= 3:
-            return parts[0]
+            if len(parts) >= 3:
+                return parts[0]
     return None
 
 
@@ -408,13 +394,7 @@ def _under_any(path: Path, dirs) -> bool:
         resolved = path.resolve()
     except Exception:
         resolved = path
-    for d in dirs:
-        try:
-            resolved.relative_to(d)
-            return True
-        except ValueError:
-            continue
-    return False
+    return any(resolved.is_relative_to(d) for d in dirs)
 
 
 def _collect_skill_candidates(name, local_category_name, all_dirs):
@@ -429,10 +409,9 @@ def _collect_skill_candidates(name, local_category_name, all_dirs):
     seen_md: set = set()
 
     def _record(sd: Optional[Path], smd: Path) -> None:
-        try:
+        key = smd
+        with suppress(Exception):
             key = smd.resolve()
-        except Exception:
-            key = smd
         if key not in seen_md:
             seen_md.add(key)
             candidates.append((sd, smd))
@@ -455,10 +434,9 @@ def _collect_skill_candidates(name, local_category_name, all_dirs):
             if found_skill_md.parent.name == name:
                 _record(found_skill_md.parent, found_skill_md)
                 continue
-            try:
+            fm: dict = {}
+            with suppress(Exception):
                 fm, _ = _parse_frontmatter(_read_skill_text(found_skill_md))
-            except Exception:
-                fm = {}
             if fm.get("name") == name:
                 _record(found_skill_md.parent, found_skill_md)
         # Legacy flat <name>.md anywhere under the dir; support docs are excluded
@@ -469,30 +447,29 @@ def _collect_skill_candidates(name, local_category_name, all_dirs):
     return candidates
 
 
-_TEMPLATE_GLOBS = ["*.md", "*.py", "*.yaml", "*.yml", "*.json", "*.tex", "*.sh"]
-_SCRIPT_GLOBS = ["*.py", "*.sh", "*.bash", "*.js", "*.ts", "*.rb"]
+# (support dir, globs, recursive, files only) — order is the linked_files key order.
+_LINKED_FILE_SPECS = (
+    ("references", ["*.md"], False, False),
+    ("templates", ["*.md", "*.py", "*.yaml", "*.yml", "*.json", "*.tex", "*.sh"], True, False),
+    ("assets", ["*"], True, True),
+    ("scripts", ["*.py", "*.sh", "*.bash", "*.js", "*.ts", "*.rb"], False, False),
+)
 
 
 def _skill_linked_files(skill_dir: Optional[Path]) -> dict:
     """references/templates/assets/scripts of a directory skill (empty groups dropped)."""
-    if not skill_dir:
-        return {}
-
-    def _rel(paths):
-        return [str(f.relative_to(skill_dir)) for f in paths]
-    def _multi(sub: Path, globs, rglob: bool):
-        out: list = []
-        for ext in globs:
-            out.extend(_rel(sub.rglob(ext) if rglob else sub.glob(ext)))
-        return out
-
-    refs, tmpl, assets, scripts = (skill_dir / n for n in ("references", "templates", "assets", "scripts"))
-    files = {
-        "references": _rel(refs.glob("*.md")) if refs.exists() else [],
-        "templates": _multi(tmpl, _TEMPLATE_GLOBS, True) if tmpl.exists() else [],
-        "assets": _rel(f for f in assets.rglob("*") if f.is_file()) if assets.exists() else [],
-        "scripts": _multi(scripts, _SCRIPT_GLOBS, False) if scripts.exists() else []}
-    return {k: v for k, v in files.items() if v}
+    files: dict = {}
+    for sub, globs, recursive, files_only in _LINKED_FILE_SPECS if skill_dir else ():
+        base = skill_dir / sub
+        if not base.exists():
+            continue
+        found = [
+            str(f.relative_to(skill_dir))
+            for g in globs for f in (base.rglob(g) if recursive else base.glob(g))
+            if not files_only or f.is_file()]
+        if found:
+            files[sub] = found
+    return files
 
 
 def _org_provenance_header(skill_dir: Path, active_skills_dir: Path):
@@ -506,12 +483,10 @@ def _org_provenance_header(skill_dir: Path, active_skills_dir: Path):
     prov_org = org_id_of_path(skill_dir, active_skills_dir)
     author = ts = ""
     if prov_org:
-        try:
+        with suppress(Exception):
             prov = json.loads(_read_skill_text(active_skills_dir / "_org" / prov_org / ORG_PROVENANCE_FILE))
             author = str(prov.get("author_device") or prov.get("author_user_id") or "")
             ts = str(prov.get("ts") or "")
-        except Exception:
-            pass
     header = (
         "> [!NOTE] ORG-SHARED SKILL — provenance\n"
         f"> This skill is shared by your organisation (org `{prov_org}`"
@@ -660,10 +635,8 @@ def _log_security_warnings(name: str, skill_md: Path, content: str, loc: _Locate
     """Warn when loaded from outside the trusted dirs (project + local + external)
     and/or when common prompt-injection patterns appear. Never blocks."""
     trusted_dirs = [loc.active_skills_dir.resolve()]
-    try:
+    with suppress(Exception):
         trusted_dirs.extend(d.resolve() for d in loc.all_dirs)
-    except Exception:
-        pass
     warnings = []
     if not _under_any(skill_md, trusted_dirs):
         warnings.append(f"skill file is outside the trusted skills directory (~/.hermes/skills/): {skill_md}")
@@ -712,10 +685,9 @@ def skill_view(
             return _fail(f"Failed to read skill '{name}': {e}")
         _log_security_warnings(name, skill_md, content, loc)
 
-        try:
+        frontmatter: Dict[str, Any] = {}
+        with suppress(Exception):
             frontmatter, _ = _parse_frontmatter(content)
-        except Exception:
-            frontmatter = {}
 
         if not skill_matches_platform(frontmatter):
             return _fail(f"Skill '{name}' is not supported on this platform.", readiness_status=SkillReadinessStatus.UNSUPPORTED.value)
