@@ -83,17 +83,6 @@ def _print_dry_run(summary: str, env_writes: dict, check=None) -> None:
     print("  [dry-run] No files written.\n")
 
 
-def _print_saved(label: str, env_writes: dict, key_line: str, server: str | None = None) -> None:
-    print(f"\n  Memory provider: {label}")
-    if server:
-        print(f"  Server: {server}")
-    print("  Activation saved to config.yaml")
-    print("  Provider config saved")
-    if env_writes:
-        print(f"  {key_line}")
-    print("\n  Start a new session to activate.\n")
-
-
 _FLAG_KEYS = (
     "mode", "api_key", "host", "oss_llm", "oss_llm_key", "oss_llm_model", "oss_llm_url", "oss_embedder", "oss_embedder_key", "oss_embedder_model", "oss_embedder_url",
     "oss_vector", "oss_vector_path", "oss_vector_url", "oss_vector_host", "oss_vector_port", "oss_vector_user", "oss_vector_password", "oss_vector_dbname", "user_id",
@@ -148,11 +137,7 @@ def build_oss_config(flags: dict[str, str]) -> tuple[dict, dict[str, str]]:
     if "url" in vector_config:
         vector_config.pop("path", None)  # a remote Qdrant URL replaces local storage
 
-    oss_config = {
-        "llm": {"provider": llm_id, "config": llm_config},
-        "embedder": {"provider": embedder_id, "config": embedder_config},
-        "vector_store": {"provider": vector_id, "config": vector_config},
-    }
+    oss_config = {"llm": {"provider": llm_id, "config": llm_config}, "embedder": {"provider": embedder_id, "config": embedder_config}, "vector_store": {"provider": vector_id, "config": vector_config}}
     # An embedder sharing the LLM's provider reuses the LLM key when no embedder key was given.
     llm_key = flags.get("oss_llm_key") if llm_def.get("needs_key") else ""
     emb_key = (flags.get("oss_embedder_key") or (flags.get("oss_llm_key") if embedder_id == llm_id else "")) if embedder_def.get("needs_key") else ""
@@ -164,15 +149,9 @@ def _write_env(env_path: Path, env_writes: dict[str, str]) -> None:
     env_path.parent.mkdir(parents=True, exist_ok=True)
     # utf-8-sig like the canonical .env readers: a BOM'd first line would miss the key match and get duplicated.
     existing_lines = env_path.read_text(encoding="utf-8-sig").splitlines() if env_path.exists() else []
-    updated_keys: set[str] = set()
-    new_lines: list[str] = []
-    for line in existing_lines:
-        key = line.split("=", 1)[0].strip() if "=" in line and not line.startswith("#") else None
-        if key and key in env_writes:
-            updated_keys.add(key)
-            line = f"{key}={env_writes[key]}"
-        new_lines.append(line)
-    new_lines += [f"{k}={v}" for k, v in env_writes.items() if k not in updated_keys]
+    keys = [line.split("=", 1)[0].strip() if "=" in line and not line.startswith("#") else None for line in existing_lines]
+    new_lines = [f"{k}={env_writes[k]}" if k in env_writes else line for k, line in zip(keys, existing_lines)]
+    new_lines += [f"{k}={v}" for k, v in env_writes.items() if k not in keys]
     env_path.write_text("\n".join(new_lines) + "\n", encoding="utf-8")
 
 
@@ -183,13 +162,23 @@ def _activate_provider(config: dict) -> None:
     save_config(config)
 
 
-def _persist_provider_config(hermes_home: str, config: dict, provider_config: dict, env_writes: dict[str, str]) -> None:
-    """Shared platform/self-hosted tail: activate, write mem0.json (0600), then .env."""
+def _persist_provider_config(hermes_home: str, config: dict, provider_config: dict, env_writes: dict[str, str], label: str, key_line: str, server: str | None = None) -> None:
+    """Shared platform/self-hosted tail: activate, write mem0.json (0600), then .env, then a saved summary."""
     _activate_provider(config)
     from plugins.memory.mem0 import Mem0MemoryProvider
     Mem0MemoryProvider().save_config(provider_config, hermes_home)
     if env_writes:
         _write_env(Path(hermes_home) / ".env", env_writes)
+    if server:
+        _check_selfhosted_server(server)
+    print(f"\n  Memory provider: {label}")
+    if server:
+        print(f"  Server: {server}")
+    print("  Activation saved to config.yaml")
+    print("  Provider config saved")
+    if env_writes:
+        print(f"  {key_line}")
+    print("\n  Start a new session to activate.\n")
 
 
 def _setup_platform(hermes_home: str, config: dict, flags: dict[str, str]) -> None:
@@ -201,10 +190,8 @@ def _setup_platform(hermes_home: str, config: dict, flags: dict[str, str]) -> No
         if val := _prompt(desc, default=str(provider_config.get(key) or default)):
             provider_config[key] = val
     choices = ["true", "false"]
-    current = provider_config.get("rerank", "false")
-    current_idx = choices.index(str(current).lower()) if current and str(current).lower() in choices else 0
-    sel = _curses_select("  Enable reranking for recall", [(c, "") for c in choices], default=current_idx)
-    provider_config["rerank"] = choices[sel]
+    current = str(provider_config.get("rerank", "false") or "").lower()
+    provider_config["rerank"] = choices[_curses_select("  Enable reranking for recall", [(c, "") for c in choices], default=choices.index(current) if current in choices else 0)]
 
     if flags.get("dry_run"):
         _print_dry_run(str(provider_config), env_writes)
@@ -216,8 +203,7 @@ def _setup_platform(hermes_home: str, config: dict, flags: dict[str, str]) -> No
     # _load_config() also seeds ``host`` from MEM0_HOST (.env); the file clear can't help there, so warn.
     if os.environ.get("MEM0_HOST", "").strip():
         print(f"\n  ⚠ MEM0_HOST is set in your environment ({os.environ['MEM0_HOST']}). It overrides platform mode — remove it from ~/.hermes/.env (or unset it) or Hermes will keep routing to the self-hosted server.")
-    _persist_provider_config(hermes_home, config, provider_config, env_writes)
-    _print_saved("mem0", env_writes, "API keys saved to .env")
+    _persist_provider_config(hermes_home, config, provider_config, env_writes, "mem0", "API keys saved to .env")
 
 
 def _check_selfhosted_server(host: str) -> None:
@@ -249,9 +235,7 @@ def _setup_selfhosted(hermes_home: str, config: dict, flags: dict[str, str]) -> 
         _print_dry_run(f"host={host}, user_id={user_id}, agent_id={agent_id}", env_writes, lambda: _check_selfhosted_server(host))
         return
     provider_config.update(mode="platform", host=host, user_id=user_id, agent_id=agent_id)  # routing: oss > host > platform
-    _persist_provider_config(hermes_home, config, provider_config, env_writes)
-    _check_selfhosted_server(host)
-    _print_saved("mem0 (self-hosted)", env_writes, "API key saved to .env", server=host)
+    _persist_provider_config(hermes_home, config, provider_config, env_writes, "mem0 (self-hosted)", "API key saved to .env", server=host)
 
 
 def _print_oss_summary(oss_config: dict, env_writes: dict, dry_run: bool = False) -> None:
@@ -489,18 +473,18 @@ def _setup_oss_interactive(hermes_home: str, config: dict) -> None:
 def _install_provider_deps(llm_id: str, embedder_id: str, vector_id: str) -> None:
     deps = {registry[pid]["pip_dep"] for (_, registry), pid in zip(SECTION_REGISTRIES, (llm_id, embedder_id, vector_id)) if registry.get(pid, {}).get("pip_dep")}
     for dep in sorted(deps):
+        print(f"  Installing {dep}...")
         try:
-            print(f"  Installing {dep}...")
             # Environment-aware install: sealed hosted venvs redirect to the durable data-volume target instead of /opt/hermes.
             from tools.lazy_deps import install_specs
             outcome = install_specs([dep], timeout=60)
-            if outcome.ok:
-                print(f"  ✓ Installed {dep}")
-            elif outcome.blocked:
-                print(f"  Warning: cannot install {dep}: {outcome.reason}")
-            else:
-                print(f"  Warning: Could not install {dep}. Install manually: uv pip install {dep}")
         except Exception:
+            outcome = None
+        if outcome is not None and outcome.ok:
+            print(f"  ✓ Installed {dep}")
+        elif outcome is not None and outcome.blocked:
+            print(f"  Warning: cannot install {dep}: {outcome.reason}")
+        else:
             print(f"  Warning: Could not install {dep}. Install manually: uv pip install {dep}")
     if deps:
         import importlib

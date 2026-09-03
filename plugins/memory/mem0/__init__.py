@@ -113,8 +113,7 @@ class Mem0MemoryProvider(MemoryProvider):
         cfg = _load_config()
         if cfg.get("mode", "platform") == "oss":
             return bool(cfg.get("oss", {}).get("vector_store"))
-        # Platform needs an api_key; self-hosted needs a host (api_key optional when the server runs with AUTH_DISABLED).
-        return bool(cfg.get("api_key") or cfg.get("host"))
+        return bool(cfg.get("api_key") or cfg.get("host"))  # platform needs a key; self-hosted a host (key optional with AUTH_DISABLED)
 
     def save_config(self, values, hermes_home):
         """Merge-write config to $HERMES_HOME/mem0.json."""
@@ -165,14 +164,13 @@ class Mem0MemoryProvider(MemoryProvider):
             return None
 
     def _is_breaker_open(self) -> bool:
-        """Return True if the circuit breaker is tripped (too many failures)."""
+        """True while the breaker is tripped; an expired cooldown resets the failure count."""
         with self._breaker_lock:
-            if self._consecutive_failures < _BREAKER_THRESHOLD:
-                return False
-            if time.monotonic() >= self._breaker_open_until:
+            if self._consecutive_failures >= _BREAKER_THRESHOLD and time.monotonic() < self._breaker_open_until:
+                return True
+            if self._consecutive_failures >= _BREAKER_THRESHOLD:
                 self._consecutive_failures = 0
-                return False
-            return True
+            return False
 
     def _format_error(self, prefix: str, exc: Exception) -> str:
         msg = f"{prefix}: {exc}"
@@ -241,6 +239,7 @@ class Mem0MemoryProvider(MemoryProvider):
         self._start_prefetch(message)
 
     def _consume_prefetch_result(self, query: str) -> str | None:
+        """Pop the finished prefetch body for ``query`` (None if absent or still running)."""
         with self._prefetch_lock:
             if self._prefetch_query != query or not self._prefetch_done:
                 return None

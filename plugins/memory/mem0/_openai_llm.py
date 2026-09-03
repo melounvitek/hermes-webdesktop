@@ -46,8 +46,7 @@ class DirectOpenAILLM(OpenAILLM):
     def generate_response(self, messages: List[Dict[str, str]], response_format=None, tools: Optional[List[Dict]] = None, tool_choice: str = "auto", **kwargs):
         params = self._get_supported_params(messages=messages, **kwargs)
         params.update({"model": self.config.model, "messages": messages})
-        # No OpenRouter-only fields; ``store`` is opt-in so OpenAI-compatible
-        # endpoints never receive unknown fields.
+        # No OpenRouter-only fields; ``store`` is opt-in so OpenAI-compatible endpoints never receive unknown fields.
         if self.config.store is not None:
             params["store"] = self.config.store
         if response_format:

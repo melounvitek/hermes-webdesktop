@@ -8,10 +8,7 @@ from typing import Any
 
 
 def _add_kwargs(user_id: str, agent_id: str, infer: bool, metadata: dict | None) -> dict[str, Any]:
-    kwargs: dict[str, Any] = {"user_id": user_id, "agent_id": agent_id, "infer": infer}
-    if metadata:
-        kwargs["metadata"] = metadata
-    return kwargs
+    return {"user_id": user_id, "agent_id": agent_id, "infer": infer, **({"metadata": metadata} if metadata else {})}
 
 
 def _unwrap_results(response: Any) -> list:
@@ -27,13 +24,10 @@ class Mem0Backend(ABC):
 
     @abstractmethod
     def search(self, query: str, *, filters: dict, top_k: int = 10, rerank: bool = False) -> list[dict]: ...
-
     @abstractmethod
     def add(self, messages: list, *, user_id: str, agent_id: str, infer: bool = False, metadata: dict | None = None) -> dict: ...
-
     @abstractmethod
     def _update(self, memory_id: str, text: str) -> None: ...
-
     @abstractmethod
     def _delete(self, memory_id: str) -> None: ...
 
@@ -76,9 +70,7 @@ class SelfHostedBackend(Mem0Backend):
 
     def __init__(self, api_key: str, host: str, transport=None):
         import httpx
-        headers = {"Content-Type": "application/json"}
-        if api_key:
-            headers["X-API-Key"] = api_key  # omitted only for AUTH_DISABLED servers
+        headers = {"Content-Type": "application/json", **({"X-API-Key": api_key} if api_key else {})}  # key omitted only for AUTH_DISABLED servers
         # Connect-level retries keep one dropped SYN from counting toward the breaker. ``transport`` is injectable for tests.
         self._client = httpx.Client(base_url=host.rstrip("/"), headers=headers, timeout=30.0, transport=transport or httpx.HTTPTransport(retries=2))
 
@@ -88,11 +80,8 @@ class SelfHostedBackend(Mem0Backend):
         return resp.json() if resp.content else {}
 
     def search(self, query: str, *, filters: dict, top_k: int = 10, rerank: bool = False) -> list[dict]:
-        # rerank is platform-only; the self-hosted /search ignores it.
-        body: dict[str, Any] = {"query": query, "top_k": top_k}
-        if filters:
-            body["filters"] = filters  # user_id belongs in filters (top-level is deprecated)
-        return _unwrap_results(self._json("POST", "/search", json=body))
+        # rerank is platform-only; the self-hosted /search ignores it. user_id belongs in filters (top-level is deprecated).
+        return _unwrap_results(self._json("POST", "/search", json={"query": query, "top_k": top_k, **({"filters": filters} if filters else {})}))
 
     def add(self, messages: list, *, user_id: str, agent_id: str, infer: bool = False, metadata: dict | None = None) -> dict:
         return self._json("POST", "/memories", json={"messages": messages, **_add_kwargs(user_id, agent_id, infer, metadata)})
@@ -135,16 +124,14 @@ class OSSBackend(Mem0Backend):
         from mem0 import Memory
         from ._oss_providers import EMBEDDER_PROVIDERS, KNOWN_DIMS, LLM_PROVIDERS
 
-        def _provider_block(name: str) -> dict:
+        def _provider_block(name: str, registry: dict) -> dict:
+            """Copy of oss_config[name] with the legacy ``api_base`` key mapped to the provider's canonical base-URL key."""
             block = dict(oss_config[name])
-            provider = str(block.get("provider") or "").strip().lower()
             provider_config = dict(block.get("config", {}))
             legacy_base = provider_config.pop("api_base", None)
-            if legacy_base:
-                registry = LLM_PROVIDERS if name == "llm" else EMBEDDER_PROVIDERS
-                canonical_key = registry.get(provider, {}).get("base_url_key")
-                if canonical_key:
-                    provider_config.setdefault(canonical_key, legacy_base)
+            canonical_key = registry.get(str(block.get("provider") or "").strip().lower(), {}).get("base_url_key")
+            if legacy_base and canonical_key:
+                provider_config.setdefault(canonical_key, legacy_base)
             block["config"] = provider_config
             return block
 
@@ -159,7 +146,7 @@ class OSSBackend(Mem0Backend):
             self._recreate_collection_if_dims_changed(vector_store.get("provider", "qdrant"), vs_config, dims)
         vector_store["config"] = vs_config
 
-        config = {"vector_store": vector_store, "llm": _provider_block("llm"), "embedder": _provider_block("embedder"), "version": "v1.1"}
+        config = {"vector_store": vector_store, "llm": _provider_block("llm", LLM_PROVIDERS), "embedder": _provider_block("embedder", EMBEDDER_PROVIDERS), "version": "v1.1"}
         if str(config["llm"].get("provider") or "").strip().lower() == "openai":
             # mem0 validates LlmConfig.provider before its factory lookup: build the supported OpenAI config, then swap the provider.
             _register_direct_openai_provider()
