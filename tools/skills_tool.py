@@ -2,11 +2,10 @@
 """Skills Tool — list and view skill documents (progressive disclosure).
 
 A skill is a directory holding SKILL.md (YAML frontmatter + instructions) plus
-optional references/, templates/, assets/, scripts/. Tier 1 (`skills_list`)
-returns name/description only; tier 2-3 (`skill_view`) returns full content
-and linked files on demand. Sibling modules (skills_tool_setup / _plugin /
-_dedup) re-export every name here so ``from tools.skills_tool import X`` and
-``patch("tools.skills_tool.X")`` keep working.
+optional references/, templates/, assets/, scripts/. `skills_list` returns
+name/description only; `skill_view` returns full content and linked files.
+Sibling modules (skills_tool_setup / _plugin / _dedup) have every name re-exported
+here so ``from tools.skills_tool import X`` / ``patch("tools.skills_tool.X")`` keep working.
 """
 
 import json
@@ -52,9 +51,8 @@ _SKILLS_CACHE_TTL_SECONDS = 30.0
 
 
 def _skills_scan_signature(dirs_to_scan, disabled) -> tuple:
-    """O(#dirs + #categories) stat-based change signature; includes the platform
-    ``skill_matches_platform`` will use (via ``agent.skill_utils.sys`` so test
-    patches are honored) because the scan result is platform-dependent."""
+    """O(#dirs + #categories) stat-based change signature. The platform is read via
+    ``agent.skill_utils.sys`` so test patches are honored."""
     from agent import skill_utils as _skill_utils
 
     platform = getattr(getattr(_skill_utils, "sys", None), "platform", "")
@@ -116,12 +114,9 @@ def load_env() -> Dict[str, str]:
         return env_vars
     # utf-8-sig: a Notepad BOM would otherwise glue U+FEFF onto the first key.
     with env_path.open(encoding="utf-8-sig", errors="replace") as f:
-        for line in f:
-            line = line.strip()
+        for line in map(str.strip, f):
             if line and not line.startswith("#") and "=" in line:
-                if line.startswith("export "):
-                    line = line[7:]
-                key, _, value = line.partition("=")
+                key, _, value = line.removeprefix("export ").partition("=")
                 env_vars[key.strip()] = value.strip().strip("\"'")
     return env_vars
 
@@ -170,8 +165,7 @@ def _get_category_from_path(skill_path: Path) -> Optional[str]:
 
 
 def _parse_tags(tags_value) -> List[str]:
-    """Tags from frontmatter: a parsed list, a bracket-wrapped string "[a, b]",
-    or a comma-separated string "a, b"."""
+    """Tags from frontmatter: a parsed list, "[a, b]", or "a, b"."""
     if not tags_value:
         return []
     if isinstance(tags_value, list):
@@ -183,8 +177,7 @@ def _parse_tags(tags_value) -> List[str]:
 
 
 def _get_session_platform() -> str:
-    """Platform from gateway session context (mirrors
-    ``agent.skill_utils.get_disabled_skill_names``)."""
+    """Platform from gateway session context (mirrors ``get_disabled_skill_names``)."""
     try:
         from gateway.session_context import get_session_env
         return get_session_env("HERMES_SESSION_PLATFORM") or ""
@@ -193,10 +186,9 @@ def _get_session_platform() -> str:
 
 
 def _is_skill_disabled(name: str, platform: str = None) -> bool:
-    """Disabled in config? Platform precedence: explicit arg, ``HERMES_PLATFORM``
-    env, ``HERMES_SESSION_PLATFORM`` from session context. A globally-disabled
-    skill stays disabled on every platform; the platform list adds to it (keep in
-    sync with agent.skill_utils.get_disabled_skill_names)."""
+    """Disabled in config? Platform precedence: explicit arg, ``HERMES_PLATFORM``,
+    session ``HERMES_SESSION_PLATFORM``. A globally-disabled skill stays disabled on
+    every platform (keep in sync with agent.skill_utils.get_disabled_skill_names)."""
     try:
         from hermes_cli.config import load_config
         skills_cfg = load_config().get("skills", {})
@@ -212,9 +204,8 @@ def _is_skill_disabled(name: str, platform: str = None) -> bool:
 
 
 def _skill_search_dirs() -> Tuple[list, list, Path]:
-    """(project_dirs, all_dirs, active_skills_dir). Trusted project-local dirs come
-    FIRST so first-wins dedup / the collision resolver prefer them over
-    same-named local/external skills."""
+    """(project_dirs, all_dirs, active_skills_dir); trusted project-local dirs come
+    FIRST so first-wins dedup / the collision resolver prefer them."""
     from agent.skill_utils import get_external_skills_dirs, get_project_skills_dirs
 
     project_dirs = list(get_project_skills_dirs())
@@ -227,9 +218,9 @@ def _skill_search_dirs() -> Tuple[list, list, Path]:
 
 
 def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
-    """All skills (name, description, category) across local/project/external dirs,
-    first-wins by name. ``skip_disabled=True`` returns ALL skills regardless of
-    disabled state (used by the ``hermes skills`` config UI). Cached per session."""
+    """All skills (name, description, category) across project/local/external dirs,
+    first-wins by name; cached per session. ``skip_disabled=True`` returns ALL skills
+    regardless of disabled state (``hermes skills`` config UI)."""
     from agent.skill_utils import iter_project_skill_files, iter_skill_index_files
 
     cache_key = "with_disabled" if skip_disabled else "filtered"
@@ -260,12 +251,10 @@ def _find_all_skills(*, skip_disabled: bool = False) -> List[Dict[str, Any]]:
                 if name in seen_names or name in disabled:
                     continue
                 description = frontmatter.get("description", "")
-                if not description:
-                    for line in body.strip().split("\n"):
-                        line = line.strip()
-                        if line and not line.startswith("#"):
-                            description = line
-                            break
+                if not description:  # first non-heading body line (a null value stays null)
+                    description = next(
+                        (ln for ln in map(str.strip, body.strip().split("\n")) if ln and not ln.startswith("#")),
+                        description)
                 seen_names.add(name)
                 skills.append({
                     "name": name,
@@ -288,13 +277,9 @@ def _sort_skills(skills: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
 
 
 def skills_list(category: str = None, task_id: str = None) -> str:
-    """Tier 1 listing: name + description (+ category) only, to minimize tokens.
-    ``task_id`` is accepted for handler parity."""
+    """Tier 1 listing: name + description (+ category) only; ``task_id`` is handler parity."""
     try:
-        active_skills_dir = _skills_dir()
-        if not active_skills_dir.exists():
-            active_skills_dir.mkdir(parents=True, exist_ok=True)
-
+        _skills_dir().mkdir(parents=True, exist_ok=True)
         all_skills = _find_all_skills()
         try:
             from hermes_cli.plugins import discover_plugins, get_plugin_manager
@@ -329,12 +314,10 @@ def skills_list(category: str = None, task_id: str = None) -> str:
 # ── skill_view helpers ─────────────────────────────────────────────────────
 
 def _resolve_plugin_skill(name, file_path, task_id, preprocess):
-    """Qualified-name dispatch for ``plugin:skill`` names.
-
-    Returns ``(result_json, None)`` when answered, or ``(None, local_category_name)``
-    to fall through to the flat-tree scan: categorized local skills also use
-    ``category:skill`` in config and gateway prompts, so the on-disk
-    ``category/skill`` translation is returned (None when there's no bare part)."""
+    """Qualified-name dispatch for ``plugin:skill`` names: ``(result_json, None)`` when
+    answered, else ``(None, local_category_name)`` to fall through to the flat-tree
+    scan — categorized local skills also use ``category:skill`` in config and gateway
+    prompts, so the on-disk ``category/skill`` form is returned (None without a bare part)."""
     from agent.skill_utils import is_valid_namespace, parse_qualified_name
     from hermes_cli.plugins import discover_plugins, get_plugin_manager
 
@@ -353,16 +336,14 @@ def _resolve_plugin_skill(name, file_path, task_id, preprocess):
         logger.debug("Failed pruning inactive memory-provider skills: %s", exc)
 
     plugin_skill_md = pm.find_plugin_skill(name)
-    # Memory providers load through plugins.memory, not the general PluginManager:
-    # load the namespaced provider once so its collector can forward its skills
-    # into the registry before declaring the qualified skill missing.
-    if plugin_skill_md is None:
+    # Memory providers load through plugins.memory, not the general PluginManager: load
+    # the namespaced provider once so its collector can forward its skills into the registry.
+    if plugin_skill_md is None and namespace == active_memory_provider:
         try:
-            if namespace == active_memory_provider:
-                from plugins.memory import load_memory_provider
+            from plugins.memory import load_memory_provider
 
-                load_memory_provider(namespace)
-                plugin_skill_md = pm.find_plugin_skill(name)
+            load_memory_provider(namespace)
+            plugin_skill_md = pm.find_plugin_skill(name)
         except Exception as exc:
             logger.debug("Failed lazy memory-provider skill load for %s: %s", namespace, exc)
 
@@ -371,20 +352,16 @@ def _resolve_plugin_skill(name, file_path, task_id, preprocess):
             pm.remove_plugin_skill(name)  # stale registry entry — file deleted out of band
             return _fail(
                 f"Skill '{name}' file no longer exists at {plugin_skill_md}. The registry entry "
-                f"has been cleaned up — try again after the plugin is reloaded."
-            ), None
+                f"has been cleaned up — try again after the plugin is reloaded."), None
         return _serve_plugin_skill(
-            plugin_skill_md, namespace, bare,
-            file_path=file_path, preprocess=preprocess, session_id=task_id,
-        ), None
+            plugin_skill_md, namespace, bare, file_path=file_path, preprocess=preprocess, session_id=task_id), None
 
     available = pm.list_plugin_skills(namespace)
     if available:  # plugin exists but this specific skill is missing
         return _fail(
             f"Skill '{bare}' not found in plugin '{namespace}'.",
             available_skills=[f"{namespace}:{s}" for s in available],
-            hint=f"The '{namespace}' plugin provides {len(available)} skill(s).",
-        ), None
+            hint=f"The '{namespace}' plugin provides {len(available)} skill(s)."), None
     return None, (f"{namespace}/{bare}" if bare else None)  # plugin not found → local scan
 
 
@@ -398,11 +375,10 @@ def _under_any(path: Path, dirs) -> bool:
 
 
 def _collect_skill_candidates(name, local_category_name, all_dirs):
-    """ALL (skill_dir, skill_md) candidates across every dir using every lookup
-    strategy (direct path, recursive by parent dir / frontmatter name, legacy flat
-    <name>.md), deduped by resolved path. Collision detection is the point: silent
-    shadowing of a local skill by a same-named external one is a real bug class,
-    so the caller refuses when more than one matches."""
+    """ALL (skill_dir, skill_md) candidates across every dir and lookup strategy
+    (direct path, recursive by dir / frontmatter name, legacy flat <name>.md), deduped
+    by resolved path. Collision detection is the point: silent shadowing of a local
+    skill by a same-named external one is a real bug class, so the caller refuses >1."""
     from agent.skill_utils import iter_skill_index_files
 
     candidates: List[Tuple[Optional[Path], Path]] = []
@@ -416,8 +392,7 @@ def _collect_skill_candidates(name, local_category_name, all_dirs):
             seen_md.add(key)
             candidates.append((sd, smd))
 
-    def _record_direct(direct_path: Path) -> None:
-        # Direct path ("mlops/axolotl" or bare "axolotl") or its legacy flat .md sibling.
+    def _record_direct(direct_path: Path) -> None:  # "mlops/axolotl" / "axolotl" or its flat .md sibling
         flat = direct_path.with_suffix(".md")
         if not _is_skill_support_path(direct_path) and direct_path.is_dir() and (direct_path / "SKILL.md").exists():
             _record(direct_path, direct_path / "SKILL.md")
@@ -425,9 +400,8 @@ def _collect_skill_candidates(name, local_category_name, all_dirs):
             _record(None, flat)
 
     for search_dir in all_dirs:
-        _record_direct(search_dir / name)
-        if local_category_name:  # "myplugin:explore" with no such plugin → "myplugin/explore"
-            _record_direct(search_dir / local_category_name)
+        for direct in filter(None, (name, local_category_name)):  # "p:x" with no plugin p → "p/x"
+            _record_direct(search_dir / direct)
         # Recursive by directory name plus frontmatter `name:` — skills_list()
         # exposes the frontmatter name, so skill_view(name) must accept it too.
         for found_skill_md in iter_skill_index_files(search_dir, "SKILL.md"):
@@ -474,8 +448,8 @@ def _skill_linked_files(skill_dir: Optional[Path]) -> dict:
 
 def _org_provenance_header(skill_dir: Path, active_skills_dir: Path):
     """(org_provenance dict, header text) for an org-mirror skill, else (None, "").
-    Provenance is announced IN the content the model consumes; the author is
-    token-verified at push time by the sync plane, so the header is trustworthy."""
+    Announced IN the content the model consumes; the author is token-verified at push
+    time by the sync plane, so the header is trustworthy."""
     from agent.skill_utils import ORG_PROVENANCE_FILE, is_org_mirror_path, org_id_of_path
 
     if not is_org_mirror_path(skill_dir, active_skills_dir):
@@ -501,11 +475,9 @@ def _org_provenance_header(skill_dir: Path, active_skills_dir: Path):
 
 
 def _skill_readiness(frontmatter: Dict[str, Any], skill_name: str) -> Tuple[dict, dict]:
-    """Resolve required env vars / credential files (prompting for secrets where
-    the surface allows) and register what's available for sandboxes.
-
-    Returns ``(fields, extras)``: ``fields`` go before ``_source_path`` in the
-    skill_view result, ``extras`` (setup_help, gateway_setup_hint, setup_note)
+    """Resolve required env vars / credential files (prompting for secrets where the
+    surface allows) and register what's available for sandboxes. Returns ``(fields,
+    extras)``: ``fields`` go before ``_source_path`` in the skill_view result, ``extras``
     after it — result key order is part of the tool output."""
     legacy_env_vars, _ = _collect_prerequisite_values(frontmatter)
     required_env_vars = _get_required_environment_variables(frontmatter, legacy_env_vars)
@@ -530,8 +502,8 @@ def _skill_readiness(frontmatter: Dict[str, Any], skill_name: str) -> Tuple[dict
         except Exception:
             logger.debug("Could not register env passthrough for skill %s", skill_name, exc_info=True)
 
-    # Credential files for mounting into remote sandboxes: existing host files are
-    # registered, missing ones flag setup_needed.
+    # Credential files for remote sandboxes: existing host files are registered,
+    # missing ones flag setup_needed.
     required_cred_files_raw = frontmatter.get("required_credential_files", [])
     missing_cred_files: list = []
     if isinstance(required_cred_files_raw, list) and required_cred_files_raw:
@@ -539,8 +511,7 @@ def _skill_readiness(frontmatter: Dict[str, Any], skill_name: str) -> Tuple[dict
             from tools.credential_files import register_credential_files
 
             missing_cred_files = register_credential_files(required_cred_files_raw)
-            if missing_cred_files:
-                setup_needed = True
+            setup_needed = setup_needed or bool(missing_cred_files)
         except Exception:
             logger.debug("Could not register credential files for skill %s", skill_name, exc_info=True)
 
@@ -584,8 +555,8 @@ class _Located:
 
 
 def _locate_skill(name: str, local_category_name: Optional[str]) -> _Located:
-    """Find the unique on-disk skill for *name*: collision refusal, project-tier
-    precedence, quarantine gate, not-found listing."""
+    """Unique on-disk skill for *name*: collision refusal, project-tier precedence,
+    quarantine gate, not-found listing."""
     project_dirs, all_dirs, active_skills_dir = _skill_search_dirs()
     loc = _Located(project_dirs, all_dirs, active_skills_dir)
     if not all_dirs:
@@ -594,11 +565,9 @@ def _locate_skill(name: str, local_category_name: Optional[str]) -> _Located:
 
     candidates = _collect_skill_candidates(name, local_category_name, all_dirs)
     if len(candidates) > 1 and project_dirs:
-        # A project skill intentionally overrides a same-named local/external skill,
-        # so narrow to project candidates when any exist. Ambiguity WITHIN that tier still refuses.
-        project_candidates = [(sd, smd) for sd, smd in candidates if _under_any(smd, project_dirs)]
-        if project_candidates:
-            candidates = project_candidates
+        # A project skill intentionally overrides a same-named local/external skill;
+        # ambiguity WITHIN the project tier still refuses.
+        candidates = [c for c in candidates if _under_any(c[1], project_dirs)] or candidates
     if len(candidates) > 1:
         paths = [str(smd) for _, smd in candidates]
         logger.warning("Skill name collision for '%s': %d candidates — %s", name, len(candidates), "; ".join(paths))
@@ -621,8 +590,7 @@ def _locate_skill(name: str, local_category_name: Optional[str]) -> _Located:
             loc.error = _fail(
                 f"Project skill '{name}' is quarantined: the security scan flagged its content as "
                 "dangerous. It will not load until the repo's skill content changes and passes a re-scan.",
-                hint="Inspect the skill in the repo checkout, or untrust the repo with `hermes skills untrust`.",
-            )
+                hint="Inspect the skill in the repo checkout, or untrust the repo with `hermes skills untrust`.")
             return loc
 
     if not loc.skill_md or not loc.skill_md.exists():
@@ -632,16 +600,15 @@ def _locate_skill(name: str, local_category_name: Optional[str]) -> _Located:
 
 
 def _log_security_warnings(name: str, skill_md: Path, content: str, loc: _Located) -> None:
-    """Warn when loaded from outside the trusted dirs (project + local + external)
-    and/or when common prompt-injection patterns appear. Never blocks."""
+    """Warn (never block) when loaded from outside the trusted dirs (project + local +
+    external) and/or when common prompt-injection patterns appear."""
     trusted_dirs = [loc.active_skills_dir.resolve()]
     with suppress(Exception):
         trusted_dirs.extend(d.resolve() for d in loc.all_dirs)
     warnings = []
     if not _under_any(skill_md, trusted_dirs):
         warnings.append(f"skill file is outside the trusted skills directory (~/.hermes/skills/): {skill_md}")
-    content_lower = content.lower()
-    if any(p in content_lower for p in _INJECTION_PATTERNS):
+    if any(p in content.lower() for p in _INJECTION_PATTERNS):
         warnings.append("skill content contains patterns that may indicate prompt injection")
     if warnings:
         logger.warning("Skill security warning for '%s': %s", name, "; ".join(warnings))
@@ -649,17 +616,15 @@ def _log_security_warnings(name: str, skill_md: Path, content: str, loc: _Locate
 
 def skill_view(
     name: str, file_path: str = None, task_id: str = None, preprocess: bool = True) -> str:
-    """View a skill (SKILL.md) or a specific file within its directory, as JSON.
+    """View a skill (SKILL.md) or a file within its directory, as JSON.
 
-    ``name`` is a skill name or path ("axolotl", "03-fine-tuning/axolotl"); the
-    qualified form "plugin:skill" resolves plugin-provided skills. ``preprocess``
-    applies the configured SKILL.md template / inline shell rendering; internal
-    slash/preload callers disable it because they render the skill message themselves."""
+    ``name`` is a skill name or path ("axolotl", "03-fine-tuning/axolotl"); "plugin:skill"
+    resolves plugin-provided skills. ``preprocess`` applies the configured SKILL.md
+    template / inline shell rendering; slash/preload callers render the message themselves."""
     try:
         # Validate before the ':' dispatch so a Windows drive path (C:\skills\foo)
         # can't be reinterpreted as a plugin namespace.
-        lookup_error = _skill_lookup_path_error(name)
-        if lookup_error:
+        if lookup_error := _skill_lookup_path_error(name):
             return _fail(lookup_error, hint=_LOOKUP_HINT)
 
         local_category_name: str | None = None
@@ -669,10 +634,8 @@ def skill_view(
                 return served
         # The fall-through form (namespace/bare) joins onto each search dir too;
         # re-validate it since `bare` is not namespace-checked.
-        if local_category_name:
-            lookup_error = _skill_lookup_path_error(local_category_name)
-            if lookup_error:
-                return _fail(lookup_error, hint=_LOOKUP_HINT)
+        if local_category_name and (lookup_error := _skill_lookup_path_error(local_category_name)):
+            return _fail(lookup_error, hint=_LOOKUP_HINT)
 
         loc = _locate_skill(name, local_category_name)
         if loc.error is not None:
@@ -718,8 +681,7 @@ def skill_view(
         rendered_content = content
         if preprocess:
             rendered_content = _preprocess_skill(
-                content, skill_dir, task_id, "Could not preprocess skill content for %s", skill_name,
-            )
+                content, skill_dir, task_id, "Could not preprocess skill content for %s", skill_name)
         org_provenance = None
         if skill_dir:
             try:
@@ -801,12 +763,9 @@ registry.register(
 
 
 def _skill_view_with_bump(args, **kw):
-    """Invoke skill_view, then bump view_count/use on success (best-effort).
-
-    Repeat-view dedup mirrors read_file's unchanged-stub: when this session already
-    loaded the SAME unchanged skill file, return a short stub instead of the full
-    content. The stub only replaces content already present earlier in this
-    conversation, and the cache is cleared on context compression."""
+    """Invoke skill_view, then bump view_count/use on success (best-effort). Repeat-view
+    dedup mirrors read_file's unchanged-stub: a SAME, unchanged skill file already loaded
+    in this session returns a short stub (cache cleared on context compression)."""
     name = args.get("name", "")
     task_id = kw.get("task_id")
     stub = _check_skill_view_dedup(task_id, name, args.get("file_path"))
@@ -817,13 +776,11 @@ def _skill_view_with_bump(args, **kw):
         parsed = json.loads(result)
         if isinstance(parsed, dict) and parsed.get("success"):
             _record_skill_view(task_id, name, args.get("file_path"), parsed)
-            # Qualified forms ("plugin:skill") return with the canonical name.
-            resolved = parsed.get("name") or name
-            if resolved:
+            if resolved := parsed.get("name") or name:  # qualified forms return the canonical name
                 from tools.skill_usage import bump_use, bump_view
                 bump_view(str(resolved))
-                # Viewing is the agent actively loading the skill to act on it — that
-                # counts as use; the curator's stale timer keys off last_used_at.
+                # Viewing is actively loading the skill to act on it — that counts as use
+                # (the curator's stale timer keys off last_used_at).
                 bump_use(str(resolved), task_id=kw.get("task_id"), session_id=kw.get("session_id"))
     except Exception:
         pass
