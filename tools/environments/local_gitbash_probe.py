@@ -37,34 +37,19 @@ def _mandatory_aslr_enabled() -> "bool | None":
     global _mandatory_aslr_enabled_cache
     if _mandatory_aslr_enabled_cache is not None:
         return _mandatory_aslr_enabled_cache
-
+    cmd = [shutil.which("powershell.exe") or "powershell.exe", "-NoProfile", "-NonInteractive",
+           "-Command", "(Get-ProcessMitigation -System).Aslr.ForceRelocateImages.ToString()"]
     try:
-        powershell = shutil.which("powershell.exe") or "powershell.exe"
-        result = subprocess.run(
-            [
-                powershell,
-                "-NoProfile",
-                "-NonInteractive",
-                "-Command",
-                "(Get-ProcessMitigation -System).Aslr.ForceRelocateImages.ToString()",
-            ],
-            capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
-            timeout=10,
-            creationflags=windows_hide_flags(),
-        )
-        if result.returncode != 0:
-            return None
-        value = (result.stdout or "").strip().upper()
-        if value == "ON":
-            _mandatory_aslr_enabled_cache = True
-            return True
-        if value in {"OFF", "NOTSET"}:
-            _mandatory_aslr_enabled_cache = False
-            return False
+        result = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8",
+                                errors="replace", timeout=10, creationflags=windows_hide_flags())
     except Exception as exc:
         logger.debug("Could not query Windows Mandatory ASLR state: %s", exc)
-    return None
+        return None
+    if result.returncode != 0:
+        return None
+    value = (result.stdout or "").strip().upper()
+    _mandatory_aslr_enabled_cache = {"ON": True, "OFF": False, "NOTSET": False}.get(value)
+    return _mandatory_aslr_enabled_cache
 
 
 def _git_root_from_bash(bash: str) -> str:
@@ -73,15 +58,12 @@ def _git_root_from_bash(bash: str) -> str:
     if ntpath.basename(bin_dir).lower() != "bin":
         return ntpath.dirname(bin_dir)
     parent = ntpath.dirname(bin_dir)
-    if ntpath.basename(parent).lower() == "usr":
-        return ntpath.dirname(parent)
-    return parent
+    return ntpath.dirname(parent) if ntpath.basename(parent).lower() == "usr" else parent
 
 
 def _git_bash_aslr_help(bash: str, details: str = "") -> str:
     """Build the targeted per-program Mandatory-ASLR remediation."""
-    git_root = _git_root_from_bash(bash)
-    escaped_root = git_root.replace("'", "''")
+    escaped_root = _git_root_from_bash(bash).replace("'", "''")
     detail_line = f"\nGit Bash probe output: {details[:500]}" if details else ""
     return (
         f"Git Bash at {bash} cannot launch required MSYS child processes while "
@@ -102,27 +84,21 @@ def _bash_starts(bash: str) -> bool:
     """True if *bash* can launch external MSYS programs (cached per path).
     ``--noprofile --norc`` so a broken login post-install (``Directory
     \\drivers\\etc``) does not falsely condemn an otherwise usable bash."""
-    cached = _bash_starts_cache.get(bash)
-    if cached is not None:
-        return cached
-
+    if bash in _bash_starts_cache:
+        return _bash_starts_cache[bash]
     try:
         result = subprocess.run(
             [bash, "--noprofile", "--norc", "-c", _BASH_EXTERNAL_PROGRAM_PROBE],
-            capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
-            timeout=15,
-            creationflags=windows_hide_flags() if _IS_WINDOWS else 0,
-        )
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=15, creationflags=windows_hide_flags() if _IS_WINDOWS else 0)
         ok = result.returncode == 0
         if not ok:
-            combined = f"{result.stdout or ''}{result.stderr or ''}"
-            _bash_probe_details_cache[bash] = combined.strip()[:2000]
-            logger.debug("bash probe failed for %s: %s", bash, combined.strip()[:200])
+            combined = f"{result.stdout or ''}{result.stderr or ''}".strip()
+            _bash_probe_details_cache[bash] = combined[:2000]
+            logger.debug("bash probe failed for %s: %s", bash, combined[:200])
     except Exception as exc:
         _bash_probe_details_cache[bash] = str(exc)[:2000]
         logger.debug("bash probe error for %s: %s", bash, exc)
         ok = False
-
     _bash_starts_cache[bash] = ok
     return ok
