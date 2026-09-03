@@ -1,24 +1,11 @@
 """Cross-agent file state coordination.
 
 Prevents mangled edits when concurrent subagents (same process, same
-filesystem) touch the same file: subagent B writes a file that subagent A
-already read, so A's next write would clobber B's changes with stale content.
-Complements the single-agent path-overlap check in
-``run_agent._should_parallelize_tool_batch``.
-
-A process-wide ``FileStateRegistry`` tracks, per resolved path:
-  * per-agent read stamps  {task_id: {path: (mtime, read_ts, partial)}}
-  * last writer globally   {path: (task_id, write_ts)}
-  * a per-path ``threading.Lock`` for read->modify->write sections
-
-Hooks used by the file tools: ``record_read`` (read_file), ``note_write``
-(after write_file/patch), ``check_stale`` (BEFORE write_file/patch),
-``lock_path`` (wrap the whole read->modify->write block) and ``writes_since``
-(delegate_tool's subagent-completion reminder).
-
-All methods are no-ops when ``HERMES_DISABLE_FILE_STATE_GUARD=1``. This is
-separate from ``file_tools._read_tracker``, which handles per-task
-consecutive-read loop detection.
+filesystem) touch the same file: B writes a file A already read, so A's next
+write would clobber B's changes. Complements the single-agent path-overlap
+check in ``run_agent._should_parallelize_tool_batch``. A process-wide
+``FileStateRegistry`` tracks per-agent read stamps, the global last writer and
+a per-path lock; every method is a no-op under ``HERMES_DISABLE_FILE_STATE_GUARD=1``.
 """
 from __future__ import annotations
 
@@ -35,10 +22,43 @@ from typing import Dict, Iterable, List, Optional, Tuple
 # so the model re-reads in full.
 ReadStamp = Tuple[float, float, bool]
 
-# Bounded so long sessions don't accumulate unbounded state; oldest by
-# insertion order are dropped on overflow.
+# Bounded so long sessions don't accumulate unbounded state.
 _MAX_PATHS_PER_AGENT = 4096
 _MAX_GLOBAL_WRITERS = 4096
+
+
+def _disabled() -> bool:
+    # Re-read each call so tests can toggle via monkeypatch.setenv.
+    return os.environ.get("HERMES_DISABLE_FILE_STATE_GUARD", "").strip() == "1"
+
+
+def _mtime_or_none(resolved: str) -> Optional[float]:
+    try:
+        return os.path.getmtime(resolved)
+    except OSError:
+        return None
+
+
+def _fmt_ts(ts: float) -> str:
+    # Short wall-clock for warnings; avoids datetime formatting on the hot path.
+    return time.strftime("%H:%M:%S", time.localtime(ts))
+
+
+def _evict_oldest(container, cap: int) -> None:
+    """Pop entries until *container* is within *cap*.
+
+    Sets pop arbitrary entries (they only feed diagnostic summaries); dicts pop
+    oldest by insertion order. An evicted entry costs one redundant re-send
+    (dedup) or one non-mtime staleness check — graceful degradation, not a bug.
+    """
+    for _ in range(len(container) - cap):
+        try:
+            if isinstance(container, set):
+                container.pop()
+            else:
+                container.pop(next(iter(container)))
+        except (StopIteration, KeyError):
+            break
 
 
 class FileStateRegistry:
@@ -51,50 +71,31 @@ class FileStateRegistry:
         self._meta_lock = threading.Lock()  # guards _path_locks
         self._state_lock = threading.Lock()  # guards _reads + _last_writer
 
-    def _lock_for(self, resolved: str) -> threading.Lock:
-        with self._meta_lock:
-            lock = self._path_locks.get(resolved)
-            if lock is None:
-                lock = threading.Lock()
-                self._path_locks[resolved] = lock
-            return lock
-
     @contextmanager
     def lock_path(self, resolved: str):
         """Per-path lock: threads on the same path serialize, different paths proceed."""
-        lock = self._lock_for(resolved)
-        lock.acquire()
-        try:
+        with self._meta_lock:
+            lock = self._path_locks.setdefault(resolved, threading.Lock())
+        with lock:
             yield
-        finally:
-            lock.release()
 
-    def record_read(
-        self,
-        task_id: str,
-        resolved: str,
-        *,
-        partial: bool = False,
-        mtime: Optional[float] = None,
-    ) -> None:
+    def _stamp(self, task_id: str, resolved: str, mtime: float, now: float, partial: bool) -> None:
+        """Caller holds ``_state_lock``."""
+        agent_reads = self._reads[task_id]
+        agent_reads[resolved] = (float(mtime), now, bool(partial))
+        _evict_oldest(agent_reads, _MAX_PATHS_PER_AGENT)
+
+    def record_read(self, task_id: str, resolved: str, *, partial: bool = False,
+                    mtime: Optional[float] = None) -> None:
         if _disabled():
             return
         mtime = _mtime_or_none(resolved) if mtime is None else mtime
         if mtime is None:
             return
-        now = time.time()
         with self._state_lock:
-            agent_reads = self._reads[task_id]
-            agent_reads[resolved] = (float(mtime), now, bool(partial))
-            _cap_dict(agent_reads, _MAX_PATHS_PER_AGENT)
+            self._stamp(task_id, resolved, mtime, time.time(), partial)
 
-    def note_write(
-        self,
-        task_id: str,
-        resolved: str,
-        *,
-        mtime: Optional[float] = None,
-    ) -> None:
+    def note_write(self, task_id: str, resolved: str, *, mtime: Optional[float] = None) -> None:
         """Record a successful write: global last-writer AND this agent's own
         read stamp (a write is an implicit read of the current content)."""
         if _disabled():
@@ -105,9 +106,8 @@ class FileStateRegistry:
         now = time.time()
         with self._state_lock:
             self._last_writer[resolved] = (task_id, now)
-            _cap_dict(self._last_writer, _MAX_GLOBAL_WRITERS)
-            self._reads[task_id][resolved] = (float(mtime), now, False)
-            _cap_dict(self._reads[task_id], _MAX_PATHS_PER_AGENT)
+            _evict_oldest(self._last_writer, _MAX_GLOBAL_WRITERS)
+            self._stamp(task_id, resolved, mtime, now, False)
 
     def check_stale(self, task_id: str, resolved: str) -> Optional[str]:
         """Model-facing warning if this write would be stale, else ``None``.
@@ -171,12 +171,8 @@ class FileStateRegistry:
             "Read the file first so you can write an informed edit."
         )
 
-    def writes_since(
-        self,
-        exclude_task_id: str,
-        since_ts: float,
-        paths: Iterable[str],
-    ) -> Dict[str, List[str]]:
+    def writes_since(self, exclude_task_id: str, since_ts: float,
+                     paths: Iterable[str]) -> Dict[str, List[str]]:
         """``{writer_task_id: [paths]}`` for writes after ``since_ts`` by agents
         other than ``exclude_task_id`` (delegate_task's "subagent modified files
         you previously read" reminder)."""
@@ -213,36 +209,6 @@ def get_registry() -> FileStateRegistry:
     return _registry
 
 
-def _disabled() -> bool:
-    # Re-read each call so tests can toggle via monkeypatch.setenv.
-    return os.environ.get("HERMES_DISABLE_FILE_STATE_GUARD", "").strip() == "1"
-
-
-def _mtime_or_none(resolved: str) -> Optional[float]:
-    try:
-        return os.path.getmtime(resolved)
-    except OSError:
-        return None
-
-
-def _fmt_ts(ts: float) -> str:
-    # Short wall-clock for warnings; avoids datetime formatting on the hot path.
-    return time.strftime("%H:%M:%S", time.localtime(ts))
-
-
-def _cap_dict(d: dict, limit: int) -> None:
-    """Trim ``d`` to ``limit`` entries by dropping the insertion-order oldest."""
-    over = len(d) - limit
-    if over <= 0:
-        return
-    it = iter(d)
-    for _ in range(over):
-        try:
-            d.pop(next(it))
-        except (StopIteration, KeyError):
-            break
-
-
 # Convenience wrappers (short names used at call sites).
 def record_read(task_id: str, resolved_or_path: str | Path, *, partial: bool = False) -> None:
     _registry.record_read(task_id, str(resolved_or_path), partial=partial)
@@ -260,11 +226,7 @@ def lock_path(resolved_or_path: str | Path):
     return _registry.lock_path(str(resolved_or_path))
 
 
-def writes_since(
-    exclude_task_id: str,
-    since_ts: float,
-    paths: Iterable[str | Path],
-) -> Dict[str, List[str]]:
+def writes_since(exclude_task_id: str, since_ts: float, paths: Iterable[str | Path]) -> Dict[str, List[str]]:
     return _registry.writes_since(exclude_task_id, since_ts, [str(p) for p in paths])
 
 
