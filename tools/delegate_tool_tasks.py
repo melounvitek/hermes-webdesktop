@@ -9,23 +9,6 @@ import json
 import re
 from typing import Any, Dict, List, Optional
 
-def _recover_tasks_from_json_string(tasks: Any) -> tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
-    if not isinstance(tasks, str):
-        return None, None
-    raw = tasks.strip()
-    if not raw:
-        return None, "Provide either 'goal' (single task) or 'tasks' (batch)."
-    try:
-        parsed = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        return None, (
-            "tasks must be a JSON array of task objects; received a string "
-            f"that could not be parsed as JSON ({exc.msg})."
-        )
-    if not isinstance(parsed, list):
-        return None, (f"tasks must be a JSON array of task objects; parsed " f"{type(parsed).__name__} instead.")
-    return parsed, None
-
 # Placeholder shapes for batch goal validation: bare 'TODO' / 'task N' labels,
 # or unexpanded template markers. The marker regex is deliberately NARROW —
 # only snake_case / space-separated placeholder identifiers (`<feature_name>`,
@@ -34,27 +17,40 @@ def _recover_tasks_from_json_string(tasks: Any) -> tuple[Optional[List[Dict[str,
 # generics (`Vec<T>`), HTML tags (`<div>`), dict snippets (`{"key": 1}`), glob
 # braces (`{a,b}`) and f-string style (`{i}`).
 _PLACEHOLDER_GOAL_RE = re.compile(r"^(todo|task\s*\d+)$", re.IGNORECASE)
-
 _TEMPLATE_MARKER_RE = re.compile(
     r"<[A-Za-z][A-Za-z0-9]*(?:[ _-][A-Za-z0-9]+)+>|\{[A-Za-z][A-Za-z0-9]*(?:[ _-][A-Za-z0-9]+)+\}"
 )
-
 _MIN_BATCH_GOAL_LEN = 10
 
+def _recover_tasks_from_json_string(tasks: Any) -> tuple[Optional[List[Dict[str, Any]]], Optional[str]]:
+    """``(parsed_list, None)`` for a JSON-array string, ``(None, error)`` for a bad string, ``(None, None)`` otherwise."""
+    if not isinstance(tasks, str):
+        return None, None
+    raw = tasks.strip()
+    if not raw:
+        return None, "Provide either 'goal' (single task) or 'tasks' (batch)."
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        return None, f"tasks must be a JSON array of task objects; received a string that could not be parsed as JSON ({exc.msg})."
+    if not isinstance(parsed, list):
+        return None, f"tasks must be a JSON array of task objects; parsed {type(parsed).__name__} instead."
+    return parsed, None
+
 def _validate_batch_tasks(task_list: List[Dict[str, Any]]) -> Optional[str]:
-    """Validate a tasks=[...] batch beyond per-task goal presence; actionable
-    error string or None.
+    """Batch-only quality gate beyond per-task goal presence; actionable error or None.
 
     No minimum count: a one-entry array is the canonical single-task shape
     (legacy top-level `goal` is wrapped into one). Duplicate goals are
     deliberately NOT rejected — identical-goal fan-outs (best-of-N / ensemble
-    sampling) are legitimate and blocking them broke real workflows.
+    sampling) are legitimate and blocking them broke real workflows. The
+    too-short check applies only to multi-task fan-outs (terse goals there are
+    usually unexpanded templates); a SINGLE task legitimately uses short goals
+    ("Fix the tests").
     """
     for i, task in enumerate(task_list):
         goal = str(task.get("goal", "")).strip()
-        normalized = " ".join(goal.lower().split())
-
-        if _PLACEHOLDER_GOAL_RE.match(normalized):
+        if _PLACEHOLDER_GOAL_RE.match(" ".join(goal.lower().split())):
             return (
                 f"Task {i} has a placeholder goal ({goal!r}). Replace it "
                 "with a specific, self-contained description of what the subagent should accomplish."
@@ -67,14 +63,9 @@ def _validate_batch_tasks(task_list: List[Dict[str, Any]]) -> Optional[str]:
                 "calling delegate_task — subagents cannot resolve placeholders."
             )
         if len(goal) < _MIN_BATCH_GOAL_LEN and len(task_list) >= 2:
-            # Multi-task fan-outs with terse goals are usually unexpanded
-            # templates; a SINGLE task legitimately uses short goals
-            # ("Fix the tests"), so one-entry arrays keep the historical
-            # single-`goal` exemption.
             return (
                 f"Task {i} goal is too short ({goal!r}). Write a specific, "
-                "self-contained goal of at least "
-                f"{_MIN_BATCH_GOAL_LEN} characters so the subagent knows "
+                f"self-contained goal of at least {_MIN_BATCH_GOAL_LEN} characters so the subagent knows "
                 "exactly what to do."
             )
     return None
@@ -101,10 +92,9 @@ def _normalize_task_list(
             )
         task_list = tasks
     elif goal and isinstance(goal, str) and goal.strip():
-        single_task: Dict[str, Any] = {"goal": goal, "context": context, "role": top_role}
+        task_list = [{"goal": goal, "context": context, "role": top_role}]
         if output_schema is not None:
-            single_task["output_schema"] = output_schema
-        task_list = [single_task]
+            task_list[0]["output_schema"] = output_schema
     else:
         return None, (
             "No tasks provided. Pass tasks=[{goal: '...', context: '...'}, "
@@ -116,14 +106,9 @@ def _normalize_task_list(
             return None, f"Task {i} must be an object, got {type(task).__name__}."
         if not task.get("goal", "").strip():
             return None, f"Task {i} is missing a 'goal'."
-
-    # Batch-only quality gate (placeholders, template markers); the single-goal
-    # form is exempt because short goals are valid there.
-    if tasks is not None and isinstance(tasks, list):
-        batch_error = _validate_batch_tasks(task_list)
-        if batch_error:
-            return None, batch_error
-    return task_list, None
+    # The single-goal form is exempt from the batch gate (short goals are valid there).
+    batch_error = _validate_batch_tasks(task_list) if isinstance(tasks, list) else None
+    return (None, batch_error) if batch_error else (task_list, None)
 
 def _coerce_task_schemas(
     task_list: List[Dict[str, Any]], output_schema: Optional[Dict[str, Any]]
