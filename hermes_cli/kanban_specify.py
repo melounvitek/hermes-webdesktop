@@ -23,10 +23,7 @@ from hermes_cli import kanban_db as kb
 
 from utils import env_int
 
-HERMES_KANBAN_SPECIFY_MAX_TOKENS = max(
-    1500,
-    env_int("HERMES_KANBAN_SPECIFY_MAX_TOKENS", 6000),
-)
+HERMES_KANBAN_SPECIFY_MAX_TOKENS = max(1500, env_int("HERMES_KANBAN_SPECIFY_MAX_TOKENS", 6000))
 
 logger = logging.getLogger(__name__)
 
@@ -159,10 +156,7 @@ def _call_aux(verb: str, task_id: str, *, aux_task: str, system: str, user: str,
     try:
         resp = call_llm(
             task=aux_task,
-            messages=[
-                {"role": "system", "content": system},
-                {"role": "user", "content": user},
-            ],
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
             temperature=0.3,
             max_tokens=max_tokens,
             timeout=timeout,
@@ -227,10 +221,5 @@ def specify_task(
 def list_triage_ids(*, tenant: Optional[str] = None) -> list[str]:
     """Task ids in the triage column; ``tenant`` narrows the sweep."""
     with kb.connect_closing() as conn:
-        tasks = kb.list_tasks(
-            conn,
-            status="triage",
-            tenant=tenant,
-            include_archived=False,
-        )
+        tasks = kb.list_tasks(conn, status="triage", tenant=tenant, include_archived=False)
     return [t.id for t in tasks]
