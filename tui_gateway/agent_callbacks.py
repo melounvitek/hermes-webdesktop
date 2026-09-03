@@ -319,9 +319,8 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
 
 
 def _ephemeral_preview_agent_kwargs(agent, task_id: str) -> dict:
-    kwargs = _background_agent_kwargs(agent, task_id)
-    kwargs.update({"enabled_toolsets": ["terminal", "file"], "session_db": None, "skip_memory": True})
-    return kwargs
+    return {**_background_agent_kwargs(agent, task_id),
+            "enabled_toolsets": ["terminal", "file"], "session_db": None, "skip_memory": True}
 
 
 _PREVIEW_HISTORY_ROLES = ("user", "assistant", "tool", "system")

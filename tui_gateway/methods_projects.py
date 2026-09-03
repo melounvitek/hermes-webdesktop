@@ -348,10 +348,9 @@ def _project_tree_row(r: dict) -> dict:
         source=r.get("source"), archived=bool(r.get("archived")))
     row.update({k: r.get(k) or 0 for k in (
         "message_count", "tool_call_count", "input_tokens", "output_tokens")})
-    row.update(
-        actual_cost_usd=r.get("actual_cost_usd"), estimated_cost_usd=r.get("estimated_cost_usd"),
-        model=r.get("model"), is_active=False, cwd=r.get("cwd"), git_branch=r.get("git_branch"),
-        git_repo_root=r.get("git_repo_root"))
+    row.update({k: r.get(k) for k in ("actual_cost_usd", "estimated_cost_usd", "model")})
+    row["is_active"] = False
+    row.update({k: r.get(k) for k in ("cwd", "git_branch", "git_repo_root")})
     return row
 
 
@@ -361,17 +360,12 @@ def _project_tree_inputs(
     """Gather (sessions, projects, discovered_repos, active_id) for build_tree.
     ``include_discovered`` is the zero-session-repo overview tier; drill-in skips it,
     avoiding the distinct-cwd scan + git probes on that per-turn path."""
+    # compact_rows: `_project_tree_row` drops the system-prompt blob; selecting it
+    # only to discard it costs tens of MB of B-tree reads per build on a big DB.
     rows = db.list_sessions_rich(
-        limit=session_limit,
-        offset=0,
-        order_by_last_active=True,
-        min_message_count=1,
-        include_children=False,
-        exclude_sources=_PROJECT_TREE_EXCLUDED_SOURCES,
-        include_archived=False,
-        # `_project_tree_row` drops the system-prompt blob; selecting it only to
-        # discard it costs tens of MB of B-tree reads per build on a big DB.
-        compact_rows=True)
+        limit=session_limit, offset=0, order_by_last_active=True, min_message_count=1,
+        include_children=False, exclude_sources=_PROJECT_TREE_EXCLUDED_SOURCES,
+        include_archived=False, compact_rows=True)
     sessions = [_project_tree_row(r) for r in rows]
     # Parallel-warm the git cache so build_tree's resolver reads it instead of
     # cold-probing each cwd in sequence (matters on the drill-in path).
@@ -386,10 +380,10 @@ def _project_tree_inputs(
         projects = [p.to_dict() for p in pdb.list_projects(conn)]
         active_id = pdb.get_active_id(conn)
         # backfill stays off the hot tree path — grouping uses the live resolver.
-        discovered = (
-            _discover_repos_payload(db, conn=conn, backfill=False, include_cached=policy["enabled"])
-            if include_discovered
-            else [])
+        discovered = []
+        if include_discovered:
+            discovered = _discover_repos_payload(
+                db, conn=conn, backfill=False, include_cached=policy["enabled"])
     return sessions, projects, discovered, active_id
 
 
