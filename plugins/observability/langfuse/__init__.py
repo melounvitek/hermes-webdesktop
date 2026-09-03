@@ -140,24 +140,22 @@ def _describe_content(value: Any) -> Any:
     return {"omitted": True, **(shape or {"type": type(value).__name__})}
 
 
-def _capture_content(value: Any, *, parse_json_strings: bool = False) -> Any:
+def _capture_content(value: Any, *, parse_json_strings: bool = False, tool_result_of: Optional[tuple] = None) -> Any:
     """Apply the active capture mode to a CONTENT value.
 
     Only prompt/response text, tool arguments and tool results are content;
     metadata fields (provider, model, IDs, counts) stay as-is in every mode.
+    ``tool_result_of=(tool_name, args)`` marks a tool result: JSON strings are
+    parsed first so a read_file payload can be collapsed to a preview keyed by
+    the call's ``args``.
     """
     if _capture_mode() == "metadata":
         return _describe_content(value)
+    if tool_result_of is not None:
+        tool_name, args = tool_result_of
+        value = _maybe_parse_json_string(value) if isinstance(value, str) else value
+        value, parse_json_strings = _normalize_payload(value, tool_name=tool_name, args=args), True
     return _safe_value(value, parse_json_strings=parse_json_strings)
-
-
-def _capture_tool_result(result: Any, *, tool_name: str, args: Any) -> Any:
-    """Capture a tool result: JSON strings are parsed first so a read_file
-    payload can be collapsed to a preview keyed by the call's ``args``."""
-    if _capture_mode() == "metadata":
-        return _describe_content(result)
-    value = _maybe_parse_json_string(result) if isinstance(result, str) else result
-    return _safe_value(_normalize_payload(value, tool_name=tool_name, args=args), parse_json_strings=True)
 
 
 # Sentinel: "_get_langfuse() has tried and failed". Tests reset by reloading
@@ -212,10 +210,10 @@ def _build_client() -> Optional[Langfuse]:
 
     # The SDK does not validate keys at construction; placeholder keys
     # would fail silently at flush time (#23823). Warn once here instead.
-    placeholder_issues = list(filter(None, (
+    placeholder_issues = [issue for issue in (
         _validate_langfuse_key("HERMES_LANGFUSE_PUBLIC_KEY", public_key),
         _validate_langfuse_key("HERMES_LANGFUSE_SECRET_KEY", secret_key),
-    )))
+    ) if issue]
     if placeholder_issues:
         logger.warning(
             "Langfuse plugin: credentials look like placeholders, traces will "
@@ -579,9 +577,9 @@ def _start_root_trace(task_key: str, *, task_id: str, session_id: str, platform:
     return TraceState(trace_id=trace_id, root_ctx=root_ctx, root_span=root_span)
 
 
-def _start_child_observation(state: TraceState, *, client: Langfuse, name: str, as_type: str,
-                             input_value: Any, metadata: Optional[dict] = None,
-                             model: Optional[str] = None, model_parameters: Optional[dict] = None) -> Any:
+def _start_child_observation(state: TraceState, *, name: str, as_type: str, input_value: Any,
+                             metadata: Optional[dict] = None, model: Optional[str] = None,
+                             model_parameters: Optional[dict] = None) -> Any:
     return state.root_span.start_observation(name=name, as_type=as_type, input=input_value, metadata=metadata or {},
                                              model=model, model_parameters=model_parameters)
 
@@ -779,7 +777,7 @@ def _emit_moa_reference_generations(state: TraceState, *, client: Langfuse, refe
         metadata.update({k: ref[k] for k in ("provider", "cost_status", "cost_source", "temperature") if ref.get(k) is not None})
 
         observation = _start_child_observation(
-            state, client=client, name=f"MoA advisor: {label}", as_type="generation",
+            state, name=f"MoA advisor: {label}", as_type="generation",
             input_value=None, metadata=metadata, model=ref.get("model"),
         )
         _end_observation(
@@ -829,7 +827,7 @@ def on_pre_llm_request(*, task_id: str = "", session_id: str = "", platform: str
         if system_chars:
             gen_metadata["system_prompt_chars"] = system_chars
         state.generations[req_key] = _start_child_observation(
-            state, client=client, name=f"LLM call {api_call_count}", as_type="generation",
+            state, name=f"LLM call {api_call_count}", as_type="generation",
             input_value=langfuse_input, metadata=gen_metadata, model=model,
             model_parameters={"api_mode": api_mode, "provider": provider},
         )
@@ -875,13 +873,9 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
     # post_api_request's ``response`` is a sanitized dict with no ``.usage``;
     # gate on the attribute so the usage-dict fallback is actually reached.
     if getattr(response, "usage", None) is not None:
-        usage_details, cost_details = _usage_and_cost(
-            response, provider=provider, api_mode=api_mode, model=model, base_url=base_url,
-        )
+        usage_details, cost_details = _usage_and_cost(response, provider=provider, api_mode=api_mode, model=model, base_url=base_url)
     elif isinstance(usage, dict) and usage:
-        usage_details, cost_details = _summary_usage_and_cost(
-            usage, provider=provider, model=model, base_url=base_url,
-        )
+        usage_details, cost_details = _summary_usage_and_cost(usage, provider=provider, model=model, base_url=base_url)
     else:
         usage_details, cost_details = {}, {}
 
@@ -889,8 +883,7 @@ def on_post_llm_call(*, task_id: str = "", session_id: str = "", provider: str =
     _add_duration(gen_metadata, api_duration)
     if finish_reason:
         gen_metadata["finish_reason"] = finish_reason
-    _end_observation(generation, output=output, usage_details=usage_details,
-                     cost_details=cost_details, metadata=gen_metadata)
+    _end_observation(generation, output=output, usage_details=usage_details, cost_details=cost_details, metadata=gen_metadata)
 
     has_tools = bool(getattr(assistant_message, "tool_calls", None)) if assistant_message else assistant_tool_call_count > 0
     if not has_tools and output.get("content"):
@@ -908,7 +901,7 @@ def on_pre_tool_call(*, tool_name: str = "", args: Any = None, task_id: str = ""
         if state is None:
             return
         observation = _start_child_observation(
-            state, client=client, name=f"Tool: {tool_name}", as_type="tool",
+            state, name=f"Tool: {tool_name}", as_type="tool",
             input_value=_capture_content(args),
             metadata={"tool_name": tool_name, "tool_call_id": tool_call_id},
         )
@@ -935,7 +928,7 @@ def on_post_tool_call(*, tool_name: str = "", args: Any = None, result: Any = No
     if observation is None:
         return
 
-    safe_result_value = _capture_tool_result(result, tool_name=tool_name, args=args)
+    safe_result_value = _capture_content(result, tool_result_of=(tool_name, args))
 
     # Backfill so the generation's tool_call record carries the result alongside arguments.
     if tool_call_id:
@@ -1040,7 +1033,7 @@ def on_subagent_start(*, parent_turn_id: str = "", parent_subagent_id: Any = Non
         if parent_subagent_id:
             metadata["parent_subagent_id"] = parent_subagent_id
         state.subagents[str(child_session_id)] = _start_child_observation(
-            state, client=client, name=f"Subagent: {child_role or 'delegate'}", as_type="span",
+            state, name=f"Subagent: {child_role or 'delegate'}", as_type="span",
             input_value=_capture_content(child_goal), metadata=metadata,
         )
 
