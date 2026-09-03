@@ -523,13 +523,14 @@ def _merge_late_steer(result: Dict[str, Any], subagent_id: Optional[str], child:
         result["pending_steer"] = f"{existing}\n{late}" if isinstance(existing, str) and existing else late
 
 def _finish_failed_entry(
-    entry: Dict[str, Any], late_steer: Optional[str], child_progress_cb: Any, worktree: _WorktreeReporter, *, preview: str,
+    entry: Dict[str, Any], late_steer: Optional[str], child_progress_cb: Any, worktree: _WorktreeReporter, *,
+    preview: str, summary: str = "", status: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Shared tail of every child failure path: emit ``subagent.complete``, note
     the steer text that won the race with the failure, report the worktree."""
     _safe_progress(
-        child_progress_cb, "subagent.complete", preview=preview, status=entry["status"],
-        duration_seconds=entry["duration_seconds"], summary=entry["summary"] or "",
+        child_progress_cb, "subagent.complete", preview=preview, status=status or entry["status"],
+        duration_seconds=entry["duration_seconds"], summary=summary,
     )
     _append_missed_steer(entry, late_steer)
     worktree.attach(entry)  # no-op when isolation never engaged
