@@ -4877,46 +4877,56 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     task = get_task(conn, task_id)
     if not task:
         raise ValueError(f"unknown task {task_id}")
-
-    # Single clock reading shared by every relative-age stamp below, so all
-    # ages in one rendering are consistent ("3h ago" / "3h ago", not drifting
-    # by the seconds it takes to build the block).
-    _now = int(time.time())
-
-    def _cap(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES) -> str:
-        """Truncate a string to `limit` chars with a visible ellipsis."""
-        if not s:
-            return ""
-        s = s.strip()
-        if len(s) <= limit:
-            return s
-        return s[:limit] + f"… [truncated, {len(s) - limit} chars omitted]"
-
-    def _stamp(ts: int) -> str:
-        """``YYYY-MM-DD HH:MM`` plus a relative age when one is available."""
-        disp = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
-        age = _relative_age(ts, _now)
-        return f"{disp}, {age}" if age else disp
-
-    def _metadata_line(metadata: Any) -> Optional[str]:
-        if not metadata:
-            return None
-        try:
-            return f"_metadata_: `{_cap(json.dumps(metadata, ensure_ascii=False, sort_keys=True))}`"
-        except Exception:
-            return None
-
-    def _tail(items: list, cap: int, noun: str) -> tuple[list, Optional[str]]:
-        """Keep the newest ``cap`` items; describe the omitted head, if any."""
-        omitted = max(0, len(items) - cap)
-        if not omitted:
-            return items, None
-        return items[-cap:], (
-            f"_({omitted} earlier {noun}{'s' if omitted != 1 else ''} "
-            f"omitted; showing most recent {cap})_"
-        )
-
+    # One clock reading so every relative age in this rendering agrees.
+    now = int(time.time())
     lines: list[str] = []
+    _ctx_header(lines, task)
+    _ctx_attachments(lines, list_attachments(conn, task_id))
+    _ctx_prior_attempts(lines, conn, task_id, now)
+    _ctx_parent_results(lines, conn, task_id, now)
+    _ctx_role_history(lines, conn, task, now)
+    _ctx_comments(lines, list_comments(conn, task_id), now)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _ctx_cap(s: Optional[str], limit: int = _CTX_MAX_FIELD_BYTES) -> str:
+    """Truncate to ``limit`` chars with a visible ellipsis."""
+    if not s:
+        return ""
+    s = s.strip()
+    if len(s) <= limit:
+        return s
+    return s[:limit] + f"… [truncated, {len(s) - limit} chars omitted]"
+
+
+def _ctx_stamp(ts: int, now: int) -> str:
+    """``YYYY-MM-DD HH:MM`` plus a relative age when one is available."""
+    disp = time.strftime("%Y-%m-%d %H:%M", time.localtime(ts))
+    age = _relative_age(ts, now)
+    return f"{disp}, {age}" if age else disp
+
+
+def _ctx_metadata_line(metadata: Any) -> Optional[str]:
+    if not metadata:
+        return None
+    try:
+        return f"_metadata_: `{_ctx_cap(json.dumps(metadata, ensure_ascii=False, sort_keys=True))}`"
+    except Exception:
+        return None
+
+
+def _ctx_tail(items: list, cap: int, noun: str) -> tuple[list, Optional[str]]:
+    """Keep the newest ``cap`` items; describe the omitted head, if any."""
+    omitted = max(0, len(items) - cap)
+    if not omitted:
+        return items, None
+    return items[-cap:], (
+        f"_({omitted} earlier {noun}{'s' if omitted != 1 else ''} "
+        f"omitted; showing most recent {cap})_"
+    )
+
+
+def _ctx_header(lines: list[str], task: Task) -> None:
     lines.append(f"# Kanban task {task.id}: {task.title}")
     lines.append("")
     lines.append(f"Assignee: {task.assignee or '(unassigned)'}")
@@ -4936,156 +4946,138 @@ def build_worker_context(conn: sqlite3.Connection, task_id: str) -> str:
     if task.branch_name:
         lines.append(f"Branch:   {task.branch_name}")
     lines.append("")
-
     if task.body and task.body.strip():
         lines.append("## Body")
-        lines.append(_cap(task.body, _CTX_MAX_BODY_BYTES))
+        lines.append(_ctx_cap(task.body, _CTX_MAX_BODY_BYTES))
         lines.append("")
 
-    # Attachments — files uploaded to this task (PDFs, source docs,
-    # images). Surface the absolute on-disk path so the worker, which has
-    # full file-tool access, can read them directly (read_file, terminal
-    # `pdftotext`, etc.). On the local terminal backend the path resolves
-    # as-is; remote backends need the kanban attachments dir mounted.
-    attachments = list_attachments(conn, task_id)
-    if attachments:
-        lines.append("## Attachments")
-        lines.append(
-            "Files attached to this task. Read them with the file/terminal "
-            "tools at the absolute paths below:"
-        )
-        for att in attachments:
-            size_kb = max(1, (att.size + 1023) // 1024) if att.size else 0
-            size_str = f", {size_kb} KB" if size_kb else ""
-            ctype = f", {att.content_type}" if att.content_type else ""
-            lines.append(f"- `{att.filename}`{ctype}{size_str} → `{att.stored_path}`")
-        lines.append("")
 
-    # Prior attempts — show closed runs so a retrying worker sees the
-    # history. Skip the currently-active run (that's this worker).
-    # Cap at _CTX_MAX_PRIOR_ATTEMPTS most-recent closed runs; older
-    # attempts get collapsed into a one-line marker so the worker knows
-    # more exist without bloating the prompt.
+def _ctx_attachments(lines: list[str], attachments: list[Attachment]) -> None:
+    """Absolute on-disk paths so the worker's file tools read them directly
+    (remote terminal backends need the attachments dir mounted)."""
+    if not attachments:
+        return
+    lines.append("## Attachments")
+    lines.append(
+        "Files attached to this task. Read them with the file/terminal "
+        "tools at the absolute paths below:"
+    )
+    for att in attachments:
+        size_kb = max(1, (att.size + 1023) // 1024) if att.size else 0
+        size_str = f", {size_kb} KB" if size_kb else ""
+        ctype = f", {att.content_type}" if att.content_type else ""
+        lines.append(f"- `{att.filename}`{ctype}{size_str} → `{att.stored_path}`")
+    lines.append("")
+
+
+def _ctx_prior_attempts(lines: list[str], conn: sqlite3.Connection, task_id: str, now: int) -> None:
+    """Closed runs on this task (the active run is this worker), newest
+    ``_CTX_MAX_PRIOR_ATTEMPTS`` in full, older ones as a one-line marker."""
     all_prior = [r for r in list_runs(conn, task_id) if r.ended_at is not None]
-    # list_runs returns ascending by started_at; "most recent" = last N
-    shown, omitted_note = _tail(all_prior, _CTX_MAX_PRIOR_ATTEMPTS, "attempt")
+    shown, omitted_note = _ctx_tail(all_prior, _CTX_MAX_PRIOR_ATTEMPTS, "attempt")
+    if not shown:
+        return
     first_shown_idx = len(all_prior) - len(shown) + 1
-    if shown:
-        lines.append("## Prior attempts on this task")
-        if omitted_note:
-            lines.append(omitted_note)
-        for offset, run in enumerate(shown):
-            idx = first_shown_idx + offset
-            profile = run.profile or "(unknown)"
-            outcome = run.outcome or run.status
-            lines.append(f"### Attempt {idx} — {outcome} ({profile}, {_stamp(run.started_at)})")
-            if run.summary and run.summary.strip():
-                lines.append(_cap(run.summary))
-            if run.error and run.error.strip():
-                lines.append(f"_error_: {_cap(run.error)}")
-            meta_line = _metadata_line(run.metadata)
-            if meta_line:
-                lines.append(meta_line)
-            lines.append("")
+    lines.append("## Prior attempts on this task")
+    if omitted_note:
+        lines.append(omitted_note)
+    for offset, run in enumerate(shown):
+        profile = run.profile or "(unknown)"
+        outcome = run.outcome or run.status
+        lines.append(
+            f"### Attempt {first_shown_idx + offset} — {outcome} ({profile}, {_ctx_stamp(run.started_at, now)})"
+        )
+        if run.summary and run.summary.strip():
+            lines.append(_ctx_cap(run.summary))
+        if run.error and run.error.strip():
+            lines.append(f"_error_: {_ctx_cap(run.error)}")
+        meta_line = _ctx_metadata_line(run.metadata)
+        if meta_line:
+            lines.append(meta_line)
+        lines.append("")
 
-    # Parents: prefer the most-recent 'completed' run's summary + metadata,
-    # fall back to ``task.result`` when no run rows exist (legacy DBs,
-    # or tasks completed before the runs table landed).
+
+def _ctx_parent_results(lines: list[str], conn: sqlite3.Connection, task_id: str, now: int) -> None:
+    """Done-parent handoffs: newest ``completed`` run's summary+metadata,
+    falling back to ``task.result`` for pre-runs-table data. Stamped with a
+    relative age so the worker re-verifies stale upstream results."""
     parent_rows = conn.execute(
         "SELECT parent_id FROM task_links WHERE child_id = ? ORDER BY parent_id",
         (task_id,),
     ).fetchall()
-    parent_ids = [r["parent_id"] for r in parent_rows]
+    wrote_header = False
+    for pid in (r["parent_id"] for r in parent_rows):
+        pt = get_task(conn, pid)
+        if not pt or pt.status != "done":
+            continue
+        runs = [r for r in list_runs(conn, pid) if r.outcome == "completed"]
+        runs.sort(key=lambda r: r.started_at, reverse=True)
+        run = runs[0] if runs else None
+        if not wrote_header:
+            lines.append("## Parent task results")
+            lines.append(
+                "_Handoffs from upstream tasks, captured when each parent "
+                "completed (see age below). These are point-in-time "
+                "snapshots, not live state — if a result drives your "
+                "current work and it's not recent, re-verify against the "
+                "source before acting on it as current._"
+            )
+            wrote_header = True
+        done_ts = run.ended_at if run is not None and run.ended_at else (pt.completed_at or None)
+        age = _relative_age(done_ts, now)
+        lines.append(f"### {pid}" + (f" (completed {age})" if age else ""))
+        if run is not None and run.summary and run.summary.strip():
+            lines.append(_ctx_cap(run.summary))
+        elif pt.result:
+            lines.append(_ctx_cap(pt.result))
+        else:
+            lines.append("(no result recorded)")
+        meta_line = _ctx_metadata_line(run.metadata) if run is not None else None
+        if meta_line:
+            lines.append(meta_line)
+        lines.append("")
 
-    if parent_ids:
-        wrote_header = False
-        for pid in parent_ids:
-            pt = get_task(conn, pid)
-            if not pt or pt.status != "done":
-                continue
-            runs = [r for r in list_runs(conn, pid) if r.outcome == "completed"]
-            runs.sort(key=lambda r: r.started_at, reverse=True)
-            run = runs[0] if runs else None
 
-            if not wrote_header:
-                lines.append("## Parent task results")
-                lines.append(
-                    "_Handoffs from upstream tasks, captured when each parent "
-                    "completed (see age below). These are point-in-time "
-                    "snapshots, not live state — if a result drives your "
-                    "current work and it's not recent, re-verify against the "
-                    "source before acting on it as current._"
-                )
-                wrote_header = True
+def _ctx_role_history(lines: list[str], conn: sqlite3.Connection, task: Task, now: int) -> None:
+    """The assignee's 5 most recent completed runs on OTHER tasks — implicit
+    role continuity without wiring anything into SOUL.md / MEMORY.md."""
+    if not task.assignee:
+        return
+    role_rows = conn.execute(
+        "SELECT t.id, t.title, r.summary, r.ended_at "
+        "FROM task_runs r JOIN tasks t ON r.task_id = t.id "
+        "WHERE r.profile = ? AND r.task_id != ? "
+        "  AND r.outcome = 'completed' "
+        "ORDER BY r.ended_at DESC LIMIT 5",
+        (task.assignee, task.id),
+    ).fetchall()
+    if not role_rows:
+        return
+    lines.append(f"## Recent work by @{task.assignee}")
+    for row in role_rows:
+        first = _first_line(row["summary"], 200) or "(no summary)"
+        lines.append(
+            f"- {row['id']} — {row['title']} ({_ctx_stamp(int(row['ended_at']), now)}): {first}"
+        )
+    lines.append("")
 
-            # When did this parent's result get produced? Prefer the
-            # completed run's end time; fall back to the task's completed_at.
-            done_ts = None
-            if run is not None and getattr(run, "ended_at", None):
-                done_ts = run.ended_at
-            elif pt.completed_at:
-                done_ts = pt.completed_at
-            age = _relative_age(done_ts, _now)
-            lines.append(f"### {pid}" + (f" (completed {age})" if age else ""))
 
-            body_lines: list[str] = []
-            if run is not None and run.summary and run.summary.strip():
-                body_lines.append(_cap(run.summary))
-            elif pt.result:
-                body_lines.append(_cap(pt.result))
-            else:
-                body_lines.append("(no result recorded)")
-
-            meta_line = _metadata_line(run.metadata) if run is not None else None
-            if meta_line:
-                body_lines.append(meta_line)
-            lines.extend(body_lines)
-            lines.append("")
-
-    # Cross-task role history: what else has THIS assignee completed
-    # recently? Gives the worker implicit continuity — "I'm the reviewer
-    # and my last three reviews focused on security" — without forcing
-    # the user to wire anything into SOUL.md / MEMORY.md. Bounded to the
-    # most recent 5 completed runs, excluding this task so the retry
-    # section above isn't duplicated. Safe on assignee=None (skipped).
-    if task.assignee:
-        role_rows = conn.execute(
-            "SELECT t.id, t.title, r.summary, r.ended_at "
-            "FROM task_runs r JOIN tasks t ON r.task_id = t.id "
-            "WHERE r.profile = ? AND r.task_id != ? "
-            "  AND r.outcome = 'completed' "
-            "ORDER BY r.ended_at DESC LIMIT 5",
-            (task.assignee, task_id),
-        ).fetchall()
-        if role_rows:
-            lines.append(f"## Recent work by @{task.assignee}")
-            for row in role_rows:
-                first = _first_line(row["summary"], 200) or "(no summary)"
-                lines.append(
-                    f"- {row['id']} — {row['title']} ({_stamp(int(row['ended_at']))}): {first}"
-                )
-            lines.append("")
-
-    # Comments: cap at the most-recent _CTX_MAX_COMMENTS so
-    # comment-storm tasks don't blow out the worker's prompt. Older
-    # comments summarised in a one-line marker like prior attempts.
-    shown_c, omitted_note = _tail(list_comments(conn, task_id), _CTX_MAX_COMMENTS, "comment")
-    if shown_c:
-        lines.append("## Comment thread")
-        if omitted_note:
-            lines.append(omitted_note)
-        for c in shown_c:
-            # Explicit "comment from worker" framing so operator-controlled
-            # HERMES_PROFILE values like "hermes-system" or "operator" can't be
-            # misread by the next worker as a system directive above the
-            # (attacker-influenceable) comment body. Defense-in-depth on top of
-            # the closed LLM-controlled author-forgery surface.
-            safe_author = (c.author or "").replace("`", "")
-            lines.append(f"comment from worker `{safe_author}` at {_stamp(c.created_at)}:")
-            lines.append(_cap(c.body, _CTX_MAX_COMMENT_BYTES))
-            lines.append("")
-
-    return "\n".join(lines).rstrip() + "\n"
+def _ctx_comments(lines: list[str], comments: list[Comment], now: int) -> None:
+    """Newest ``_CTX_MAX_COMMENTS`` comments. The explicit "comment from
+    worker" framing stops an operator-controlled HERMES_PROFILE like
+    "hermes-system" being read as a system directive above an
+    attacker-influenceable body (defense-in-depth)."""
+    shown, omitted_note = _ctx_tail(comments, _CTX_MAX_COMMENTS, "comment")
+    if not shown:
+        return
+    lines.append("## Comment thread")
+    if omitted_note:
+        lines.append(omitted_note)
+    for c in shown:
+        safe_author = (c.author or "").replace("`", "")
+        lines.append(f"comment from worker `{safe_author}` at {_ctx_stamp(c.created_at, now)}:")
+        lines.append(_ctx_cap(c.body, _CTX_MAX_COMMENT_BYTES))
+        lines.append("")
 
 
 # ---------------------------------------------------------------------------
