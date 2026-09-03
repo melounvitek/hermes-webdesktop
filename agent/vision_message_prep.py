@@ -32,6 +32,22 @@ def _is_image_part(part: Any) -> bool:
     return isinstance(part, dict) and part.get("type") in _IMAGE_PART_TYPES
 
 
+def _salvage_text_parts(content: list, *, any_dict_text: bool) -> List[str]:
+    """Stripped, non-empty text from string parts and text-typed dict parts (or any dict's
+    ``text`` when ``any_dict_text``), in order."""
+    texts: List[str] = []
+    for part in content:
+        if isinstance(part, str):
+            text = part.strip()
+        elif isinstance(part, dict) and (any_dict_text or part.get("type") in _TEXT_PART_TYPES):
+            text = str(part.get("text", "") or "").strip()
+        else:
+            continue
+        if text:
+            texts.append(text)
+    return texts
+
+
 def _provider_model_key(agent: Any) -> tuple[str, str]:
     """``(provider.lower(), model)`` as recorded in ``_no_list_tool_content_models``.
     Module-level so ``MagicMock(spec=AIAgent)`` agents in tests don't swallow it."""
@@ -142,31 +158,17 @@ class VisionMessagePrepMixin:
         if not self._content_has_image_parts(content):
             return content
 
-        text_parts: List[str] = []
         image_notes: List[str] = []
-        for part in content:
-            if isinstance(part, str):
-                if part.strip():
-                    text_parts.append(part.strip())
-                continue
-            if not isinstance(part, dict):
-                continue
-
-            if _is_image_part(part):
-                image_data = part.get("image_url", {})
-                image_url = image_data.get("url", "") if isinstance(image_data, dict) else str(image_data or "")
-                image_notes.append(
-                    self._describe_image_for_anthropic_fallback(image_url, role) if image_url
-                    else "[An image was attached but no image source was available.]"
-                )
-                continue
-            # Text parts and unknown dict types both contribute their ``text``.
-            text = str(part.get("text", "") or "").strip()
-            if text:
-                text_parts.append(text)
-
+        for part in filter(_is_image_part, content):
+            image_data = part.get("image_url", {})
+            image_url = image_data.get("url", "") if isinstance(image_data, dict) else str(image_data or "")
+            image_notes.append(
+                self._describe_image_for_anthropic_fallback(image_url, role) if image_url
+                else "[An image was attached but no image source was available.]"
+            )
+        # Text parts and unknown dict types both contribute their ``text``.
         prefix = "\n\n".join(note for note in image_notes if note).strip()
-        suffix = "\n".join(text for text in text_parts if text).strip()
+        suffix = "\n".join(_salvage_text_parts(content, any_dict_text=True)).strip()
         if prefix and suffix:
             return f"{prefix}\n\n{suffix}"
         return prefix or suffix or "[A multimodal message was converted to text for Anthropic compatibility.]"
@@ -222,8 +224,7 @@ class VisionMessagePrepMixin:
                 )
                 return _multimodal_text_summary(result)
             key = _provider_model_key(self)
-            no_list = getattr(self, "_no_list_tool_content_models", None)
-            if no_list and key in no_list:
+            if key in (getattr(self, "_no_list_tool_content_models", None) or ()):
                 logger.debug(
                     "Tool %s: model %s/%s known to reject list-type tool "
                     "content this session — sending text summary",
@@ -283,18 +284,7 @@ class VisionMessagePrepMixin:
                 continue
 
             # Salvage any text parts so the model still sees some signal.
-            text_parts: List[str] = []
-            for part in content:
-                if isinstance(part, str):
-                    text = part.strip()
-                elif isinstance(part, dict) and part.get("type") in _TEXT_PART_TYPES:
-                    text = str(part.get("text") or "").strip()
-                else:
-                    continue
-                if text:
-                    text_parts.append(text)
-
-            msg["content"] = "\n\n".join(text_parts) or (
+            msg["content"] = "\n\n".join(_salvage_text_parts(content, any_dict_text=False)) or (
                 "[image content removed — provider does not accept "
                 "list-type tool message content]"
             )
