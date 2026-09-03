@@ -153,9 +153,7 @@ def _match_new_style_provider(requested_norm: str, providers: Dict[str, Any]) ->
 def _match_legacy_custom_provider(requested_norm: str, custom_providers) -> Optional[Dict[str, Any]]:
     """Scan the legacy ``custom_providers:`` list for ``requested_norm``."""
     for entry in custom_providers:
-        if not isinstance(entry, dict):
-            continue
-        name, base_url = entry.get("name"), entry.get("base_url")
+        name, base_url = (entry.get("name"), entry.get("base_url")) if isinstance(entry, dict) else (None, None)
         if not isinstance(name, str) or not isinstance(base_url, str):
             continue
         provider_key = _clean(entry.get("provider_key", ""))
@@ -178,10 +176,9 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
     rp = _rp()
     config = rp.load_config()
     providers = config.get("providers")
-    if isinstance(providers, dict):
-        found = _match_new_style_provider(requested_norm, providers)
-        if found:
-            return found
+    found = _match_new_style_provider(requested_norm, providers) if isinstance(providers, dict) else None
+    if found:
+        return found
     if isinstance(config.get("custom_providers"), dict):
         logger.warning("custom_providers in config.yaml is a dict, not a list. "
                        "Each entry must be prefixed with '-' in YAML. "
@@ -221,9 +218,7 @@ def _find_custom_identity(matches: Callable[[Dict[str, Any]], bool]) -> Optional
     except Exception:
         custom_providers = None
     for entry in custom_providers or []:
-        if not isinstance(entry, dict):
-            continue
-        name = entry.get("name")
+        name = entry.get("name") if isinstance(entry, dict) else None
         if isinstance(name, str) and name.strip() and matches(entry):
             return custom_provider_slug(name, str(entry.get("provider_key", "") or ""))
     return None
@@ -258,10 +253,8 @@ def find_custom_provider_identity_by_model(model: str) -> Optional[str]:
         if isinstance(models, dict):
             return any(str(mid).strip().lower() == target for mid in models)
         if isinstance(models, list):
-            return any(
-                _model_id_matches(item.get("id") or item.get("name") if isinstance(item, dict) else item, target)
-                for item in models
-            )
+            return any(_model_id_matches(item.get("id") or item.get("name") if isinstance(item, dict) else item, target)
+                       for item in models)
         return False
 
     return _find_custom_identity(_entry_serves_model)
@@ -277,14 +270,10 @@ def canonical_custom_identity(*, base_url: Optional[str] = None, config_provider
     (3) the configured provider (arg, ``model.provider``, ``HERMES_INFERENCE_PROVIDER``) when it
     names a real entry."""
     rp = _rp()
-    if base_url:
-        identity = find_custom_provider_identity(base_url)
-        if identity:
-            return identity
-    if model:
-        identity = find_custom_provider_identity_by_model(model)
-        if identity:
-            return identity
+    identity = (find_custom_provider_identity(base_url) if base_url else None) or (
+        find_custom_provider_identity_by_model(model) if model else None)
+    if identity:
+        return identity
     candidate = str(config_provider or "").strip()
     if not candidate:
         try:
