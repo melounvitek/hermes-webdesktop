@@ -57,9 +57,7 @@ def _emit_once(bucket: set, key: Tuple, server_id: str, level: int, first: str, 
         _emit(server_id, logging.DEBUG, repeat)
 
 
-# ---------------------------------------------------------------------------
-# Public event helpers — call these from the LSP layer.
-# ---------------------------------------------------------------------------
+# ---- Public event helpers — call these from the LSP layer ----
 
 
 def log_clean(server_id: str, file_path: str) -> None:
@@ -137,16 +135,7 @@ def reset_announce_caches() -> None:
 
 
 __all__ = [
-    "event_log",
-    "log_clean",
-    "log_disabled",
-    "log_active",
-    "log_diagnostics",
-    "log_no_project_root",
-    "log_server_unavailable",
-    "log_timeout",
-    "log_server_error",
-    "log_spawn_failed",
-    "log_reaped",
+    "event_log", "log_clean", "log_disabled", "log_active", "log_diagnostics", "log_no_project_root",
+    "log_server_unavailable", "log_timeout", "log_server_error", "log_spawn_failed", "log_reaped",
     "reset_announce_caches",
 ]

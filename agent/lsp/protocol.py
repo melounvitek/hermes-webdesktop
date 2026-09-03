@@ -89,12 +89,10 @@ async def read_message(reader: asyncio.StreamReader) -> Optional[dict]:
         raise LSPProtocolError(f"non-integer Content-Length: {cl!r}") from e
     if n < 0 or n > _MAX_BODY_BYTES:
         raise LSPProtocolError(f"unreasonable Content-Length: {n}")
-
     try:
         body = await reader.readexactly(n)
     except asyncio.IncompleteReadError as e:
         raise LSPProtocolError(f"truncated LSP body: expected {n} bytes, got {len(e.partial)}") from e
-
     try:
         return json.loads(body.decode("utf-8"))
     except json.JSONDecodeError as e:
@@ -105,18 +103,12 @@ async def read_message(reader: asyncio.StreamReader) -> Optional[dict]:
 
 def make_notification(method: str, params: Any) -> dict:
     """Build a JSON-RPC 2.0 notification envelope (no ``id``)."""
-    msg: dict = {"jsonrpc": "2.0", "method": method}
-    if params is not None:
-        msg["params"] = params
-    return msg
+    return {"jsonrpc": "2.0", "method": method, **({} if params is None else {"params": params})}
 
 
 def make_request(req_id: int, method: str, params: Any) -> dict:
     """Build a JSON-RPC 2.0 request envelope."""
-    msg: dict = {"jsonrpc": "2.0", "id": req_id, "method": method}
-    if params is not None:
-        msg["params"] = params
-    return msg
+    return {"jsonrpc": "2.0", "id": req_id, "method": method, **({} if params is None else {"params": params})}
 
 
 def make_response(req_id: Any, result: Any) -> dict:
@@ -126,9 +118,7 @@ def make_response(req_id: Any, result: Any) -> dict:
 
 def make_error_response(req_id: Any, code: int, message: str, data: Any = None) -> dict:
     """Build a JSON-RPC 2.0 error response envelope."""
-    err: dict = {"code": code, "message": message}
-    if data is not None:
-        err["data"] = data
+    err = {"code": code, "message": message, **({} if data is None else {"data": data})}
     return {"jsonrpc": "2.0", "id": req_id, "error": err}
 
 
@@ -151,15 +141,7 @@ def classify_message(msg: dict) -> Tuple[str, Any]:
 
 
 __all__ = [
-    "ERROR_CONTENT_MODIFIED",
-    "ERROR_METHOD_NOT_FOUND",
-    "LSPProtocolError",
-    "LSPRequestError",
-    "encode_message",
-    "read_message",
-    "make_request",
-    "make_notification",
-    "make_response",
-    "make_error_response",
-    "classify_message",
+    "ERROR_CONTENT_MODIFIED", "ERROR_METHOD_NOT_FOUND", "LSPProtocolError", "LSPRequestError",
+    "encode_message", "read_message", "make_request", "make_notification", "make_response",
+    "make_error_response", "classify_message",
 ]

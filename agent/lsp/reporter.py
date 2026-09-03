@@ -80,11 +80,4 @@ def truncate(s: str, *, limit: int = MAX_TOTAL_CHARS) -> str:
     return s[: limit - len(marker)] + marker
 
 
-__all__ = [
-    "SEVERITY_NAMES",
-    "DEFAULT_SEVERITIES",
-    "MAX_PER_FILE",
-    "format_diagnostic",
-    "report_for_file",
-    "truncate",
-]
+__all__ = ["SEVERITY_NAMES", "DEFAULT_SEVERITIES", "MAX_PER_FILE", "format_diagnostic", "report_for_file", "truncate"]
