@@ -10,18 +10,8 @@ import logging
 from typing import Any, Dict, List
 
 from plugins.web._common import (
-    SEARCH_LIMIT_CAP,
-    BaseWebSearchProvider,
-    document,
-    http_status_detail,
-    keyless_variant_schema,
-    provider_env,
-    run_extract,
-    run_search,
-    search_fail,
-    search_ok,
-    use_keyless,
-    web_hit,
+    SEARCH_LIMIT_CAP, BaseWebSearchProvider, document, http_status_detail, keyless_extract, keyless_search,
+    keyless_variant_schema, page_error, provider_env, run_extract, run_search, search_fail, search_ok, use_keyless, web_hit,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,21 +38,15 @@ class KeenableWebSearchProvider(BaseWebSearchProvider):
 
     def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
         def _body() -> Dict[str, Any]:
-            from plugins.web.keyless_mcp import search_with_failover
-
             api_key = provider_env("KEENABLE_API_KEY")
             if use_keyless("keenable", api_key):
-                logger.info("Keenable keyless search: '%s' (limit=%d)", query, limit)
-                return search_with_failover("keenable", query, limit)
-
+                return keyless_search("Keenable", "keenable", query, limit, logger)
             import requests
-
             logger.info("Keenable search: '%s' (limit=%d)", query, limit)
             response = requests.post(
                 f"{_KEENABLE_API_URL}/v1/search",
                 json={"query": query, "max_results": min(max(1, int(limit)), SEARCH_LIMIT_CAP)},
-                headers=_keenable_headers(api_key),
-                timeout=30,
+                headers=_keenable_headers(api_key), timeout=30,
             )
             if response.status_code >= 400:
                 return search_fail(f"Keenable search failed: {http_status_detail(response)}")
@@ -75,30 +59,21 @@ class KeenableWebSearchProvider(BaseWebSearchProvider):
 
     def extract(self, urls: List[str], **kwargs: Any) -> List[Dict[str, Any]]:
         def _body() -> List[Dict[str, Any]]:
-            from plugins.web.keyless_mcp import extract_with_failover
-
             api_key = provider_env("KEENABLE_API_KEY")
             if use_keyless("keenable", api_key):
-                logger.info("Keenable keyless extract: %d URL(s)", len(urls))
-                return extract_with_failover("keenable", list(urls))
-
+                return keyless_extract("Keenable", "keenable", urls, logger)
             import requests
-
             logger.info("Keenable extract: %d URL(s)", len(urls))
             results: List[Dict[str, Any]] = []
             for url in urls:
                 try:
-                    response = requests.get(
-                        f"{_KEENABLE_API_URL}/v1/fetch", params={"url": url}, headers=_keenable_headers(api_key), timeout=30
-                    )
+                    response = requests.get(f"{_KEENABLE_API_URL}/v1/fetch", params={"url": url}, headers=_keenable_headers(api_key), timeout=30)
                     if response.status_code >= 400:
                         raise ValueError(http_status_detail(response))
                     data = response.json()
-                    results.append(
-                        document(data.get("url") or url, data.get("title") or "", data.get("content") or "", source_url=url)
-                    )
+                    results.append(document(data.get("url") or url, data.get("title") or "", data.get("content") or "", source_url=url))
                 except Exception as exc:  # noqa: BLE001 — per-URL error entry
-                    results.append({"url": url, "title": "", "content": "", "error": f"Keenable extract failed: {exc}"})
+                    results.append(page_error(url, f"Keenable extract failed: {exc}"))
             return results
 
         return run_extract("Keenable", logger, urls, _body, verbatim_value_error=False)

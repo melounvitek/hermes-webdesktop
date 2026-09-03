@@ -10,7 +10,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict
 
-from plugins.web._common import BaseWebSearchProvider, http_get_json, provider_env, search_fail, search_ok
+from plugins.web._common import BaseWebSearchProvider, http_get_json, provider_env, search_fail, search_ok, setup_schema, titled_rows
 
 logger = logging.getLogger(__name__)
 
@@ -28,44 +28,21 @@ class BraveFreeWebSearchProvider(BaseWebSearchProvider):
         api_key = provider_env("BRAVE_SEARCH_API_KEY")
         if not api_key:
             return search_fail("BRAVE_SEARCH_API_KEY is not set")
-
         data, failure = http_get_json(
-            "Brave Search",
-            _BRAVE_ENDPOINT,
+            "Brave Search", _BRAVE_ENDPOINT,
             params={"q": query, "count": max(1, min(int(limit), 20))},  # Brave caps count at 20
             headers={"X-Subscription-Token": api_key, "Accept": "application/json"},
-            timeout=15,
-            logger=logger,
+            timeout=15, logger=logger,
         )
         if failure is not None:
             return failure
-
         raw_results = (data.get("web") or {}).get("results", []) or []
-        web_results = [
-            {
-                "title": str(r.get("title", "")),
-                "url": str(r.get("url", "")),
-                "description": str(r.get("description", "")),
-                "position": i + 1,
-            }
-            for i, r in enumerate(raw_results[:limit])
-        ]
-        logger.info(
-            "Brave Search '%s': %d results (from %d raw, limit %d)",
-            query, len(web_results), len(raw_results), limit,
-        )
+        web_results = titled_rows(raw_results[:limit], "description")
+        logger.info("Brave Search '%s': %d results (from %d raw, limit %d)", query, len(web_results), len(raw_results), limit)
         return search_ok(web_results)
 
     def get_setup_schema(self) -> Dict[str, Any]:
-        return {
-            "name": "Brave Search (Free)",
-            "badge": "free",
-            "tag": "Free-tier API key — 2k queries/mo, search only.",
-            "env_vars": [
-                {
-                    "key": "BRAVE_SEARCH_API_KEY",
-                    "prompt": "Brave Search API key (free tier)",
-                    "url": "https://brave.com/search/api/",
-                },
-            ],
-        }
+        return setup_schema(
+            "Brave Search (Free)", "free", "Free-tier API key — 2k queries/mo, search only.",
+            "BRAVE_SEARCH_API_KEY", "Brave Search API key (free tier)", "https://brave.com/search/api/",
+        )

@@ -1,12 +1,8 @@
-"""DuckDuckGo search via the optional ``ddgs`` package (search only, no key).
-
-``is_available()`` reflects package importability; the plugin registers either way
-so ``hermes tools`` can offer to install it.
-
-Isolation: ``ddgs``/``primp`` can block inside native code while holding the GIL, so
-a thread-pool ``future.result(timeout=…)`` cap can never fire and Ctrl+C/SIGTERM
-freeze the whole process. Each search therefore runs in a disposable child process
-the parent can terminate/kill.
+"""DuckDuckGo search via the optional ``ddgs`` package (search only, no key). ``is_available()``
+reflects package importability; the plugin registers either way so ``hermes tools`` can offer to
+install it. Isolation: ``ddgs``/``primp`` can block inside native code while holding the GIL, so a
+thread-pool ``future.result(timeout=…)`` cap can never fire and Ctrl+C/SIGTERM freeze the process —
+each search runs in a disposable child process the parent can terminate/kill.
 """
 
 from __future__ import annotations
@@ -20,22 +16,18 @@ import sys
 import time
 from typing import Any, Dict, Optional
 
-from plugins.web._common import BaseWebSearchProvider, search_fail, search_ok
+from plugins.web._common import BaseWebSearchProvider, search_fail, search_ok, setup_schema, title_hit
 
 logger = logging.getLogger(__name__)
 
-# Hard wall-clock cap per search. ``DDGS(timeout=…)`` only bounds individual HTTP
-# requests; ddgs's multi-engine retry loop has no overall cap, so a rate-limited
-# response could otherwise hang the shared agent loop indefinitely.
+# Hard wall-clock cap per search: ``DDGS(timeout=…)`` only bounds individual HTTP requests;
+# ddgs's multi-engine retry loop has no overall cap, so a rate-limited response could
+# otherwise hang the shared agent loop indefinitely.
 _SEARCH_TIMEOUT_SECS = 30
 _POLL_INTERVAL_SECS = 0.1  # parent stdout / interrupt-flag poll cadence
 _TERMINATE_GRACE_SECS = 1.0  # wait after terminate() before escalating to kill()
-
-# Test-only hook name forwarded to the child (see _search_worker.py); never set in production.
-_test_hook: Optional[str] = None
-
-# Last worker Popen started by ``_run_ddgs_search_bounded`` (test reap checks).
-_last_worker_proc: Optional[subprocess.Popen] = None
+_test_hook: Optional[str] = None  # test-only hook forwarded to the child (see _search_worker.py)
+_last_worker_proc: Optional[subprocess.Popen] = None  # last worker Popen (test reap checks)
 
 
 class _SearchInterrupted(Exception):
@@ -43,98 +35,71 @@ class _SearchInterrupted(Exception):
 
 
 def _run_ddgs_search(query: str, safe_limit: int) -> list[dict[str, Any]]:
-    """Blocking ddgs query → normalized hits. Module-level so the child worker can
-    import it and tests can patch it for in-process runs."""
+    """Blocking ddgs query → normalized hits (module-level: the child worker imports it,
+    tests patch it for in-process runs)."""
     from ddgs import DDGS  # type: ignore
-
     results: list[dict[str, Any]] = []
     with DDGS(timeout=10) as client:
         for i, hit in enumerate(client.text(query, max_results=safe_limit)):
             if i >= safe_limit:
                 break
-            results.append(
-                {
-                    "title": str(hit.get("title", "")),
-                    "url": str(hit.get("href") or hit.get("url") or ""),
-                    "description": str(hit.get("body", "")),
-                    "position": i + 1,
-                }
-            )
+            results.append(title_hit(str(hit.get("title", "")), str(hit.get("href") or hit.get("url") or ""), str(hit.get("body", "")), i + 1))
     return results
 
 
 def _plugins_path_entry() -> str:
-    """``sys.path`` entry that makes ``import plugins`` work in the child (prefers
-    the live package location; correct for source checkouts and site-packages)."""
+    """``sys.path`` entry that makes ``import plugins`` work in the child (live package
+    location first; correct for source checkouts and site-packages)."""
     try:
         import plugins as plugins_pkg
-
-        pkg_file = getattr(plugins_pkg, "__file__", None)
-        if pkg_file:
+        if pkg_file := getattr(plugins_pkg, "__file__", None):
             return os.path.dirname(os.path.dirname(os.path.abspath(pkg_file)))
     except Exception:  # noqa: BLE001 — fall through to path-walk fallback
         pass
-    here = os.path.abspath(__file__)
-    for _ in range(4):
-        here = os.path.dirname(here)
-    return here
+    return os.path.abspath(os.path.join(__file__, *([os.pardir] * 4)))
 
 
 def _terminate_and_reap(proc: Optional[subprocess.Popen], *, grace: float = _TERMINATE_GRACE_SECS) -> None:
-    """Terminate a worker, escalate to kill, and wait so no orphan remains.
-
-    Does not close the parent's pipe ends — closing stdout while another thread is
-    blocked in ``read()`` deadlocks on some platforms; the caller drains first.
-    """
+    """Terminate a worker, escalate to kill, and wait so no orphan remains. Does not close
+    the parent's pipe ends — closing stdout while another thread is blocked in ``read()``
+    deadlocks on some platforms; the caller drains first."""
     if proc is None:
         return
+    alive = False
 
-    def _wait_until_dead(seconds: float) -> bool:
-        deadline = time.monotonic() + seconds
+    def _wait_until_dead() -> bool:
+        deadline = time.monotonic() + grace
         while proc.poll() is None and time.monotonic() < deadline:
             time.sleep(0.05)
         return proc.poll() is not None
 
     try:
-        if proc.poll() is None:
-            proc.terminate()
-            _wait_until_dead(grace)
-        if proc.poll() is None:
-            proc.kill()
-            if not _wait_until_dead(grace):
-                logger.warning("DDGS worker pid=%s did not exit after kill", proc.pid)
+        for escalate in (proc.terminate, proc.kill):
+            if proc.poll() is None:
+                escalate()
+                alive = not _wait_until_dead()
+        if alive:
+            logger.warning("DDGS worker pid=%s did not exit after kill", proc.pid)
     except Exception as exc:  # noqa: BLE001 — best-effort cleanup
         logger.debug("DDGS worker reap error: %s", exc)
 
 
 def _spawn_worker(env: dict[str, str]) -> subprocess.Popen:
-    """Start ``_search_worker.py`` as a script with ``plugins`` importable."""
-    # Running the worker as a script puts ``plugins/web/ddgs/`` on ``sys.path[0]``,
-    # which breaks ``import plugins...``; prepend the real package location.
+    """Start ``_search_worker.py`` as a script with ``plugins`` importable. Running as a
+    script puts ``plugins/web/ddgs/`` on ``sys.path[0]``, breaking ``import plugins...``,
+    so the real package location is prepended to PYTHONPATH."""
     child_pythonpath = env.get("PYTHONPATH", "")
     path_entry = _plugins_path_entry()
     if path_entry and path_entry not in child_pythonpath.split(os.pathsep):
         env["PYTHONPATH"] = path_entry + os.pathsep + child_pythonpath if child_pythonpath else path_entry
-
     worker_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "_search_worker.py")
-    # stdin/stdout/stderr must stay explicit keyword args on the Popen call so
-    # scripts/check_subprocess_stdin.py can see them (TUI gateway inherits stdin).
-    extra_kwargs: dict[str, Any] = (
-        {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}  # so terminate/kill reach the worker
-        if sys.platform == "win32"
-        else {"start_new_session": True}  # own session so a hung primp grandchild is reaped too
-    )
+    # Own process group/session so terminate/kill also reach a hung primp grandchild.
+    extra_kwargs: dict[str, Any] = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if sys.platform == "win32" else {"start_new_session": True}
+    # stdin/stdout/stderr stay explicit keyword args so scripts/check_subprocess_stdin.py sees them
+    # (TUI gateway inherits stdin). stderr=DEVNULL: a chatty child would deadlock a stdout-only drain.
     return subprocess.Popen(
-        [sys.executable, worker_path],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        # DEVNULL: a chatty child filling the stderr pipe while we only drain stdout would deadlock.
-        stderr=subprocess.DEVNULL,
-        env=env,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        **extra_kwargs,
+        [sys.executable, worker_path], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        env=env, text=True, encoding="utf-8", errors="replace", **extra_kwargs,
     )
 
 
@@ -149,72 +114,52 @@ def _parse_envelope(raw: str, proc: subprocess.Popen) -> list[dict[str, Any]]:
         raise RuntimeError(f"DDGS worker returned invalid JSON: {raw[:200]!r}") from exc
     if not isinstance(envelope, dict):
         raise RuntimeError(f"DDGS worker returned an invalid envelope: {envelope!r}")
-    if envelope.get("ok"):
-        results = envelope.get("results") or []
-        if not isinstance(results, list):
-            raise RuntimeError("DDGS worker returned non-list results")
-        return results
-    raise RuntimeError(str(envelope.get("error") or "DDGS worker failed"))
+    if not envelope.get("ok"):
+        raise RuntimeError(str(envelope.get("error") or "DDGS worker failed"))
+    results = envelope.get("results") or []
+    if not isinstance(results, list):
+        raise RuntimeError("DDGS worker returned non-list results")
+    return results
 
 
 def _run_ddgs_search_bounded(query: str, safe_limit: int) -> list[dict[str, Any]]:
-    """Run ``_run_ddgs_search`` in a disposable process with a hard deadline.
-
-    The parent never joins a child that may be in native code holding *its* GIL —
-    it polls a communicator thread and, on timeout/interrupt, kills the OS process.
-    Raises ``TimeoutError``, ``_SearchInterrupted``, or ``RuntimeError``.
-    """
+    """Run ``_run_ddgs_search`` in a disposable process with a hard deadline. The parent
+    never joins a child that may be in native code holding *its* GIL — it polls a
+    communicator thread and, on timeout/interrupt, kills the OS process.
+    Raises ``TimeoutError``, ``_SearchInterrupted``, or ``RuntimeError``."""
     from tools.interrupt import is_interrupted  # lazy: keep plugin import light
     from tools.environments.local import _sanitize_subprocess_env
-
     global _last_worker_proc
-
     request: dict[str, Any] = {"query": query, "safe_limit": safe_limit}
     env = _sanitize_subprocess_env(dict(os.environ))
     if _test_hook:
         request["test_hook"] = _test_hook
         env["HERMES_DDGS_ALLOW_TEST_HOOKS"] = "1"
-
-    proc = _spawn_worker(env)
-    _last_worker_proc = proc
-
+    proc = _last_worker_proc = _spawn_worker(env)
     # ``communicate`` runs in a side thread so the parent can poll interrupt /
     # deadline without blocking; killing the child unblocks it.
     pool = cf.ThreadPoolExecutor(max_workers=1)
     fut = pool.submit(proc.communicate, json.dumps(request))
-    timed_out = interrupted = False
-    raw = ""
+    interrupted, done, raw = False, False, ""
     try:
         deadline = time.monotonic() + _SEARCH_TIMEOUT_SECS
-        while True:
-            if is_interrupted():
-                interrupted = True
-                break
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                timed_out = True
-                break
+        while not done and not (interrupted := is_interrupted()) and (remaining := deadline - time.monotonic()) > 0:
             try:
-                out, _err = fut.result(timeout=min(_POLL_INTERVAL_SECS, remaining))
-                raw = out or ""
-                break
+                raw, done = fut.result(timeout=min(_POLL_INTERVAL_SECS, remaining))[0] or "", True
             except cf.TimeoutError:
-                continue
+                pass
     finally:
         _terminate_and_reap(proc)
         # After kill, communicate should return promptly; don't block forever.
         if not fut.done():
             try:
-                out, _err = fut.result(timeout=_TERMINATE_GRACE_SECS)
-                if not raw:
-                    raw = out or ""
+                raw = raw or fut.result(timeout=_TERMINATE_GRACE_SECS)[0] or ""
             except Exception:  # noqa: BLE001
                 pass
         pool.shutdown(wait=False, cancel_futures=True)
-
     if interrupted:
         raise _SearchInterrupted("DuckDuckGo search interrupted")
-    if timed_out:
+    if not done:
         raise TimeoutError(f"DuckDuckGo search timed out after {_SEARCH_TIMEOUT_SECS}s")
     return _parse_envelope(raw, proc)
 
@@ -231,7 +176,6 @@ class DDGSWebSearchProvider(BaseWebSearchProvider):
         tool-registration time and on every ``hermes tools`` paint."""
         try:
             import ddgs  # noqa: F401
-
             return True
         except ImportError:
             return False
@@ -241,18 +185,14 @@ class DDGSWebSearchProvider(BaseWebSearchProvider):
         hung native ``primp`` call cannot freeze the Hermes process."""
         if not self.is_available():
             return search_fail("ddgs package is not installed — run `pip install ddgs`")
-
-        # Defensive cap in case the package ignores its max_results hint.
-        safe_limit = max(1, int(limit))
-
         try:
-            web_results = _run_ddgs_search_bounded(query, safe_limit)
+            # max(1, …): defensive cap in case the package ignores its max_results hint.
+            web_results = _run_ddgs_search_bounded(query, max(1, int(limit)))
         except TimeoutError:
             logger.warning("DDGS search timed out after %ds for query: %r", _SEARCH_TIMEOUT_SECS, query)
             return search_fail(
                 f"DuckDuckGo search timed out after {_SEARCH_TIMEOUT_SECS}s — "
-                "DuckDuckGo may be rate-limiting or slow. Try again later "
-                "or switch to a different search provider."
+                "DuckDuckGo may be rate-limiting or slow. Try again later or switch to a different search provider."
             )
         except _SearchInterrupted:
             logger.info("DDGS search interrupted for query: %r", query)
@@ -260,16 +200,12 @@ class DDGSWebSearchProvider(BaseWebSearchProvider):
         except Exception as exc:  # noqa: BLE001 — ddgs raises its own exceptions
             logger.warning("DDGS search error: %s", exc)
             return search_fail(f"DuckDuckGo search failed: {exc}")
-
         logger.info("DDGS search '%s': %d results (limit %d)", query, len(web_results), limit)
         return search_ok(web_results)
 
     def get_setup_schema(self) -> Dict[str, Any]:
-        return {
-            "name": "DuckDuckGo (ddgs)",
-            "badge": "free · no key · search only",
-            "tag": "Search via the ddgs Python package — no API key (pair with any extract provider)",
-            "env_vars": [],
-            # Triggers `_run_post_setup("ddgs")` so the package gets pip-installed on first pick.
-            "post_setup": "ddgs",
-        }
+        # post_setup triggers `_run_post_setup("ddgs")` so the package gets pip-installed on first pick.
+        return setup_schema(
+            "DuckDuckGo (ddgs)", "free · no key · search only",
+            "Search via the ddgs Python package — no API key (pair with any extract provider)", post_setup="ddgs",
+        )
