@@ -32,10 +32,8 @@ def _origin_from_env() -> Optional[Dict[str, str]]:
             "Cron origin captured thread_id=%s for %s:%s",
             thread_id, origin_platform, origin_chat_id)
     return {
-        "platform": origin_platform,
-        "chat_id": origin_chat_id,
-        "chat_name": get_session_env("HERMES_SESSION_CHAT_NAME") or None,
-        "thread_id": thread_id,
+        "platform": origin_platform, "chat_id": origin_chat_id,
+        "chat_name": get_session_env("HERMES_SESSION_CHAT_NAME") or None, "thread_id": thread_id,
         # Lets a delivery mirror resolve the participant's session in per-user-isolated groups.
         "user_id": get_session_env("HERMES_SESSION_USER_ID") or None,
         # Workspace/server scope (Slack team, Discord guild...): Slack session keys embed it,
@@ -52,7 +50,6 @@ def _local_delivery_notice(job: Dict[str, Any], user_deliver: Optional[str]) -> 
         return None
     try:
         from cron.scheduler import _resolve_delivery_targets
-
         if _resolve_delivery_targets(job):
             return None
     except Exception:  # resolution unavailable — fall back to the origin signal
@@ -211,7 +208,6 @@ def _resolve_cron_context_deliver(deliver: Optional[str]) -> Optional[str]:
     elements pass through. Otherwise the scheduler would guess a home channel."""
     from gateway.session_context import get_session_env
     from utils import is_truthy_value
-
     if not is_truthy_value(get_session_env("HERMES_CRON_SESSION", "")):
         return deliver
 
@@ -291,7 +287,6 @@ def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
         return None
 
     from hermes_constants import get_hermes_home
-
     raw = script.strip()
     if raw.startswith(("/", "~")) or (len(raw) >= 2 and raw[1] == ":"):
         return (
@@ -300,7 +295,6 @@ def _validate_cron_script_path(script: Optional[str]) -> Optional[str]:
             f"Place scripts in ~/.hermes/scripts/ and use just the filename.")
 
     from tools.path_security import validate_within_dir
-
     scripts_dir = get_hermes_home() / "scripts"
     scripts_dir.mkdir(parents=True, exist_ok=True)
     if validate_within_dir(scripts_dir / raw, scripts_dir):
@@ -392,7 +386,6 @@ def _gateway_liveness_notice(plural: bool = False) -> dict:
     on "scheduler active". False -> warning (no gateway process), None -> probe failed."""
     try:
         from hermes_cli.cron import _builtin_gateway_liveness
-
         _gw = _builtin_gateway_liveness()
     except Exception:
         return {"gateway_running": None}
