@@ -34,7 +34,6 @@ class NasCronClient:
     def _request(self, method: str, path: str, **kwargs: Any) -> Dict[str, Any]:
         """Issue one request; raise NasCronClientError on transport error or non-2xx."""
         import requests  # lazy: agent already depends on requests
-
         try:
             resp = requests.request(method, f"{self.portal_url}{path}", headers=self._headers(),
                                     timeout=self.timeout_seconds, **kwargs)

@@ -31,7 +31,6 @@ def _get_jwk_client(jwks_url: str) -> Any:
         client = _JWK_CLIENTS.get(jwks_url)
         if client is None:
             from jwt import PyJWKClient
-
             # Explicit Accept + User-Agent: the portal WAF 403s the default urllib fingerprint.
             client = PyJWKClient(
                 jwks_url, headers={"Accept": "application/json", "User-Agent": "HermesAgent/1.0"})
@@ -50,15 +49,12 @@ def verify_nas_fire_token(*, token: str, expected_audience: str, jwks_or_key: Op
     if not jwks_or_key:  # never fall back to unsigned decode on a security boundary
         logger.warning("cron fire: no JWKS/key configured; refusing token")
         return None
-
     try:
         import jwt
-
         if jwks_or_key.startswith(("http://", "https://")):
             signing_key = _get_jwk_client(jwks_or_key).get_signing_key_from_jwt(token).key
         else:
             signing_key = jwks_or_key  # inline PEM public key (test / pinned-key deployments)
-
         decode_kwargs: Dict[str, Any] = dict(
             algorithms=["RS256", "RS384", "RS512", "ES256", "ES384"], audience=expected_audience,
             leeway=leeway_seconds, options={"require": ["exp", "aud"]})
@@ -68,7 +64,6 @@ def verify_nas_fire_token(*, token: str, expected_audience: str, jwks_or_key: Op
     except Exception as e:
         logger.warning("cron fire: token verification failed: %s", e)
         return None
-
     if claims.get("purpose") != _FIRE_PURPOSE:
         logger.warning("cron fire: token missing/!=%s purpose claim", _FIRE_PURPOSE)
         return None

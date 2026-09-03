@@ -36,7 +36,6 @@ def load_context_engine(name: str) -> Optional["ContextEngine"]:  # noqa: F821
 def _load_engine_from_dir(engine_dir: Path) -> Optional["ContextEngine"]:  # noqa: F821
     """Import an engine module and extract its ContextEngine (register(ctx) or subclass)."""
     from agent.context_engine import ContextEngine
-
     name = engine_dir.name
     mod = _loader.load_plugin_module(
         f"plugins.context_engine.{name}", engine_dir,
@@ -66,7 +65,6 @@ class _EngineCollector(_loader.NoopPluginContext):
             logger.warning("Context engine '%s' tried to register a command with an empty name.",
                            self._engine_name)
             return
-
         conflict = "Context engine '%s' tried to register command '/%s' which %s Skipping."
         try:
             from hermes_cli.commands import resolve_command

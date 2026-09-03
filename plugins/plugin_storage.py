@@ -28,7 +28,6 @@ def plugin_data_dir(name: str) -> Path:
     """Return (and create) ``<hermes home>/plugin-data/<name>/``; resolves ``get_hermes_home()`` on
     every call so it follows the active profile — don't cache across profile switches."""
     from hermes_constants import get_hermes_home
-
     root = get_hermes_home() / "plugin-data" / _validate_name(name)
     root.mkdir(parents=True, exist_ok=True)
     return root
@@ -39,7 +38,6 @@ def plugin_db(name: str, filename: str = "data.db") -> sqlite3.Connection:
     ``check_same_thread=False`` for the threaded FastAPI/tool env — caller owns transactions."""
     if Path(filename).name != filename or not filename:
         raise ValueError(f"invalid plugin db filename: {filename!r}")
-
     conn = sqlite3.connect(plugin_data_dir(name) / filename, check_same_thread=False)
     conn.execute("PRAGMA journal_mode=WAL")
     conn.execute("PRAGMA foreign_keys=ON")
