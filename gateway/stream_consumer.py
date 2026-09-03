@@ -657,12 +657,9 @@ class GatewayStreamConsumer(
         self._use_native_streaming = self._resolve_native_streaming()
         if self._use_native_streaming:
             logger.debug("Stream consumer using native-stream transport (chat=%s)", self.chat_id)
-            try:
-                seed_ok = bool(await self._send_seed_frame())
-            except Exception:
-                logger.debug("Native streaming seed frame raised; disabling native", exc_info=True)
-                seed_ok = False
-            if seed_ok:
+            if await self._try_seed_frame(
+                "Native streaming seed frame raised; disabling native", exc_info=True,
+            ):
                 self._native_stream_opened = True
                 self._use_draft_streaming = False
                 return
@@ -754,12 +751,7 @@ class GatewayStreamConsumer(
         """
         if not self._reopen_seed_pending():
             return
-        try:
-            seed_ok = await self._send_seed_frame()
-        except Exception as e:
-            logger.debug("Eager reopen seed raised, disabling native: %s", e)
-            seed_ok = False
-        if seed_ok:
+        if await self._try_seed_frame("Eager reopen seed raised, disabling native: %s"):
             self._native_stream_opened = True
             self._native_last_pushed_len = 0
             self._awaiting_reopen_after_boundary = False

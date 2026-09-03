@@ -48,6 +48,20 @@ class StreamTransportMixin:
             "", chat_id=self.chat_id, reply_to=self._initial_reply_to_id, turn_id=self._turn_id,
         )
 
+    async def _try_seed_frame(self, fail_log: str, *, exc_info: bool = False) -> bool:
+        """_send_seed_frame() as a bool; a raise logs ``fail_log`` at DEBUG and reads as False.
+
+        ``exc_info`` logs the traceback instead of formatting the error into ``fail_log``.
+        """
+        try:
+            return bool(await self._send_seed_frame())
+        except Exception as e:
+            if exc_info:
+                logger.debug(fail_log, exc_info=True)
+            else:
+                logger.debug(fail_log, e)
+            return False
+
     async def _send_frame(self, text: str, *, finalize: bool):
         """One native-stream frame; every frame carries the same chat/reply/turn routing."""
         return await self.adapter.send_stream_frame(
@@ -387,12 +401,7 @@ class StreamTransportMixin:
         native was disabled (seed/frame failure) so the caller falls through.
         """
         if not self._native_stream_opened and text:
-            try:
-                seeded = await self._send_seed_frame()
-            except Exception as e:
-                logger.debug("Re-seed failed, disabling native streaming: %s", e)
-                seeded = False
-            if not seeded:
+            if not await self._try_seed_frame("Re-seed failed, disabling native streaming: %s"):
                 self._use_native_streaming = False
                 return None
             self._native_stream_opened = True
