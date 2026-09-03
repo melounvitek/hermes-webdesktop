@@ -26,7 +26,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Optional, Set, Tuple
 
-from hermes_cli._subprocess_compat import IS_WINDOWS, kill_process_tree, windows_hide_flags
+# split_command_line, not shlex: shlex eats Windows path backslashes.
+from hermes_cli._subprocess_compat import IS_WINDOWS, kill_process_tree, split_command_line, windows_hide_flags
 
 try:
     import fcntl  # POSIX only; Windows falls back to best-effort without flock.
@@ -71,12 +72,6 @@ def _forget_home_registrations(registry: Set[tuple], lock: threading.Lock) -> No
     home_key = _home_key()
     with lock:
         registry.difference_update({k for k in registry if k[0] == home_key})
-
-
-def _split(command: str) -> List[str]:
-    from hermes_cli._subprocess_compat import split_command_line  # Windows-safe: shlex eats path backslashes
-
-    return split_command_line(command)
 
 
 def _entry_matches(e: Any, event: Optional[str], command: str) -> bool:
@@ -151,25 +146,21 @@ def register_from_config(cfg: Optional[Dict[str, Any]], *, accept_hooks: bool = 
     newly wired up; skipped entries (unknown, malformed, not allowlisted, registered) are logged only."""
     if not isinstance(cfg, dict):
         return []
-
     # Safe mode: hooks are user customizations too — fire zero user-configured code.
     from utils import env_var_enabled
 
     if env_var_enabled("HERMES_SAFE_MODE"):
         logger.info("HERMES_SAFE_MODE=1 — shell-hook registration skipped")
         return []
-
     effective_accept = _resolve_effective_accept(cfg, accept_hooks)
     specs = _parse_hooks_block(cfg.get("hooks"))
     if not specs:
         return []
-
     registered: List[ShellHookSpec] = []
     from hermes_cli.plugins import get_plugin_manager  # lazy: avoids import cycle
 
     manager = get_plugin_manager()
     home_key = _home_key()
-
     # Idempotence + allowlist read happen under the lock; the TTY prompt runs outside it; mutation
     # re-takes the lock and re-checks in case two callers raced.
     for spec in specs:
@@ -178,7 +169,6 @@ def register_from_config(cfg: Optional[Dict[str, Any]], *, accept_hooks: bool = 
             if key in _registered:
                 continue
             already_allowlisted = _is_allowlisted(spec.event, spec.command)
-
         if not already_allowlisted and not _prompt_and_record(spec.event, spec.command, accept_hooks=effective_accept):
             logger.warning(
                 "shell hook for %s (%s) not allowlisted — skipped. Use --accept-hooks / "
@@ -186,7 +176,6 @@ def register_from_config(cfg: Optional[Dict[str, Any]], *, accept_hooks: bool = 
                 spec.event, spec.command,
             )
             continue
-
         with _registered_lock:
             if key in _registered:
                 continue
@@ -197,15 +186,12 @@ def register_from_config(cfg: Optional[Dict[str, Any]], *, accept_hooks: bool = 
                 "shell hook registered: %s -> %s (matcher=%s, timeout=%ds, fail_closed=%s)",
                 spec.event, spec.command, spec.matcher, spec.timeout, spec.fail_closed,
             )
-
     return registered
 
 
 def iter_configured_hooks(cfg: Optional[Dict[str, Any]]) -> List[ShellHookSpec]:
     """Parse config hooks without registering (``hermes hooks list`` / doctor)."""
-    if not isinstance(cfg, dict):
-        return []
-    return _parse_hooks_block(cfg.get("hooks"))
+    return _parse_hooks_block(cfg.get("hooks")) if isinstance(cfg, dict) else []
 
 
 def re_register_config_hooks() -> None:
@@ -231,11 +217,9 @@ def _parse_hooks_block(hooks_cfg: Any) -> List[ShellHookSpec]:
 
     if not isinstance(hooks_cfg, dict):
         return []
-
     specs: List[ShellHookSpec] = []
     for event_name, entries in hooks_cfg.items():
-        # Reserved non-event sub-sections nested under `hooks:`.
-        if event_name in ("output_spill", "outbound"):
+        if event_name in ("output_spill", "outbound"):  # reserved non-event sub-sections under `hooks:`
             continue
         if event_name in SHELL_UNSUPPORTED_HOOKS:
             # _parse_response has no channel for these directives — refuse loudly.
@@ -258,7 +242,6 @@ def _parse_hooks_block(hooks_cfg: Any) -> List[ShellHookSpec]:
             logger.warning("hooks.%s must be a list of hook definitions; got %s", event_name, type(entries).__name__)
             continue
         specs.extend(filter(None, (_parse_single_entry(event_name, i, raw) for i, raw in enumerate(entries))))
-
     return specs
 
 
@@ -269,12 +252,10 @@ def _parse_single_entry(event: str, index: int, raw: Any) -> Optional[ShellHookS
     if not isinstance(raw, dict):
         warn(" must be a mapping with a 'command' key; got %s", type(raw).__name__)
         return None
-
     command = raw.get("command")
     if not isinstance(command, str) or not command.strip():
         warn(" is missing a non-empty 'command' field")
         return None
-
     matcher = raw.get("matcher")
     if matcher is not None and not isinstance(matcher, str):
         warn(".matcher must be a string regex; ignoring")
@@ -286,12 +267,10 @@ def _parse_single_entry(event: str, index: int, raw: Any) -> Optional[ShellHookS
             matcher, event,
         )
         matcher = None
-
-    timeout_raw = raw.get("timeout", DEFAULT_TIMEOUT_SECONDS)
     try:
-        timeout = int(timeout_raw)
+        timeout = int(raw.get("timeout", DEFAULT_TIMEOUT_SECONDS))
     except (TypeError, ValueError):
-        warn(".timeout must be an int (got %r); using default %ds", timeout_raw, DEFAULT_TIMEOUT_SECONDS)
+        warn(".timeout must be an int (got %r); using default %ds", raw.get("timeout"), DEFAULT_TIMEOUT_SECONDS)
         timeout = DEFAULT_TIMEOUT_SECONDS
     if timeout < 1:
         warn(".timeout must be >=1; using default %ds", DEFAULT_TIMEOUT_SECONDS)
@@ -299,7 +278,6 @@ def _parse_single_entry(event: str, index: int, raw: Any) -> Optional[ShellHookS
     if timeout > MAX_TIMEOUT_SECONDS:
         warn(".timeout=%ds exceeds max %ds; clamping", timeout, MAX_TIMEOUT_SECONDS)
         timeout = MAX_TIMEOUT_SECONDS
-
     # ``fail_closed`` (canonical) wins over ``failClosed`` (Cursor/Claude-Code compat).
     fail_closed = raw.get("fail_closed", raw.get("failClosed", False))
     if not isinstance(fail_closed, bool):
@@ -312,18 +290,20 @@ def _parse_single_entry(event: str, index: int, raw: Any) -> Optional[ShellHookS
             ", ".join(sorted(_BLOCKING_EVENTS)), event,
         )
         fail_closed = False
-
     return ShellHookSpec(event=event, command=command.strip(), matcher=matcher, timeout=timeout, fail_closed=fail_closed)
 
 
 # --- Subprocess callback ---
 
+# Popen failure -> diagnostic; anything else is reported as str(exc).
+_POPEN_ERRORS = ((FileNotFoundError, "command not found"), (PermissionError, "command not executable"))
+
+
 def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
     """Run ``spec.command`` with ``stdin_json`` on stdin; the single subprocess site.
     Returns a diagnostic dict with the same keys for every outcome."""
     result: Dict[str, Any] = {
-        "returncode": None, "stdout": "", "stderr": "",
-        "timed_out": False, "elapsed_seconds": 0.0, "error": None,
+        "returncode": None, "stdout": "", "stderr": "", "timed_out": False, "elapsed_seconds": 0.0, "error": None,
     }
 
     def failed(error: str) -> Dict[str, Any]:
@@ -331,12 +311,11 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
         return result
 
     try:
-        argv = _split(os.path.expanduser(spec.command))
+        argv = split_command_line(os.path.expanduser(spec.command))
     except ValueError as exc:
         return failed(f"command {spec.command!r} cannot be parsed: {exc}")
     if not argv:
         return failed("empty command")
-
     t0 = time.monotonic()
     # Own process group on POSIX so a timed-out hook's descendants are reaped with it; Windows tree
     # cleanup goes through kill_process_tree (taskkill /T). Hooks that finish in time keep detached
@@ -344,18 +323,11 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
     popen_kwargs: Dict[str, Any] = {"creationflags": windows_hide_flags()} if IS_WINDOWS else {"process_group": 0}
     try:
         proc = subprocess.Popen(
-            argv,
-            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-            text=True, encoding='utf-8', errors='replace', shell=False,
-            **popen_kwargs,
+            argv, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, encoding='utf-8', errors='replace', shell=False, **popen_kwargs,
         )
-    except FileNotFoundError:
-        return failed("command not found")
-    except PermissionError:
-        return failed("command not executable")
-    except Exception as exc:  # pragma: no cover — defensive
-        return failed(str(exc))
-
+    except Exception as exc:
+        return failed(next((msg for cls, msg in _POPEN_ERRORS if isinstance(exc, cls)), str(exc)))
     try:
         stdout, stderr = proc.communicate(input=stdin_json, timeout=spec.timeout)
     except Exception as exc:
@@ -368,10 +340,8 @@ def _spawn(spec: ShellHookSpec, stdin_json: str) -> Dict[str, Any]:
         result["timed_out"] = True
         result["elapsed_seconds"] = round(time.monotonic() - t0, 3)
         return result
-
     result.update(
-        returncode=proc.returncode, stdout=stdout or "", stderr=stderr or "",
-        elapsed_seconds=round(time.monotonic() - t0, 3),
+        returncode=proc.returncode, stdout=stdout or "", stderr=stderr or "", elapsed_seconds=round(time.monotonic() - t0, 3),
     )
     return result
 
@@ -384,8 +354,7 @@ def _make_callback(spec: ShellHookSpec) -> Callable[..., Optional[Dict[str, Any]
             return None
         return _evaluate_result(spec, _spawn(spec, _serialize_payload(spec.event, kwargs)))
 
-    _callback.__name__ = f"shell_hook[{spec.event}:{spec.command}]"
-    _callback.__qualname__ = _callback.__name__
+    _callback.__name__ = _callback.__qualname__ = f"shell_hook[{spec.event}:{spec.command}]"
     return _callback
 
 
@@ -400,39 +369,30 @@ def _evaluate_result(spec: ShellHookSpec, r: Dict[str, Any]) -> Optional[Dict[st
     stdout; unparseable stdout on a fail_closed hook blocks."""
     blocking_event = spec.event in _BLOCKING_EVENTS
     fail_closed = spec.fail_closed and blocking_event
-
     if r["error"]:
         logger.warning("shell hook failed (event=%s command=%s): %s", spec.event, spec.command, r["error"])
         return _fail_closed_block(spec, r["error"]) if fail_closed else None
     if r["timed_out"]:
         logger.warning("shell hook timed out after %.2fs (event=%s command=%s)", r["elapsed_seconds"], spec.event, spec.command)
         return _fail_closed_block(spec, f"timed out after {spec.timeout}s") if fail_closed else None
-
     stderr = r["stderr"].strip()
     if stderr:
         logger.debug("shell hook stderr (event=%s command=%s): %s", spec.event, spec.command, stderr[:_STDERR_MESSAGE_LIMIT])
-
     if r["returncode"] == BLOCK_EXIT_CODE and blocking_event:
         parsed = _parse_response(spec.event, r["stdout"])
         if isinstance(parsed, dict) and parsed.get("action") == "block":
             return parsed
         message = stderr[:_STDERR_MESSAGE_LIMIT] or _DEFAULT_BLOCK_MESSAGE
-        logger.info(
-            "shell hook exited %d — blocking (event=%s command=%s): %s",
-            BLOCK_EXIT_CODE, spec.event, spec.command, message,
-        )
+        logger.info("shell hook exited %d — blocking (event=%s command=%s): %s", BLOCK_EXIT_CODE, spec.event, spec.command, message)
         return {"action": "block", "message": message}
-
     # Other non-zero exits: still parse stdout so exit-code failures can carry a block directive.
     if r["returncode"] != 0:
         logger.warning(
             "shell hook exited %d (event=%s command=%s); stderr=%s",
             r["returncode"], spec.event, spec.command, stderr[:_STDERR_MESSAGE_LIMIT],
         )
-
     stdout = (r["stdout"] or "").strip()
     parsed = _parse_response(spec.event, stdout)
-
     if parsed is None and fail_closed and stdout and not _is_json_object(stdout):
         # A fail-closed gate must not silently allow on garbage stdout (e.g. a stack trace).
         return _fail_closed_block(spec, "unparseable stdout (expected a JSON object)")
@@ -457,35 +417,34 @@ def _block_message(primary: Any, secondary: Any) -> str:
     return raw if isinstance(raw, str) and raw else _DEFAULT_BLOCK_MESSAGE
 
 
+# pre_tool_call response dialects, checked in order: Hermes ``action`` then Claude-Code ``decision``.
+# (verb key, block-message primary, block-message secondary, modify payload key) — the Claude-Code shape
+# is translated to the canonical one expected by get_pre_tool_call_block_message.
+_PRE_TOOL_DIALECTS = (("action", "message", "reason", "args"), ("decision", "reason", "message", "tool_input"))
+
+
 def _parse_pre_tool_call(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    # Claude-Code-style {"decision": ..., "reason"/"tool_input": ...} is translated to the canonical
-    # Hermes shape expected by get_pre_tool_call_block_message.
-    if data.get("action") == "block":
-        return {"action": "block", "message": _block_message(data.get("message"), data.get("reason"))}
-    if data.get("decision") == "block":
-        return {"action": "block", "message": _block_message(data.get("reason"), data.get("message"))}
-    if data.get("action") == "modify" and isinstance(data.get("args"), dict):
-        return {"action": "modify", "args": data["args"]}
-    if data.get("decision") == "modify" and isinstance(data.get("tool_input"), dict):
-        return {"action": "modify", "args": data["tool_input"]}
+    for verb, primary, secondary, _ in _PRE_TOOL_DIALECTS:
+        if data.get(verb) == "block":
+            return {"action": "block", "message": _block_message(data.get(primary), data.get(secondary))}
+    for verb, _, _, payload in _PRE_TOOL_DIALECTS:
+        if data.get(verb) == "modify" and isinstance(data.get(payload), dict):
+            return {"action": "modify", "args": data[payload]}
     return None
 
 
 def _parse_pre_verify(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     # "continue" (Hermes) / "block" (Claude-Code Stop) both mean keep going; no message is a no-op.
     action = str(data.get("action") or data.get("decision") or "").strip().lower()
-    if action in {"continue", "block"}:
-        message = data.get("message") or data.get("reason")
-        if isinstance(message, str) and message.strip():
-            return {"action": "continue", "message": message.strip()}
+    message = data.get("message") or data.get("reason")
+    if action in {"continue", "block"} and isinstance(message, str) and message.strip():
+        return {"action": "continue", "message": message.strip()}
     return None
 
 
 def _parse_context(data: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     context = data.get("context")
-    if isinstance(context, str) and context.strip():
-        return {"context": context}
-    return None
+    return {"context": context} if isinstance(context, str) and context.strip() else None
 
 
 _RESPONSE_PARSERS: Dict[str, Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]] = {
@@ -582,10 +541,8 @@ def _prompt_and_record(event: str, command: str, *, accept_hooks: bool) -> bool:
         _record_approval(event, command)
         logger.info("shell hook auto-approved via --accept-hooks / env / config: %s -> %s", event, command)
         return True
-
     if not sys.stdin.isatty():
         return False
-
     print(
         f"\n⚠ Hermes is about to register a shell hook that will run a\n"
         f"  command on your behalf.\n\n"
@@ -599,7 +556,6 @@ def _prompt_and_record(event: str, command: str, *, accept_hooks: bool) -> bool:
     except (EOFError, KeyboardInterrupt):
         print()  # keep the terminal tidy after ^C
         return False
-
     if answer not in {"y", "yes"}:
         return False
     _record_approval(event, command)
@@ -627,10 +583,7 @@ def revoke(command: str) -> int:
 
 
 _SCRIPT_EXTENSIONS: Tuple[str, ...] = (
-    ".sh", ".bash", ".zsh", ".fish",
-    ".py", ".pyw",
-    ".rb", ".pl", ".lua",
-    ".js", ".mjs", ".cjs", ".ts",
+    ".sh", ".bash", ".zsh", ".fish", ".py", ".pyw", ".rb", ".pl", ".lua", ".js", ".mjs", ".cjs", ".ts",
 )
 
 
@@ -638,10 +591,8 @@ def _command_script_path(command: str) -> str:
     """Script path from ``command``: first token with a script extension, then a path-like token,
     then the first token (``python3 /p/hook.py``, ``/usr/bin/env bash x.sh``)."""
     try:
-        parts = _split(command)
+        parts = split_command_line(command) or [command]
     except ValueError:
-        return command
-    if not parts:
         return command
     return (
         next((p for p in parts if p.lower().endswith(_SCRIPT_EXTENSIONS)), None)
@@ -683,13 +634,11 @@ def script_is_executable(command: str) -> bool:
     """True iff ``command`` is runnable as configured: a bare script needs X_OK, an
     interpreter-prefixed one only R_OK (mirrors what ``_spawn`` does)."""
     path = _command_script_path(command)
-    if not path:
-        return False
     expanded = os.path.expanduser(path)
-    if not os.path.isfile(expanded):
+    if not path or not os.path.isfile(expanded):
         return False
     try:
-        argv = _split(command)
+        argv = split_command_line(command)
     except ValueError:
         return False
     is_bare_invocation = bool(argv) and argv[0] == path
