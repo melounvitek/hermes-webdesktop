@@ -1,11 +1,11 @@
 """AST-level deep audit for skill Python files — opt-in diagnostic (``hermes skills audit --deep``), not a
-security gate (SECURITY.md §2.4). Flags dynamic import / dynamic attribute access patterns for human review;
-every pattern has legitimate uses, so findings are hints, not verdicts.
-"""
+security gate (SECURITY.md §2.4). Flags dynamic import / attribute access for human review; every pattern has
+legitimate uses, so findings are hints, not verdicts."""
 
 from __future__ import annotations
 
 import ast
+from contextlib import suppress
 from pathlib import Path
 from typing import List, Tuple
 
@@ -14,10 +14,8 @@ Finding = Tuple[str, int, str, str]
 
 _IGNORED_DIRS = {"__pycache__", ".venv", "venv", "node_modules"}
 # builtin name -> (index of the argument that must be a literal, pattern_id, description)
-_DYNAMIC_CALLS = {
-    "__import__": (0, "dynamic_import_computed", "__import__ with non-literal module name"),
-    "getattr": (1, "dynamic_getattr", "getattr with non-literal attribute name"),
-}
+_DYNAMIC_CALLS = {"__import__": (0, "dynamic_import_computed", "__import__ with non-literal module name"),
+                  "getattr": (1, "dynamic_getattr", "getattr with non-literal attribute name")}
 
 
 def _is_importlib(name: str) -> bool:
@@ -30,9 +28,7 @@ def _scan_source(content: str, rel_path: str) -> List[Finding]:
     except (SyntaxError, ValueError, RecursionError):
         return []
     findings: List[Finding] = []
-
-    def hit(node, pid: str, desc: str) -> None:
-        findings.append((rel_path, node.lineno, pid, desc))
+    hit = lambda node, pid, desc: findings.append((rel_path, node.lineno, pid, desc))  # noqa: E731
 
     class V(ast.NodeVisitor):
         def visit_Call(self, node):
@@ -58,15 +54,12 @@ def _scan_source(content: str, rel_path: str) -> List[Finding]:
             self.generic_visit(node)
 
         def visit_ImportFrom(self, node):
-            m = node.module or ""
-            if _is_importlib(m):
-                hit(node, "importlib_import", f"from {m} import ... — enables dynamic module loading")
+            if _is_importlib(node.module or ""):
+                hit(node, "importlib_import", f"from {node.module} import ... — enables dynamic module loading")
             self.generic_visit(node)
 
-    try:
+    with suppress(RecursionError, ValueError, RuntimeError):  # hostile input: keep what was collected so far
         V().visit(tree)
-    except (RecursionError, ValueError, RuntimeError):
-        pass  # hostile/pathological input: return what was collected so far
     return findings
 
 
@@ -81,18 +74,8 @@ def ast_scan_path(path: Path) -> List[Finding]:
     """Scan one .py file or every .py under a directory; [] for non-Python/missing paths."""
     if path.is_file():
         return _scan_file(path, path.name) if path.suffix.lower() == ".py" else []
-    if not path.is_dir():
-        return []
-    out: List[Finding] = []
-    for py in sorted(path.rglob("*.py")):
-        if set(py.parent.parts) & _IGNORED_DIRS:
-            continue
-        try:
-            rel = py.relative_to(path).as_posix()
-        except ValueError:
-            rel = py.name
-        out.extend(_scan_file(py, rel))
-    return out
+    return [f for py in sorted(path.rglob("*.py")) if not set(py.parent.parts) & _IGNORED_DIRS
+            for f in _scan_file(py, py.relative_to(path).as_posix())] if path.is_dir() else []
 
 
 def format_ast_report(findings: List[Finding], skill_name: str = "") -> str:
@@ -100,12 +83,10 @@ def format_ast_report(findings: List[Finding], skill_name: str = "") -> str:
     header = f"AST deep scan: {skill_name}" if skill_name else "AST deep scan"
     if not findings:
         return f"{header}\n  No dynamic import/access patterns detected."
-    lines = [header, f"  {len(findings)} finding(s):"]
-    current = None
+    lines, current = [header, f"  {len(findings)} finding(s):"], None
     for f, line, pid, desc in sorted(findings):
         if f != current:
             current = f
             lines.append(f"  {f}")
         lines.append(f"    L{line}  {pid}  — {desc}")
-    lines += ["", "  Note: diagnostic hints for human review, not security verdicts."]
-    return "\n".join(lines)
+    return "\n".join(lines + ["", "  Note: diagnostic hints for human review, not security verdicts."])
