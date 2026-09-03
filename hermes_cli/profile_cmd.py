@@ -127,12 +127,10 @@ def _profile_list(args):
         return
 
     print(
-        f"\n {'Profile':<16} {'Model':<28} {'Gateway':<12} "
-        f"{'Alias':<12} {'Distribution'}"
+        f"\n {'Profile':<16} {'Model':<28} {'Gateway':<12} {'Alias':<12} {'Distribution'}"
     )
     print(
-        f" {'─' * 15}    {'─' * 27}    {'─' * 11}    "
-        f"{'─' * 11}    {'─' * 20}"
+        f" {'─' * 15}    {'─' * 27}    {'─' * 11}    {'─' * 11}    {'─' * 20}"
     )
 
     for p in profiles:
@@ -210,8 +208,7 @@ def _profile_create(args):
         result = seed_profile_skills(profile_dir)
         if result and result.get("skipped_opt_out"):
             print(
-                "No bundled skills seeded (--no-skills). "
-                "Delete .no-bundled-skills in the profile to opt back in."
+                "No bundled skills seeded (--no-skills). Delete .no-bundled-skills in the profile to opt back in."
             )
         elif result:
             print(f"{len(result.get('copied', []))} bundled skills synced.")
@@ -311,9 +308,7 @@ def _profile_describe(args):
     if text_value:
         try:
             _profiles_mod.write_profile_meta(
-                _describe_target_dir(name),
-                description=text_value,
-                description_auto=False,
+                _describe_target_dir(name), description=text_value, description_auto=False
             )
             print(f"Description updated for '{name}'.")
         except Exception as exc:

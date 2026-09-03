@@ -16,15 +16,10 @@ from typing import Dict, List, Optional, Tuple
 
 from agent.skill_utils import is_excluded_skill_path
 from hermes_cli.archive_safe import (
-    archive_root_dirs,
-    make_targz,
-    normalize_archive_parts,
-    safe_extract_targz,
+    archive_root_dirs, make_targz, normalize_archive_parts, safe_extract_targz
 )
 from hermes_constants import (
-    clear_named_profile_deleted,
-    mark_named_profile_deleted,
-    named_profile_is_deleted,
+    clear_named_profile_deleted, mark_named_profile_deleted, named_profile_is_deleted
 )
 
 logger = logging.getLogger(__name__)
@@ -172,8 +167,7 @@ def _is_our_wrapper(path: Path) -> bool:
 
 def _missing_profile_error(canon: str) -> FileNotFoundError:
     return FileNotFoundError(
-        f"Profile '{canon}' does not exist. "
-        f"Create it with: hermes profile create {canon}"
+        f"Profile '{canon}' does not exist. Create it with: hermes profile create {canon}"
     )
 
 
@@ -202,8 +196,7 @@ def validate_profile_name(name: str) -> None:
         return  # special alias for ~/.hermes
     if not _PROFILE_ID_RE.match(name):
         raise ValueError(
-            f"Invalid profile name {name!r}. Must match "
-            f"[a-z0-9][a-z0-9_-]{{0,63}}"
+            f"Invalid profile name {name!r}. Must match [a-z0-9][a-z0-9_-]{{0,63}}"
         )
     if name in _RESERVED_NAMES:
         raise ValueError(
@@ -218,8 +211,7 @@ def validate_alias_name(name: str) -> None:
     under ``~/.local/bin``, so ``../../.bashrc`` must never escape the wrapper dir."""
     if not _PROFILE_ID_RE.match(name):
         raise ValueError(
-            f"Invalid alias name {name!r}. Must match "
-            f"[a-z0-9][a-z0-9_-]{{0,63}}"
+            f"Invalid alias name {name!r}. Must match [a-z0-9][a-z0-9_-]{{0,63}}"
         )
 
 
@@ -260,8 +252,7 @@ def profile_matches_home(name: str, home: "Path | None" = None) -> bool:
 
             home = get_hermes_home()
         return (
-            Path(target).expanduser().resolve(strict=False)
-            == Path(home).expanduser().resolve(strict=False)
+            Path(target).expanduser().resolve(strict=False) == Path(home).expanduser().resolve(strict=False)
         )
     except Exception:
         return False
@@ -551,8 +542,7 @@ def _seed_model_config(profile_dir: Path) -> None:
         if not model_cfg:
             return
         config_path.write_text(
-            yaml.safe_dump({"model": model_cfg}, sort_keys=False),
-            encoding="utf-8",
+            yaml.safe_dump({"model": model_cfg}, sort_keys=False), encoding="utf-8"
         )
     except Exception:
         pass  # creation must not fail over this; `hermes model` sets it later
@@ -567,9 +557,7 @@ def _check_gateway_running(profile_dir: Path) -> bool:
     against the process table, matching ``/api/status``."""
     try:
         from gateway.status import (
-            get_running_pid,
-            get_runtime_status_running_pid,
-            read_runtime_status,
+            get_running_pid, get_runtime_status_running_pid, read_runtime_status
         )
         if get_running_pid(profile_dir / "gateway.pid", cleanup_stale=False) is not None:
             return True
@@ -635,9 +623,7 @@ def _count_skills(profile_dir: Path) -> int:
     now = time.time()
     cached = _SKILL_COUNT_CACHE.get(key)
     if (
-        cached is not None
-        and cached[0] == signature
-        and (now - cached[1]) < _SKILL_COUNT_TTL_SECONDS
+        cached is not None and cached[0] == signature and (now - cached[1]) < _SKILL_COUNT_TTL_SECONDS
     ):
         return cached[2]
 
@@ -771,8 +757,7 @@ def list_profiles() -> List[ProfileInfo]:
 
 
 def profiles_to_serve(
-    multiplex: bool,
-    profile_allowlist: Optional[List[str]] = None,
+    multiplex: bool, profile_allowlist: Optional[List[str]] = None
 ) -> List[Tuple[str, Path]]:
     """``(profile_name, hermes_home)`` pairs a gateway should serve — the single chokepoint
     for "which profiles does the inbound gateway handle".
@@ -808,8 +793,7 @@ def profiles_to_serve(
         if missing and missing not in _WARNED_MISSING_ALLOWLIST_ENTRIES:
             _WARNED_MISSING_ALLOWLIST_ENTRIES.add(missing)
             logger.warning(
-                "Skipping missing gateway.multiplex_profile_allowlist profile(s): %s",
-                ", ".join(missing),
+                "Skipping missing gateway.multiplex_profile_allowlist profile(s): %s", ", ".join(missing)
             )
 
     return serve
@@ -862,10 +846,7 @@ def _clone_all_into(source_dir: Path, profile_dir: Path, canon: str) -> None:
     """--clone-all: full copytree minus infrastructure/history, then strip runtime files
     and cloned single-use OAuth grants."""
     shutil.copytree(
-        source_dir,
-        profile_dir,
-        symlinks=True,
-        ignore=_clone_all_copytree_ignore(source_dir),
+        source_dir, profile_dir, symlinks=True, ignore=_clone_all_copytree_ignore(source_dir)
     )
     for stale in _CLONE_ALL_STRIP:
         (profile_dir / stale).unlink(missing_ok=True)
@@ -967,8 +948,7 @@ def create_profile(
     if no_skills:
         _seed_file_if_missing(
             profile_dir / NO_BUNDLED_SKILLS_MARKER,
-            "This profile opted out of bundled-skill seeding "
-            "(`hermes profile create --no-skills`).\n"
+            "This profile opted out of bundled-skill seeding (`hermes profile create --no-skills`).\n"
             "Delete this file to re-enable sync on the next `hermes update`.\n",
         )
 
@@ -982,9 +962,7 @@ def create_profile(
     if description and description.strip():
         try:
             write_profile_meta(
-                profile_dir,
-                description=description.strip(),
-                description_auto=False,
+                profile_dir, description=description.strip(), description_auto=False
             )
         except Exception:
             pass  # non-fatal — user can describe later with `hermes profile describe`
@@ -1169,9 +1147,7 @@ def _wait_then_force_kill(pids: List[int], start_times: dict, *, wait: float = 1
         if _pid_exists(pid):
             try:
                 terminate_pid(
-                    pid,
-                    force=True,
-                    expected_start_time=start_times.get(pid, get_process_start_time(pid)),
+                    pid, force=True, expected_start_time=start_times.get(pid, get_process_start_time(pid))
                 )
             except (ProcessLookupError, PermissionError, OSError):
                 pass
@@ -1272,8 +1248,7 @@ def delete_profile(name: str, yes: bool = False) -> Path:
 
     if canon == "default":
         raise ValueError(
-            "Cannot delete the default profile (~/.hermes).\n"
-            "To remove everything, use: hermes uninstall"
+            "Cannot delete the default profile (~/.hermes).\nTo remove everything, use: hermes uninstall"
         )
 
     profile_dir = get_profile_dir(canon)
@@ -1436,9 +1411,7 @@ def _stop_gateway_process(profile_dir: Path) -> None:
         # owner. A poisoned gateway.pid in this dir can point at another profile's live
         # gateway — killing it starts a mutual SIGTERM restart loop.
         from gateway.status import (
-            get_process_start_time,
-            recorded_gateway_home_conflicts,
-            terminate_pid,
+            get_process_start_time, recorded_gateway_home_conflicts, terminate_pid
         )
 
         if recorded_gateway_home_conflicts(data, expected_home=profile_dir):
@@ -1554,8 +1527,7 @@ def _profile_export_directory() -> Path:
     # path another local user could pre-create (or symlink) first.
     uid_suffix = f"-{os.getuid()}" if hasattr(os, "getuid") else ""
     candidates = (
-        Path.home() / ".hermes-profile-exports",
-        Path(tempfile.gettempdir()) / f"hermes-profile-exports{uid_suffix}",
+        Path.home() / ".hermes-profile-exports", Path(tempfile.gettempdir()) / f"hermes-profile-exports{uid_suffix}"
     )
     for candidate in candidates:
         if not _inside_git_checkout(candidate):
@@ -1585,8 +1557,7 @@ def get_profile_export_path(name: str, *, timestamp: Optional[str] = None) -> Pa
     if hasattr(os, "getuid") and export_dir.stat().st_uid != os.getuid():
         raise ValueError(
             f"Export directory {export_dir} is owned by another user; "
-            "refusing to write a profile archive there. Provide an explicit "
-            "output path."
+            "refusing to write a profile archive there. Provide an explicit output path."
         )
     stamp = timestamp or time.strftime("%Y%m%d-%H%M%S")
     return export_dir / f"{canon}-{stamp}.tar.gz"
@@ -1781,9 +1752,7 @@ def _migrate_honcho_profile_host(old_name: str, new_name: str, new_dir: Path) ->
     new_host = f"hermes_{new_name}"
 
     candidates = [
-        new_dir / "honcho.json",
-        _get_default_hermes_home() / "honcho.json",
-        Path.home() / ".honcho" / "config.json",
+        new_dir / "honcho.json", _get_default_hermes_home() / "honcho.json", Path.home() / ".honcho" / "config.json"
     ]
 
     seen: set[Path] = set()

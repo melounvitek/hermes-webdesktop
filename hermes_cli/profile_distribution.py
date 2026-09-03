@@ -182,11 +182,7 @@ def write_manifest(profile_dir: Path, manifest: DistributionManifest) -> Path:
     # shareable descriptor, not a secret — don't leave it at mkstemp's 0600. An existing
     # file's mode is preserved.
     atomic_yaml_write(
-        mf_path,
-        manifest.to_dict(),
-        sort_keys=False,
-        default_flow_style=False,
-        create_mode=0o644,
+        mf_path, manifest.to_dict(), sort_keys=False, default_flow_style=False, create_mode=0o644
     )
     return mf_path
 
@@ -217,8 +213,7 @@ def check_hermes_requires(spec: str, current_version: str) -> None:
     op, target = m.groups() if m else (">=", spec.strip())
     if not _VERSION_OPS[op](_parse_semver(current_version), _parse_semver(target)):
         raise DistributionError(
-            f"This distribution requires Hermes {op}{target}, "
-            f"but you have {current_version}."
+            f"This distribution requires Hermes {op}{target}, but you have {current_version}."
         )
 
 
@@ -343,15 +338,11 @@ def _has_cron_jobs(staged: Path) -> bool:
 
 
 def plan_install(
-    source: str,
-    workdir: Path,
-    override_name: Optional[str] = None,
+    source: str, workdir: Path, override_name: Optional[str] = None
 ) -> InstallPlan:
     """Stage *source* and produce a plan describing what install would do."""
     from hermes_cli.profiles import (
-        get_profile_dir,
-        normalize_profile_name,
-        validate_profile_name,
+        get_profile_dir, normalize_profile_name, validate_profile_name
     )
     from hermes_cli import __version__ as hermes_version
 
@@ -360,8 +351,7 @@ def plan_install(
     manifest = read_manifest(staged)
     if manifest is None:
         raise DistributionError(
-            f"No {MANIFEST_FILENAME} found at the distribution root — "
-            "this source is not a Hermes distribution."
+            f"No {MANIFEST_FILENAME} found at the distribution root — this source is not a Hermes distribution."
         )
 
     check_hermes_requires(manifest.hermes_requires, hermes_version)  # fail fast
@@ -371,8 +361,7 @@ def plan_install(
     if canon == "default":
         raise DistributionError(
             "Cannot install a distribution as 'default' — that is the built-in "
-            "root profile (~/.hermes).  Pass --name <name> to install under a "
-            "new profile."
+            "root profile (~/.hermes).  Pass --name <name> to install under a new profile."
         )
     manifest.name = canon
     manifest.source = provenance
@@ -416,10 +405,7 @@ def _owned_entries(staged: Path, manifest: DistributionManifest):
 
 
 def _copy_dist_payload(
-    staged: Path,
-    target: Path,
-    manifest: DistributionManifest,
-    preserve_config: bool,
+    staged: Path, target: Path, manifest: DistributionManifest, preserve_config: bool
 ) -> None:
     """Copy distribution-owned files (see ``_owned_entries``) from *staged* into *target*.
 
@@ -469,16 +455,12 @@ def _bootstrap_user_dirs(target: Path) -> None:
 
 
 def install_distribution(
-    source: str,
-    name: Optional[str] = None,
-    force: bool = False,
-    create_alias: bool = False,
+    source: str, name: Optional[str] = None, force: bool = False, create_alias: bool = False
 ) -> InstallPlan:
     """Install a distribution from *source* into a new profile; returns the resolved plan.
     Use :func:`plan_install` first to preview + prompt."""
     from hermes_cli.profiles import (
-        check_alias_collision,
-        create_wrapper_script,
+        check_alias_collision, create_wrapper_script
     )
 
     with tempfile.TemporaryDirectory(prefix="hermes_dist_install_") as tmp:
@@ -487,8 +469,7 @@ def install_distribution(
         if plan.existing and not force:
             raise DistributionError(
                 f"Profile '{plan.manifest.name}' already exists at {plan.target_dir}. "
-                "Use `hermes profile update` to upgrade in place, "
-                "or pass --force to overwrite."
+                "Use `hermes profile update` to upgrade in place, or pass --force to overwrite."
             )
 
         # Fresh install: config.yaml comes from the distribution.
@@ -504,9 +485,7 @@ def install_distribution(
 def _existing_profile(profile_name: str) -> Tuple[str, Path]:
     """Return ``(canonical_name, profile_dir)`` or raise if the profile doesn't exist."""
     from hermes_cli.profiles import (
-        get_profile_dir,
-        normalize_profile_name,
-        validate_profile_name,
+        get_profile_dir, normalize_profile_name, validate_profile_name
     )
 
     canon = normalize_profile_name(profile_name)
@@ -518,8 +497,7 @@ def _existing_profile(profile_name: str) -> Tuple[str, Path]:
 
 
 def update_distribution(
-    profile_name: str,
-    force_config: bool = False,
+    profile_name: str, force_config: bool = False
 ) -> InstallPlan:
     """Re-pull from the installed manifest's ``source:`` and apply: dist-owned files
     overwritten, user data never touched, ``config.yaml`` preserved unless ``force_config``."""

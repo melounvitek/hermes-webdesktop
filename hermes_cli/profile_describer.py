@@ -111,10 +111,7 @@ def _extract_json_blob(raw: str) -> Optional[dict]:
 
 
 def describe_profile(
-    profile_name: str,
-    *,
-    overwrite: bool = False,
-    timeout: Optional[int] = None,
+    profile_name: str, *, overwrite: bool = False, timeout: Optional[int] = None
 ) -> DescribeOutcome:
     """Auto-generate a description for one profile. Expected failures (profile missing, no aux
     client, API error, malformed response) return ``ok=False`` so a sweep continues.
@@ -137,10 +134,7 @@ def describe_profile(
     existing = profiles_mod.read_profile_meta(profile_dir)
     if existing.get("description") and not existing.get("description_auto") and not overwrite:
         return DescribeOutcome(
-            canon,
-            False,
-            "profile already has a user-authored description "
-            "(use --overwrite to replace)",
+            canon, False, "profile already has a user-authored description (use --overwrite to replace)"
         )
 
     all_skills = _collect_skills(profile_dir)
@@ -172,8 +166,7 @@ def describe_profile(
         resp = call_llm(
             task="profile_describer",
             messages=[
-                {"role": "system", "content": _SYSTEM_PROMPT},
-                {"role": "user", "content": user_msg},
+                {"role": "system", "content": _SYSTEM_PROMPT}, {"role": "user", "content": user_msg}
             ],
             temperature=0.3,
             max_tokens=400,
@@ -205,9 +198,7 @@ def describe_profile(
 
     try:
         profiles_mod.write_profile_meta(
-            profile_dir,
-            description=description,
-            description_auto=True,
+            profile_dir, description=description, description_auto=True
         )
     except Exception as exc:
         return DescribeOutcome(canon, False, f"failed to write profile.yaml: {exc}")
