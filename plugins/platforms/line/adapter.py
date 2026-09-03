@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import contextlib
 import enum
 import hashlib
 import hmac
@@ -230,9 +231,7 @@ _SOURCE_KINDS = {"group": ("groupId", "group"), "room": ("roomId", "room"), "use
 def _resolve_chat(source: Dict[str, Any]) -> Tuple[str, str]:
     """Return ``(chat_id, chat_type)`` from a LINE event ``source`` block (user/group/room)."""
     kind = _SOURCE_KINDS.get((source or {}).get("type", ""))
-    if kind is None:
-        return "", "dm"
-    return source.get(kind[0], ""), kind[1]
+    return ("", "dm") if kind is None else (source.get(kind[0], ""), kind[1])
 
 
 def _allowed_for_source(
@@ -279,9 +278,7 @@ class _LineClient:
         clamped = max(5, min(60, (seconds // 5) * 5 or 5))  # LINE: 5-step increments, max 60
         try:
             async with self._session(5.0) as session:
-                await session.post(
-                    LINE_LOADING_URL, headers=self._headers, json={"chatId": chat_id, "loadingSeconds": clamped}
-                )
+                await session.post(LINE_LOADING_URL, headers=self._headers, json={"chatId": chat_id, "loadingSeconds": clamped})
         except Exception as exc:  # best-effort; never raise
             logger.debug("LINE loading indicator failed: %s", exc)
 
@@ -300,19 +297,14 @@ class _LineClient:
         try:
             async with self._session(10.0) as session:
                 async with session.get(LINE_BOT_INFO_URL, headers=self._headers) as resp:
-                    if resp.status >= 400:
-                        return None
-                    data = await resp.json()
-                    return data.get("userId")
+                    return None if resp.status >= 400 else (await resp.json()).get("userId")
         except Exception:
             return None
 
 
 def _text_message(text: str) -> Dict[str, Any]:
     """Build a LINE text message object, capped to per-bubble max."""
-    if len(text) > LINE_PER_BUBBLE_CHARS:
-        text = text[: LINE_PER_BUBBLE_CHARS - 1] + "…"
-    return {"type": "text", "text": text}
+    return {"type": "text", "text": text if len(text) <= LINE_PER_BUBBLE_CHARS else text[: LINE_PER_BUBBLE_CHARS - 1] + "…"}
 
 
 def _text_messages(content: str) -> List[Dict[str, Any]]:
@@ -387,7 +379,6 @@ class LineAdapter(BasePlatformAdapter):
 
     def __init__(self, config, **kwargs):
         super().__init__(config=config, platform=Platform("line"))
-
         extra = getattr(config, "extra", {}) or {}
 
         def env_or(env: str, key: str, default: Any = "") -> Any:
@@ -435,7 +426,6 @@ class LineAdapter(BasePlatformAdapter):
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         if not self.channel_access_token or not self.channel_secret:
             return self._fail("config_missing", "LINE_CHANNEL_ACCESS_TOKEN and LINE_CHANNEL_SECRET must be set")
-
         # One profile per channel token; lock on a hash so the secret never hits disk.
         try:
             from gateway.status import acquire_scoped_lock
@@ -445,21 +435,16 @@ class LineAdapter(BasePlatformAdapter):
             self._lock_key = tok_hash
         except ImportError:
             self._lock_key = None
-
         self._client = _LineClient(self.channel_access_token)
-
-        # Best-effort self-userId for self-echo filtering (LINE rarely echoes anyway).
-        try:
+        try:  # best-effort self-userId for self-echo filtering (LINE rarely echoes anyway)
             self._bot_user_id = await self._client.get_bot_user_id()
         except Exception as exc:
             logger.debug("LINE: get_bot_user_id failed: %s", exc)
             self._bot_user_id = None
-
         try:
             from aiohttp import web
         except ImportError:
             return self._fail("missing_dep", "aiohttp is required for the LINE adapter — install with `pip install aiohttp`")
-
         self._app = web.Application(client_max_size=WEBHOOK_BODY_MAX_BYTES)
         self._app.router.add_post(self.webhook_path, self._handle_webhook)
         self._app.router.add_get(f"{self.webhook_path}/health", self._handle_health)  # tunnel/proxy probe
@@ -495,10 +480,8 @@ class LineAdapter(BasePlatformAdapter):
         for attr, method in (("_site", "stop"), ("_runner", "cleanup")):
             obj = getattr(self, attr)
             if obj is not None:
-                try:
+                with contextlib.suppress(Exception):
                     await getattr(obj, method)()
-                except Exception:
-                    pass
                 setattr(self, attr, None)
         self._app = None
         for path in list(self._media_temp_paths):
@@ -506,11 +489,9 @@ class LineAdapter(BasePlatformAdapter):
         self._media_temp_paths.clear()
         self._media_tokens.clear()
         if self._lock_key:
-            try:
+            with contextlib.suppress(Exception):
                 from gateway.status import release_scoped_lock
                 release_scoped_lock("line", self._lock_key)
-            except Exception:
-                pass
             self._lock_key = None
 
     async def _handle_health(self, request) -> Any:
@@ -621,16 +602,15 @@ class LineAdapter(BasePlatformAdapter):
         try:
             await self._client.reply(reply_token, messages)
         except Exception as exc:
-            if state is State.READY:
-                logger.warning("LINE: postback reply failed (%s); falling back to push", exc)
-                try:
-                    await self._client.push(chat_id, messages)
-                except Exception as exc2:
-                    logger.error("LINE: postback push fallback failed: %s", exc2)
-                    return
-            else:
+            if state is not State.READY:
                 if state is State.ERROR:
                     logger.warning("LINE: postback ERROR reply failed: %s", exc)
+                return
+            logger.warning("LINE: postback reply failed (%s); falling back to push", exc)
+            try:
+                await self._client.push(chat_id, messages)
+            except Exception as exc2:
+                logger.error("LINE: postback push fallback failed: %s", exc2)
                 return
         if state in (State.READY, State.ERROR):
             self._cache.mark_delivered(request_id)
@@ -727,10 +707,8 @@ class LineAdapter(BasePlatformAdapter):
         finally:
             if not post_task.done():
                 post_task.cancel()
-                try:
+                with contextlib.suppress(asyncio.CancelledError, Exception):
                     await post_task
-                except (asyncio.CancelledError, Exception):
-                    pass
 
     async def interrupt_session_activity(self, session_key: str, chat_id: str) -> None:
         """Resolve any orphan PENDING postback so the button doesn't loop."""
@@ -892,10 +870,8 @@ class LineAdapter(BasePlatformAdapter):
 
 
 def _unlink_quietly(path: str) -> None:
-    try:
+    with contextlib.suppress(OSError):
         os.unlink(path)
-    except OSError:
-        pass
 
 
 def _env_credentials_present() -> bool:
