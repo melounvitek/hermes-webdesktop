@@ -24,6 +24,13 @@ _VERIFICATION_CONTINUATION_FLAGS = ("_verification_stop_synthetic", "_pre_verify
 
 _SENTENCE_END = {".", "!", "?", "。", "！", "？", "`", ")"}
 
+# ``result[key] = agent.session_<key>`` for the per-session usage/cost counters.
+_SESSION_TOKEN_KEYS = (
+    "input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
+    "reasoning_tokens", "prompt_tokens", "completion_tokens", "total_tokens",
+)
+_SESSION_COST_KEYS = ("estimated_cost_usd", "cost_status", "cost_source")
+
 
 def _assistant_row_missing_visible_text(msg: dict) -> bool:
     """True when an assistant row has no visible text (blank final or tool-only)."""
@@ -485,18 +492,9 @@ def finalize_turn(
         "model": agent.model,
         "provider": agent.provider,
         "base_url": agent.base_url,
-        "input_tokens": agent.session_input_tokens,
-        "output_tokens": agent.session_output_tokens,
-        "cache_read_tokens": agent.session_cache_read_tokens,
-        "cache_write_tokens": agent.session_cache_write_tokens,
-        "reasoning_tokens": agent.session_reasoning_tokens,
-        "prompt_tokens": agent.session_prompt_tokens,
-        "completion_tokens": agent.session_completion_tokens,
-        "total_tokens": agent.session_total_tokens,
+        **{key: getattr(agent, f"session_{key}") for key in _SESSION_TOKEN_KEYS},
         "last_prompt_tokens": getattr(agent.context_compressor, "last_prompt_tokens", 0) or 0,
-        "estimated_cost_usd": agent.session_estimated_cost_usd,
-        "cost_status": agent.session_cost_status,
-        "cost_source": agent.session_cost_source,
+        **{key: getattr(agent, f"session_{key}") for key in _SESSION_COST_KEYS},
         # Requested service tier, for billing audits (`hermes -z --usage-file`).
         "service_tier": (
             (getattr(agent, "request_overrides", {}) or {}).get("extra_body") or {}

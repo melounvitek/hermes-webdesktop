@@ -112,6 +112,7 @@ def apply_stop_gates(
     there)."""
 
     def _continue(nudge: str, flag: str) -> StopGateVerdict:
+        """Append the synthetic nudge row and hand the turn back to the loop."""
         append_message(messages, {"role": "user", "content": nudge, flag: True})
         agent._session_messages = messages
         # Keep the answer only as a budget-exhaustion fallback; clear ``final_response`` so
@@ -127,17 +128,14 @@ def apply_stop_gates(
 
     _verify_nudge = _verify_on_stop_nudge(agent)
     if _verify_nudge:
-        agent._verification_stop_nudges = (
-            getattr(agent, "_verification_stop_nudges", 0) + 1
-        )
+        agent._verification_stop_nudges = getattr(agent, "_verification_stop_nudges", 0) + 1
         final_msg["finish_reason"] = "verification_required"
         _append_interim_answer(
             agent, final_msg, messages, conversation_history, "verify-on-stop interim flush failed"
         )
         verdict = _continue(_verify_nudge, "_verification_stop_synthetic")
         # Internal nudge: stay silent on the terminal, debug-log only.
-        logger.debug("verification stop-loop nudge issued (attempt %d)",
-                     agent._verification_stop_nudges)
+        logger.debug("verification stop-loop nudge issued (attempt %d)", agent._verification_stop_nudges)
         return verdict
 
     _attempt = getattr(agent, "_pre_verify_nudges", 0)
@@ -149,15 +147,12 @@ def apply_stop_gates(
             agent, final_msg, messages, conversation_history, "pre_verify interim flush failed"
         )
         verdict = _continue(_verify_nudge2, "_pre_verify_synthetic")
-        logger.debug("pre_verify nudge issued (attempt %d)",
-                     agent._pre_verify_nudges)
+        logger.debug("pre_verify nudge issued (attempt %d)", agent._pre_verify_nudges)
         return verdict
 
     _kanban_nudge = _kanban_stop_nudge(agent, messages)
     if _kanban_nudge:
-        agent._kanban_stop_nudges = (
-            getattr(agent, "_kanban_stop_nudges", 0) + 1
-        )
+        agent._kanban_stop_nudges = getattr(agent, "_kanban_stop_nudges", 0) + 1
         final_msg["finish_reason"] = "kanban_terminal_required"
         final_msg["_kanban_stop_synthetic"] = True
         append_message(messages, final_msg)

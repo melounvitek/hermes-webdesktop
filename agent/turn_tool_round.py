@@ -82,7 +82,7 @@ def run_tool_round(
     if _tvv.action == "continue":
         return _verdict("continue")
 
-    # ── Post-call guardrails ──────────────────────────
+    # Post-call guardrails.
     assistant_message.tool_calls = agent._deduplicate_tool_calls(
         agent._cap_delegate_task_calls(assistant_message.tool_calls)
     )
