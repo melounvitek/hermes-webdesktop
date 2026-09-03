@@ -140,9 +140,8 @@ class SessionCompressionMixin:
                 "UPDATE sessions SET ended_at = NULL, end_reason = NULL "
                 "WHERE id = ? AND ended_at IS NOT NULL AND end_reason = 'compression'",
                 (session_id,))
-            # rowcount==1 is guaranteed by the parent SELECT in this same txn. A False return
-            # added past this point must raise instead: the lease DELETE above commits unless
-            # _do raises.
+            # rowcount==1 is guaranteed by the parent SELECT in this same txn. A False return added past
+            # this point must raise instead: the lease DELETE above commits unless _do raises.
             return updated.rowcount == 1
         return bool(self._execute_write(_do))
 

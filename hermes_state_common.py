@@ -19,11 +19,10 @@ from agent.context_compressor import (
     _SUMMARY_END_MARKER)
 
 
-# Session preview = head of the first user message, shown wherever a session has no
-# title.  A /skill invocation embeds the whole skill body, so its plain head would
-# preview the SKILL's prose; scaffolded rows carry a wider excerpt (whole message under
-# budget, else head + tail where the typed instruction lands) so ``_shape_preview`` can
-# recover ``/work — fix the title leak``.
+# Session preview = head of the first user message, shown wherever a session has no title.  A /skill
+# invocation embeds the whole skill body, so its plain head would preview the SKILL's prose; scaffolded rows
+# carry a wider excerpt (whole message under budget, else head + tail where the typed instruction lands) so
+# ``_shape_preview`` can recover ``/work — fix the title leak``.
 _PREVIEW_HEAD_CHARS = 63
 _PREVIEW_SCAFFOLD_WINDOW = 400
 _PREVIEW_MAX_CHARS = 60
@@ -63,9 +62,8 @@ def _sql_after_marker(marker: str) -> str:
     return f"SUBSTR(m.content, INSTR(m.content, {_sql_literal(marker)}) + {len(marker)})"
 
 
-# Current and legacy long-form prefixes share this whole introduction; matching all of
-# it keeps an ordinary message that merely starts with the bracketed label from
-# counting as a compaction carrier.
+# Current and legacy long-form prefixes share this whole introduction; matching all of it keeps an ordinary
+# message that merely starts with the bracketed label from counting as a compaction carrier.
 _PREVIEW_LONG_FORM_PREFIX = SUMMARY_PREFIX.split("Do NOT answer", 1)[0]
 _PREVIEW_SUMMARY_PREFIXES = (_PREVIEW_LONG_FORM_PREFIX, LEGACY_SUMMARY_PREFIX)
 _PREVIEW_STANDALONE_SUMMARY_SQL = _sql_starts_with("m.content", _PREVIEW_SUMMARY_PREFIXES)
@@ -136,8 +134,7 @@ _PREVIEW_RAW_SUBQUERY_SQL = (
 
 # ── Session lineage predicates ({a} = sessions alias) ───────────────────────
 
-# A /branch child (kept visible, never cascade-deleted): stable marker OR the legacy
-# end_reason heuristic.
+# A /branch child (kept visible, never cascade-deleted): stable marker OR the legacy end_reason heuristic.
 _BRANCH_CHILD_SQL = (
     "json_extract(COALESCE({a}.model_config, '{{}}'), '$._branched_from') IS NOT NULL"
     " OR EXISTS (SELECT 1 FROM sessions p            WHERE p.id = {a}.parent_session_id"
@@ -161,9 +158,8 @@ _RESET_END_REASONS = (
 )
 _RESET_END_REASONS_SQL = ", ".join(f"'{reason}'" for reason in _RESET_END_REASONS)
 
-# Accidental end reasons recovery treats as resumable (docs/session-lifecycle.md).
-# Single source of truth: interpolated into recovery SQL AND exposed as
-# SessionDB.RECOVERABLE_END_REASONS.
+# Accidental end reasons recovery treats as resumable (docs/session-lifecycle.md). Single source of truth:
+# interpolated into recovery SQL AND exposed as SessionDB.RECOVERABLE_END_REASONS.
 _RECOVERABLE_END_REASONS = (
     "agent_close",
     "ws_orphan_reap",
@@ -175,11 +171,10 @@ _RECOVERABLE_END_REASONS = (
 )
 _RECOVERABLE_END_REASONS_SQL = ", ".join(f"'{reason}'" for reason in _RECOVERABLE_END_REASONS)
 
-# End reasons written by AUTOMATIC cleanup (shutdown, orphan reapers, idle/LRU eviction),
-# not by a deliberate conversation boundary: "some runtime went away", NOT "this
-# conversation ended", so a writer that can prove liveness (e.g. a compression rotation
-# holding the lease) may clear it.  Superset of the recoverable set plus the TUI
-# gateway's automatic reasons.
+# End reasons written by AUTOMATIC cleanup (shutdown, orphan reapers, idle/LRU eviction), not by a
+# deliberate conversation boundary: "some runtime went away", NOT "this conversation ended", so a writer
+# that can prove liveness (e.g. a compression rotation holding the lease) may clear it.  Superset of the
+# recoverable set plus the TUI gateway's automatic reasons.
 _AUTOMATIC_END_REASONS = frozenset(_RECOVERABLE_END_REASONS) | {
     "tui_shutdown", "ws_disconnect", "idle_timeout", "lru_evict"}
 
@@ -212,8 +207,7 @@ _RESET_CHILD_SQL = (
     " OR " + _legacy_reset_child_sql("{a}", _RESET_END_REASONS_SQL)
 )
 
-# Picker-visible rows: roots + branch/reset children (not subagent runs or compression
-# continuations).
+# Picker-visible rows: roots + branch/reset children (not subagent runs or compression continuations).
 _LISTABLE_CHILD_SQL = (
     f"(s.parent_session_id IS NULL OR {_BRANCH_CHILD_SQL.format(a='s')}"
     f" OR {_RESET_CHILD_SQL.format(a='s')})"
@@ -265,11 +259,10 @@ SCHEMA_VERSION = 28
 # below it a full rewrite costs more I/O than it returns.
 AUTO_VACUUM_MIN_FREELIST_RATIO = 0.25
 
-# FTS storage layout, tracked INDEPENDENTLY of SCHEMA_VERSION (state_meta
-# ``fts_storage_version``): schema version advances freely on open, the FTS layout only
-# changes when a DB is born fresh or explicitly optimized via ``hermes sessions
-# optimize-storage``.  Legacy DBs sit at 0 (marker absent) with a working inline index;
-# 1 = v23 external-content layout.
+# FTS storage layout, tracked INDEPENDENTLY of SCHEMA_VERSION (state_meta ``fts_storage_version``): schema
+# version advances freely on open, the FTS layout only changes when a DB is born fresh or explicitly
+# optimized via ``hermes sessions optimize-storage``.  Legacy DBs sit at 0 (marker absent) with a working
+# inline index; 1 = v23 external-content layout.
 FTS_STORAGE_VERSION = 1
 
 # Cap on user-controlled FTS5 query input before sanitizer processing.
@@ -565,14 +558,12 @@ CREATE INDEX IF NOT EXISTS idx_sessions_system_prompt_hash
 """
 
 # ── Deferred FTS rebuild bookkeeping ──
-# While a background rebuild is pending, two state_meta keys define which rows
-# are IN the FTS indexes: H = fts_rebuild_high_water (MAX(messages.id) when the
-# old indexes were dropped), P = fts_rebuild_progress (highest backfilled id).
-# A row is indexed iff id <= P OR id > H (AUTOINCREMENT ids: post-drop rows are
-# indexed live by the insert triggers); rows in (P, H] are not.  Every trigger
-# gates on that predicate: an external-content 'delete' for a row NOT in the
-# index corrupts it, and skipping one for an indexed row leaves a stale entry.
-# With no rebuild pending both keys are absent and COALESCE makes it a tautology.
+# While a background rebuild is pending, two state_meta keys define which rows are IN the FTS indexes: H =
+# fts_rebuild_high_water (MAX(messages.id) when the old indexes were dropped), P = fts_rebuild_progress
+# (highest backfilled id). A row is indexed iff id <= P OR id > H (AUTOINCREMENT ids: post-drop rows are
+# indexed live by the insert triggers); rows in (P, H] are not.  Every trigger gates on that predicate: an
+# external-content 'delete' for a row NOT in the index corrupts it, and skipping one for an indexed row
+# leaves a stale entry. With no rebuild pending both keys are absent and COALESCE makes it a tautology.
 FTS_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
     content,
@@ -622,12 +613,11 @@ BEGIN
 END;
 """
 
-# Trigram FTS5 table for CJK substring search (unicode61 splits CJK into single
-# tokens, breaking phrase matching).  The trigram index is ~2.6x the text it
-# covers and ``role='tool'`` rows are ~90% of message bytes of machine noise,
-# so it reads through the ``messages_fts_trigram_src`` view, which excludes
-# tool rows; those remain searchable via ``messages_fts``, and
-# ``search_messages`` routes CJK queries filtered on role='tool' to LIKE.
+# Trigram FTS5 table for CJK substring search (unicode61 splits CJK into single tokens, breaking phrase
+# matching).  The trigram index is ~2.6x the text it covers and ``role='tool'`` rows are ~90% of message
+# bytes of machine noise, so it reads through the ``messages_fts_trigram_src`` view, which excludes tool
+# rows; those remain searchable via ``messages_fts``, and ``search_messages`` routes CJK queries filtered on
+# role='tool' to LIKE.
 FTS_TRIGRAM_SQL = """
 CREATE VIEW IF NOT EXISTS messages_fts_trigram_src AS
     SELECT id, role, content, tool_name, tool_calls
@@ -688,9 +678,8 @@ END;
 _FTS_CJK_TRIGGERS = (
     "messages_fts_cjk_insert", "messages_fts_cjk_delete", "messages_fts_cjk_update")
 
-# Set when a tokenizer-less process dropped the cjk triggers to keep writes
-# alive: the cjk index is missing rows and must not serve reads until
-# `hermes sessions optimize-storage` rebuilds it on a capable host.
+# Set when a tokenizer-less process dropped the cjk triggers to keep writes alive: the cjk index is missing
+# rows and must not serve reads until `hermes sessions optimize-storage` rebuilds it on a capable host.
 FTS_CJK_STALE_KEY = "fts_cjk_stale"
 
 # Set when a base/trigram FTS index was detached after runtime corruption.
@@ -702,10 +691,9 @@ FTS_STALE_KEY = "fts_stale"
 FTS_REBUILD_DEFERRAL_KEY = "fts_rebuild_deferral"
 
 # ── Legacy (v22 / inline-content) FTS DDL ──────────────────────────────
-# Used ONLY to keep a pre-v23 install's search working and its triggers
-# repairable until `optimize_fts_storage()` migrates it: inline copies of
-# content || tool_name || tool_calls, trigram over every row.  Never created
-# on a fresh install.  Handing a legacy DB the v23 DDL would create the
+# Used ONLY to keep a pre-v23 install's search working and its triggers repairable until
+# `optimize_fts_storage()` migrates it: inline copies of content || tool_name || tool_calls, trigram over
+# every row.  Never created on a fresh install.  Handing a legacy DB the v23 DDL would create the
 # external-content trigram VIEW and leave it in a mixed, broken state.
 LEGACY_FTS_SQL = """
 CREATE VIRTUAL TABLE IF NOT EXISTS messages_fts USING fts5(
@@ -761,21 +749,17 @@ END;
 """
 
 # ── Cross-process full-FTS-rebuild admission (single authority) ──────────────
-# Several Hermes processes share one state.db; a full structural FTS rebuild
-# (FTS5 'rebuild' or the drop/recreate in `_recover_stale_fts`) must run in ONE
-# of them at a time — concurrent rebuilds structurally corrupted state.db in
-# production.  Single authority for `rebuild_fts()`, `_rebuild_fts_indexes()`
-# and `_recover_stale_fts()`; the chunked backfill (`fts_rebuild_step`) is
-# deliberately NOT routed through it (it claims progress under SQLite
-# transaction authority and is multi-process).
-# Semantics mirror `hermes_state._cross_process_repair_lock`: portable (msvcrt
-# on Windows, flock elsewhere), bounded wait, FAIL CLOSED.  flock rides the open
-# file description, so a forked child that inherited the fd holds it forever
-# after the holder dies; the holder's pid + start time are recorded under the
-# lock and a provably-dead holder's lock is broken by unlinking and retaking on
-# a fresh inode.  Indeterminate liveness still defers.  `<db>.fts_rebuild.lock`
-# is distinct from `<db>.repair.lock` (schema surgery on an EXCLUSIVE offline
-# connection, minutes in VACUUM).  Lives here because mixins cannot import
+# Several Hermes processes share one state.db; a full structural FTS rebuild (FTS5 'rebuild' or the
+# drop/recreate in `_recover_stale_fts`) must run in ONE of them at a time — concurrent rebuilds
+# structurally corrupted state.db in production.  Single authority for `rebuild_fts()`,
+# `_rebuild_fts_indexes()` and `_recover_stale_fts()`; the chunked backfill (`fts_rebuild_step`) is
+# deliberately NOT routed through it (it claims progress under SQLite transaction authority and is
+# multi-process). Semantics mirror `hermes_state._cross_process_repair_lock`: portable (msvcrt on Windows,
+# flock elsewhere), bounded wait, FAIL CLOSED.  flock rides the open file description, so a forked child
+# that inherited the fd holds it forever after the holder dies; the holder's pid + start time are recorded
+# under the lock and a provably-dead holder's lock is broken by unlinking and retaking on a fresh inode.
+# Indeterminate liveness still defers.  `<db>.fts_rebuild.lock` is distinct from `<db>.repair.lock` (schema
+# surgery on an EXCLUSIVE offline connection, minutes in VACUUM).  Lives here because mixins cannot import
 # hermes_state (cycle).
 
 logger = logging.getLogger("hermes_state")
@@ -788,10 +772,9 @@ _IS_WINDOWS = sys.platform == "win32"
 # processes, so a short wait suffices — never re-enter the full timeout.
 _LOCK_BREAK_REACQUIRE_SECONDS = 5.0
 
-# "Another process holds the lock": flock → EWOULDBLOCK/EAGAIN, msvcrt.locking
-# → EACCES (EDEADLK when its retry gives up).  Anything else (ESTALE, ENOTSUP,
-# ENOLCK, EIO) is a persistent environment failure that polling cannot fix;
-# treating it as contention burned the full timeout on every attempt.
+# "Another process holds the lock": flock → EWOULDBLOCK/EAGAIN, msvcrt.locking → EACCES (EDEADLK when its
+# retry gives up).  Anything else (ESTALE, ENOTSUP, ENOLCK, EIO) is a persistent environment failure that
+# polling cannot fix; treating it as contention burned the full timeout on every attempt.
 _LOCK_CONTENTION_ERRNOS = {errno.EAGAIN, errno.EACCES, errno.EWOULDBLOCK}
 if hasattr(errno, "EDEADLK"):
     _LOCK_CONTENTION_ERRNOS.add(errno.EDEADLK)
