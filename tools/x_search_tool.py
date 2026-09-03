@@ -1,16 +1,12 @@
 #!/usr/bin/env python3
 """X Search tool backed by xAI's built-in ``x_search`` Responses API tool.
 
-Registers when either xAI credential path is available (``XAI_API_KEY`` or
-``hermes auth add xai-oauth``). At call time an explicit ``XAI_API_KEY`` wins
-(``prefer_api_key=True``): x_search is API-metered and the subscription OAuth
-bearer answers ``/v1/responses`` in a degraded no-citation mode.
-
-``from_date``/``to_date`` are validated client-side (strict ``YYYY-MM-DD``, ``from <= to``,
-``from`` not in the future) so malformed windows fail fast instead of burning a billable
-call. Successful responses carry ``degraded``/``degraded_reason``: True when a narrowing
-filter was active AND xAI returned no citations in either channel (answer came from the
-model's own knowledge, not the X index).
+Registers when either xAI credential path is available (``XAI_API_KEY`` or ``hermes auth add
+xai-oauth``). At call time an explicit ``XAI_API_KEY`` wins (``prefer_api_key=True``): x_search
+is API-metered and the subscription OAuth bearer answers ``/v1/responses`` without citations.
+Date filters are validated client-side so malformed windows fail fast instead of burning a
+billable call. Results carry ``degraded``: True when a narrowing filter was active AND xAI
+returned no citations in either channel (answer came from model knowledge, not the X index).
 """
 
 from __future__ import annotations
@@ -62,16 +58,11 @@ def _get_x_search_int(key: str, default: int, floor: int) -> int:
         return default
 
 
-def _get_x_search_timeout_seconds() -> int:
-    return _get_x_search_int("timeout_seconds", DEFAULT_X_SEARCH_TIMEOUT_SECONDS, 30)
-
-
 def _resolve_xai_bearer() -> Tuple[str, str, str]:
     """Return ``(api_key, base_url, source)``; ``source`` is ``"xai-oauth"`` or ``"xai"``.
 
-    Raises ``RuntimeError`` when no credential is usable so a credential that expires
-    between registration and invocation yields a clean tool error, not a 401.
-    ``prefer_api_key=True``: see module docstring.
+    Raises ``RuntimeError`` when no credential is usable so a credential that expires between
+    registration and invocation yields a clean tool error, not a 401.
     """
     creds = resolve_xai_http_credentials(prefer_api_key=True)
     api_key = str(creds.get("api_key") or "").strip()
@@ -99,9 +90,11 @@ def _normalize_handles(handles: Optional[List[str]], field_name: str) -> List[st
     return cleaned
 
 
-def _parse_iso_date(value: str, field_name: str) -> date:
-    """Parse a strict YYYY-MM-DD string (xAI silently accepts malformed dates and returns no citations)."""
+def _parse_iso_date(value: str, field_name: str) -> Optional[date]:
+    """Strict YYYY-MM-DD or None for blank (xAI silently accepts malformed dates and returns no citations)."""
     raw = value.strip()
+    if not raw:
+        return None
     try:
         return datetime.strptime(raw, "%Y-%m-%d").date()
     except ValueError as exc:
@@ -110,8 +103,7 @@ def _parse_iso_date(value: str, field_name: str) -> date:
 
 def _validate_date_range(from_date: str, to_date: str) -> None:
     """Both parse as YYYY-MM-DD; from <= to; from not after today UTC (to may be in the future)."""
-    parsed_from = _parse_iso_date(from_date, "from_date") if from_date.strip() else None
-    parsed_to = _parse_iso_date(to_date, "to_date") if to_date.strip() else None
+    parsed_from, parsed_to = _parse_iso_date(from_date, "from_date"), _parse_iso_date(to_date, "to_date")
     if parsed_from and parsed_to and parsed_from > parsed_to:
         raise ValueError(
             f"from_date ({parsed_from.isoformat()}) must be on or before to_date ({parsed_to.isoformat()})"
@@ -181,7 +173,7 @@ def _error_json(error: str, exc: BaseException) -> str:
 
 def _post_with_retries(url: str, headers: Dict[str, str], payload: Dict[str, Any]) -> requests.Response:
     """POST with retries on 5xx / timeout / connection errors; re-raises the last failure."""
-    timeout_seconds = _get_x_search_timeout_seconds()
+    timeout_seconds = _get_x_search_int("timeout_seconds", DEFAULT_X_SEARCH_TIMEOUT_SECONDS, 30)
     max_retries = _get_x_search_int("retries", DEFAULT_X_SEARCH_RETRIES, 0)
     for attempt in range(max_retries + 1):
         try:
@@ -256,7 +248,6 @@ def x_search_tool(
             reasoning_effort = _get_x_search_reasoning_effort()
         except ValueError as exc:
             return tool_error(str(exc))
-
         payload = {
             "model": str(_load_x_search_config().get("model") or "").strip() or DEFAULT_X_SEARCH_MODEL,
             "input": [{"role": "user", "content": query.strip()}],
@@ -265,14 +256,12 @@ def x_search_tool(
         }
         if reasoning_effort:
             payload["reasoning"] = {"effort": reasoning_effort}
-
         headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json",
             "User-Agent": hermes_xai_user_agent(),
         }
         data = _post_with_retries(f"{base_url}/responses", headers, payload).json()
-
         citations = list(data.get("citations") or [])
         inline_citations = _extract_inline_citations(data)
         # xAI returns 200 with a synthesized answer even when no posts match the narrowing
@@ -301,7 +290,8 @@ def x_search_tool(
         return _error_json(_http_error_message(e), e)
     except requests.ReadTimeout as e:
         logger.error("x_search timed out: %s", e, exc_info=True)
-        return _error_json(f"xAI x_search timed out after {_get_x_search_timeout_seconds()} seconds", e)
+        timeout = _get_x_search_int("timeout_seconds", DEFAULT_X_SEARCH_TIMEOUT_SECONDS, 30)
+        return _error_json(f"xAI x_search timed out after {timeout} seconds", e)
     except Exception as e:
         logger.error("x_search failed: %s", e, exc_info=True)
         return _error_json(str(e), e)
