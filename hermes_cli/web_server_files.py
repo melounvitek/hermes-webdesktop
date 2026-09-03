@@ -1,7 +1,4 @@
 """Managed-files policy for the dashboard file browser: root resolution, path containment, entry metadata.
-
-Split out of ``hermes_cli.web_server``, which re-imports every externally used
-name so ``web_server.<name>`` keeps resolving (and monkeypatching) as before.
 """
 
 import mimetypes
@@ -99,7 +96,8 @@ def _dashboard_local_update_managed_externally() -> bool:
     the update button is the correct path. pip stays blocked in containers: its
     apply path mutates the running container filesystem.
     """
-    from hermes_cli.web_server import PROJECT_ROOT, detect_install_method
+    from hermes_cli.web_server import PROJECT_ROOT
+    from hermes_cli.config import detect_install_method
     if _default_hermes_root_is_opt_data():
         return True
     try:

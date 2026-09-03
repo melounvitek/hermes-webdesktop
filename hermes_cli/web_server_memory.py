@@ -1,8 +1,4 @@
 """Memory-provider dashboard helpers: manifest/schema loading, setup-env and dependency probes, configured-status discovery.
-
-Split out of ``hermes_cli.web_server``; every externally used name is re-imported there so
-``web_server.<name>`` keeps resolving (and monkeypatching). Helpers that tests patch on
-``web_server`` are reached lazily through it.
 """
 
 import logging
@@ -140,7 +136,6 @@ def _run_setup_command(
 
 
 def _memory_provider_dependencies_installed(setup: Dict[str, Any]) -> bool:
-    from hermes_cli.web_server import _dependency_importable
     pip_ok = all(_dependency_importable(dep) for dep in _string_list(setup.get("pip_dependencies")))
     external_ok = True
     for dep in setup.get("external_dependencies") or []:
@@ -226,7 +221,7 @@ def _read_json_file(path: Path) -> Dict[str, Any]:
 
 def _read_memory_provider_existing_values(name: str) -> Dict[str, Any]:
     """Best-effort read of existing provider config across legacy/native stores."""
-    from hermes_cli.web_server import get_hermes_home, load_config
+    from hermes_cli.config import get_hermes_home, load_config
 
     hermes_home = get_hermes_home()
     values: Dict[str, Any] = {}
@@ -259,7 +254,7 @@ def _read_memory_provider_existing_values(name: str) -> Dict[str, Any]:
 
 
 def _env_lookup(env_key: Optional[str]) -> str:
-    from hermes_cli.web_server import load_env
+    from hermes_cli.config import load_env
     if not env_key:
         return ""
     return str(load_env().get(env_key) or os.environ.get(env_key) or "")
@@ -348,7 +343,7 @@ def _memory_provider_status(row: Dict[str, Any], setup: Dict[str, Any], configur
 
 
 def _discover_memory_provider_statuses() -> List[Dict[str, Any]]:
-    from hermes_cli.web_server import load_config
+    from hermes_cli.config import load_config
     discovered: Dict[str, Dict[str, Any]] = {}
     try:
         from plugins.memory import discover_memory_providers
@@ -393,7 +388,6 @@ def _discover_memory_provider_statuses() -> List[Dict[str, Any]]:
 
 
 def _require_memory_provider_ready(name: str) -> None:
-    from hermes_cli.web_server import _discover_memory_provider_statuses
     if not name:
         return
     row = next((r for r in _discover_memory_provider_statuses() if r["name"] == name), None)

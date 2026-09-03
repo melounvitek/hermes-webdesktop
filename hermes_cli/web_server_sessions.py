@@ -1,9 +1,5 @@
 """Session-DB access for the dashboard: per-profile SessionDB opening with schema
 heal, latest-descendant lookup and the auto-archive ticker.
-
-Split out of ``hermes_cli.web_server``, which re-imports every external name so
-``web_server.<name>`` keeps resolving (and monkeypatching); helpers tests patch
-there are reached lazily through it.
 """
 
 import logging
@@ -111,8 +107,6 @@ def _open_session_db_at_path(db_path: Path, *, read_only: bool):
     healthy read path never takes a write lock.  Tables outside SCHEMA_SQL
     (telemetry ``tel_*``, FTS shadow tables) are outside both probe and heal.
     """
-    from hermes_cli.web_server import (
-        _session_db_heal_exhausted, _session_db_heal_warned, _session_db_read_probe_statements)
     import sqlite3
 
     from hermes_state import SessionDB, is_malformed_schema_error
@@ -188,7 +182,7 @@ def _open_session_db_for_profile(profile: Optional[str], *, read_only: bool):
 
     Access-mode semantics: see :func:`_open_session_db_at_path`.
     """
-    from hermes_cli.web_server import _cron_profile_home
+    from hermes_cli.web_server_cron import _cron_profile_home
     from hermes_state import _default_db_path
 
     if profile:
@@ -210,7 +204,6 @@ def _maybe_auto_archive_for_profile(profile: Optional[str]) -> None:
     """Config-gated stale-session auto-archive for ``profile``; never raises.
     ``hermes serve`` runs neither CLI nor gateway startup hooks, so this
     session-list trigger is what makes ``sessions.auto_archive`` work there."""
-    from hermes_cli.web_server import _open_session_db_for_profile
     try:
         key = profile or ""
         now = time.monotonic()

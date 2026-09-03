@@ -1,7 +1,4 @@
 """Serve-process lifecycle: parent death watchdog, port-conflict preflight, READY announcement, browser open, trusted proxies.
-
-Split out of ``hermes_cli.web_server``, which re-imports every externally used
-name so ``web_server.<name>`` keeps resolving (and monkeypatching) as before.
 """
 
 import logging
@@ -380,7 +377,6 @@ def _write_machine_sentinel_line(line: str) -> None:
 
 def _report_port_in_use(host: str, port: int) -> None:
     """Print the machine sentinel + a human hint naming likely holders."""
-    from hermes_cli.web_server import _write_machine_sentinel_line
     _write_machine_sentinel_line(_PORT_IN_USE_SENTINEL.format(port=port))
     print(
         f"  Port {port} on {host} is already in use — likely another "

@@ -1,7 +1,5 @@
 """MCP dashboard helpers: create-payload normalisation, env redaction/summary, dashboard-driven MCP OAuth worker.
 
-Split out of ``hermes_cli.web_server``, which re-imports every externally used
-name so ``web_server.<name>`` keeps resolving (and monkeypatching) as before.
 Wraps the same config layer the CLI uses (hermes_cli.mcp_config); stdio ``env``
 secrets are redacted on read.
 """

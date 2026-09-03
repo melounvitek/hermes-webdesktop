@@ -1,9 +1,5 @@
 """Dashboard OAuth/login-status helpers: provider catalog, per-provider device pollers,
 Anthropic/Copilot/Claude-Code status probes.
-
-Split out of ``hermes_cli.web_server``; every externally used name is re-imported there, so
-``web_server.<name>`` keeps resolving (and monkeypatching). Helpers that tests patch on
-``web_server`` are reached lazily through it.
 """
 
 import logging
@@ -216,7 +212,7 @@ def _oauth_poller(label: str):
 @_oauth_poller("nous")
 def _nous_poller(session_id: str, sess: Dict[str, Any]) -> None:
     """Background poller that drives a Nous device-code flow to completion."""
-    from hermes_cli.web_server import _profile_scope
+    from hermes_cli.web_server_profiles import _profile_scope
     from hermes_cli.auth import _poll_for_token, persist_nous_credentials, refresh_nous_oauth_from_state
     import httpx
     portal_base_url, client_id = sess["portal_base_url"], sess["client_id"]
@@ -255,7 +251,7 @@ def _minimax_poller(session_id: str, sess: Dict[str, Any]) -> None:
     ``device_code``. Builds the same auth_state as the CLI's ``_minimax_oauth_login`` and persists
     via ``_minimax_save_auth_state`` so the system ends up as after ``hermes auth add minimax-oauth``.
     Region is fixed to "global" here; cn-region operators use the CLI's ``--region cn``."""
-    from hermes_cli.web_server import _profile_scope
+    from hermes_cli.web_server_profiles import _profile_scope
     from hermes_cli.auth import (
         _minimax_poll_token, _minimax_resolve_token_expiry_unix, _minimax_save_auth_state,
         MINIMAX_OAUTH_GLOBAL_INFERENCE, MINIMAX_OAUTH_SCOPE,
@@ -294,7 +290,7 @@ def _minimax_poller(session_id: str, sess: Dict[str, Any]) -> None:
 @_oauth_poller("xai")
 def _xai_device_poller(session_id: str, sess: Dict[str, Any]) -> None:
     """Background poller for xAI's OAuth device-code flow."""
-    from hermes_cli.web_server import _profile_scope
+    from hermes_cli.web_server_profiles import _profile_scope
     import httpx
     from hermes_cli.auth import (
         _save_xai_oauth_tokens, _xai_oauth_discovery, _xai_oauth_poll_device_token,

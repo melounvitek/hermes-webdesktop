@@ -1,9 +1,5 @@
 """Chat/terminal WebSocket plumbing: PTY bridge selection and registry, WS
 client/origin/auth gates, chat argv resolution, gateway/sidecar URL building.
-
-Split out of ``hermes_cli.web_server``; every externally used name is re-imported
-there, so ``web_server.<name>`` keeps resolving (and monkeypatching) as before.
-Helpers that tests patch on ``web_server`` are reached lazily through it.
 """
 
 import logging
@@ -184,7 +180,6 @@ def _ws_host_origin_reason(ws: "WebSocket") -> Optional[str]:
 
 def _ws_host_origin_is_allowed(ws: "WebSocket") -> bool:
     """True when the upgrade passes the dashboard Host/Origin guard."""
-    from hermes_cli.web_server import _ws_host_origin_reason
     return _ws_host_origin_reason(ws) is None
 
 
@@ -286,7 +281,6 @@ def _ws_auth_reason(ws: "WebSocket") -> tuple[Optional[str], str]:
 
 def _ws_auth_ok(ws: "WebSocket") -> bool:
     """True when the WS-upgrade credential is accepted. See _ws_auth_reason."""
-    from hermes_cli.web_server import _ws_auth_reason
     return _ws_auth_reason(ws)[0] is None
 
 
@@ -303,10 +297,10 @@ def _resolve_chat_argv(
     ``profile`` scopes the ENTIRE chat by pointing ``HERMES_HOME`` at the profile
     dir, the same propagation ``hermes -p <name>`` performs.
     """
-    from hermes_cli.web_server import (
-        _config_profile_scope, _open_session_db_for_profile, _resolve_profile_dir,
-        _session_latest_descendant)
-    from hermes_cli.main import PROJECT_ROOT, _apply_tui_python_env, _make_tui_argv
+    from hermes_cli.web_server_profiles import _config_profile_scope, _resolve_profile_dir
+    from hermes_cli.web_server_sessions import _open_session_db_for_profile, _session_latest_descendant
+    from hermes_cli.main import PROJECT_ROOT
+    from hermes_cli.main_tui_launch import _apply_tui_python_env, _make_tui_argv
 
     profile_dir: Optional[Path] = None
     requested = (profile or "").strip()
@@ -428,7 +422,7 @@ async def _resolve_chat_argv_async(
     active_session_file: Optional[str] = None) -> tuple[list[str], Optional[str], Optional[dict]]:
     """Resolve chat argv off the event loop (it may run ``npm run build``); the
     async lock keeps one-build-at-a-time without parking worker threads."""
-    from hermes_cli.web_server import _get_chat_argv_lock, _resolve_chat_argv, app
+    from hermes_cli.web_server import _get_chat_argv_lock, app
     kwargs = {"resume": resume, "sidecar_url": sidecar_url, "profile": profile}
     if active_session_file is not None:
         kwargs["active_session_file"] = active_session_file

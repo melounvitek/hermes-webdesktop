@@ -1,8 +1,4 @@
 """Dashboard UI assets: SPA mount, theme normalisation/bootstrap CSS, dashboard-plugin discovery and the plugins-hub merge.
-
-Split out of ``hermes_cli.web_server``; every externally used name is re-imported there so
-``web_server.<name>`` keeps resolving (and monkeypatching). Helpers that tests patch on
-``web_server`` are reached lazily through it.
 """
 
 import logging
@@ -47,7 +43,7 @@ def _render_active_theme_bootstrap_css() -> str:
     references the variables rather than literals so runtime theme switches stay live:
     ``applyTheme()`` writes inline styles on ``documentElement`` which outrank this block.
     """
-    from hermes_cli.web_server import load_config
+    from hermes_cli.config import load_config
     try:
         active = cfg_get(load_config(), "dashboard", "theme", default="default")
         if not active or not isinstance(active, str):
@@ -621,7 +617,6 @@ def _plugin_auth_hint(name: str, provides_tools: list) -> tuple:
     A missing cache entry is "unknown": schedule a background probe rather than probing
     inline (which would starve the root event loop), so the short hub TTL picks it up.
     """
-    from hermes_cli.web_server import _schedule_check_fn_probe
     try:
         from tools.registry import get_cached_check_fn_result, registry
         for tname in provides_tools:
@@ -646,13 +641,9 @@ def _merged_plugins_hub(force_refresh: bool = False) -> Dict[str, Any]:
     event loop). Only cached availability is consumed and the payload is memoized briefly to
     collapse the dashboard's bursty duplicate fetches.
     """
-    from hermes_cli.web_server import (
-        _discover_memory_provider_statuses,
-        _get_dashboard_plugins,
-        _normalize_memory_provider_name,
-        get_hermes_home,
-        load_config,
-    )
+    from hermes_cli.web_server_memory import _discover_memory_provider_statuses, _normalize_memory_provider_name
+    from hermes_cli.web_server import _get_dashboard_plugins
+    from hermes_cli.config import get_hermes_home, load_config
     global _plugins_hub_cache, _plugins_hub_cache_expires_at
     now = time.monotonic()
     if not force_refresh:

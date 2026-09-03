@@ -1,9 +1,5 @@
 """Dashboard cron helpers: per-profile scheduler I/O, job validation/normalisation, cron fire and
 gateway forwarding.
-
-Split out of ``hermes_cli.web_server``; every externally used name is re-imported there, so
-``web_server.<name>`` keeps resolving (and monkeypatching). Helpers that tests patch on
-``web_server`` are reached lazily through it.
 """
 
 import contextlib
@@ -72,7 +68,6 @@ def _validate_dashboard_cron_effective_job(job: Dict[str, Any]) -> None:
 
 
 def _validate_dashboard_cron_context_from(refs: Optional[List[str]], profile_name: str) -> None:
-    from hermes_cli.web_server import _call_cron_for_profile
     for ref in refs or ():
         # "self" (the continuity toggle) resolves to the job's own id at run time — it can't be
         # validated against the store (create precedes the job's existence).
@@ -87,7 +82,7 @@ def _validate_dashboard_cron_context_from(refs: Optional[List[str]], profile_nam
 def _cron_profile_dicts() -> List[Dict[str, Any]]:
     """Minimal profile records (callers only consume ``name``); avoids ``list_profiles()``,
     whose config parsing, gateway probes and skill counts are GIL pressure on large pools."""
-    from hermes_cli.web_server import _fallback_profile_dicts
+    from hermes_cli.web_server_profiles import _fallback_profile_dicts
     from hermes_cli import profiles as profiles_mod
     try:
         return [
@@ -116,7 +111,6 @@ def _cron_default_profile() -> str:
 
 def _cron_profile_home(profile: Optional[str]) -> Tuple[str, Path]:
     """Resolve a profile query value to (profile_name, HERMES_HOME)."""
-    from hermes_cli.web_server import _cron_default_profile
     from hermes_cli import profiles as profiles_mod
     raw = (profile or _cron_default_profile()).strip() or "default"
     try:
@@ -157,7 +151,6 @@ def _cron_store_scope(home: Path):
 
 def _call_cron_for_profile(target_profile: Optional[str], func_name: str, *args, **kwargs):
     """Run a cron.jobs helper against the selected profile's cron directory."""
-    from hermes_cli.web_server import _cron_profile_home
     profile_name, home = _cron_profile_home(target_profile)
     with _cron_store_scope(home) as cron_jobs:
         if func_name == "create_job":
@@ -182,7 +175,6 @@ def _notify_cron_provider_for_profile(target_profile: Optional[str]) -> None:
     affected profile re-arms on its next fire/start (idempotent via dedup_key). The built-in
     provider re-reads jobs.json each tick and stays a no-op here.
     """
-    from hermes_cli.web_server import _cron_profile_dicts, _cron_profile_home
     try:
         _profile_name, home = _cron_profile_home(target_profile)
         from cron.scheduler_provider import InProcessCronScheduler, resolve_cron_scheduler
@@ -205,7 +197,6 @@ def _notify_cron_provider_for_profile(target_profile: Optional[str]) -> None:
 
 def _mutate_cron_for_profile(target_profile: Optional[str], func_name: str, *args, **kwargs):
     """Apply a cron store mutation and reconcile its scheduler provider."""
-    from hermes_cli.web_server import _call_cron_for_profile, _notify_cron_provider_for_profile
     result = _call_cron_for_profile(target_profile, func_name, *args, **kwargs)
     if result:
         _notify_cron_provider_for_profile(target_profile)
@@ -213,7 +204,6 @@ def _mutate_cron_for_profile(target_profile: Optional[str], func_name: str, *arg
 
 
 def _find_cron_job_profile(job_id: str) -> Optional[str]:
-    from hermes_cli.web_server import _call_cron_for_profile, _cron_profile_dicts
     for profile in _cron_profile_dicts():
         name = str(profile.get("name") or "")
         if not name:
@@ -226,7 +216,7 @@ def _find_cron_job_profile(job_id: str) -> Optional[str]:
 
 async def _run_cron_dashboard_io(func, *args, **kwargs):
     """Run cron dashboard profile/job I/O outside the FastAPI event loop."""
-    from hermes_cli.web_server import run_in_threadpool
+    from starlette.concurrency import run_in_threadpool
     if inspect.iscoroutinefunction(func):
         raise TypeError("_run_cron_dashboard_io only accepts sync callables")
     result = await run_in_threadpool(func, *args, **kwargs)
@@ -244,7 +234,6 @@ def _raise_if_cron_registration_error(e: Exception) -> None:
 
 
 def _create_cron_job_sync(body: CronJobCreate, profile: Optional[str] = None):
-    from hermes_cli.web_server import _cron_profile_home
     try:
         profile_name, profile_home = _cron_profile_home(profile)
         script = _normalize_dashboard_cron_script(body.script, profile_home)
@@ -286,7 +275,6 @@ def _fire_cron_job_for_profile(profile: str, job_id: str, *, force: bool = False
     cannot serve relay-fronted platforms or E2EE rooms). Retained for the dashboard trigger path
     and external callers on the web_deps late-binding seam; do not add new uses.
     """
-    from hermes_cli.web_server import _cron_profile_home
     _profile_name, home = _cron_profile_home(profile)
     from cron.scheduler_provider import provider_supports_force_fire, resolve_cron_scheduler
     with _cron_store_scope(home):
@@ -332,7 +320,7 @@ def _gateway_fire_endpoint(profile: str, home: Path) -> str:
     mirrors under ``/p/<profile>/…``, so a non-default profile's port must be read from the
     default home (a secondary's own API_SERVER_PORT is a port nothing listens on).
     """
-    from hermes_cli.web_server import _cron_default_profile, load_config
+    from hermes_cli.config import load_config
     import os as _os
     multiplex = False
     try:
@@ -396,7 +384,6 @@ async def _forward_cron_fire_to_gateway(
     de-dupes a double fire) — unless :func:`_gateway_intentionally_stopped`, in which case it
     drops the fire with 200: retrying into an operator-stopped gateway can never succeed.
     """
-    from hermes_cli.web_server import _cron_profile_home
     _profile_name, home = _cron_profile_home(profile)
     url = _gateway_fire_endpoint(_profile_name, home)
     import httpx
@@ -425,7 +412,6 @@ def _gateway_intentionally_stopped(profile: Optional[str]) -> bool:
     ``gateway_state`` runtime field: a legacy/crashed file must stay on the retryable-503 path.
     Any resolution or parse failure returns False (fail open toward retry).
     """
-    from hermes_cli.web_server import _cron_profile_home
     import json as _json
     try:
         data = _json.loads((_cron_profile_home(profile)[1] / "gateway_state.json").read_text(encoding="utf-8"))

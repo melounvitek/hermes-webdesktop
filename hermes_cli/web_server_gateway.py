@@ -1,9 +1,5 @@
 """Gateway/process helpers for the dashboard: per-profile gateway topology (+cache), action
 subprocess spawning, gateway restart plumbing, system platform display.
-
-Split out of ``hermes_cli.web_server``; every externally used name is re-imported there, so
-``web_server.<name>`` keeps resolving (and monkeypatching). Helpers that tests patch on
-``web_server`` are reached lazily through it.
 """
 
 import logging
@@ -149,7 +145,6 @@ def _collect_profile_gateway_topology() -> Dict[str, Any]:
     (multiplex / single / multiple / none) and ``profile_platforms`` — ownership-filtered runtime
     platform maps per live gateway, an internal aggregation input never exposed directly.
     """
-    from hermes_cli.web_server import _profile_gateway_writer_identity
     try:
         from hermes_cli.profiles import _check_gateway_running, profiles_to_serve
         from gateway.status import read_runtime_status
@@ -213,7 +208,6 @@ def _topology_cache_get(fn: Any) -> Optional[Dict[str, Any]]:
 
 
 def _collect_profile_gateway_topology_cached() -> Dict[str, Any]:
-    from hermes_cli.web_server import _collect_profile_gateway_topology
     fn = _collect_profile_gateway_topology
     cached = _topology_cache_get(fn)
     if cached is not None:
@@ -286,7 +280,6 @@ _ACTION_RESULTS: Dict[str, Dict[str, Any]] = {}
 
 def _terminate_desktop_managed_gateway() -> None:
     """Stop a live gateway restart child when its Desktop backend shuts down."""
-    from hermes_cli.web_server import _ACTION_PROCS
     proc = _ACTION_PROCS.get("gateway-restart")
     if proc is None:
         return
@@ -333,9 +326,7 @@ def _spawn_hermes_action(
     subcommand: List[str], name: str, *, env_overrides: Optional[Dict[str, str]] = None
 ) -> subprocess.Popen:
     """Spawn ``hermes <subcommand>`` detached (via ``hermes_cli.main``) and record the handle."""
-    from hermes_cli.web_server import (
-        PROJECT_ROOT, _ACTION_COMMANDS, _ACTION_IDS, _ACTION_LOG_DIR, _ACTION_PROCS, _ACTION_RESULTS,
-    )
+    from hermes_cli.web_server import PROJECT_ROOT
     _ACTION_LOG_DIR.mkdir(parents=True, exist_ok=True)
     log_file = open(_ACTION_LOG_DIR / _ACTION_LOG_FILES[name], "ab", buffering=0)
     log_file.write(f"\n=== {name} started {time.strftime('%Y-%m-%d %H:%M:%S')} ===\n".encode())
@@ -365,7 +356,7 @@ def _spawn_hermes_action(
 
 
 def _gateway_subcommand(profile: Optional[str], verb: str) -> List[str]:
-    from hermes_cli.web_server import _profile_cli_args
+    from hermes_cli.web_server_profiles import _profile_cli_args
     return _profile_cli_args(profile) + ["gateway", verb]
 
 

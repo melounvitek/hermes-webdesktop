@@ -15,7 +15,6 @@ import logging
 import os
 import re
 import secrets
-import shutil  # noqa: F401 — tests monkeypatch web_server.shutil.which
 import subprocess
 import sys
 import sysconfig
@@ -34,29 +33,12 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from hermes_cli import __version__
-from hermes_cli.config import (  # noqa: F401 — late-bound by extracted routers/modules; tests monkeypatch web_server.<name>
-    cfg_get,
-    check_config_version,
-    detect_install_method,
-    get_hermes_home,
-    load_config,
-    load_env,
-    remove_env_value,
-    save_config,
-    save_env_value,
-)
-from gateway.status import (  # noqa: F401 — late-bound by web_routers/status + tests monkeypatch web_server.<name>
-    get_running_pid,
-    get_running_pid_cached,
-    get_runtime_status_running_pid,
-    read_runtime_status,
-)
+from hermes_cli.config import load_config
 
 try:
     from fastapi import FastAPI, HTTPException, Request
     from fastapi.middleware.cors import CORSMiddleware
     from fastapi.responses import JSONResponse
-    from starlette.concurrency import run_in_threadpool  # noqa: F401 — late-bound by web_server_cron/routers; tests patch web_server.run_in_threadpool
 except ImportError:
     # First try lazy-installing the dashboard extras. Only the user actually
     # running `hermes dashboard` needs fastapi+uvicorn; lazy install keeps
@@ -67,7 +49,6 @@ except ImportError:
         from fastapi import FastAPI, HTTPException, Request
         from fastapi.middleware.cors import CORSMiddleware
         from fastapi.responses import JSONResponse
-        from starlette.concurrency import run_in_threadpool  # noqa: F401
     except Exception:
         raise SystemExit(
             "Web UI requires fastapi and uvicorn.\n"
@@ -78,19 +59,15 @@ WEB_DIST = Path(os.environ["HERMES_WEB_DIST"]) if "HERMES_WEB_DIST" in os.enviro
 _log = logging.getLogger(__name__)
 
 
-from hermes_cli.web_server_lifecycle import (  # noqa: E402,F401 — re-exported; routers/tests reach these via web_server.<name>
+from hermes_cli.web_server_lifecycle import (  # noqa: E402
     PORT_IN_USE_EXIT_CODE,
     _dashboard_forwarded_allow_ips,
     _eager_reconcile_own_session_db,
-    _is_addr_in_use_error,
-    _is_serve_orphaned,
     _maybe_open_browser,
     _port_bind_conflict,
     _read_bound_port,
     _report_port_in_use,
-    _resolve_restart_drain_timeout,
     _start_parent_death_watchdog,
-    _valid_parent_start_marker,
     _warm_gateway_module,
     _write_dashboard_ready_file,
     _write_machine_sentinel_line,
@@ -779,123 +756,17 @@ async def _dashboard_selftest_loop() -> None:
         await _dashboard_selftest_once()
 
 
-# Helpers extracted into web_server_<concern> modules, re-exported so
-# ``web_server.<name>`` stays the late-binding seam (web_deps.late) routers use
-# and tests monkeypatch. Every name here has a live web_server.<name> reference.
-from hermes_cli.web_server_config import (  # noqa: E402,F401
-    CONFIG_SCHEMA, _AUX_TASK_SLOTS, _apply_main_model_assignment, _apply_model_assignment_sync,
-    _dashboard_code_skew_guard, _denormalize_config_from_web, _memory_provider_options,
-    _normalize_config_for_web, _normalize_main_model_assignment,
-    _schema_with_dynamic_provider_options, _timezone_options,
-)
-from hermes_cli.web_models import (  # noqa: E402,F401
-    ConfigUpdate, WhatsAppOnboardingStart, WhatsAppOnboardingApply, MoaModelSlot, MoaPresetPayload,
-    MoaConfigPayload, BulkDeleteSessions, CronJobCreate, CronJobUpdate,
-    AutomationBlueprintInstantiate, MCPServerCreate,
-)
-from hermes_cli.web_server_gateway import (  # noqa: E402,F401
-    _ACTION_COMMANDS, _ACTION_IDS, _ACTION_LOG_DIR, _ACTION_LOG_FILES, _ACTION_PROCS,
-    _ACTION_RESULTS, _TOPOLOGY_CACHE, _TOPOLOGY_CACHE_TTL, _collect_profile_gateway_topology,
-    _collect_profile_gateway_topology_cached, _dashboard_spawn_executable, _display_system_platform,
-    _gateway_subcommand, _load_configured_gateway_platforms, _probe_gateway_health,
-    _profile_gateway_writer_identity, _profile_platform_ports, _restart_gateway_after,
-    _spawn_hermes_action, _split_text_for_speak_stream, _strip_session_list_rows,
-    _terminate_desktop_managed_gateway,
-)
-from hermes_cli.web_server_files import (  # noqa: E402,F401
-    _dashboard_local_update_managed_externally, _fs_path, _managed_file_entry,
-    _managed_response_meta, _path_is_under, _resolve_managed_path,
-)
-from hermes_cli.web_server_memory import (  # noqa: E402,F401
-    _coerce_bool, _dependency_importable, _discover_memory_provider_statuses, _field_default,
-    _field_is_set, _field_value, _field_visible, _load_memory_provider, _memory_provider_manifest,
-    _memory_provider_setup_info, _memory_provider_setup_manifest, _normalize_memory_provider_name,
-    _normalize_memory_provider_schema, _read_memory_provider_existing_values,
-    _require_memory_provider_ready, _run_setup_command,
-)
-from hermes_cli.web_server_profiles import (  # noqa: E402,F401
-    _profile_cli_args, _hub_action_name, _installed_hub_identifiers, _SKILLS_PROFILE_LOCK,
-    _TERMINAL_BACKENDS, _approval_mode_of, _aux_task_summary, _aux_usage_rows,
-    _broadcast_gateway_session_info, _config_profile_scope, _fallback_profile_dicts,
-    _is_other_profile, _merge_aux_into_by_model, _parse_model_ids, _plugin_terminal_backend_rows,
-    _profile_scope, _resolve_profile_dir, _write_profile_mcp_servers,
-)
-from hermes_cli.web_server_messaging import (  # noqa: E402,F401
-    _MESSAGING_KEYS_PAGE_KEYS, _TelegramOnboardingPairing, _WhatsAppOnboardingSession,
-    _build_catalog_entry, _channel_managed_env_keys, _messaging_platform_catalog,
-    _restart_gateway_after_whatsapp_onboarding, _telegram_onboarding_error_message,
-    _telegram_onboarding_lock, _telegram_onboarding_pairings, _telegram_onboarding_request_sync,
-    _whatsapp_onboarding_payload, _whatsapp_onboarding_sessions, _whatsapp_session_path,
-    _write_platform_enabled,
-)
-from hermes_cli.web_server_oauth import (  # noqa: E402,F401
-    _OAUTH_PROVIDER_CATALOG, _external_process_cli_command, _minimax_poller, _nous_poller,
-    _oauth_profile_name, _oauth_sessions, _oauth_sessions_lock, _truncate_token, _xai_device_poller,
-)
-from hermes_cli.web_server_sessions import (  # noqa: E402,F401
-    _auto_archive_ticker_loop, _last_auto_archive_check, _maybe_auto_archive_for_profile,
-    _open_session_db_at_path, _open_session_db_for_profile, _session_db_heal_exhausted,
-    _session_db_heal_warned, _session_db_read_probe_statements, _session_latest_descendant,
-)
-from hermes_cli.web_server_cron import (  # noqa: E402,F401
-    _call_cron_for_profile, _create_cron_job_sync, _cron_default_profile, _cron_optional_text,
-    _cron_profile_dicts, _cron_profile_home, _cron_string_list, _find_cron_job_profile,
-    _fire_cron_job_for_profile, _forward_cron_fire_to_gateway, _gateway_fire_endpoint,
-    _gateway_intentionally_stopped, _mutate_cron_for_profile, _normalize_dashboard_cron_script,
-    _notify_cron_provider_for_profile, _raise_if_cron_registration_error, _run_cron_dashboard_io,
-    _validate_dashboard_cron_context_from, _validate_dashboard_cron_effective_job,
-)
-from hermes_cli.web_server_mcp import (  # noqa: E402,F401
-    _mcp_oauth_flows, _mcp_server_summary, _normalize_mcp_server_create, _run_dashboard_mcp_oauth,
-)
-from hermes_cli.web_server_chat import (  # noqa: E402,F401
-    PTY_REGISTRY, PtyBridge, PtyUnavailableError, _GATEWAY_WS_PROTOCOL,
-    _GATEWAY_WS_TICKET_PROTOCOL_PREFIX, _LOOPBACK_HOSTS, _PTY_BRIDGE_AVAILABLE, _RESIZE_RE,
-    _active_session_file_for_channel, _build_gateway_ws_url, _build_sidecar_url,
-    _get_console_executor, _legacy_pump, _resolve_chat_argv, _resolve_chat_argv_async,
-    _resolve_client_ws_host, _ws_auth_ok, _ws_auth_reason, _ws_client_is_allowed, _ws_client_reason,
-    _ws_host_origin_is_allowed, _ws_host_origin_reason, _ws_request_is_allowed,
-)
-from hermes_cli.web_server_dashboard import (  # noqa: E402,F401
-    _BUILTIN_DASHBOARD_THEMES, _discover_dashboard_plugins, _discover_user_themes,
-    _invalidate_plugins_hub_cache, _merged_plugins_hub, _mount_plugin_api_routes,
-    _normalise_theme_definition, _render_active_theme_bootstrap_css, _safe_plugin_api_relpath,
-    _schedule_check_fn_probe, mount_spa,
-)
 
 
-# Legacy re-exports of route handlers; tests call these via web_server.<name>.
-from hermes_cli.web_routers.files import upload_managed_file_stream  # noqa: E402,F401
-from hermes_cli.web_routers.status import get_status, run_dump  # noqa: E402,F401
-from hermes_cli.web_routers.sessions import search_sessions  # noqa: E402,F401
-from hermes_cli.web_routers.models import (  # noqa: E402,F401
-    get_model_options, get_recommended_default_model, set_moa_models,
+# Action registries/spawner are owned by web_server_gateway; routers and tests reach them
+# there, so this module reads them through the module too (one patch seam).
+from hermes_cli import web_server_gateway as _gateway_mod  # noqa: E402
+from hermes_cli.web_server_gateway import _ACTION_LOG_FILES, _terminate_desktop_managed_gateway  # noqa: E402
+from hermes_cli.web_server_sessions import _auto_archive_ticker_loop  # noqa: E402
+from hermes_cli.web_server_chat import PTY_REGISTRY  # noqa: E402
+from hermes_cli.web_server_dashboard import (  # noqa: E402
+    _discover_dashboard_plugins, _mount_plugin_api_routes, mount_spa,
 )
-from hermes_cli.web_routers.messaging import (  # noqa: E402,F401
-    apply_whatsapp_onboarding, start_whatsapp_onboarding,
-)
-from hermes_cli.web_routers.oauth import (  # noqa: E402,F401
-    _codex_full_login_worker, _new_oauth_session, _resolve_provider_status,
-)
-from hermes_cli.web_routers.sessions import (  # noqa: E402,F401
-    bulk_delete_sessions_endpoint, count_empty_sessions_endpoint, delete_empty_sessions_endpoint,
-    get_session_latest_descendant, get_session_messages, delete_session_endpoint,
-    export_session_endpoint, prune_sessions_endpoint,
-)
-from hermes_cli.web_routers.cron import (  # noqa: E402,F401
-    list_cron_jobs, create_cron_job, update_cron_job, pause_cron_job, resume_cron_job,
-    trigger_cron_job, delete_cron_job, instantiate_blueprint, _normalize_dashboard_cron_updates,
-)
-from hermes_cli.web_routers.ops import (  # noqa: E402,F401
-    list_credential_pool, run_doctor, run_import,
-)
-from hermes_cli.web_routers.analytics import (  # noqa: E402,F401
-    get_models_analytics, get_usage_analytics,
-)
-from hermes_cli.web_routers.chat_ws import (  # noqa: E402,F401
-    _broadcast_event, _get_event_state, pty_ws,
-)
-from hermes_cli.web_routers.dashboard_ui import post_agent_plugin_install  # noqa: E402,F401
 
 
 _GATEWAY_HEALTH_URL = os.getenv("GATEWAY_HEALTH_URL")
@@ -978,10 +849,10 @@ def _spawn_gateway_restart(profile: Optional[str] = None) -> Tuple[subprocess.Po
 
     global _LAST_GATEWAY_RESTART
 
-    subcommand = _gateway_subcommand(profile, "restart")
-    existing = _ACTION_PROCS.get("gateway-restart")
+    subcommand = _gateway_mod._gateway_subcommand(profile, "restart")
+    existing = _gateway_mod._ACTION_PROCS.get("gateway-restart")
     if existing is not None and existing.poll() is None:
-        existing_command = _ACTION_COMMANDS.get("gateway-restart")
+        existing_command = _gateway_mod._ACTION_COMMANDS.get("gateway-restart")
         if existing_command is None or existing_command == tuple(subcommand):
             return existing, True
         raise RuntimeError("gateway restart already in progress for another profile")
@@ -1000,7 +871,7 @@ def _spawn_gateway_restart(profile: Optional[str] = None) -> Tuple[subprocess.Po
             )
             return recent_proc, True
 
-    proc = _spawn_hermes_action(subcommand, "gateway-restart")
+    proc = _gateway_mod._spawn_hermes_action(subcommand, "gateway-restart")
     _LAST_GATEWAY_RESTART = (time.monotonic(), proc, tuple(subcommand))
     return proc, False
 

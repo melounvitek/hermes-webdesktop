@@ -1,9 +1,5 @@
 """Profile-scoped helpers: profile discovery fallback, profile dir/MCP-server writes,
 the profile/config scope context managers, skills-hub and tools/analytics catalog helpers.
-
-Split out of ``hermes_cli.web_server``; every externally used name is re-imported
-there, so ``web_server.<name>`` keeps resolving (and monkeypatching) as before.
-Helpers that tests patch on ``web_server`` are reached lazily through it.
 """
 
 import logging

@@ -1,8 +1,4 @@
-"""Pydantic request/response models for the Hermes dashboard web server.
-
-``web_server`` re-exports every name here, so existing imports like
-``from hermes_cli.web_server import ConfigUpdate`` keep working.
-"""
+"""Pydantic request/response models for the Hermes dashboard web server."""
 
 from __future__ import annotations
 

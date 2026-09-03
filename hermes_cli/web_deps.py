@@ -1,30 +1,35 @@
 """Late-binding dependency seam for extracted dashboard routers.
 
-``web_server`` owns all dashboard state/helpers; routers under ``web_routers/`` cannot
-import it at import time (web_server imports them to mount them — a cycle) and must not
-copy its state (tests ``monkeypatch.setattr(web_server, ...)`` and expect that to win).
-``late(name)`` / ``LateState(name)`` resolve ``web_server.<name>`` *at call time*.
+``web_server`` owns the dashboard app and its process state; routers under
+``web_routers/`` cannot import it at import time (web_server imports them to mount them —
+a cycle) and must not copy its state (tests ``monkeypatch.setattr(web_server, ...)`` and
+expect that to win). ``late(name)`` / ``LateState(name)`` resolve ``<module>.<name>`` *at
+call time*; ``module`` defaults to ``web_server`` and may name a ``web_server_<concern>``
+module whose helper tests monkeypatch there.
 """
 
 from __future__ import annotations
 
+import importlib
 import sys
 from typing import Any
 
+WEB_SERVER = "hermes_cli.web_server"
 
-def _server():
-    """Return the live ``hermes_cli.web_server`` module (imported on demand)."""
-    mod = sys.modules.get("hermes_cli.web_server")
+
+def _server(module: str = WEB_SERVER):
+    """Return the live ``module`` (imported on demand)."""
+    mod = sys.modules.get(module)
     if mod is None:  # pragma: no cover - routers are only mounted by web_server
-        import hermes_cli.web_server as mod  # type: ignore[no-redef]
+        mod = importlib.import_module(module)
     return mod
 
 
-def late(name: str):
-    """Late-binding proxy for a callable defined on ``web_server``."""
+def late(name: str, module: str = WEB_SERVER):
+    """Late-binding proxy for a callable defined on ``module``."""
 
     def _proxy(*args: Any, **kwargs: Any):
-        return getattr(_server(), name)(*args, **kwargs)
+        return getattr(_server(module), name)(*args, **kwargs)
 
     _proxy.__name__ = name
     _proxy.__qualname__ = name
@@ -39,13 +44,15 @@ class LateState:
     defined *after* the router's ``include_router`` point, so a late import would miss it.
     """
 
-    __slots__ = ("_name",)
+    __slots__ = ("_name", "_module")
 
-    def __init__(self, name: str) -> None:
+    def __init__(self, name: str, module: str = WEB_SERVER) -> None:
         object.__setattr__(self, "_name", name)
+        object.__setattr__(self, "_module", module)
 
     def _target(self) -> Any:
-        return getattr(_server(), object.__getattribute__(self, "_name"))
+        return getattr(_server(object.__getattribute__(self, "_module")),
+                       object.__getattribute__(self, "_name"))
 
     def __getattr__(self, attr: str) -> Any:
         return getattr(self._target(), attr)

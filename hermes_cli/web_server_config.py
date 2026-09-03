@@ -1,8 +1,4 @@
 """Dashboard config schema and model-assignment logic: CONFIG_SCHEMA construction, dynamic provider options, web<->config normalisation, main/aux model assignment.
-
-Split out of ``hermes_cli.web_server``; every externally used name is re-imported there so
-``web_server.<name>`` keeps resolving (and monkeypatching). Helpers that tests patch on
-``web_server`` are reached lazily through it.
 """
 
 import logging

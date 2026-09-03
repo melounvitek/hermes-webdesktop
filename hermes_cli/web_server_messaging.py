@@ -1,9 +1,5 @@
 """Messaging-platform catalog and onboarding helpers: platform overrides/env discovery, WhatsApp
 and Telegram onboarding state.
-
-Split out of ``hermes_cli.web_server``; every externally used name is re-imported there, so
-``web_server.<name>`` keeps resolving (and monkeypatching). Helpers that tests patch on
-``web_server`` are reached lazily through it.
 """
 
 import logging
@@ -380,7 +376,7 @@ def _whatsapp_onboarding_payload(pairing_id: str, record: _WhatsAppOnboardingSes
 
 
 def _restart_gateway_after_whatsapp_onboarding(profile: Optional[str] = None) -> dict[str, Any]:
-    from hermes_cli.web_server import _restart_gateway_after
+    from hermes_cli.web_server_gateway import _restart_gateway_after
     return _restart_gateway_after(profile, what="WhatsApp onboarding", label="WhatsApp onboarding")
 
 
