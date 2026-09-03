@@ -573,10 +573,8 @@ class TeamsAdapter(BasePlatformAdapter):
 
     @staticmethod
     def _invoke_card(body: list) -> "InvokeResponse[AdaptiveCardActionMessageResponse]":
-        return InvokeResponse(
-            status=200,
-            body=AdaptiveCardActionCardResponse(value=AdaptiveCard().with_version("1.4").with_body(body)),
-        )
+        card = AdaptiveCard().with_version("1.4").with_body(body)
+        return InvokeResponse(status=200, body=AdaptiveCardActionCardResponse(value=card))
 
     async def _on_card_action(
         self, ctx: "ActivityContext[AdaptiveCardInvokeActivity]"
@@ -589,23 +587,9 @@ class TeamsAdapter(BasePlatformAdapter):
         session_key = data.get("session_key", "")
         if not hermes_action or not session_key:
             return self._invoke_message("Unknown action.")
-        # Default-deny: approval clicks require TEAMS_ALLOWED_USERS or an explicit
-        # TEAMS_ALLOW_ALL_USERS=true opt-in, else anyone who can message the bot could approve.
-        allowed_csv = os.getenv("TEAMS_ALLOWED_USERS", "").strip()
-        allow_all = os.getenv("TEAMS_ALLOW_ALL_USERS", "").strip().lower() in {"1", "true", "yes"}
-        if not allow_all:
-            if not allowed_csv:
-                logger.warning(
-                    "[teams] card action rejected: TEAMS_ALLOWED_USERS not configured "
-                    "and TEAMS_ALLOW_ALL_USERS not set — default deny")
-                return self._invoke_message("⛔ Approval buttons require TEAMS_ALLOWED_USERS to be configured.")
-            from_account = ctx.activity.from_
-            clicker_id = getattr(from_account, "aad_object_id", None) or getattr(from_account, "id", "")
-            allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
-            if "*" not in allowed_ids and clicker_id not in allowed_ids:
-                logger.warning("[teams] Unauthorized card action by %s — ignoring", clicker_id)
-                return self._invoke_message("⛔ Not authorized.")
-
+        denied = self._card_action_denied(ctx.activity.from_)
+        if denied:
+            return self._invoke_message(denied)
         choice = _APPROVAL_CHOICES.get(hermes_action)
         if not choice:
             return self._invoke_message("Unknown action.")
@@ -615,6 +599,26 @@ class TeamsAdapter(BasePlatformAdapter):
         body = _approval_body(data.get("cmd", ""), data.get("desc", ""))
         body.append(TextBlock(text=_APPROVAL_LABELS[choice], wrap=True, weight="Bolder"))
         return self._invoke_card(body)
+
+    @staticmethod
+    def _card_action_denied(from_account: Any) -> Optional[str]:
+        """Default-deny gate for approval clicks: require TEAMS_ALLOWED_USERS or an explicit
+        TEAMS_ALLOW_ALL_USERS=true opt-in, else anyone who can message the bot could approve.
+        Returns the user-facing denial text, or ``None`` when allowed."""
+        if os.getenv("TEAMS_ALLOW_ALL_USERS", "").strip().lower() in {"1", "true", "yes"}:
+            return None
+        allowed_csv = os.getenv("TEAMS_ALLOWED_USERS", "").strip()
+        if not allowed_csv:
+            logger.warning(
+                "[teams] card action rejected: TEAMS_ALLOWED_USERS not configured "
+                "and TEAMS_ALLOW_ALL_USERS not set — default deny")
+            return "⛔ Approval buttons require TEAMS_ALLOWED_USERS to be configured."
+        clicker_id = getattr(from_account, "aad_object_id", None) or getattr(from_account, "id", "")
+        allowed_ids = {uid.strip() for uid in allowed_csv.split(",") if uid.strip()}
+        if "*" not in allowed_ids and clicker_id not in allowed_ids:
+            logger.warning("[teams] Unauthorized card action by %s — ignoring", clicker_id)
+            return "⛔ Not authorized."
+        return None
 
     async def send_exec_approval(
         self, chat_id: str, command: str, session_key: str, description: str = "dangerous command",
@@ -628,8 +632,7 @@ class TeamsAdapter(BasePlatformAdapter):
 
         def _action(title: str, hermes_action: str, **kw) -> "ExecuteAction":
             return ExecuteAction(
-                title=title, verb="hermes_approve", data={**btn_data_base, "hermes_action": hermes_action}, **kw
-            )
+                title=title, verb="hermes_approve", data={**btn_data_base, "hermes_action": hermes_action}, **kw)
 
         actions = [_action("Allow Once", "approve_once", style="positive")]
         if not smart_denied and allow_session:
