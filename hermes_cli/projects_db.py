@@ -1,7 +1,7 @@
 """Per-profile first-class Project store.
 
-The schema is intentionally small and additive: column additions go through
-:func:`_add_column_if_missing` so opening an old DB is always safe.
+The schema is small and additive: column additions go through ``add_column_if_missing`` so
+opening an old DB is always safe.
 """
 
 from __future__ import annotations
@@ -19,19 +19,11 @@ from typing import Iterable, List, Optional
 from hermes_cli.sqlite_util import add_column_if_missing as _add_column_if_missing, write_txn
 from hermes_constants import get_hermes_home
 
-# ---------------------------------------------------------------------------
-# Paths
-# ---------------------------------------------------------------------------
-
 
 def projects_db_path() -> Path:
     """The per-profile projects DB path (``$HERMES_HOME/projects.db``)."""
     return get_hermes_home() / "projects.db"
 
-
-# ---------------------------------------------------------------------------
-# Schema
-# ---------------------------------------------------------------------------
 
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS projects (
@@ -74,24 +66,17 @@ CREATE TABLE IF NOT EXISTS discovered_repos (
 );
 """
 
+# --- Slug + id helpers -------------------------------------------------------
 
-# ---------------------------------------------------------------------------
-# Slug + id helpers
-# ---------------------------------------------------------------------------
-
-# Lowercase alphanumerics, hyphens, underscores; 1-64 chars; no leading
-# separator. Strict enough to stop traversal and path separators, loose enough
-# for kebab-case names like ``hermes-agent``. Display formatting (spaces,
-# emoji, capitalisation) lives in ``name``; the slug is just a stable handle.
+# Lowercase alphanumerics, hyphens, underscores; 1-64 chars; no leading separator. Strict enough to
+# stop traversal/path separators, loose enough for kebab-case. Display formatting lives in ``name``.
 _SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9\-_]{0,63}$")
 
 
 def _slugify(name: str) -> str:
     """Derive a slug candidate from a human name (best-effort)."""
-    s = str(name or "").strip().lower()
-    s = re.sub(r"[^a-z0-9]+", "-", s).strip("-_")
-    s = s[:64].strip("-_")
-    return s or "project"
+    s = re.sub(r"[^a-z0-9]+", "-", str(name or "").strip().lower()).strip("-_")
+    return s[:64].strip("-_") or "project"
 
 
 def normalize_slug(slug: Optional[str]) -> Optional[str]:
@@ -110,10 +95,6 @@ def normalize_slug(slug: Optional[str]) -> Optional[str]:
     return s
 
 
-def _new_project_id() -> str:
-    return "p_" + secrets.token_hex(4)
-
-
 def _now() -> int:
     return int(time.time())
 
@@ -124,19 +105,20 @@ def _normalize_path(path: str) -> str:
     return p.rstrip("/\\") or p
 
 
-# ---------------------------------------------------------------------------
-# Connection management
-# ---------------------------------------------------------------------------
+# --- Connection management ---------------------------------------------------
 
 _INITIALIZED_PATHS: set[str] = set()
+
+# TEXT columns added to `projects` after v1; re-applied idempotently on every open so a legacy DB
+# upgrades in place.
+_OPTIONAL_PROJECT_COLUMNS = ("board_slug", "primary_path", "icon", "color")
 
 
 def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
     """Open (and initialize if needed) the per-profile projects DB.
 
-    WAL with DELETE fallback for network filesystems (shared helper from ``hermes_state``). Schema
-    init is idempotent (``CREATE TABLE IF NOT EXISTS`` + additive migrations) and cached per-path
-    per-process.
+    WAL with DELETE fallback for network filesystems (``hermes_state`` helper). Schema init is
+    idempotent (``CREATE TABLE IF NOT EXISTS`` + additive migrations) and cached per-path per-process.
     """
     path = db_path if db_path is not None else projects_db_path()
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -150,7 +132,10 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
         conn.execute("PRAGMA foreign_keys=ON")
         if resolved not in _INITIALIZED_PATHS:
             conn.executescript(SCHEMA_SQL)
-            _migrate_add_optional_columns(conn)
+            cols = {row["name"] for row in conn.execute("PRAGMA table_info(projects)")}
+            for col in _OPTIONAL_PROJECT_COLUMNS:
+                if col not in cols:
+                    _add_column_if_missing(conn, "projects", col, f"{col} TEXT")
             _INITIALIZED_PATHS.add(resolved)
     except Exception:
         conn.close()
@@ -160,13 +145,8 @@ def connect(db_path: Optional[Path] = None) -> sqlite3.Connection:
 
 @contextlib.contextmanager
 def connect_closing(db_path: Optional[Path] = None):
-    """Open a projects DB connection and guarantee it is closed on exit.
-
-    sqlite3's connection context manager only commits/rollbacks; it does NOT close the file
-    descriptor. Long-lived processes (gateway, dashboard) route many project operations through
-    ``connect()``; without closing, FDs to ``projects.db`` accumulate. Mirrors
-    ``kanban_db.connect_closing``.
-    """
+    """Open a projects DB connection and close it on exit (sqlite3's own context manager only
+    commits/rollbacks, so long-lived gateway/dashboard processes would leak fds otherwise)."""
     conn = connect(db_path=db_path)
     try:
         yield conn
@@ -175,23 +155,7 @@ def connect_closing(db_path: Optional[Path] = None):
             conn.close()
 
 
-# TEXT columns added to `projects` after v1; re-applied idempotently on every
-# open so a legacy DB upgrades in place.
-_OPTIONAL_PROJECT_COLUMNS = ("board_slug", "primary_path", "icon", "color")
-
-
-def _migrate_add_optional_columns(conn: sqlite3.Connection) -> None:
-    """Add columns introduced after v1 to legacy DBs (safe on every open)."""
-    cols = {row["name"] for row in conn.execute("PRAGMA table_info(projects)")}
-    for col in _OPTIONAL_PROJECT_COLUMNS:
-        if col not in cols:
-            _add_column_if_missing(conn, "projects", col, f"{col} TEXT")
-
-
-# ---------------------------------------------------------------------------
-# Dataclasses
-# ---------------------------------------------------------------------------
-
+# --- Dataclasses -------------------------------------------------------------
 
 @dataclass
 class ProjectFolder:
@@ -201,12 +165,7 @@ class ProjectFolder:
     added_at: int = 0
 
     def to_dict(self) -> dict:
-        return {
-            "path": self.path,
-            "label": self.label,
-            "is_primary": bool(self.is_primary),
-            "added_at": self.added_at,
-        }
+        return {"path": self.path, "label": self.label, "is_primary": bool(self.is_primary), "added_at": self.added_at}
 
 
 @dataclass
@@ -224,55 +183,33 @@ class Project:
     folders: List[ProjectFolder] = field(default_factory=list)
 
     def to_dict(self) -> dict:
-        return {
-            "id": self.id,
-            "slug": self.slug,
-            "name": self.name,
-            "description": self.description,
-            "icon": self.icon,
-            "color": self.color,
-            "board_slug": self.board_slug,
-            "primary_path": self.primary_path,
-            "archived": bool(self.archived),
-            "created_at": self.created_at,
-            "folders": [f.to_dict() for f in self.folders],
-        }
+        d = {k: getattr(self, k) for k in ("id", "slug", "name", "description", "icon", "color", "board_slug", "primary_path")}
+        return {**d, "archived": bool(self.archived), "created_at": self.created_at, "folders": [f.to_dict() for f in self.folders]}
 
 
 # Nullable TEXT columns that may be absent from a legacy row.
 _OPTIONAL_ROW_FIELDS = ("description", "icon", "color", "board_slug", "primary_path")
 
 
-def _project_from_row(row: sqlite3.Row) -> Project:
+def _load_project(conn: sqlite3.Connection, row: sqlite3.Row) -> Project:
+    """Materialize a ``projects`` row together with its folders."""
     keys = row.keys()
-    return Project(
-        id=row["id"],
-        slug=row["slug"],
-        name=row["name"],
-        created_at=row["created_at"],
+    project = Project(
+        id=row["id"], slug=row["slug"], name=row["name"], created_at=row["created_at"],
         archived=bool(row["archived"]) if "archived" in keys else False,
         **{f: row[f] for f in _OPTIONAL_ROW_FIELDS if f in keys},
     )
-
-
-def _load_project(conn: sqlite3.Connection, row: sqlite3.Row) -> Project:
-    """Materialize a ``projects`` row together with its folders."""
-    project = _project_from_row(row)
     project.folders = [
         ProjectFolder(path=r["path"], label=r["label"], is_primary=bool(r["is_primary"]), added_at=r["added_at"])
         for r in conn.execute(
-            "SELECT path, label, is_primary, added_at FROM project_folders "
-            "WHERE project_id = ? ORDER BY is_primary DESC, added_at ASC",
+            "SELECT path, label, is_primary, added_at FROM project_folders WHERE project_id = ? ORDER BY is_primary DESC, added_at ASC",
             (project.id,),
         ).fetchall()
     ]
     return project
 
 
-# ---------------------------------------------------------------------------
-# CRUD
-# ---------------------------------------------------------------------------
-
+# --- CRUD --------------------------------------------------------------------
 
 def _unique_slug(conn: sqlite3.Connection, candidate: str) -> str:
     """Return ``candidate`` or ``candidate-2``, ``-3`` ... if taken."""
@@ -290,21 +227,15 @@ def _primary_path_key(path: str) -> str:
     return os.path.normcase(_normalize_path(path))
 
 
-def find_by_primary_path(
-    conn: sqlite3.Connection, path: str, *, include_archived: bool = False
-) -> Optional[Project]:
-    """The first (oldest) project whose primary path matches ``path``, else None.
-
-    Comparison is separator/case normalized so equivalent Windows spellings of the same folder do
-    not slip past the dedup check.
-    """
+def find_by_primary_path(conn: sqlite3.Connection, path: str, *, include_archived: bool = False) -> Optional[Project]:
+    """The first (oldest) project whose primary path matches ``path`` (separator/case normalized so
+    equivalent Windows spellings don't slip past the dedup check), else None."""
     key = _primary_path_key(path)
     if not key:
         return None
     for proj in list_projects(conn, include_archived=include_archived):
         primary = proj.primary_path or next(
-            (f.path for f in proj.folders if f.is_primary),
-            proj.folders[0].path if proj.folders else None,
+            (f.path for f in proj.folders if f.is_primary), proj.folders[0].path if proj.folders else None
         )
         if primary and _primary_path_key(primary) == key:
             return proj
@@ -312,30 +243,18 @@ def find_by_primary_path(
 
 
 def create_project(
-    conn: sqlite3.Connection,
-    *,
-    name: str,
-    slug: Optional[str] = None,
-    folders: Optional[Iterable[str]] = None,
-    primary_path: Optional[str] = None,
-    description: Optional[str] = None,
-    icon: Optional[str] = None,
-    color: Optional[str] = None,
-    board_slug: Optional[str] = None,
-    allow_duplicate_path: bool = False,
+    conn: sqlite3.Connection, *, name: str, slug: Optional[str] = None, folders: Optional[Iterable[str]] = None,
+    primary_path: Optional[str] = None, description: Optional[str] = None, icon: Optional[str] = None,
+    color: Optional[str] = None, board_slug: Optional[str] = None, allow_duplicate_path: bool = False,
 ) -> str:
-    """Create a project and return its id.
-
-    ``folders`` are normalized to absolute paths. If ``primary_path`` is given it is added to the
-    folder set (if not already present) and marked primary; otherwise the first folder becomes
-    primary.
-    """
+    """Create a project and return its id. ``folders`` are normalized to absolute paths; ``primary_path``
+    is added to the folder set (if absent) and marked primary, else the first folder becomes primary."""
     name = str(name or "").strip()
     if not name:
         raise ValueError("project name must not be empty")
 
     slug_candidate = normalize_slug(slug) if slug else _slugify(name)
-    pid = _new_project_id()
+    pid = "p_" + secrets.token_hex(4)
     now = _now()
 
     folder_paths: List[str] = []
@@ -359,76 +278,40 @@ def create_project(
             )
 
     with write_txn(conn):
-        unique = _unique_slug(conn, slug_candidate)
         conn.execute(
-            "INSERT INTO projects "
-            "(id, slug, name, description, icon, color, board_slug, "
-            " primary_path, created_at, archived) "
+            "INSERT INTO projects (id, slug, name, description, icon, color, board_slug,  primary_path, created_at, archived) "
             "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0)",
-            (
-                pid,
-                unique,
-                name,
-                description,
-                icon,
-                color,
-                normalize_slug(board_slug) if board_slug else None,
-                primary,
-                now,
-            ),
+            (pid, _unique_slug(conn, slug_candidate), name, description, icon, color,
+             normalize_slug(board_slug) if board_slug else None, primary, now),
         )
         for path in folder_paths:
             conn.execute(
-                "INSERT INTO project_folders "
-                "(project_id, path, label, is_primary, added_at) "
-                "VALUES (?, ?, ?, ?, ?)",
+                "INSERT INTO project_folders (project_id, path, label, is_primary, added_at) VALUES (?, ?, ?, ?, ?)",
                 (pid, path, None, 1 if path == primary else 0, now),
             )
     return pid
 
 
-def list_projects(
-    conn: sqlite3.Connection, *, include_archived: bool = False
-) -> List[Project]:
-    sql = "SELECT * FROM projects"
-    if not include_archived:
-        sql += " WHERE archived = 0"
-    sql += " ORDER BY created_at ASC"
-    rows = conn.execute(sql).fetchall()
-    return [_load_project(conn, r) for r in rows]
+def list_projects(conn: sqlite3.Connection, *, include_archived: bool = False) -> List[Project]:
+    sql = "SELECT * FROM projects" + ("" if include_archived else " WHERE archived = 0") + " ORDER BY created_at ASC"
+    return [_load_project(conn, r) for r in conn.execute(sql).fetchall()]
 
 
-def get_project(
-    conn: sqlite3.Connection, id_or_slug: str
-) -> Optional[Project]:
+def get_project(conn: sqlite3.Connection, id_or_slug: str) -> Optional[Project]:
     """Look up a project by id first, then by slug."""
-    row = conn.execute(
-        "SELECT * FROM projects WHERE id = ?", (id_or_slug,)
-    ).fetchone()
-    if row is None:
-        row = conn.execute(
-            "SELECT * FROM projects WHERE slug = ?", (str(id_or_slug).lower(),)
-        ).fetchone()
-    if row is None:
-        return None
-    return _load_project(conn, row)
+    row = (
+        conn.execute("SELECT * FROM projects WHERE id = ?", (id_or_slug,)).fetchone()
+        or conn.execute("SELECT * FROM projects WHERE slug = ?", (str(id_or_slug).lower(),)).fetchone()
+    )
+    return None if row is None else _load_project(conn, row)
 
 
 def update_project(
-    conn: sqlite3.Connection,
-    project_id: str,
-    *,
-    name: Optional[str] = None,
-    description: Optional[str] = None,
-    icon: Optional[str] = None,
-    color: Optional[str] = None,
-    board_slug: Optional[str] = None,
+    conn: sqlite3.Connection, project_id: str, *, name: Optional[str] = None, description: Optional[str] = None,
+    icon: Optional[str] = None, color: Optional[str] = None, board_slug: Optional[str] = None,
 ) -> bool:
-    """Patch top-level project fields. Only provided fields change.
-
-    ``icon``, ``color``, and ``board_slug`` accept an empty string to clear (store NULL) — passing
-    ``None`` leaves the field untouched, so callers that want to clear must send ``""``.
-    """
+    """Patch top-level project fields; only provided (non-None) fields change. ``icon``, ``color`` and
+    ``board_slug`` take ``""`` to clear (store NULL) — ``None`` leaves the field untouched."""
     if name is not None:
         name = str(name).strip()
         if not name:
@@ -447,52 +330,35 @@ def update_project(
     if not sets:
         return False
     params = [stored for _, given, stored in fields if given is not None] + [project_id]
+    return _execute_rowcount(conn, f"UPDATE projects SET {', '.join(sets)} WHERE id = ?", params) > 0
+
+
+def _execute_rowcount(conn: sqlite3.Connection, sql: str, params) -> int:
+    """Run one write statement in its own txn and return the affected row count."""
     with write_txn(conn):
-        cur = conn.execute(
-            f"UPDATE projects SET {', '.join(sets)} WHERE id = ?", params
-        )
-    return cur.rowcount > 0
+        cur = conn.execute(sql, params)
+    return cur.rowcount
 
 
-def add_folder(
-    conn: sqlite3.Connection,
-    project_id: str,
-    path: str,
-    *,
-    label: Optional[str] = None,
-    is_primary: bool = False,
-) -> str:
+def add_folder(conn: sqlite3.Connection, project_id: str, path: str, *, label: Optional[str] = None, is_primary: bool = False) -> str:
     """Add a folder to a project. Returns the normalized path."""
     norm = _normalize_path(path)
     if not norm:
         raise ValueError("folder path must not be empty")
     if get_project(conn, project_id) is None:
         raise ValueError(f"no such project: {project_id}")
-    now = _now()
     with write_txn(conn):
         conn.execute(
-            "INSERT OR IGNORE INTO project_folders "
-            "(project_id, path, label, is_primary, added_at) "
-            "VALUES (?, ?, ?, 0, ?)",
-            (project_id, norm, label, now),
+            "INSERT OR IGNORE INTO project_folders (project_id, path, label, is_primary, added_at) VALUES (?, ?, ?, 0, ?)",
+            (project_id, norm, label, _now()),
         )
         if label is not None:
-            conn.execute(
-                "UPDATE project_folders SET label = ? "
-                "WHERE project_id = ? AND path = ?",
-                (label, project_id, norm),
-            )
-        if is_primary:
+            conn.execute("UPDATE project_folders SET label = ? WHERE project_id = ? AND path = ?", (label, project_id, norm))
+        # An explicit primary, or the first folder of an empty project, becomes primary.
+        if is_primary or conn.execute(
+            "SELECT 1 FROM project_folders WHERE project_id = ? AND is_primary = 1", (project_id,)
+        ).fetchone() is None:
             _set_primary_locked(conn, project_id, norm)
-        else:
-            # First folder of an empty project becomes primary implicitly.
-            existing_primary = conn.execute(
-                "SELECT 1 FROM project_folders "
-                "WHERE project_id = ? AND is_primary = 1",
-                (project_id,),
-            ).fetchone()
-            if existing_primary is None:
-                _set_primary_locked(conn, project_id, norm)
     return norm
 
 
@@ -501,90 +367,50 @@ def remove_folder(conn: sqlite3.Connection, project_id: str, path: str) -> bool:
     norm = _normalize_path(path)
     with write_txn(conn):
         was_primary = conn.execute(
-            "SELECT is_primary FROM project_folders "
-            "WHERE project_id = ? AND path = ?",
-            (project_id, norm),
+            "SELECT is_primary FROM project_folders WHERE project_id = ? AND path = ?", (project_id, norm)
         ).fetchone()
-        cur = conn.execute(
-            "DELETE FROM project_folders WHERE project_id = ? AND path = ?",
-            (project_id, norm),
-        )
+        cur = conn.execute("DELETE FROM project_folders WHERE project_id = ? AND path = ?", (project_id, norm))
         if was_primary is not None and was_primary["is_primary"]:
             nxt = conn.execute(
-                "SELECT path FROM project_folders WHERE project_id = ? "
-                "ORDER BY added_at ASC LIMIT 1",
-                (project_id,),
+                "SELECT path FROM project_folders WHERE project_id = ? ORDER BY added_at ASC LIMIT 1", (project_id,)
             ).fetchone()
-            new_primary = nxt["path"] if nxt else None
-            if new_primary:
-                _set_primary_locked(conn, project_id, new_primary)
+            if nxt and nxt["path"]:
+                _set_primary_locked(conn, project_id, nxt["path"])
             else:
-                conn.execute(
-                    "UPDATE projects SET primary_path = NULL WHERE id = ?",
-                    (project_id,),
-                )
+                conn.execute("UPDATE projects SET primary_path = NULL WHERE id = ?", (project_id,))
     return cur.rowcount > 0
 
 
-def _set_primary_locked(
-    conn: sqlite3.Connection, project_id: str, path: str
-) -> None:
+def _set_primary_locked(conn: sqlite3.Connection, project_id: str, path: str) -> None:
     """Set the primary folder (caller already holds a write txn)."""
-    conn.execute(
-        "UPDATE project_folders SET is_primary = 0 WHERE project_id = ?",
-        (project_id,),
-    )
-    conn.execute(
-        "UPDATE project_folders SET is_primary = 1 "
-        "WHERE project_id = ? AND path = ?",
-        (project_id, path),
-    )
-    conn.execute(
-        "UPDATE projects SET primary_path = ? WHERE id = ?",
-        (path, project_id),
-    )
+    conn.execute("UPDATE project_folders SET is_primary = 0 WHERE project_id = ?", (project_id,))
+    conn.execute("UPDATE project_folders SET is_primary = 1 WHERE project_id = ? AND path = ?", (project_id, path))
+    conn.execute("UPDATE projects SET primary_path = ? WHERE id = ?", (path, project_id))
 
 
 def set_primary(conn: sqlite3.Connection, project_id: str, path: str) -> bool:
     norm = _normalize_path(path)
     with write_txn(conn):
-        exists = conn.execute(
-            "SELECT 1 FROM project_folders WHERE project_id = ? AND path = ?",
-            (project_id, norm),
-        ).fetchone()
-        if exists is None:
+        if conn.execute("SELECT 1 FROM project_folders WHERE project_id = ? AND path = ?", (project_id, norm)).fetchone() is None:
             return False
         _set_primary_locked(conn, project_id, norm)
     return True
 
 
-def _set_archived(conn: sqlite3.Connection, project_id: str, archived: int) -> bool:
-    with write_txn(conn):
-        cur = conn.execute(
-            f"UPDATE projects SET archived = {int(archived)} WHERE id = ?", (project_id,)
-        )
-    return cur.rowcount > 0
-
-
 def archive_project(conn: sqlite3.Connection, project_id: str) -> bool:
-    return _set_archived(conn, project_id, 1)
+    return _execute_rowcount(conn, "UPDATE projects SET archived = 1 WHERE id = ?", (project_id,)) > 0
 
 
 def restore_project(conn: sqlite3.Connection, project_id: str) -> bool:
-    return _set_archived(conn, project_id, 0)
+    return _execute_rowcount(conn, "UPDATE projects SET archived = 0 WHERE id = ?", (project_id,)) > 0
 
 
 def delete_project(conn: sqlite3.Connection, project_id: str) -> bool:
     """Hard-delete a project and its folders (cascade)."""
-    with write_txn(conn):
-        cur = conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
-    return cur.rowcount > 0
+    return _execute_rowcount(conn, "DELETE FROM projects WHERE id = ?", (project_id,)) > 0
 
 
-# ---------------------------------------------------------------------------
-# Active-project pointer (project_meta KV)
-# ---------------------------------------------------------------------------
-
+# --- Active-project pointer + discovery policy (project_meta KV) --------------
 
 _ACTIVE_META_KEY = "active_id"
 _DISCOVERY_POLICY_META_KEY = "repo_discovery_policy"
@@ -593,8 +419,7 @@ _DISCOVERY_POLICY_META_KEY = "repo_discovery_policy"
 def _upsert_meta_locked(conn: sqlite3.Connection, key: str, value: str) -> None:
     """Upsert a project_meta row (caller already holds a write txn)."""
     conn.execute(
-        "INSERT INTO project_meta (key, value) VALUES (?, ?) "
-        "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+        "INSERT INTO project_meta (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
         (key, value),
     )
 
@@ -621,17 +446,9 @@ def get_discovery_policy_key(conn: sqlite3.Connection) -> Optional[str]:
     return _get_meta(conn, _DISCOVERY_POLICY_META_KEY)
 
 
-def reconcile_discovered_repos_policy(
-    conn: sqlite3.Connection,
-    policy_key: str,
-    *,
-    preserve_unversioned: bool = False,
-) -> bool:
-    """Clear cached scan rows when their discovery policy changes.
-
-    Existing pre-policy rows are retained only for the backward-compatible default policy. Returns
-    whether rows were cleared.
-    """
+def reconcile_discovered_repos_policy(conn: sqlite3.Connection, policy_key: str, *, preserve_unversioned: bool = False) -> bool:
+    """Clear cached scan rows when their discovery policy changes; pre-policy rows are retained only
+    for the backward-compatible default policy. Returns whether rows were cleared."""
     current = get_discovery_policy_key(conn)
     if current == policy_key:
         return False
@@ -644,42 +461,28 @@ def reconcile_discovered_repos_policy(
     return cleared
 
 
-def clear_discovered_repos(
-    conn: sqlite3.Connection, *, policy_key: Optional[str] = None
-) -> None:
+def clear_discovered_repos(conn: sqlite3.Connection, *, policy_key: Optional[str] = None) -> None:
     with write_txn(conn):
         conn.execute("DELETE FROM discovered_repos")
         if policy_key is not None:
             _upsert_meta_locked(conn, _DISCOVERY_POLICY_META_KEY, policy_key)
 
 
-# ---------------------------------------------------------------------------
-# Discovered repos (filesystem scan cache)
-# ---------------------------------------------------------------------------
-
+# --- Discovered repos (filesystem scan cache) --------------------------------
 
 def record_discovered_repos(
-    conn: sqlite3.Connection,
-    repos: Iterable[tuple[str, Optional[str]]],
-    *,
-    replace: bool = False,
+    conn: sqlite3.Connection, repos: Iterable[tuple[str, Optional[str]]], *, replace: bool = False,
     policy_key: Optional[str] = None,
 ) -> int:
-    """Persist scanned git repo roots into the cache.
-
-    ``repos`` is an iterable of ``(root, label)``. Roots are normalized; the label falls back to the
-    basename. Returns the number of rows written.
-
-    When ``replace`` is true, this is the authoritative result of a fresh disk scan: delete stale
-    rows first so old eval/worktree noise disappears instead of living forever in the cache.
-    """
+    """Persist scanned ``(root, label)`` repo roots (normalized; label falls back to basename) and
+    return the row count. ``replace`` = authoritative fresh scan: stale rows are deleted first so old
+    eval/worktree noise doesn't live forever."""
     now = _now()
     rows = []
     for root, label in repos:
         norm = _normalize_path(root)
-        if not norm:
-            continue
-        rows.append((norm, (label or os.path.basename(norm) or norm), now))
+        if norm:
+            rows.append((norm, (label or os.path.basename(norm) or norm), now))
 
     with write_txn(conn):
         if replace:
@@ -687,8 +490,7 @@ def record_discovered_repos(
         if rows:
             conn.executemany(
                 "INSERT INTO discovered_repos (root, label, last_seen) VALUES (?, ?, ?) "
-                "ON CONFLICT(root) DO UPDATE SET label = excluded.label, "
-                "last_seen = excluded.last_seen",
+                "ON CONFLICT(root) DO UPDATE SET label = excluded.label, last_seen = excluded.last_seen",
                 rows,
             )
         if policy_key is not None:
@@ -698,49 +500,31 @@ def record_discovered_repos(
 
 def list_discovered_repos(conn: sqlite3.Connection) -> List[dict]:
     """All cached discovered repo roots, most-recently-seen first."""
-    rows = conn.execute(
-        "SELECT root, label, last_seen FROM discovered_repos ORDER BY last_seen DESC"
-    ).fetchall()
+    rows = conn.execute("SELECT root, label, last_seen FROM discovered_repos ORDER BY last_seen DESC").fetchall()
     return [dict(r) for r in rows]
 
 
-# ---------------------------------------------------------------------------
-# Resolution + naming
-# ---------------------------------------------------------------------------
+# --- Resolution + naming -----------------------------------------------------
 
-
-def project_for_path(
-    conn: sqlite3.Connection, path: str, *, include_archived: bool = False
-) -> Optional[Project]:
-    """Return the project owning ``path`` (longest-prefix folder match).
-
-    A folder owns ``path`` when ``path`` equals the folder or is nested under it. The most specific
-    (longest) folder wins, so nested projects resolve to the innermost one.
-    """
+def project_for_path(conn: sqlite3.Connection, path: str, *, include_archived: bool = False) -> Optional[Project]:
+    """Return the project owning ``path``: a folder owns it when equal or an ancestor, and the longest
+    folder wins so nested projects resolve to the innermost one."""
     if not str(path or "").strip():
         return None
     target = _normalize_path(path)
-    sql = (
-        "SELECT pf.project_id AS pid, pf.path AS folder "
-        "FROM project_folders pf JOIN projects p ON p.id = pf.project_id"
-    )
+    sql = "SELECT pf.project_id AS pid, pf.path AS folder FROM project_folders pf JOIN projects p ON p.id = pf.project_id"
     if not include_archived:
         sql += " WHERE p.archived = 0"
     best_pid: Optional[str] = None
     best_len = -1
     for row in conn.execute(sql).fetchall():
         folder = row["folder"]
-        owns = (
-            target == folder
-            or target.startswith(folder.rstrip("/\\") + os.sep)
-            or target.startswith(folder.rstrip("/\\") + "/")
-        )
+        stem = folder.rstrip("/\\")
+        owns = target == folder or target.startswith(stem + os.sep) or target.startswith(stem + "/")
         if owns and len(folder) > best_len:
             best_len = len(folder)
             best_pid = row["pid"]
-    if best_pid is None:
-        return None
-    return get_project(conn, best_pid)
+    return None if best_pid is None else get_project(conn, best_pid)
 
 
 # Deterministic branch slug: lowercase, separators collapsed, capped.
@@ -748,16 +532,11 @@ _BRANCH_SAFE_RE = re.compile(r"[^a-z0-9._-]+")
 
 
 def branch_name_for(project: Project, task_id: str, *, title: str = "") -> str:
-    """Deterministic branch name for a project-linked kanban task.
-
-    Shape: ``<project-slug>/<task-id>`` (optionally ``-<title-slug>``). Stable and human-meaningful,
-    replacing the random ``wt/<task-id>`` fallback.
-    """
-    slug = project.slug or _slugify(project.name)
-    base = f"{slug}/{task_id}"
+    """Deterministic ``<project-slug>/<task-id>[-<title-slug>]`` branch name for a project-linked kanban
+    task (stable and human-meaningful, replacing the random ``wt/<task-id>`` fallback)."""
+    base = f"{project.slug or _slugify(project.name)}/{task_id}"
     if title:
-        tslug = _BRANCH_SAFE_RE.sub("-", str(title).strip().lower()).strip("-")
-        tslug = tslug[:40].strip("-")
+        tslug = _BRANCH_SAFE_RE.sub("-", str(title).strip().lower()).strip("-")[:40].strip("-")
         if tslug:
             base = f"{base}-{tslug}"
     return base

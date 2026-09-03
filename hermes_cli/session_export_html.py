@@ -1,7 +1,4 @@
-"""HTML Export generator for Hermes sessions. Generates a standalone, beautiful HTML file with all
-messages embedded. Supports single and multi-session exports with a professional sidebar. No remote
-dependencies. Enhanced with UI-UX-PRO-MAX design intelligence.
-"""
+"""Standalone single-file HTML export (single or multi-session with sidebar); no remote deps."""
 
 import datetime
 import secrets
@@ -645,14 +642,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </html>
 """
 
-def _escape_html(text: str) -> str:
-    if not isinstance(text, str):
-        text = str(text)
-    return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;").replace("'", "&#39;")
+def _escape_html(text: Any) -> str:
+    return (
+        str(text).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+        .replace('"', "&quot;").replace("'", "&#39;")
+    )
+
 
 def _format_timestamp(ts: float) -> str:
-    if not ts: return "N/A"
-    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S")
+    return datetime.datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M:%S") if ts else "N/A"
+
 
 _ROLE_ICONS = {"user": ICON_USER, "assistant": ICON_BOT, "system": ICON_SHIELD}
 _CHEVRON_HTML = ICON_CHEVRON_RIGHT.replace('class="', 'class="chevron ')
@@ -675,7 +674,7 @@ def _content_text(content: Any) -> str:
 
 def _collapsible(kind: str, icon: str, title: str, inner: str, indent: str, outer_class: str = "") -> str:
     """A chevron-headed collapsible block (tool-call / reasoning / system-prompt)."""
-    return f'''
+    return f"""
 {indent}<div class="{outer_class or kind}">
 {indent}    <div class="{kind}-header">
 {indent}        {_CHEVRON_HTML}
@@ -685,98 +684,66 @@ def _collapsible(kind: str, icon: str, title: str, inner: str, indent: str, oute
 {indent}        {inner}
 {indent}    </div>
 {indent}</div>
-{indent}'''
+{indent}"""
 
 
 def _generate_messages_html(messages: List[Dict[str, Any]]) -> str:
     html_list = []
     for i, msg in enumerate(messages):
         role = msg.get("role", "unknown")
-        
-        # Skip internal metadata messages
-        if role == "session_meta":
+        if role == "session_meta":  # internal metadata, never rendered
             continue
-            
         content = _content_text(msg.get("content") or "")
-        timestamp = _format_timestamp(msg.get("timestamp", 0))
-        role_icon = _ROLE_ICONS.get(role, ICON_TERMINAL)
-
-        # Build message HTML. The role feeds two sinks and for tool/MCP messages
-        # is externally influenced, so treat each sink on its own terms:
-        #  - display text: HTML-escape (prevents markup/JS injection).
-        #  - class attribute: reduce to a single safe CSS token (alnum/-/_),
-        #    so a crafted role can neither break out of the attribute nor split
-        #    into several unintended classes. Real roles (user/assistant/system/
-        #    tool) are unchanged, so the `.message-<role>` rules still match.
-        safe_role = _escape_html(role)
+        # The role feeds two sinks and is externally influenced for tool/MCP messages: HTML-escape
+        # the display text; reduce the class token to alnum/-/_ so a crafted role can neither break
+        # out of the attribute nor split into extra classes (real roles keep matching `.message-<role>`).
         role_class = "".join(c if c.isalnum() or c in "-_" else "-" for c in str(role).lower())
-        msg_class = f"message message-{role_class} active"
-        # Delay animation for initial items
-        delay_style = f' style="animation-delay: {min(i * 0.05, 1.0)}s"' if i < 10 else ""
-        
-        html = f'<div class="{msg_class}"{delay_style}>'
-        html += f'  <div class="message-header">'
-        html += f'    <div class="role-badge">{_CHEVRON_HTML} {role_icon} {safe_role}</div>'
-        html += f'    <div class="timestamp">{timestamp}</div>'
-        html += '  </div>'
-        html += '  <div class="message-body">'
-        
+        delay_style = f' style="animation-delay: {min(i * 0.05, 1.0)}s"' if i < 10 else ""  # stagger first items
+        html = (
+            f'<div class="message message-{role_class} active"{delay_style}>'
+            f'  <div class="message-header">'
+            f'    <div class="role-badge">{_CHEVRON_HTML} {_ROLE_ICONS.get(role, ICON_TERMINAL)} {_escape_html(role)}</div>'
+            f'    <div class="timestamp">{_format_timestamp(msg.get("timestamp", 0))}</div>'
+            '  </div>'
+            '  <div class="message-body">'
+        )
         for tc in msg.get("tool_calls") or ():
-            fn_name = tc.get("function", {}).get("name", "unknown")
-            args = tc.get("function", {}).get("arguments", "{}")
+            fn = tc.get("function", {})
             html += _collapsible(
-                "tool-call", ICON_WRENCH, f"Tool Call: {_escape_html(fn_name)}",
-                f"<pre><code>{_escape_html(args)}</code></pre>", " " * 16,
+                "tool-call", ICON_WRENCH, f"Tool Call: {_escape_html(fn.get('name', 'unknown'))}",
+                f"<pre><code>{_escape_html(fn.get('arguments', '{}'))}</code></pre>", " " * 16,
             )
-
         if content:
-            if role == "tool":
-                html += f'  <div class="content"><pre><code>{_escape_html(content)}</code></pre></div>'
-            else:
-                html += f'  <div class="content">{_escape_html(content)}</div>'
-        
-        reasoning = msg.get("reasoning") or msg.get("reasoning_content")
-        if reasoning:
+            escaped = _escape_html(content)
+            body = f"<pre><code>{escaped}</code></pre>" if role == "tool" else escaped
+            html += f'  <div class="content">{body}</div>'
+        if reasoning := msg.get("reasoning") or msg.get("reasoning_content"):
             html += _collapsible(
                 "reasoning", ICON_SPARKLES, "Reasoning",
                 f'<div class="content">{_escape_html(reasoning)}</div>', " " * 12,
             )
-            
-        html += '  </div>'
-        html += '</div>'
-        html_list.append(html)
+        html_list.append(html + "  </div></div>")
     return "\n".join(html_list)
 
-def generate_multi_session_html_export(sessions: List[Dict[str, Any]]) -> str:
-    if not sessions:
-        return "<html><body><h1>No sessions to export.</h1></body></html>"
 
-    is_multi = len(sessions) > 1
-    generated_at = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Sidebar
-    sidebar_html = ""
-    if is_multi:
-        sidebar_items = []
-        for s in sessions:
-            sid = str(s.get("id", "N/A"))
-            escaped_sid = _escape_html(sid)
-            title = s.get("title") or s.get("preview") or "Untitled Session"
-            if len(title) > 50: title = title[:47] + "..."
-            date = _format_timestamp(s.get("started_at", 0)).split(" ")[0]
-            
-            item = f'''
-            <a class="session-item" data-id="{escaped_sid}" href="#{quote(sid, safe='')}">
+def _sidebar_html(sessions: List[Dict[str, Any]]) -> str:
+    items = []
+    for s in sessions:
+        sid = str(s.get("id", "N/A"))
+        title = s.get("title") or s.get("preview") or "Untitled Session"
+        if len(title) > 50:
+            title = title[:47] + "..."
+        date = _format_timestamp(s.get("started_at", 0)).split(" ")[0]
+        items.append(f"""
+            <a class="session-item" data-id="{_escape_html(sid)}" href="#{quote(sid, safe='')}">
                 <div class="session-item-title">{_escape_html(title)}</div>
                 <div class="session-item-meta">
                     <span>{_escape_html(sid[:8])}</span>
                     <span>{date}</span>
                 </div>
             </a>
-            '''
-            sidebar_items.append(item)
-        
-        sidebar_html = f'''
+            """)
+    return f"""
         <aside class="sidebar">
             <div class="sidebar-header">
                 <div class="sidebar-brand">
@@ -788,59 +755,54 @@ def generate_multi_session_html_export(sessions: List[Dict[str, Any]]) -> str:
                 </div>
             </div>
             <div class="session-list">
-                {"".join(sidebar_items)}
+                {"".join(items)}
             </div>
         </aside>
-        '''
+        """
 
-    # Main Content
-    sessions_html_list = []
-    for s in sessions:
-        sid = str(s.get("id", "N/A"))
-        escaped_sid = _escape_html(sid)
-        title = s.get("title") or "Hermes Session"
-        model = s.get("model") or "Unknown"
-        started_at = _format_timestamp(s.get("started_at", 0))
-        messages_html = _generate_messages_html(s.get("messages", []))
-        view_class = "session-view" if is_multi else "session-view active"
-        
-        system_prompt = s.get("system_prompt")
-        system_html = ""
-        if system_prompt:
-            system_html = _collapsible(
-                "system-prompt", ICON_SHIELD, "System Prompt (Persona)",
-                f'<div class="content">{_escape_html(system_prompt)}</div>', " " * 12,
-                outer_class="system-prompt-section active",
-            )
-        
-        session_html = f'''
-        <div class="{view_class}" id="view-{escaped_sid}">
+
+def _session_view_html(s: Dict[str, Any], is_multi: bool) -> str:
+    escaped_sid = _escape_html(str(s.get("id", "N/A")))
+    system_html = ""
+    if system_prompt := s.get("system_prompt"):
+        system_html = _collapsible(
+            "system-prompt", ICON_SHIELD, "System Prompt (Persona)",
+            f'<div class="content">{_escape_html(system_prompt)}</div>', " " * 12,
+            outer_class="system-prompt-section active",
+        )
+    return f"""
+        <div class="{"session-view" if is_multi else "session-view active"}" id="view-{escaped_sid}">
             <header class="fade-in">
-                <h1>{_escape_html(title)}</h1>
+                <h1>{_escape_html(s.get("title") or "Hermes Session")}</h1>
                 <div class="meta">
                     <div class="meta-item"><strong>ID:</strong> {escaped_sid}</div>
-                    <div class="meta-item"><strong>Model:</strong> {_escape_html(model)}</div>
-                    <div class="meta-item"><strong>Started:</strong> {started_at}</div>
+                    <div class="meta-item"><strong>Model:</strong> {_escape_html(s.get("model") or "Unknown")}</div>
+                    <div class="meta-item"><strong>Started:</strong> {_format_timestamp(s.get("started_at", 0))}</div>
                 </div>
                 {system_html}
             </header>
             <main>
-                {messages_html}
+                {_generate_messages_html(s.get("messages", []))}
             </main>
         </div>
-        '''
-        sessions_html_list.append(session_html)
+        """
 
+
+def generate_multi_session_html_export(sessions: List[Dict[str, Any]]) -> str:
+    if not sessions:
+        return "<html><body><h1>No sessions to export.</h1></body></html>"
+    is_multi = len(sessions) > 1
     return HTML_TEMPLATE.format(
         page_title="Hermes Session Export" if is_multi else _escape_html(sessions[0].get("title") or "Hermes Session"),
-        sidebar_html=sidebar_html,
-        sessions_html="\n".join(sessions_html_list),
+        sidebar_html=_sidebar_html(sessions) if is_multi else "",
+        sessions_html="\n".join(_session_view_html(s, is_multi) for s in sessions),
         main_margin="var(--sidebar-width)" if is_multi else "0",
         layout_class="layout-multi" if is_multi else "layout-single",
-        generated_at=generated_at,
+        generated_at=datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         script_nonce=secrets.token_urlsafe(16),
     )
 
+
 def generate_html_export(session_data: Dict[str, Any]) -> str:
-    """Legacy wrapper for single session export."""
+    """Single-session export (legacy entry point)."""
     return generate_multi_session_html_export([session_data])

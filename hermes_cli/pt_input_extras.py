@@ -2,23 +2,21 @@
 
 from __future__ import annotations
 
-# kitty CSI-u ORs lock-key state into the modifier parameter of every key
-# event while a lock is on: CapsLock=64, NumLock=128, both=192 (#88221,
-# #89651).  Every fixed-modifier CSI-u (and legacy CSI-tilde / CSI-letter)
-# registration therefore needs lock-offset twins, or those events leak into
-# the prompt as literal text.  The xterm modifyOtherKeys ``ESC[27;N;CP~``
-# encoding never carries lock bits, so it never gets the twins.
+# kitty CSI-u ORs lock-key state into the modifier parameter of every key event while a lock is
+# on: CapsLock=64, NumLock=128, both=192. Every fixed-modifier CSI-u (and legacy CSI-tilde /
+# CSI-letter) registration therefore needs lock-offset twins, or those events leak into the prompt
+# as literal text. The xterm modifyOtherKeys ``ESC[27;N;CP~`` encoding never carries lock bits.
 _LOCK_BIT_OFFSETS = (0, 64, 128, 192)
 
 
 def _lock_variants(modifier: int) -> tuple[int, ...]:
-    """Return ``modifier`` plus its CapsLock/NumLock/both twins."""
+    """``modifier`` plus its CapsLock/NumLock/both twins."""
     return tuple(modifier + off for off in _LOCK_BIT_OFFSETS)
 
 
 def _lock_twins(modifier: int) -> tuple[int, ...]:
-    """Return only the lock twins of ``modifier`` (never the base value)."""
-    return tuple(modifier + off for off in _LOCK_BIT_OFFSETS[1:])
+    """Only the lock twins of ``modifier`` (never the base value)."""
+    return _lock_variants(modifier)[1:]
 
 
 def _clear_vt100_prefix_cache() -> None:
@@ -28,35 +26,28 @@ def _clear_vt100_prefix_cache() -> None:
     would keep stale ``False`` answers and misparse newly registered sequences.
     """
     try:
-        from prompt_toolkit.input.vt100_parser import (
-            _IS_PREFIX_OF_LONGER_MATCH_CACHE,
-        )
+        from prompt_toolkit.input.vt100_parser import _IS_PREFIX_OF_LONGER_MATCH_CACHE
         _IS_PREFIX_OF_LONGER_MATCH_CACHE.clear()
     except Exception:
         pass
 
 
-def _pt_tables():
-    """Return ``(ANSI_SEQUENCES, Keys)`` or ``None`` when prompt_toolkit is unavailable."""
+def _install(build, *, overwrite: bool) -> int:
+    """Install ``build(ANSI_SEQUENCES, Keys) -> {seq: key}`` into prompt_toolkit's table; return
+    the number of entries changed (0 when prompt_toolkit is unavailable).
+
+    ``overwrite=True`` replaces differing entries; ``overwrite=False`` behaves like ``setdefault``
+    so existing/user registrations win. Clears the VT100 prefix cache when anything changed.
+    """
     try:
         from prompt_toolkit.input.ansi_escape_sequences import ANSI_SEQUENCES
         from prompt_toolkit.keys import Keys
     except Exception:
-        return None
-    return ANSI_SEQUENCES, Keys
-
-
-def _register(table: dict, aliases: dict, *, overwrite: bool) -> int:
-    """Install ``aliases`` into ``table``; return the number of entries changed.
-
-    ``overwrite=True`` replaces differing entries; ``overwrite=False`` behaves like ``setdefault``
-    so existing/user registrations win. Clears the VT100 prefix cache when anything changed, since
-    new longer sequences can flip "is this a prefix of a longer match?" answers the parser cached.
-    """
+        return 0
     changed = 0
-    for seq, key in aliases.items():
-        if (table.get(seq) != key) if overwrite else (seq not in table):
-            table[seq] = key
+    for seq, key in build(ANSI_SEQUENCES, Keys).items():
+        if (ANSI_SEQUENCES.get(seq) != key) if overwrite else (seq not in ANSI_SEQUENCES):
+            ANSI_SEQUENCES[seq] = key
             changed += 1
     if changed:
         _clear_vt100_prefix_cache()
@@ -65,8 +56,7 @@ def _register(table: dict, aliases: dict, *, overwrite: bool) -> int:
 
 def install_keypress_data_normalization() -> int:
     """Normalize KeyPress data for extended-key aliases that map to a single plain character
-    (Shift+Space → ``' '``, Shift+letter → the uppercase letter, keypad digits → ``'0'``..``'9'``,
-    keypad operators).
+    (Shift+Space → ``' '``, Shift+letter → uppercase, keypad digits/operators).
     """
     try:
         import prompt_toolkit.input.vt100_parser as _vt100_mod
@@ -74,24 +64,15 @@ def install_keypress_data_normalization() -> int:
     except Exception:
         return 0
 
-    if getattr(
-        _vt100_mod.Vt100Parser._call_handler, "_hermes_char_data_normalized", False
-    ):
+    _orig_call_handler = _vt100_mod.Vt100Parser._call_handler
+    if getattr(_orig_call_handler, "_hermes_char_data_normalized", False):
         return 0
 
-    _orig_call_handler = _vt100_mod.Vt100Parser._call_handler
-
     def _patched_call_handler(self, key, insert_text):
-        # A single plain character (not a Keys member, not a tuple) mapped
-        # from an extended sequence must carry the mapped character as its
-        # data — self-insert inserts event.data and the raw CSI would leak.
-        if (
-            isinstance(key, str)
-            and len(key) == 1
-            and not isinstance(key, _PtKeys)
-            and isinstance(insert_text, str)
-            and insert_text.startswith("\x1b")
-        ):
+        # A single plain character mapped from an extended sequence must carry the mapped
+        # character as its data — self-insert inserts event.data and the raw CSI would leak.
+        if (isinstance(key, str) and len(key) == 1 and not isinstance(key, _PtKeys)
+                and isinstance(insert_text, str) and insert_text.startswith("\x1b")):
             insert_text = key
         return _orig_call_handler(self, key, insert_text)
 
@@ -101,60 +82,68 @@ def install_keypress_data_normalization() -> int:
 
 
 def _install_enter_alias(modifier: int) -> int:
-    """Map <modifier>+Enter (Kitty CSI-u ``ESC[13;<m>u`` plus lock-bit twins, xterm
-    ``ESC[27;<m>;13~`` / ``;13u``) to (Escape, ControlM) so the Alt+Enter newline handler fires.
+    """Map <modifier>+Enter (Kitty CSI-u ``ESC[13;<m>u`` plus lock twins, xterm ``ESC[27;<m>;13~``
+    / ``;13u``) to (Escape, ControlM) so the Alt+Enter newline handler fires.
 
     Stock prompt_toolkit maps the tilde form to plain ControlM (i.e. Shift+Enter == Enter, the very
-    bug this fixes), so those keys are overwritten unconditionally; other modifier variants are
-    untouched.
+    bug this fixes), so these keys are overwritten unconditionally.
     """
-    tables = _pt_tables()
-    if tables is None:
-        return 0
-    seqs, keys = tables
-    alt_enter = (keys.Escape, keys.ControlM)
-    aliases = {f"\x1b[13;{m}u": alt_enter for m in _lock_variants(modifier)}
-    aliases[f"\x1b[27;{modifier};13~"] = alt_enter
-    aliases[f"\x1b[27;{modifier};13u"] = alt_enter
-    return _register(seqs, aliases, overwrite=True)
+    def build(_seqs, keys):
+        alt_enter = (keys.Escape, keys.ControlM)
+        seqs = [f"\x1b[13;{m}u" for m in _lock_variants(modifier)] + [f"\x1b[27;{modifier};13~", f"\x1b[27;{modifier};13u"]
+        return dict.fromkeys(seqs, alt_enter)
+
+    return _install(build, overwrite=True)
 
 
 def install_shift_enter_alias() -> int:
-    """Map Shift+Enter sequences to (Escape, ControlM) so the Alt+Enter newline handler fires.
-
-    macOS Terminal and stock Windows Terminal send the same byte for Enter and Shift+Enter, so
-    nothing can be done for them here.
+    """Map Shift+Enter to (Escape, ControlM). macOS Terminal and stock Windows Terminal send the
+    same byte for Enter and Shift+Enter, so nothing can be done for them here.
     """
     return _install_enter_alias(2)
 
 
 def install_ctrl_enter_alias() -> int:
-    """Map Ctrl+Enter sequences to (Escape, ControlM) so the Alt+Enter newline handler fires.
-
-    Without the alias, Kitty/mintty/xterm users over SSH get a raw CSI sequence inserted as text.
-    """
+    """Map Ctrl+Enter to (Escape, ControlM); otherwise Kitty/mintty/xterm over SSH insert raw CSI."""
     return _install_enter_alias(5)
 
 
 def install_cmd_backspace_alias() -> int:
-    """Map Cmd+Backspace / Cmd+ForwardDelete to prompt_toolkit's readline kill bindings.
+    """Map Cmd+Backspace -> ControlU and Cmd+ForwardDelete -> ControlK.
 
-    Terminals that rewrite Cmd+Backspace to Ctrl+U already work; Kitty/modifyOtherKeys report Cmd
-    as the super bit (8), yielding unmapped sequences that insert literally. Cmd+Backspace ->
-    ControlU (``ESC[127;9u``, ``;10u``, ``ESC[27;9;127~``); Cmd+ForwardDelete -> ControlK via
-    the CSI tilde form ``ESC[3;9~`` / ``;10~`` since forward-delete is not a CSI-u codepoint.
+    Kitty/modifyOtherKeys report Cmd as the super bit (8), yielding unmapped sequences that insert
+    literally. Forward-delete is not a CSI-u codepoint, so it uses the CSI tilde form ``ESC[3;9~``.
     """
-    tables = _pt_tables()
-    if tables is None:
-        return 0
-    seqs, keys = tables
-    aliases: dict[str, object] = {}
-    for base in (9, 10):  # super / super+shift
-        for mod in _lock_variants(base):
-            aliases[f"\x1b[127;{mod}u"] = keys.ControlU
-            aliases[f"\x1b[3;{mod}~"] = keys.ControlK
-    aliases["\x1b[27;9;127~"] = keys.ControlU
-    return _register(seqs, aliases, overwrite=True)
+    def build(_seqs, keys):
+        mods = [mod for base in (9, 10) for mod in _lock_variants(base)]  # super / super+shift
+        aliases = {f"\x1b[127;{mod}u": keys.ControlU for mod in mods}
+        aliases.update({f"\x1b[3;{mod}~": keys.ControlK for mod in mods})
+        aliases["\x1b[27;9;127~"] = keys.ControlU
+        return aliases
+
+    return _install(build, overwrite=True)
+
+
+# Kitty functional keys (Private Use Area codepoints) that have prompt_toolkit equivalents.
+# kitty emits these CSI-u encodings even in LEGACY mode, so unmapped they leak as literal text.
+_KITTY_FUNCTIONAL_NAMED = {
+    57409: ".", 57410: "/", 57411: "*", 57412: "-", 57413: "+", 57414: "ControlM",  # KP ops
+    57415: "=", 57416: ",",
+    57417: "Left", 57418: "Right", 57419: "Up", 57420: "Down", 57421: "PageUp",  # KP nav
+    57422: "PageDown", 57423: "Home", 57424: "End", 57425: "Insert", 57426: "Delete",
+}
+# No prompt_toolkit equivalent: locks/PrintScreen/Pause/Menu, F25-F35, KP_BEGIN, media keys and
+# bare modifier events — consumed as Ignore instead of leaking literal text.
+_KITTY_FUNCTIONAL_IGNORED = (*range(57358, 57364), *range(57388, 57399), 57427, *range(57428, 57455))
+
+
+def _kitty_functional_map(Keys) -> dict[int, object]:
+    fm: dict[int, object] = {57399 + d: str(d) for d in range(10)}  # KP_0..KP_9
+    fm.update({cp: getattr(Keys, v) if v[0].isupper() else v for cp, v in _KITTY_FUNCTIONAL_NAMED.items()})
+    fm.update({57376 + (n - 13): getattr(Keys, f"F{n}") for n in range(13, 25)})  # F13..F24
+    for code in _KITTY_FUNCTIONAL_IGNORED:
+        fm.setdefault(code, Keys.Ignore)
+    return fm
 
 
 def install_modify_other_keys_aliases() -> int:
@@ -162,246 +151,94 @@ def install_modify_other_keys_aliases() -> int:
 
     Once ``modifyOtherKeys=2`` is pushed (to distinguish Shift+Enter) the terminal re-encodes
     EVERY Ctrl combo as ``ESC[27;5;<cp>~``; stock prompt_toolkit maps only Ctrl+Enter, so
-    Ctrl+A/C/D/E/K/R/U/W/Z leak as text. Installs Ctrl/Alt/Shift letters, digits, symbols,
-    multi-modifier combos, CapsLock/NumLock lock-bit variants, CSI-u Esc, modified
-    Enter/Tab/Backspace/Space, and Kitty functional keys. Uses ``setdefault`` so existing
-    mappings (incl. the Shift/Ctrl+Enter aliases) are never overwritten.
+    Ctrl+A/C/D/... leak as text. Installs Ctrl/Alt/Shift letters, digits, symbols, multi-modifier
+    combos, lock-bit variants, CSI-u Esc, modified Enter/Tab/Backspace/Space and Kitty functional
+    keys. ``setdefault`` semantics: existing mappings (incl. the Shift/Ctrl+Enter aliases) win.
     """
-    tables = _pt_tables()
-    if tables is None:
-        return 0
-    ANSI_SEQUENCES, Keys = tables
+    return _install(_modify_other_keys_aliases, overwrite=False)
 
-    # Everything below is collected into ``aliases`` (first writer wins, matching setdefault
-    # order) and installed once at the end.
+
+def _modify_other_keys_aliases(ANSI_SEQUENCES: dict, Keys) -> dict[str, object]:
+    # Collected first-writer-wins (matching setdefault order), installed once at the end.
     aliases: dict[str, object] = {}
+    _put = aliases.setdefault
 
-    def _put(seq: str, key_val: object) -> None:
-        aliases.setdefault(seq, key_val)
-
-    # -- Ctrl+letter / Ctrl+digit / Ctrl+symbol → Keys.Control* ----
-    # codepoint -> Keys value.  The raw control byte for Ctrl+<ch> is
-    # chr(ord(ch) & 0x1f) (i.e. ord(ch) - 96 for lowercase).  We map the
-    # *extended* sequence to the same Keys value that the raw byte maps to,
-    # so prompt_toolkit's existing key bindings fire identically.
-    ctrl_key_map: dict[int, object] = {}
-
-    # a-z: Ctrl+A = \x01 = Keys.ControlA, ..., Ctrl+Z = \x1a = Keys.ControlZ
-    # Symbols that produce control chars:
-    # Ctrl+@   (64)  = \x00 = Keys.ControlAt
-    # Ctrl+[   (91)  = \x1b = Keys.Escape
-    # Ctrl+\   (92)  = \x1c = Keys.ControlBackslash
-    # Ctrl+]   (93)  = \x1d = Keys.ControlSquareClose
-    # Ctrl+^   (94)  = \x1e = Keys.ControlCircumflex
-    # Ctrl+_   (95)  = \x1f = Keys.ControlUnderscore
-    # Ctrl+Space(32) = \x00 = Keys.ControlAt (prompt_toolkit maps \x00 → ControlAt)
-    letters = range(ord('a'), ord('z') + 1)
-    for codepoint in (*letters, 64, 91, 92, 93, 94, 95, 32):
-        existing = ANSI_SEQUENCES.get(chr(codepoint & 0x1F))
-        if existing is not None:
-            ctrl_key_map[codepoint] = existing
-
-    # 0-9: Ctrl+digit codepoints don't have a useful raw-byte mapping
-    # (e.g. chr(ord('0') & 0x1F) = 0x10 = ControlP, not Control0), so map
-    # them directly to Keys.Control0..Keys.Control9.
-    for d in range(10):
-        ctrl_key_map[ord('0') + d] = getattr(Keys, f"Control{d}")
-
-    # Kitty CSI-u encodes CapsLock/NumLock state as extra modifier bits
-    # (caps=64, num=128) ORed into the parameter: with NumLock on, Ctrl+C
-    # arrives as ESC[99;133u (5 + 128) instead of ESC[99;5u. Terminals
-    # that report these bits (kitty, ghostty) break every key combo while
-    # a lock is on (#89651) unless the lock variants are mapped too. The
-    # xterm modifyOtherKeys encoding never carries the lock bits, so only
-    # the CSI-u form needs them.
     def _install_paired(modifier: int, mapping: dict) -> None:
-        """Install both modifyOtherKeys (ESC[27;N;CP~) and CSI-u (ESC[CP;Nu) mappings for the given
-        modifier and codepoint→key mapping.
-        """
+        """Both modifyOtherKeys (ESC[27;N;CP~, never for mod 1) and CSI-u (ESC[CP;Nu + lock twins)."""
         for codepoint, key_val in mapping.items():
             if modifier != 1:
                 _put(f"\x1b[27;{modifier};{codepoint}~", key_val)
             for mod in _lock_variants(modifier):
                 _put(f"\x1b[{codepoint};{mod}u", key_val)
 
-    # Ctrl+letter / Ctrl+digit / Ctrl+symbol (modifier 5)
+    # Ctrl+<ch>: the extended sequence maps to whatever Keys value the raw control byte
+    # chr(ord(ch) & 0x1f) already maps to, so existing bindings fire identically. Covers a-z and
+    # the control-producing symbols @ [ \ ] ^ _ and Space (\x00 -> ControlAt).
+    letters = range(ord('a'), ord('z') + 1)
+    ctrl_key_map: dict[int, object] = {
+        cp: key for cp in (*letters, 64, 91, 92, 93, 94, 95, 32)
+        if (key := ANSI_SEQUENCES.get(chr(cp & 0x1F))) is not None
+    }
+    # Ctrl+digit has no useful raw byte (chr(ord('0') & 0x1F) is ControlP), so map directly.
+    ctrl_key_map.update({ord('0') + d: getattr(Keys, f"Control{d}") for d in range(10)})
     _install_paired(5, ctrl_key_map)
 
-    # -- Alt+letter → (Escape, <letter>) ----
-    # Under modifyOtherKeys, Alt+a = ESC[27;3;97~. Without mapping, this
-    # leaks as literal text. prompt_toolkit handles bare Alt+letter as
-    # (Escape, <letter>), so we map the extended sequences to the same tuple.
-    #
-    # -- Shift+letter → uppercase letter ----
-    # Under modifyOtherKeys=2, some terminals re-encode Shift+a as
-    # ESC[27;2;97~. Without mapping, this leaks as literal escape +
-    # "[27;2;97~" in the prompt buffer — the "caps locked" / "every key
-    # combo is broken" symptom (#87711).
-    # Map Shift+letter to the uppercase character so typing works normally.
-    # This is safe across all Latin keyboard layouts: Shift always uppercases
-    # letters.  Shift+digit symbols are layout-specific (US: '!', AZERTY: '¹',
-    # etc.) so they are NOT mapped here — if the terminal sends those under
-    # modifyOtherKeys, they will leak, but that's better than wrong input.
-    # Map both the lowercase and uppercase codepoints — some terminals send
-    # the already-shifted codepoint (65 for 'A') with modifier=2.
-    #
-    # -- Multi-modifier letters: Shift+Alt (4), Ctrl+Shift (6),
-    # Ctrl+Alt (7), Ctrl+Alt+Shift (8) ----
-    # The Kitty protocol always reports the UNSHIFTED codepoint; some
-    # modifyOtherKeys emitters send the shifted one — map both cases.
-    # Ctrl-bearing combos normalize onto the Ctrl key (Alt adds an Escape
-    # prefix), Shift+Alt onto (Escape, UPPER) — the same normalization
-    # dte/kakoune apply to these protocols. Without these, Ctrl+Shift+R
-    # etc. leak as literal text under either protocol.
-    alt_map: dict[int, tuple] = {}
-    shift_map: dict[int, str] = {}
-    shift_alt_map: dict[int, tuple] = {}
-    ctrl_shift_map: dict[int, object] = {}
-    ctrl_alt_map: dict[int, tuple] = {}
+    # Letter combos. Alt+a -> (Escape, 'a') like bare Alt. Shift+a -> 'A' (safe on every Latin
+    # layout; Shift+digit symbols are layout-specific and deliberately NOT mapped — leaking beats
+    # wrong input). Kitty reports the UNSHIFTED codepoint, some modifyOtherKeys emitters the shifted
+    # one — map both. Ctrl-bearing combos normalize onto the Ctrl key (Alt adds an Escape prefix),
+    # Shift+Alt onto (Escape, UPPER) — the same normalization dte/kakoune apply.
     for ch in letters:
         upper_char = chr(ch - 32)
-        alt_map[ch] = (Keys.Escape, chr(ch))
-        alt_map[ch - 32] = (Keys.Escape, upper_char)
         ctrl_key = ctrl_key_map.get(ch)
+        _install_paired(3, {ch: (Keys.Escape, chr(ch)), ch - 32: (Keys.Escape, upper_char)})
         for cp in (ch, ch - 32):
-            shift_map[cp] = upper_char
-            shift_alt_map[cp] = (Keys.Escape, upper_char)
+            _install_paired(2, {cp: upper_char})
+            _install_paired(4, {cp: (Keys.Escape, upper_char)})
             if ctrl_key is not None:
-                ctrl_shift_map[cp] = ctrl_key
-                ctrl_alt_map[cp] = (Keys.Escape, ctrl_key)
-    _install_paired(3, alt_map)
-    _install_paired(2, shift_map)
-    _install_paired(4, shift_alt_map)
-    _install_paired(6, ctrl_shift_map)
-    _install_paired(7, ctrl_alt_map)
-    _install_paired(8, ctrl_alt_map)  # Ctrl+Alt+Shift — same normalization
+                _install_paired(6, {cp: ctrl_key})
+                for modifier in (7, 8):  # Ctrl+Alt and Ctrl+Alt+Shift — same normalization
+                    _install_paired(modifier, {cp: (Keys.Escape, ctrl_key)})
 
-    # -- The Esc KEY under Kitty disambiguate mode: ESC[27u (+ modifiers) --
-    # Disambiguate mode reports the Esc key as CSI-u so it is
-    # distinguishable from the ESC byte that starts escape sequences
-    # (#56684 — previously leaked "[27u" as literal text into the prompt).
-    # Modifiers run from 1 to 16: kitty reports Cmd as the super bit
-    # (mod 9+) — same reason install_cmd_backspace_alias maps 9/10 — and
-    # the lock-bit variants of the modifier-less form (1+64/128/192) are
-    # how a lone Esc keypress arrives with a lock on. Lock bits (caps/num)
-    # get the same variant treatment as _install_paired.
+    # The Esc KEY under Kitty disambiguate mode: ESC[27u (+ modifiers 1-16 incl. super 9+, and
+    # lock twins of the modifier-less form, which is how a lone Esc arrives with a lock on).
     _put("\x1b[27u", Keys.Escape)
+    for mod in (mod for m in range(1, 17) for mod in _lock_variants(m)):
+        _put(f"\x1b[27;{mod}u", Keys.Escape)
+
+    # Modified Enter/Tab/Backspace/Space (Shift/Ctrl+Enter are owned by the enter aliases, which run
+    # first and win). Modifier 1 = unmodified keys kitty CSI-u-encodes on their own when a lock bit
+    # is set (plain Backspace arrives as ESC[127;129u rather than \x7f).
+    alt_backspace = (Keys.Escape, Keys.ControlH)  # backward-kill-word, matching Ink TUI + Desktop
+    _install_paired(2, {9: Keys.BackTab, 127: Keys.ControlH, 32: " "})
+    _install_paired(3, {13: (Keys.Escape, Keys.ControlM), 127: alt_backspace, 32: (Keys.Escape, " ")})
+    _install_paired(5, {9: Keys.ControlI, 127: alt_backspace})  # Ctrl+Tab degrades to Tab
+    _install_paired(1, {9: Keys.ControlI, 13: Keys.ControlM, 32: " ", 127: Keys.ControlH})
+
+    # Lock twins for the legacy CSI-letter / CSI-tilde forms kitty keeps using under the
+    # disambiguate push (Down with NumLock on = ESC[1;129B; Alt+Left = ESC[1;131D). Derived from
+    # whatever the table already maps for the base modifier, stock entries included.
     for m in range(1, 17):
-        for mod in _lock_variants(m):
-            _put(f"\x1b[27;{mod}u", Keys.Escape)
-
-    # -- Modified Enter / Tab / Backspace / Space ----
-    # Shift+Enter / Ctrl+Enter are installed by install_shift_enter_alias /
-    # install_ctrl_enter_alias (which run first and win via setdefault).
-    _install_paired(2, {
-        9: Keys.BackTab,        # Shift+Tab — same as the legacy ESC[Z
-        127: Keys.ControlH,     # Shift+Backspace — plain backspace
-        32: " ",                # Shift+Space — still a space (#86866)
-    })
-    _install_paired(3, {
-        13: (Keys.Escape, Keys.ControlM),   # Alt+Enter — newline tuple
-        127: (Keys.Escape, Keys.ControlH),  # Alt+Backspace — backward-kill-word
-        32: (Keys.Escape, " "),             # Alt+Space
-    })
-    _install_paired(5, {
-        9: Keys.ControlI,                   # Ctrl+Tab — degrade to Tab
-        127: (Keys.Escape, Keys.ControlH),  # Ctrl+Backspace — backward-kill-word,
-                                            # matching Ink TUI + Desktop (#78285)
-    })
-
-    # -- Unmodified keys with a lock bit set (kitty modifier 1 = "none") --
-    # With a lock on, kitty stamps the lock bit onto keys pressed with NO
-    # real modifier too, so plain Backspace arrives as ESC[127;129u
-    # (1 + 128) rather than \x7f. _install_paired(1, ...) registers the
-    # bare mod-1 spelling and its lock twins. Only keys kitty CSI-u-encodes
-    # on their own are listed; plain text characters are still delivered
-    # as UTF-8, lock bits or not.
-    _install_paired(1, {
-        9: Keys.ControlI,     # Tab
-        13: Keys.ControlM,    # Enter
-        32: " ",              # Space
-        127: Keys.ControlH,   # Backspace
-    })
-
-    # -- Lock-key modifier bits (NumLock=128, CapsLock=64) on the legacy
-    # CSI-letter / CSI-tilde forms kitty keeps using under the disambiguate
-    # push: kitty encodes lock state into the modifier parameter, so a
-    # plain Down with NumLock on arrives as ESC[1;129B (NumLock), ESC[1;65B
-    # (CapsLock) or ESC[1;193B (both) instead of the legacy ESC[B — and a
-    # modified one shifts the same way (Alt+Left → ESC[1;131D). Those fall
-    # through the parser and leak as literal text ("[1;129B") in the input
-    # line. Derive the lock twins from whatever the table already maps for
-    # the base modifier (stock prompt_toolkit entries included), so every
-    # modifier the terminal can report keeps working under a lock.
-    for m in range(1, 17):
-        # CSI-letter navigation: Up/Down/Right/Left/End/Home + F1-F4
-        for trailer in "ABCDFHPQRS":
-            base_seq = f"\x1b[1;{m}{trailer}" if m > 1 else f"\x1b[{trailer}"
+        legacy = [(f"\x1b[1;{m}{t}" if m > 1 else f"\x1b[{t}", f"\x1b[1;{{mod}}{t}", f"\x1bO{t}") for t in "ABCDFHPQRS"]
+        legacy += [(f"\x1b[{n};{m}~" if m > 1 else f"\x1b[{n}~", f"\x1b[{n};{{mod}}~", None) for n in range(1, 9)]
+        for base_seq, twin_fmt, ss3_seq in legacy:  # CSI-letter nav/F1-F4, then CSI-tilde nav keys
             key = ANSI_SEQUENCES.get(base_seq)
-            if key is None and m == 1:
-                # Plain F1-F4 live in the table as SS3 (ESC O P) forms.
-                key = ANSI_SEQUENCES.get(f"\x1bO{trailer}")
-            if key is None:
-                continue
-            for mod in _lock_twins(m):
-                _put(f"\x1b[1;{mod}{trailer}", key)
-        # CSI-tilde navigation: Insert/Delete/PageUp/PageDown/Home/End
-        for num in range(1, 9):
-            base_seq = f"\x1b[{num};{m}~" if m > 1 else f"\x1b[{num}~"
-            key = ANSI_SEQUENCES.get(base_seq)
-            if key is None:
-                continue
-            for mod in _lock_twins(m):
-                _put(f"\x1b[{num};{mod}~", key)
+            if key is None and m == 1 and ss3_seq:
+                key = ANSI_SEQUENCES.get(ss3_seq)  # plain F1-F4 live as SS3 forms
+            for mod in _lock_twins(m) if key is not None else ():
+                _put(twin_fmt.format(mod=mod), key)
 
-    # -- Kitty functional keys (Private Use Area codepoints) ----
-    # kitty emits these CSI-u encodings even in LEGACY mode for keys that
-    # have no legacy encoding, so unmapped they leak as literal text in any
-    # kitty session regardless of which modes were pushed.
-    functional_map: dict[int, object] = {}
-    for d in range(10):                       # KP_0..KP_9 → digits
-        functional_map[57399 + d] = str(d)
-    functional_map.update({                   # KP operators / punctuation
-        57409: ".", 57410: "/", 57411: "*", 57412: "-",
-        57413: "+", 57414: Keys.ControlM, 57415: "=", 57416: ",",
-    })
-    functional_map.update({                   # KP navigation → non-keypad keys
-        57417: Keys.Left, 57418: Keys.Right, 57419: Keys.Up,
-        57420: Keys.Down, 57421: Keys.PageUp, 57422: Keys.PageDown,
-        57423: Keys.Home, 57424: Keys.End, 57425: Keys.Insert,
-        57426: Keys.Delete,
-    })
-    for n in range(13, 25):                   # F13..F24
-        functional_map[57376 + (n - 13)] = getattr(Keys, f"F{n}")
-    # No prompt_toolkit equivalent (lock keys, PrintScreen, Menu, F25-F35,
-    # KP_BEGIN, media keys, bare modifier events): consume as Ignore
-    # instead of leaking literal text.
-    for code in (
-        list(range(57358, 57364))       # locks, PrintScreen, Pause, Menu
-        + list(range(57388, 57399))     # F25..F35
-        + [57427]                       # KP_BEGIN
-        + list(range(57428, 57455))     # media keys + modifier key events
-    ):
-        functional_map.setdefault(code, Keys.Ignore)
-    for code, key_val in functional_map.items():
+    for code, key_val in _kitty_functional_map(Keys).items():
         _put(f"\x1b[{code}u", key_val)
-        # Lock twins: with a lock on these arrive as ESC[<code>;129u etc.
-        for mod in _lock_twins(1):
+        for mod in _lock_twins(1):  # with a lock on these arrive as ESC[<code>;129u etc.
             _put(f"\x1b[{code};{mod}u", key_val)
-
-    return _register(ANSI_SEQUENCES, aliases, overwrite=False)
+    return aliases
 
 
 def install_ignored_terminal_sequences() -> int:
-    """Map terminal noise sequences to ``Keys.Ignore`` so the VT100 parser consumes them.
+    """Map focus reports ``ESC[I`` / ``ESC[O`` (Ghostty, iTerm2, some xterms) to ``Keys.Ignore``.
 
-    Covers focus reports ``ESC[I`` / ``ESC[O``, which Ghostty, iTerm2 and some xterms emit on
-    tab/window switches; unmapped, prompt_toolkit inserts ``[I``/``[O`` into the buffer. Parser-
-    level handling beats post-hoc regex stripping because the bytes never reach the buffer.
+    Parser-level handling beats post-hoc regex stripping because the bytes never reach the buffer.
     ``setdefault`` lets user/downstream registrations win.
     """
-    tables = _pt_tables()
-    if tables is None:
-        return 0
-    seqs, keys = tables
-    return _register(seqs, {"\x1b[I": keys.Ignore, "\x1b[O": keys.Ignore}, overwrite=False)
+    return _install(lambda _seqs, keys: {"\x1b[I": keys.Ignore, "\x1b[O": keys.Ignore}, overwrite=False)
