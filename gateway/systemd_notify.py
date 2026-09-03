@@ -10,34 +10,27 @@ import socket
 
 
 def _notify_socket() -> str:
-    address = os.environ.get("NOTIFY_SOCKET", "").strip()
-    return address if address and hasattr(socket, "AF_UNIX") else ""
+    return os.environ.get("NOTIFY_SOCKET", "").strip() if hasattr(socket, "AF_UNIX") else ""
 
 
 def notify(message: str) -> bool:
-    """Send one nonblocking sd_notify datagram when systemd configured it.
-
-    Failures are non-fatal: a missing socket or an older platform must never prevent the gateway
-    from starting.
-    """
+    """Send an sd_notify datagram if systemd configured it; failures never block gateway startup."""
     if not (address := _notify_socket()) or not isinstance(message, str) or not message:
         return False
     try:
-        payload = message.encode("utf-8")
         with socket.socket(socket.AF_UNIX, socket.SOCK_DGRAM) as sender:
             sender.setblocking(False)  # a full receiver buffer must not stall the event loop
-            # systemd's ``@abstract`` notation -> Python's leading-NUL address form.
+            # systemd's ``@abstract`` notation -> Python's leading-NUL address form
             sender.connect("\0" + address[1:] if address.startswith("@") else address)
-            sender.send(payload)
+            sender.send(message.encode("utf-8"))
         return True
     except (OSError, UnicodeError, ValueError):
         return False
 
 
 def watchdog_interval_seconds() -> float | None:
-    raw = os.environ.get("WATCHDOG_USEC", "").strip() if _notify_socket() else ""
     try:
-        interval = float(raw) / 1_000_000.0
+        interval = float(os.environ.get("WATCHDOG_USEC", "") if _notify_socket() else "") / 1e6
     except (TypeError, ValueError):
         return None
     return interval if math.isfinite(interval) and interval > 0 else None
@@ -46,9 +39,7 @@ def watchdog_interval_seconds() -> float | None:
 class SystemdWatchdog:
     """Feed systemd while the asyncio event loop continues to make progress."""
 
-    def __init__(
-        self, *, config_enabled: bool = True, lag_tolerance_seconds: float | None = None
-    ) -> None:
+    def __init__(self, *, config_enabled: bool = True, lag_tolerance_seconds: float | None = None):
         self._config_enabled = bool(config_enabled)
         self.interval_seconds = watchdog_interval_seconds()
         self._lag_tolerance_seconds = lag_tolerance_seconds
@@ -61,11 +52,10 @@ class SystemdWatchdog:
 
     def _lag_tolerance(self) -> float:
         default = max(0.1, (self.interval_seconds or 0.0) * 0.25)
-        try:
+        with contextlib.suppress(TypeError, ValueError):
             value = float(self._lag_tolerance_seconds)
-        except (TypeError, ValueError):
-            return default
-        return max(0.0, value) if math.isfinite(value) else default
+            return max(0.0, value) if math.isfinite(value) else default
+        return default
 
     def start(self) -> bool:
         if not self.enabled:
@@ -111,17 +101,16 @@ class SystemdWatchdog:
                 now = loop.time()
                 if not self.record_tick(scheduled_at=scheduled_at, now=now):
                     return
-                scheduled_at = (
-                    scheduled_at + cadence if scheduled_at + cadence >= now else now + cadence
-                )
+                scheduled_at += cadence
+                if scheduled_at < now:
+                    scheduled_at = now + cadence
 
     async def stop(self) -> None:
         """Stop feeding systemd and emit ``STOPPING=1`` at most once."""
         self._stopping = True
         task = self._task
         if task is not None and task is not asyncio.current_task():
-            if not task.done():
-                task.cancel()
+            task.cancel()  # no-op on a finished task
             with contextlib.suppress(asyncio.CancelledError, Exception):
                 await task
         self._task = None
