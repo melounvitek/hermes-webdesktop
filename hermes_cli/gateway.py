@@ -1146,15 +1146,14 @@ def _probe_systemd_service_running(system: bool = False) -> tuple[bool, bool]:
     return selected_system, _systemd_unit_is_active(selected_system)
 
 
+def _parse_kv_pairs(items) -> dict[str, str]:
+    """``{key: value}`` from ``KEY=VALUE`` strings (later keys win; values stripped)."""
+    return {k: v.strip() for k, v in (item.split("=", 1) for item in items if "=" in item)}
+
+
 def _read_systemd_unit_environment(system: bool = False) -> dict[str, str]:
     """Parse ``systemctl show -p Environment`` (one line of unquoted space-separated KEY=VALUE pairs)."""
-    body = _systemctl_show(("Environment",), system=system).get("Environment", "")
-    parsed: dict[str, str] = {}
-    for token in body.split():
-        if "=" in token:
-            key, value = token.split("=", 1)
-            parsed[key] = value
-    return parsed
+    return _parse_kv_pairs(_systemctl_show(("Environment",), system=system).get("Environment", "").split())
 
 
 def _systemctl_show(properties: tuple[str, ...], *, system: bool) -> dict[str, str]:
@@ -1162,20 +1161,11 @@ def _systemctl_show(properties: tuple[str, ...], *, system: bool) -> dict[str, s
     try:
         result = _run_systemctl(
             ["show", get_service_name(), "--no-pager", "--property", ",".join(properties)],
-            system=_select_systemd_scope(system),
-            timeout=10,
-            **_CAPTURE_TEXT,
+            system=_select_systemd_scope(system), timeout=10, **_CAPTURE_TEXT,
         )
     except (RuntimeError, subprocess.TimeoutExpired, OSError):
         return {}
-    if result.returncode != 0:
-        return {}
-    parsed: dict[str, str] = {}
-    for line in result.stdout.splitlines():
-        if "=" in line:
-            key, value = line.split("=", 1)
-            parsed[key] = value.strip()
-    return parsed
+    return _parse_kv_pairs(result.stdout.splitlines()) if result.returncode == 0 else {}
 
 
 def _hermes_home_from_systemd_unit_file(system: bool = False) -> str | None:
@@ -1188,13 +1178,12 @@ def _hermes_home_from_systemd_unit_file(system: bool = False) -> str | None:
     except OSError:
         return None
     for line in text.splitlines():
-        stripped = line.strip()
-        if not stripped.startswith("Environment="):
+        body = line.strip()
+        if not body.startswith("Environment="):
             continue
-        body = stripped[len("Environment=") :].strip().strip('"')
+        body = body[len("Environment=") :].strip().strip('"')
         if body.startswith("HERMES_HOME="):
-            value = body.split("=", 1)[1].strip().strip('"')
-            return value or None
+            return body.split("=", 1)[1].strip().strip('"') or None
     return None
 
 
@@ -1208,14 +1197,9 @@ def _sync_hermes_home_from_systemd_unit(system: bool) -> None:
         return
     # On-disk unit first; ``systemctl show`` for units that only exist in the manager.
     unit_home = (_hermes_home_from_systemd_unit_file(system=True) or "").strip()
-    if not unit_home:
-        unit_home = _read_systemd_unit_environment(system=True).get("HERMES_HOME", "").strip()
-    if not unit_home:
-        return
-    current = os.environ.get("HERMES_HOME", "").strip()
-    if current == unit_home:
-        return
-    os.environ["HERMES_HOME"] = unit_home
+    unit_home = unit_home or _read_systemd_unit_environment(system=True).get("HERMES_HOME", "").strip()
+    if unit_home and os.environ.get("HERMES_HOME", "").strip() != unit_home:
+        os.environ["HERMES_HOME"] = unit_home
 
 
 def _read_systemd_unit_properties(
@@ -1232,6 +1216,14 @@ def _systemd_main_pid_from_props(props: dict[str, str]) -> int | None:
     except (TypeError, ValueError):
         return None
     return pid if pid > 0 else None
+
+
+def _runtime_state_pid(state: dict | None) -> int:
+    """``pid`` recorded in a runtime-status dict; 0 when absent or unparsable."""
+    try:
+        return int((state or {}).get("pid", 0) or 0)
+    except (TypeError, ValueError):
+        return 0
 
 
 def _systemd_main_pid(system: bool = False) -> int | None:
@@ -1252,13 +1244,13 @@ def _gateway_runtime_status_for_pid(pid: int | None) -> dict | None:
     if not pid:
         return None
     state = _read_gateway_runtime_status()
-    if not state:
-        return None
-    try:
-        state_pid = int(state.get("pid", 0) or 0)
-    except (TypeError, ValueError):
-        return None
-    return state if state_pid == pid else None
+    return state if state and _runtime_state_pid(state) == pid else None
+
+
+def _systemd_cli_bits(system: bool) -> tuple[str, str, str]:
+    """``(sudo_prefix, scope_flag, user_flag)`` for printed hints: ``("sudo ", " --system", "")`` in
+    system scope, ``("", "", "--user ")`` in user scope."""
+    return ("sudo ", " --system", "") if system else ("", "", "--user ")
 
 
 def _wait_for_systemd_service_restart(
@@ -1269,8 +1261,6 @@ def _wait_for_systemd_service_restart(
     replacement_observed: list[bool] | None = None,
 ) -> bool:
     """Wait for the gateway service to become active after a restart handoff."""
-    import time
-
     svc = get_service_name()
     scope_label = _service_scope_label(system).capitalize()
     if timeout is None:
@@ -1282,29 +1272,21 @@ def _wait_for_systemd_service_restart(
         props = _read_systemd_unit_properties(system=system)
         active_state = props.get("ActiveState", "")
         sub_state = props.get("SubState", "")
-        new_pid = None
         try:
             from gateway.status import get_running_pid
 
             new_pid = get_running_pid()
         except Exception:
             new_pid = None
-        if not new_pid:
-            new_pid = _systemd_main_pid_from_props(props)
+        new_pid = new_pid or _systemd_main_pid_from_props(props)
 
         runtime_state = _read_gateway_runtime_status()
-        try:
-            runtime_pid = int((runtime_state or {}).get("pid", 0) or 0)
-        except (TypeError, ValueError):
-            runtime_pid = 0
+        runtime_pid = _runtime_state_pid(runtime_state)
         if (
             previous_pid is not None
             and replacement_observed is not None
             and not replacement_observed
-            and any(
-                candidate_pid > 0 and candidate_pid != previous_pid
-                for candidate_pid in (new_pid or 0, runtime_pid)
-            )
+            and any(p > 0 and p != previous_pid for p in (new_pid or 0, runtime_pid))
         ):
             replacement_observed.append(True)
 
@@ -1337,10 +1319,11 @@ def _wait_for_systemd_service_restart(
 
         time.sleep(2)
 
+    sudo, _, user_flag = _systemd_cli_bits(system)
     print(
         f"⚠ {scope_label} service did not become active within {int(timeout)}s.\n"
-        f"  Check status: {'sudo ' if system else ''}hermes gateway status\n"
-        f"  Check logs:   journalctl {'--user ' if not system else ''}-u {svc} -l --since '2 min ago'"
+        f"  Check status: {sudo}hermes gateway status\n"
+        f"  Check logs:   journalctl {user_flag}-u {svc} -l --since '2 min ago'"
     )
     return False
 
@@ -1353,27 +1336,22 @@ def _systemd_restart_wait_timeout(system: bool = False) -> float:
     supervisor_budget = 0.0
     for name in ("RestartUSec", "TimeoutStartUSec"):
         raw = props.get(name, "")
-        duration_us = (int(raw) if raw.isdigit() else parse_systemd_duration_to_us(raw))
+        duration_us = int(raw) if raw.isdigit() else parse_systemd_duration_to_us(raw)
         if duration_us is not None:
             supervisor_budget += duration_us / 1_000_000
     return 60.0 + supervisor_budget
 
 
 def _systemd_unit_is_start_limited(props: dict[str, str]) -> bool:
-    result = props.get("Result", "").lower()
-    sub_state = props.get("SubState", "").lower()
-    return result == "start-limit-hit" or sub_state == "start-limit-hit"
+    return "start-limit-hit" in (props.get("Result", "").lower(), props.get("SubState", "").lower())
 
 
 def _systemd_error_indicates_start_limit(exc: subprocess.CalledProcessError) -> bool:
     parts: list[str] = []
     for attr in ("stderr", "stdout", "output"):
         value = getattr(exc, attr, None)
-        if not value:
-            continue
-        if isinstance(value, bytes):
-            value = value.decode(errors="replace")
-        parts.append(str(value))
+        if value:
+            parts.append(value.decode(errors="replace") if isinstance(value, bytes) else str(value))
     text = "\n".join(parts).lower()
     return "start-limit-hit" in text or "start request repeated too quickly" in text or "start-limit" in text
 
@@ -1385,16 +1363,12 @@ def _systemd_service_is_start_limited(system: bool = False) -> bool:
 def _print_systemd_start_limit_wait(system: bool = False) -> None:
     svc = get_service_name()
     scope_label = _service_scope_label(system).capitalize()
-    scope_flag = " --system" if system else ""
-    systemctl_prefix = "systemctl " if system else "systemctl --user "
-    journal_prefix = "journalctl " if system else "journalctl --user "
+    sudo, scope_flag, user_flag = _systemd_cli_bits(system)
     print(f"⏳ {scope_label} service is temporarily rate-limited by systemd.")
     print("  systemd is refusing another immediate start after repeated exits.")
-    print(
-        f"  Wait for the start-limit window to expire, then run: {'sudo ' if system else ''}hermes gateway restart{scope_flag}"
-    )
-    print(f"  Or clear the failed state manually: {systemctl_prefix}reset-failed {svc}")
-    print(f"  Check logs: {journal_prefix}-u {svc} -l --since '5 min ago'")
+    print(f"  Wait for the start-limit window to expire, then run: {sudo}hermes gateway restart{scope_flag}")
+    print(f"  Or clear the failed state manually: systemctl {user_flag}reset-failed {svc}")
+    print(f"  Check logs: journalctl {user_flag}-u {svc} -l --since '5 min ago'")
 
 
 def _recover_pending_systemd_restart(system: bool = False, previous_pid: int | None = None) -> bool:
@@ -1408,26 +1382,20 @@ def _recover_pending_systemd_restart(system: bool = False, previous_pid: int | N
     except Exception:
         return False
 
-    runtime_state = read_runtime_status() or {}
-    if not runtime_state.get("restart_requested"):
+    if not (read_runtime_status() or {}).get("restart_requested"):
         return False
 
     active_state = props.get("ActiveState", "")
-    sub_state = props.get("SubState", "")
-    exec_main_status = props.get("ExecMainStatus", "")
-    result = props.get("Result", "")
-
-    if active_state == "activating" and sub_state == "auto-restart":
+    if active_state == "activating" and props.get("SubState", "") == "auto-restart":
         print("⏳ Service restart already pending — waiting for systemd relaunch...")
         return _wait_for_systemd_service_restart(system=system, previous_pid=previous_pid)
 
     if active_state == "failed" and (
-        exec_main_status == str(GATEWAY_SERVICE_RESTART_EXIT_CODE)
-        or result == "exit-code"
+        props.get("ExecMainStatus", "") == str(GATEWAY_SERVICE_RESTART_EXIT_CODE)
+        or props.get("Result", "") == "exit-code"
     ):
         svc = get_service_name()
-        scope_label = _service_scope_label(system).capitalize()
-        print(f"↻ Clearing failed state for pending {scope_label.lower()} service restart...")
+        print(f"↻ Clearing failed state for pending {_service_scope_label(system)} service restart...")
         _run_systemctl(["reset-failed", svc], system=system, check=False, timeout=30)
         _run_systemctl(["start", svc], system=system, check=False, timeout=90)
         return _wait_for_systemd_service_restart(system=system, previous_pid=previous_pid)
@@ -1440,15 +1408,15 @@ def _parse_launchd_pid_from_list_output(output: str) -> int | None:
     or non-positive (crashed)."""
     for line in output.splitlines():
         stripped = line.strip()
-        if stripped.startswith('"PID"') or stripped.startswith("PID"):
+        if stripped.startswith(('"PID"', "PID")):
             parts = stripped.split("=", 1)
-            if len(parts) == 2:
-                val = parts[1].strip().rstrip(";").strip('"')
-                try:
-                    pid = int(val)
-                    return pid if pid > 0 else None
-                except ValueError:
-                    return None
+            if len(parts) != 2:
+                continue
+            try:
+                pid = int(parts[1].strip().rstrip(";").strip('"'))
+            except ValueError:
+                return None
+            return pid if pid > 0 else None
     return None
 
 
@@ -1459,9 +1427,9 @@ def _parse_launchd_pid_from_print_output(output: str) -> int | None:
         if stripped.startswith("pid = "):
             try:
                 pid = int(stripped[len("pid = "):].strip())
-                return pid if pid > 0 else None
             except ValueError:
                 return None
+            return pid if pid > 0 else None
     return None
 
 
@@ -1522,11 +1490,9 @@ def get_gateway_runtime_snapshot(system: bool = False) -> GatewayRuntimeSnapshot
         try:
             from hermes_cli.service_manager import detect_service_manager, get_service_manager
             if detect_service_manager() == "s6":
-                profile = _profile_suffix() or "default"
-                service_name = f"gateway-{profile}"
+                service_name = f"gateway-{_profile_suffix() or 'default'}"
                 mgr = get_service_manager()
-                service_installed = False
-                service_running = False
+                service_installed = service_running = False
                 try:
                     service_dir = getattr(mgr, "scandir", None)
                     if service_dir is not None:
@@ -1573,11 +1539,7 @@ def get_gateway_runtime_snapshot(system: bool = False) -> GatewayRuntimeSnapshot
 
 
 def _format_gateway_pids(pids: tuple[int, ...] | list[int], *, limit: int | None = 3) -> str:
-    rendered = (
-        [str(pid) for pid in pids[:limit] if pid > 0]
-        if limit is not None
-        else [str(pid) for pid in pids if pid > 0]
-    )
+    rendered = [str(pid) for pid in (pids if limit is None else pids[:limit]) if pid > 0]
     if limit is not None and len(pids) > limit:
         rendered.append("...")
     return ", ".join(rendered)
@@ -1589,15 +1551,21 @@ def _print_gateway_process_mismatch(snapshot: GatewayRuntimeSnapshot) -> None:
     print()
     # Managed detached fallback (macOS launchd exit-5 path) vs. a genuinely manual run.
     if _launchd_unsupported_marker_exists():
-        print("⚠ Gateway is running as a detached fallback process — launchd cannot supervise it")
-        print(f"  PID(s): {_format_gateway_pids(snapshot.gateway_pids, limit=None)}")
-        print("  Auto-start at login and auto-restart on crash are NOT available.")
-        print("  Stop it with: hermes gateway stop")
+        headline, *details = (
+            "⚠ Gateway is running as a detached fallback process — launchd cannot supervise it",
+            "  Auto-start at login and auto-restart on crash are NOT available.",
+            "  Stop it with: hermes gateway stop",
+        )
     else:
-        print("⚠ Gateway process is running for this profile, but the service is not active")
-        print(f"  PID(s): {_format_gateway_pids(snapshot.gateway_pids, limit=None)}")
-        print("  This is usually a manual foreground/tmux/nohup run, so `hermes gateway`")
-        print("  can refuse to start another copy until this process stops.")
+        headline, *details = (
+            "⚠ Gateway process is running for this profile, but the service is not active",
+            "  This is usually a manual foreground/tmux/nohup run, so `hermes gateway`",
+            "  can refuse to start another copy until this process stops.",
+        )
+    print(headline)
+    print(f"  PID(s): {_format_gateway_pids(snapshot.gateway_pids, limit=None)}")
+    for line in details:
+        print(line)
 
 
 def _print_other_profiles_gateway_status() -> None:
@@ -1636,9 +1604,7 @@ def _gateway_list() -> None:
     print("Gateways:")
     for prof in profiles:
         marker = "✓" if prof.gateway_running else "✗"
-        label = prof.name
-        if prof.name == current:
-            label += " (current)"
+        label = prof.name + (" (current)" if prof.name == current else "")
         parts = [f"  {marker} {label:<24s}"]
         if prof.gateway_running:
             pid = None
@@ -1662,15 +1628,12 @@ def kill_gateway_processes(
 ) -> int:
     """Kill running gateway processes (force-kill if ``force``); ``exclude_pids`` skips e.g. just-
     restarted service PIDs. Returns count killed."""
-    pids = find_gateway_pids(exclude_pids=exclude_pids, all_profiles=all_profiles)
     killed = 0
-
-    for pid in pids:
+    for pid in find_gateway_pids(exclude_pids=exclude_pids, all_profiles=all_profiles):
         try:
             expected_start_time = None
             if force:
-                # Re-verify the LIVE cmdline at kill time: a PID recycled since the scan must
-                # never be tree-killed.
+                # Re-verify the LIVE cmdline at kill time: a PID recycled since the scan must never be tree-killed.
                 if _capture_gateway_argv(pid) is None:
                     continue
                 from gateway.status import get_process_start_time
@@ -1682,7 +1645,6 @@ def kill_gateway_processes(
             pass
         except PermissionError:
             print(f"⚠ Permission denied to kill PID {pid}")
-
         except OSError as exc:
             print(f"Failed to kill PID {pid}: {exc}")
     return killed
@@ -1735,13 +1697,11 @@ def _reap_unsupervised_gateway_orphans(extra_exclude: set | None = None) -> bool
     if supervised_host:
         return False
 
-    # Windows Task Scheduler is a supervisor too; its task state is more reliable than a
-    # parent-chain walk, which breaks once the VBS/conhost bootstrap exits (task then Ready, not
-    # Running — a Running-only check would kill the detached gateway on every desktop start).
+    # Windows Task Scheduler is a supervisor too; its task state beats a parent-chain walk, which
+    # breaks once the VBS/conhost bootstrap exits (task is then Ready, not Running).
     if is_windows():
         try:
-            # Task name is profile-aware (Hermes_Gateway_<profile>) — never hardcode it.
-            from hermes_cli.gateway_windows import get_task_name
+            from hermes_cli.gateway_windows import get_task_name  # profile-aware task name
 
             _task_name = get_task_name()
         except Exception:
@@ -1749,14 +1709,13 @@ def _reap_unsupervised_gateway_orphans(extra_exclude: set | None = None) -> bool
         if _windows_scheduled_task_supervises(_task_name):
             return False
 
-    from gateway.status import _pid_exists, write_planned_stop_marker
+    from gateway.status import _pid_exists, get_process_start_time, write_planned_stop_marker
 
     own = _reaper_exclusion_pids(extra_exclude)
     try:
         # On Windows also drop Task Scheduler-owned candidates (the pidfile-less gap).
         orphans = [
-            p
-            for p in find_gateway_pids(exclude_pids=own)
+            p for p in find_gateway_pids(exclude_pids=own)
             if p and p > 0 and not _reaper_candidate_is_supervisor_owned(p)
         ]
     except Exception:
@@ -1766,8 +1725,6 @@ def _reap_unsupervised_gateway_orphans(extra_exclude: set | None = None) -> bool
 
     # Pin each orphan's identity now: the delayed SIGKILL fires seconds later and a recycled PID
     # must never be force-killed. SIGTERM proceeds regardless; SIGKILL requires a matching fingerprint.
-    from gateway.status import get_process_start_time
-
     orphan_identity: dict[int, int] = {}
     for pid in orphans:
         start = get_process_start_time(pid)
@@ -1787,16 +1744,12 @@ def _reap_unsupervised_gateway_orphans(extra_exclude: set | None = None) -> bool
             continue
         reaped = True
 
-    # Wait, then force-kill survivors so the replacement can bind the port cleanly.
+    # Wait, then SIGKILL only survivors that still name the process fingerprinted at scan time.
     survivors = _await_gateway_exit(orphans, pid_exists=_pid_exists)
-    # Fail-closed: SIGKILL only a PID that still names the process fingerprinted at scan time.
-    verified_survivors = []
-    for pid in survivors:
-        recorded = orphan_identity.get(pid)
-        if recorded is None or get_process_start_time(pid) != recorded:
-            continue
-        verified_survivors.append(pid)
-    _force_kill_survivors(verified_survivors)
+    _force_kill_survivors([
+        pid for pid in survivors
+        if orphan_identity.get(pid) is not None and get_process_start_time(pid) == orphan_identity[pid]
+    ])
 
     return reaped
 
@@ -1806,19 +1759,16 @@ def _reaper_exclusion_pids(extra_exclude: set | None) -> set[int]:
     own = {os.getpid()}
     if extra_exclude:
         own |= extra_exclude
-    # Service-managed gateways are never orphans: on macOS supports_systemd_services() is False,
-    # so without this a launchd gateway would be SIGTERM'd (and left down under
-    # KeepAlive.SuccessfulExit=false). all_profiles=True because the scan sees every profile's
-    # gateway; a sibling profile's launchd gateway must not be reaped.
+    # Service-managed gateways are never orphans (on macOS supports_systemd_services() is False, so
+    # a launchd gateway would otherwise be SIGTERM'd). all_profiles=True: the scan sees every
+    # profile's gateway and a sibling's launchd gateway must not be reaped.
     with contextlib.suppress(Exception):
         own |= _get_service_pids(all_profiles=True)
-    # Exempt the recorded gateway PID and its parent chain (on Windows the Scheduled-Task
-    # bootstrap's ``gateway run`` argv matches the scan; killing it takes the gateway down).
-    # Evidence comes from the RAW pidfile + lock records, not the validated probe: get_running_pid
-    # returns None on any validation hiccup — exactly when a healthy standalone gateway would be
-    # hard-killed (Windows SIGTERM is TerminateProcess, no drain). For a KILL exclusion list a
-    # stale PID at worst spares one process; a false-negative kills a live gateway. The validated
-    # probe still supplies the runtime-status fallback PID when no pidfile exists.
+    # Exempt the recorded gateway PID and its parent chain (on Windows the Scheduled-Task bootstrap's
+    # ``gateway run`` argv matches the scan). Use the RAW pidfile + lock records, not only the
+    # validated probe: get_running_pid returns None on any validation hiccup — exactly when a healthy
+    # standalone gateway would be hard-killed. For a KILL exclusion list a stale PID at worst spares
+    # one process; a false-negative kills a live gateway.
     try:
         from gateway.status import (
             _pid_from_record,
