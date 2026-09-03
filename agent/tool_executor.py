@@ -115,12 +115,12 @@ _AUTHORIZATION_GATE_LOCK_TIMEOUT_S = 360.0
 
 
 def _authorization_gate_lock_timeout() -> float:
-    """Authorization-lock bound = ``tools.approval.human_wait_ceiling`` (approval timeout +
+    """Authorization-lock bound = ``tools.approval_human_wait.human_wait_ceiling`` (approval timeout +
     margin, capped so it can't overflow Lock.acquire): never break serialization while a
     prompt is answerable, never let a wedged holder park workers forever. Deliberately NOT
     min()'d with the fallback so the gate never gives up early.
 
-    Delegates to ``tools.approval.human_wait_ceiling`` — the same bound that clamps a human-wait window's
+    Delegates to ``tools.approval_human_wait.human_wait_ceiling`` — the same bound that clamps a human-wait window's
     deadline contribution — so the two can't drift. Long enough that serialization is never broken while a
     legitimate approval prompt is still answerable; short enough that a wedged holder (hanging
     ``pre_tool_call`` plugin, dead approval client) cannot park other workers forever (#79719). Resolved

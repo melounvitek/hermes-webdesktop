@@ -13,7 +13,7 @@ away — had two coupled failure modes:
    ``remaining = (deadline + (now - window_started)) - now = deadline - window_started``.
 
 The fix moves deadline exclusion to the source of the human wait
-(``tools.approval.human_wait_window`` around the CLI prompt and the gateway
+(``tools.approval_human_wait.human_wait_window`` around the CLI prompt and the gateway
 approval poll loop) and bounds the serialization lock acquire. A wedged
 plugin now contributes nothing to the exclusion, so the batch times out
 normally; a genuine approval wait is still excluded in full.

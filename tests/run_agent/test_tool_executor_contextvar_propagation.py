@@ -4,7 +4,7 @@ propagation into concurrent tool worker threads.
 Background
 ----------
 Gateway adapters (Slack, Telegram, Discord, ...) set
-``tools.approval._approval_session_key`` as a ContextVar before calling
+``tools.approval_context._approval_session_key`` as a ContextVar before calling
 ``agent.run_conversation`` so that dangerous-command approval prompts route
 back to the channel/session that initiated the tool call. When the agent
 dispatches multiple tools in parallel, it uses
@@ -77,7 +77,7 @@ def test_run_tool_worker_sees_parent_approval_session_key():
     Mirrors the exact shape of the fixed call site in
     ``run_agent.py::_execute_tool_calls_concurrent`` — a
     ``ThreadPoolExecutor`` with ``executor.submit(ctx.run, fn, *args)``.
-    Sets the real ``tools.approval._approval_session_key`` ContextVar
+    Sets the real ``tools.approval_context._approval_session_key`` ContextVar
     in the caller and asserts the worker observes it via
     ``tools.approval.get_current_session_key()``.
 

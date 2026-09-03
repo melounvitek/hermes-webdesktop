@@ -243,7 +243,7 @@ def _is_command_provider_block(value: Any) -> bool:
     """True when *value* declares a command-type voice provider.
 
     Mirrors the runtime discriminators (``tools.tts_command_provider._is_command_provider_config`` /
-    ``tools.transcription_tools._is_command_stt_provider_config``) and the desktop's
+    ``tools.transcription_command._is_command_stt_provider_config``) and the desktop's
     ``isCommandProvider``: ``type`` is OPTIONAL and case/space-insensitive (absent or
     normalizing to ``"command"``); ``command`` MUST be a non-empty string.
     """
