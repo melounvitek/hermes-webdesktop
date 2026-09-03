@@ -443,13 +443,6 @@ def enabled_mcp_server_names(config: dict) -> Set[str]:
     return names
 
 
-def _exempt_explicit_platform_native(default_off: Set[str], platform: str, *, explicitly_configured: bool) -> None:
-    """Let platform-native default-off toolsets (``discord`` on discord) through on explicit config (mutates
-    ``default_off``): off for unconfigured platforms as a security opt-in, but a saved list is that opt-in."""
-    if explicitly_configured:
-        default_off -= {ts for ts in default_off if platform in (_TOOLSET_PLATFORM_RESTRICTIONS.get(ts) or ())}
-
-
 #: Toolsets young enough that absence from a saved ``platform_toolsets`` list means "never offered", not
 #: "declined": saving ``hermes tools`` freezes a platform's composite into an explicit list nothing adds to, so
 #: a later toolset stays off forever for picker users while ``[hermes-cli]`` users inherit it.
@@ -500,13 +493,16 @@ def _configurable_subset_of(tool_names: Set[str], platform: str) -> Set[str]:
 def _default_off_toolsets(platform: str, explicitly_configured: bool) -> Set[str]:
     """Toolsets to strip from an implicit (composite-derived) enable set. A platform named after a default-off
     toolset (``homeassistant``) keeps it, except platform-restricted ones (``discord`` on discord stays OFF); a
-    configured HASS_TOKEN is an explicit opt-in that must survive platforms resolving without a saved list."""
+    configured HASS_TOKEN is an explicit opt-in that must survive platforms resolving without a saved list.
+    Platform-native default-off toolsets (``discord`` on discord) are off for unconfigured platforms as a
+    security opt-in — an explicitly saved list IS that opt-in and lets them through."""
     default_off = set(_DEFAULT_OFF_TOOLSETS)
     if platform in default_off and platform not in _TOOLSET_PLATFORM_RESTRICTIONS:
         default_off.remove(platform)
     if "homeassistant" in default_off and _homeassistant_credentials_present():
         default_off.remove("homeassistant")
-    _exempt_explicit_platform_native(default_off, platform, explicitly_configured=explicitly_configured)
+    if explicitly_configured:
+        default_off -= {ts for ts in default_off if platform in (_TOOLSET_PLATFORM_RESTRICTIONS.get(ts) or ())}
     return default_off
 
 
@@ -571,7 +567,7 @@ def _get_platform_tools(config: dict, platform: str, *, include_default_mcp_serv
     platform_toolsets = config.get("platform_toolsets") or {}
     toolset_names = platform_toolsets.get(platform)
     # An explicitly saved list (even a composite like ``hermes-discord``) is an opt-in to the platform's
-    # native default-off toolsets — see _exempt_explicit_platform_native.
+    # native default-off toolsets — see _default_off_toolsets.
     explicitly_configured = isinstance(toolset_names, list)
     if not explicitly_configured:
         toolset_names = [_platform_default_toolset(platform)]
@@ -988,38 +984,28 @@ def _apply_platform_checklist(config: dict, pkey: str, new_enabled: Set[str], pr
     _save_platform_tools(config, pkey, new_enabled)
 
 
-def _configure_all_platforms(config: dict, platform_keys: List[str]) -> bool:
-    """'Configure all platforms (global)' menu entry. Returns True when config was saved."""
-    all_current: Set[str] = set()
-    for pk in platform_keys:
-        all_current |= _current_platform_tools(config, pk)
-    new_enabled = _prompt_toolset_checklist("All platforms", all_current, force_fresh=True)
+def _configure_platforms(config: dict, platform_keys: List[str], *, all_platforms: bool = False) -> bool:
+    """Checklist + key setup + save for one platform, or for every platform at once (the 'Configure all
+    platforms (global)' menu entry). Returns True when config was saved."""
+    label = "All platforms" if all_platforms else PLATFORMS[platform_keys[0]]["label"]
+    current = {pk: _current_platform_tools(config, pk) for pk in platform_keys}
+    all_current = set().union(*current.values())
+    new_enabled = _prompt_toolset_checklist(label, all_current, force_fresh=True)
     selected_to_configure = _toolsets_needing_setup(new_enabled, config)
     _configure_list(selected_to_configure, config)
     if new_enabled == all_current and not selected_to_configure:
-        print(color("  No changes", Colors.DIM))
+        print(color("  No changes" if all_platforms else f"  No changes to {label}", Colors.DIM))
         return False
     for pk in platform_keys:
-        _apply_platform_checklist(config, pk, new_enabled, _current_platform_tools(config, pk),
-                                  set(selected_to_configure), indent="    ", header=True)
+        # Global: re-read after each save — reconciling agent.disabled_toolsets for one platform can change
+        # what the next platform resolves to. Single platform: diff against the pre-checklist snapshot.
+        prev = _current_platform_tools(config, pk) if all_platforms else current[pk]
+        _apply_platform_checklist(config, pk, new_enabled, prev, set(selected_to_configure),
+                                  indent="    " if all_platforms else "  ", header=all_platforms)
     save_config(config)
-    print(color("  ✓ Saved configuration for all platforms", Colors.GREEN))
+    print(color("  ✓ Saved configuration for all platforms" if all_platforms else f"  ✓ Saved {label} configuration",
+                Colors.GREEN))
     return True
-
-
-def _configure_one_platform(config: dict, pkey: str) -> None:
-    """Per-platform checklist + key setup + save."""
-    pinfo = PLATFORMS[pkey]
-    current_enabled = _current_platform_tools(config, pkey)
-    new_enabled = _prompt_toolset_checklist(pinfo["label"], current_enabled, force_fresh=True)
-    selected_to_configure = _toolsets_needing_setup(new_enabled, config)
-    _configure_list(selected_to_configure, config)
-    if new_enabled == current_enabled and not selected_to_configure:
-        print(color(f"  No changes to {pinfo['label']}", Colors.DIM))
-        return
-    _apply_platform_checklist(config, pkey, new_enabled, current_enabled, set(selected_to_configure))
-    save_config(config)
-    print(color(f"  ✓ Saved {pinfo['label']} configuration", Colors.GREEN))
 
 
 def tools_command(args=None, first_install: bool = False, config: dict = None):
@@ -1072,11 +1058,11 @@ def tools_command(args=None, first_install: bool = False, config: dict = None):
         elif idx == mcp_idx:
             _configure_mcp_tools_interactive(config)
         elif idx == global_idx:
-            if _configure_all_platforms(config, platform_keys):
+            if _configure_platforms(config, platform_keys, all_platforms=True):
                 for ci, pk in enumerate(platform_keys):
                     platform_choices[ci] = _platform_menu_label(config, pk)
         else:
-            _configure_one_platform(config, platform_keys[idx])
+            _configure_platforms(config, [platform_keys[idx]])
             platform_choices[idx] = _platform_menu_label(config, platform_keys[idx])
         print()
 
