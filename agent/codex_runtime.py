@@ -1,9 +1,9 @@
 """Codex API runtime — App Server and Responses-API streaming paths.
 
 Extracted from :class:`AIAgent`; every entry point takes the parent agent as its
-first argument and AIAgent keeps thin forwarders. ``run_codex_app_server_turn``
-drives one ``codex app-server`` subprocess turn (``codex_app_server`` api_mode);
-``run_codex_stream`` runs one streaming Codex Responses call (``codex_responses``);
+first argument. ``run_codex_app_server_turn`` drives one ``codex app-server``
+subprocess turn (``codex_app_server`` api_mode); ``run_codex_stream`` runs one
+streaming Codex Responses call (``codex_responses``);
 ``run_codex_create_stream_fallback`` is a legacy alias of the latter.
 """
 
@@ -109,8 +109,8 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
     compressor = getattr(agent, "context_compressor", None)
     if not isinstance(usage, dict) or not usage:
         if compressor is not None and getattr(compressor, "awaiting_real_usage_after_compression", False):
-            # No usage cannot adjudicate the pending compaction; consume the marker so
-            # preflight deferral cannot stay latched.
+            # No usage cannot adjudicate the pending compaction; consume the marker
+            # so preflight deferral cannot stay latched.
             compressor.update_from_response({})
         _queue_token_counts(
             agent, "Codex app-server api-call persistence failed (session=%s): %s",
@@ -171,17 +171,10 @@ def _record_codex_app_server_usage(agent, turn) -> dict[str, Any]:
             model=agent.model, api_call_count=1,
         ),
     )
-
     return {**usage_dict, "last_prompt_tokens": prompt_tokens, **cost_fields}
 
 
-def _record_codex_app_server_compaction(
-    agent,
-    turn,
-    *,
-    approx_tokens: int | None = None,
-    force: bool = False,
-) -> bool:
+def _record_codex_app_server_compaction(agent, turn, *, approx_tokens: int | None = None, force: bool = False) -> bool:
     """Record a Codex-native compaction boundary in Hermes state.
 
     The app-server owns the compacted thread, so local transcript rows are NOT
@@ -263,6 +256,10 @@ _MCP_LIKE_ITEM_TYPES = {"mcpToolCall", "dynamicToolCall"}
 _PREVIEW_FIELDS = {"commandExecution": "command", "webSearch": "query"}
 
 
+def _item_changes(item: dict) -> list[dict]:
+    return [c for c in (item.get("changes") or []) if isinstance(c, dict)]
+
+
 def _codex_item_to_tool_name(item: dict) -> str:
     """Synthetic Hermes tool name for a codex item (mirrors CodexEventProjector)."""
     item_type = item.get("type") or ""
@@ -281,8 +278,7 @@ def _codex_item_to_args(item: dict) -> dict:
         return {"command": item.get("command") or "", "cwd": item.get("cwd") or ""}
     if item_type == "fileChange":
         return {"changes": [
-            {"kind": (c.get("kind") or {}).get("type") or "update", "path": c.get("path") or ""}
-            for c in (item.get("changes") or []) if isinstance(c, dict)
+            {"kind": (c.get("kind") or {}).get("type") or "update", "path": c.get("path") or ""} for c in _item_changes(item)
         ]}
     if item_type in _MCP_LIKE_ITEM_TYPES:
         args = item.get("arguments") or {}
@@ -298,7 +294,7 @@ def _codex_item_to_preview(item: dict) -> Any:
     if item_type in _PREVIEW_FIELDS:
         return (item.get(_PREVIEW_FIELDS[item_type]) or "")[:120] or None
     if item_type == "fileChange":
-        paths = [c.get("path") for c in (item.get("changes") or []) if isinstance(c, dict) and c.get("path")]
+        paths = [c.get("path") for c in _item_changes(item) if c.get("path")]
         if not paths:
             return None
         return ", ".join(paths[:3]) + (f", +{len(paths) - 3} more" if len(paths) > 3 else "")
@@ -320,9 +316,7 @@ def _codex_item_completion_payload(item: dict) -> tuple[str, bool]:
         out = item.get("aggregatedOutput") or ""
         exit_code = item.get("exitCode")
         is_error = bool(exit_code is not None and exit_code != 0)
-        if is_error:
-            out = f"[exit {exit_code}]\n{out}"
-        return out, is_error
+        return (f"[exit {exit_code}]\n{out}" if is_error else out), is_error
     if item_type == "fileChange":
         status = item.get("status") or "unknown"
         n = len(item.get("changes") or [])
@@ -371,18 +365,20 @@ def make_codex_app_server_event_bridge(agent) -> Callable[[dict], None]:
     # item_id -> (tool_name, args, started_monotonic); duration even when codex omits durationMs.
     started: dict[str, tuple[str, dict, float]] = {}
 
+    def agent_cb(attr: str, fail_msg: str, *fail_args: Any, args: tuple = (), kwargs: dict | None = None) -> None:
+        _call_guarded(getattr(agent, attr, None), fail_msg, *fail_args, args=args, kwargs=kwargs)
+
     def _fire_tool_started(item: dict) -> None:
         item_id = item.get("id") or ""
         name = _codex_item_to_tool_name(item)
         args = _codex_item_to_args(item)
         if item_id:
             started[item_id] = (name, args, time.monotonic())
-        _call_guarded(getattr(agent, "tool_progress_callback", None),
-                      "tool_progress_callback raised on tool.started for %s", name,
-                      args=("tool.started", name, _codex_item_to_preview(item), args))
+        agent_cb("tool_progress_callback", "tool_progress_callback raised on tool.started for %s", name,
+                 args=("tool.started", name, _codex_item_to_preview(item), args))
         # Stable-ID tool card (TUI/desktop) fires alongside the progress bubble.
-        _call_guarded(getattr(agent, "tool_start_callback", None), "tool_start_callback raised for %s", name,
-                      args=(_stable_call_id(item, name), name, args))
+        agent_cb("tool_start_callback", "tool_start_callback raised for %s", name,
+                 args=(_stable_call_id(item, name), name, args))
 
     def _fire_tool_completed(item: dict) -> None:
         item_id = item.get("id") or ""
@@ -397,30 +393,25 @@ def make_codex_app_server_event_bridge(agent) -> Callable[[dict], None]:
         elif prior is not None:
             duration = time.monotonic() - prior[2]
         result, is_error = _codex_item_completion_payload(item)
-        _call_guarded(getattr(agent, "tool_progress_callback", None),
-                      "tool_progress_callback raised on tool.completed for %s", name,
-                      args=("tool.completed", name, None, None),
-                      kwargs={"duration": duration, "is_error": is_error, "result": result})
+        agent_cb("tool_progress_callback", "tool_progress_callback raised on tool.completed for %s", name,
+                 args=("tool.completed", name, None, None),
+                 kwargs={"duration": duration, "is_error": is_error, "result": result})
         args = prior[1] if prior is not None else _codex_item_to_args(item)
-        _call_guarded(getattr(agent, "tool_complete_callback", None), "tool_complete_callback raised for %s", name,
-                      args=(_stable_call_id(item, name), name, args, result))
+        agent_cb("tool_complete_callback", "tool_complete_callback raised for %s", name,
+                 args=(_stable_call_id(item, name), name, args, result))
 
     def _fire_delta(params: dict, attr: str) -> None:
         text = params.get("delta") or params.get("text") or ""
         if isinstance(text, str) and text:
-            _call_guarded(getattr(agent, attr, None), f"{attr} raised", args=(text,))
+            agent_cb(attr, f"{attr} raised", args=(text,))
 
     def _fire_agent_message_completed(item: dict) -> None:
         text = item.get("text") or ""
-        if not isinstance(text, str) or not text.strip():
-            return
-        # display.show_commentary=false keeps mid-turn narration off the
-        # interim path here too (same contract as codex_responses commentary).
-        if not getattr(agent, "show_commentary", True):
-            return
-        _call_guarded(getattr(agent, "_emit_interim_assistant_message", None),
-                      "_emit_interim_assistant_message raised",
-                      args=({"role": "assistant", "content": text},))
+        # display.show_commentary=false keeps mid-turn narration off the interim
+        # path here too (same contract as codex_responses commentary).
+        if isinstance(text, str) and text.strip() and getattr(agent, "show_commentary", True):
+            agent_cb("_emit_interim_assistant_message", "_emit_interim_assistant_message raised",
+                     args=({"role": "assistant", "content": text},))
 
     def _on_item(params: dict, completed: bool) -> None:
         item = params.get("item")
@@ -561,10 +552,8 @@ def _finish_codex_turn(
     if not turn.interrupted and turn.error is None:
         try:
             agent._sync_external_memory_for_turn(
-                original_user_message=original_user_message,
-                final_response=turn.final_text,
-                interrupted=False,
-                messages=messages,
+                original_user_message=original_user_message, final_response=turn.final_text,
+                interrupted=False, messages=messages,
             )
         except Exception:
             logger.debug("external memory sync raised", exc_info=True)
@@ -573,9 +562,7 @@ def _finish_codex_turn(
     if turn.final_text and not turn.interrupted and (should_review_memory or should_review_skills):
         try:
             agent._spawn_background_review(
-                messages_snapshot=list(messages),
-                review_memory=should_review_memory,
-                review_skills=should_review_skills,
+                messages_snapshot=list(messages), review_memory=should_review_memory, review_skills=should_review_skills,
             )
         except Exception:
             logger.debug("background review spawn raised", exc_info=True)
@@ -638,8 +625,7 @@ def run_codex_app_server_turn(
         interrupt, messages, api_calls=1, completed=not turn.interrupted and turn.error is None, error=turn.error,
         final_response=turn.final_text,
         # We flushed the projected rows ourselves (see _persist_projected_messages);
-        # True makes the gateway skip its own DB write, which would duplicate
-        # the already-flushed user turn.
+        # True makes the gateway skip its own DB write, which would duplicate the user turn.
         agent_persisted=True,
         codex_thread_id=turn.thread_id,
         codex_turn_id=turn.turn_id,
@@ -768,12 +754,9 @@ class _CodexResponseAssembler:
     def _on_item_added(self, event: Any, event_type: str) -> None:
         item = _event_field(event, "item")
         item_type = _event_field(item, "type", "")
-        if item_type == "message":
-            self.active_message_phase = _message_phase(item)
-            if self.active_message_phase == "commentary":
-                self.commentary_text_deltas = []
-        else:
-            self.active_message_phase = None
+        self.active_message_phase = _message_phase(item) if item_type == "message" else None
+        if self.active_message_phase == "commentary":
+            self.commentary_text_deltas = []
         # Record first-observed ordering for EVERY announced item; the .done path must
         # reuse it, or a mixed announced/pending stream without output_index values reorders the calls.
         item_id = str(_event_field(item, "id", ""))
@@ -861,8 +844,7 @@ class _CodexResponseAssembler:
                 if isinstance(content_parts, list):
                     commentary_text = "".join(
                         str(_event_field(part, "text", "") or "")
-                        for part in content_parts
-                        if _event_field(part, "type", "") == "output_text"
+                        for part in content_parts if _event_field(part, "type", "") == "output_text"
                     ).strip()
             if commentary_text:
                 self._safe(self.on_commentary_message, "on_commentary_message", commentary_text)
@@ -940,9 +922,7 @@ class _CodexResponseAssembler:
         output: List[Any] = list(self.output_items)
         if not output and self.text_deltas and not self.has_tool_calls:
             output = [SimpleNamespace(
-                type="message",
-                role="assistant",
-                status="completed",
+                type="message", role="assistant", status="completed",
                 content=[SimpleNamespace(type="output_text", text="".join(self.text_deltas))],
             )]
 
@@ -1077,8 +1057,7 @@ def _bypass_sdk_request_transform(stream_kwargs: dict) -> dict:
     moved = {
         field: stream_kwargs[field]
         for field in _SDK_TRANSFORM_BYPASS_FIELDS
-        if isinstance(stream_kwargs.get(field), (dict, list))
-        and _is_plain_json_data(stream_kwargs[field])
+        if isinstance(stream_kwargs.get(field), (dict, list)) and _is_plain_json_data(stream_kwargs[field])
     }
     if not moved:
         return stream_kwargs
@@ -1184,6 +1163,21 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                 agent._client_log_context(), exc,
             )
 
+    def _close_event_stream(event_stream: Any) -> None:
+        close_fn = getattr(event_stream, "close", None)  # None while connect never succeeded
+        if not callable(close_fn):
+            return
+        try:
+            close_fn()
+        except Exception:
+            # A failed close can leave this response's connection checked out of
+            # the httpx pool while the caller's finally reports a reuse-reason
+            # close — caching a client with a leaked connection. Poison the slot
+            # so close really closes the pool. ``client is None`` is the shared
+            # primary client, which is never reuse-cached and must not be force-shut.
+            if client is not None:
+                agent._abort_request_openai_client(active_client, reason="codex_stream_close_failed")
+
     on_commentary_message = (
         _fenced(lambda text: agent._fire_streamed_codex_commentary(text))
         if getattr(agent, "interim_assistant_callback", None) is not None and getattr(agent, "show_commentary", True)
@@ -1266,22 +1260,9 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
                     sum(len(p) for p in agent._codex_streamed_text_parts),
                     agent._client_log_context(),
                 )
-
             return final
         finally:
-            close_fn = getattr(event_stream, "close", None)  # None while connect never succeeded
-            if callable(close_fn):
-                try:
-                    close_fn()
-                except Exception:
-                    # A failed close can leave this response's connection checked
-                    # out of the httpx pool while the caller's finally reports a
-                    # reuse-reason close — caching a client with a leaked
-                    # connection. Poison the slot so close really closes the pool.
-                    # ``client is None`` is the shared primary client, which is
-                    # never reuse-cached and must not be force-shut here.
-                    if client is not None:
-                        agent._abort_request_openai_client(active_client, reason="codex_stream_close_failed")
+            _close_event_stream(event_stream)
 
 
 def run_codex_create_stream_fallback(agent, api_kwargs: dict, client: Any = None):
