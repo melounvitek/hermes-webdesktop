@@ -17,11 +17,7 @@ from hermes_cli.models import provider_label
 from hermes_cli.runtime_provider import resolve_requested_provider
 from hermes_cli.vercel_auth import describe_vercel_auth
 from hermes_cli.status_auth import (  # renderers wired into _SECTIONS below
-    _render_api_keys,
-    _render_apikey_providers,
-    _render_auth_providers,
-    _render_nous_gateway,
-)
+    _render_api_keys, _render_apikey_providers, _render_auth_providers, _render_nous_gateway)
 from hermes_constants import OPENROUTER_MODELS_URL
 from hermes_constants import is_termux as _is_termux
 
@@ -46,6 +42,16 @@ def _detail(label: str, value) -> None:
     print(f"    {label:<12}{value}")
 
 
+def _kv(label: str, value) -> None:
+    """Print a ``  Label:        value`` line (label padded to the 14-col status layout)."""
+    print(f"  {label:<14}{value}")
+
+
+def _kv_flag(label: str, ok, on: str, off: str) -> None:
+    """``_kv`` with a ✓/✗ mark followed by ``on`` or ``off`` text."""
+    _kv(label, f"{check_mark(bool(ok))} {on if ok else off}")
+
+
 def _first_env_value(names) -> str:
     """Return the first non-empty env value among ``names`` (a str or tuple of names)."""
     return next((v for v in (get_env_value(n) or "" for n in ((names,) if isinstance(names, str) else names)) if v), "")
@@ -68,9 +74,8 @@ def _effective_provider_label() -> str:
         effective = requested or "auto"
 
     if effective == "openrouter":
-        # A custom endpoint may live in config.yaml (model.base_url, the canonical
-        # location) or the legacy OPENAI_BASE_URL env var; either way labeling it
-        # "OpenRouter" is misleading.
+        # A custom endpoint may live in config.yaml (model.base_url, the canonical location) or
+        # the legacy OPENAI_BASE_URL env var; either way labeling it "OpenRouter" is misleading.
         try:
             model_cfg = load_config().get("model")
             config_base_url = (model_cfg.get("base_url") or "").strip() if isinstance(model_cfg, dict) else ""
@@ -96,7 +101,6 @@ def _estop_status_line():
 
 # --- Data tables driving the per-section renderers -------------------------
 
-
 # Simple env-driven terminal backends: (label, env var, default, empty-counts-as-unset).
 _TERMINAL_ENV_ROWS = {
     "ssh": (("SSH Host:", "TERMINAL_SSH_HOST", "(not set)", True), ("SSH User:", "TERMINAL_SSH_USER", "(not set)", True)),
@@ -119,16 +123,15 @@ _PLATFORMS = {  # name -> (token env var, home-channel env var or None)
     "Weixin": ("WEIXIN_ACCOUNT_ID", "WEIXIN_HOME_CHANNEL"),
     "BlueBubbles": ("BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_HOME_CHANNEL"),
     "QQBot": ("QQ_APP_ID", "QQ_HOME_CHANNEL"),
-    "Yuanbao": ("YUANBAO_APP_ID", "YUANBAO_HOME_CHANNEL"),
-}
+    "Yuanbao": ("YUANBAO_APP_ID", "YUANBAO_HOME_CHANNEL")}
 
 # Gateway manager label when the runtime snapshot is unavailable, keyed by platform.
 _GATEWAY_FALLBACK = {"linux": ("unknown", "systemd/manual"), "darwin": ("unknown", "launchd")}
 
 
 class _StatusContext:
-    """State shared across section renderers: config, --deep, and the Nous login facts
-    the Auth Providers section derives that the Nous Tool Gateway section needs later."""
+    """Shared by section renderers: config, --deep, and the Nous login facts Auth Providers
+    derives for the later Nous Tool Gateway section."""
 
     def __init__(self, deep: bool):
         self.deep, self.config = deep, {}
@@ -138,9 +141,10 @@ class _StatusContext:
 
 def _render_header(ctx):
     print()
-    print(color("┌─────────────────────────────────────────────────────────┐", Colors.CYAN))
-    print(color("│                 ⚕ Hermes Agent Status                  │", Colors.CYAN))
-    print(color("└─────────────────────────────────────────────────────────┘", Colors.CYAN))
+    for line in ("┌─────────────────────────────────────────────────────────┐",
+                 "│                 ⚕ Hermes Agent Status                  │",
+                 "└─────────────────────────────────────────────────────────┘"):
+        print(color(line, Colors.CYAN))
     paused = _estop_status_line()
     if paused:
         print()
@@ -149,23 +153,22 @@ def _render_header(ctx):
 
 def _render_environment(ctx):
     _section("Environment")
-    print(f"  Project:      {PROJECT_ROOT}")
-    print(f"  Python:       {sys.version.split()[0]}")
-    env_exists = get_env_path().exists()
-    print(f"  .env file:    {check_mark(env_exists)} {'exists' if env_exists else 'not found'}")
+    _kv("Project:", PROJECT_ROOT)
+    _kv("Python:", sys.version.split()[0])
+    _kv_flag(".env file:", get_env_path().exists(), "exists", "not found")
     try:
         ctx.config = load_config()
     except Exception:
         ctx.config = {}
-    print(f"  Model:        {_configured_model_label(ctx.config)}")
-    print(f"  Provider:     {_effective_provider_label()}")
+    _kv("Model:", _configured_model_label(ctx.config))
+    _kv("Provider:", _effective_provider_label())
 
 
 def _render_terminal(ctx):
     _section("Terminal Backend")
     terminal_cfg = ctx.config.get("terminal", {}) if isinstance(ctx.config.get("terminal"), dict) else {}
     terminal_env = os.getenv("TERMINAL_ENV", "") or terminal_cfg.get("backend", "local")
-    print(f"  Backend:      {terminal_env}")
+    _kv("Backend:", terminal_env)
 
     if terminal_env in _TERMINAL_ENV_ROWS:
         for label, var, default, empty_is_unset in _TERMINAL_ENV_ROWS[terminal_env]:
@@ -176,18 +179,17 @@ def _render_terminal(ctx):
         persist_enabled = (bool(terminal_cfg.get("container_persistent", True)) if persist is None
                            else persist.lower() in {"1", "true", "yes", "on"})
         auth_status = describe_vercel_auth()
-        sdk_ok = importlib.util.find_spec("vercel") is not None
-        sdk_label = "installed" if sdk_ok else "missing (install: pip install 'hermes-agent[vercel]')"
-        print(f"  Runtime:      {os.getenv('TERMINAL_VERCEL_RUNTIME') or terminal_cfg.get('vercel_runtime') or 'node24'}")
-        print(f"  SDK:          {check_mark(sdk_ok)} {sdk_label}")
-        print(f"  Auth:         {check_mark(auth_status.ok)} {auth_status.label}")
+        _kv("Runtime:", os.getenv('TERMINAL_VERCEL_RUNTIME') or terminal_cfg.get('vercel_runtime') or 'node24')
+        _kv_flag("SDK:", importlib.util.find_spec("vercel") is not None, "installed",
+                 "missing (install: pip install 'hermes-agent[vercel]')")
+        _kv("Auth:", f"{check_mark(auth_status.ok)} {auth_status.label}")
         for line in auth_status.detail_lines:
-            print(f"  Auth detail:  {line}")
-        print(f"  Persistence:  {'snapshot filesystem' if persist_enabled else 'ephemeral filesystem'}")
-        print("  Processes:    live processes do not survive cleanup, snapshots, or sandbox recreation")
+            _kv("Auth detail:", line)
+        _kv("Persistence:", 'snapshot filesystem' if persist_enabled else 'ephemeral filesystem')
+        _kv("Processes:", "live processes do not survive cleanup, snapshots, or sandbox recreation")
     else:
-        # Plugin-registered terminal backends: show availability via the
-        # provider's doctor rows (fail-soft — never break `hermes status`).
+        # Plugin-registered terminal backends: show availability via the provider's doctor rows
+        # (fail-soft — never break `hermes status`).
         try:
             from hermes_cli.plugins import discover_plugins
             discover_plugins()
@@ -199,8 +201,7 @@ def _render_terminal(ctx):
         except Exception:
             pass
 
-    sudo_password = os.getenv("SUDO_PASSWORD", "")
-    print(f"  Sudo:         {check_mark(bool(sudo_password))} {'enabled' if sudo_password else 'disabled'}")
+    _kv_flag("Sudo:", os.getenv("SUDO_PASSWORD", ""), "enabled", "disabled")
 
 
 def _render_platforms(ctx):
@@ -213,8 +214,8 @@ def _render_platforms(ctx):
     try:  # Plugin-registered platforms
         from gateway.platform_registry import platform_registry
         for entry in platform_registry.plugin_entries():
-            # Per-entry guard: one raising probe must not abort the listing of
-            # every remaining plugin platform (matches the other check_fn sites).
+            # Per-entry guard: one raising probe must not abort the listing of every remaining
+            # plugin platform (matches the other check_fn sites).
             try:
                 configured = bool(entry.check_fn())
             except Exception:
@@ -230,62 +231,64 @@ def _render_gateway(ctx):
         from hermes_cli.gateway import get_gateway_runtime_snapshot, _format_gateway_pids
 
         snapshot = get_gateway_runtime_snapshot()
-        print(f"  Status:       {check_mark(snapshot.running)} {'running' if snapshot.running else 'stopped'}")
-        print(f"  Manager:      {snapshot.manager}")
+        _kv_flag("Status:", snapshot.running, "running", "stopped")
+        _kv("Manager:", snapshot.manager)
         if snapshot.gateway_pids:
-            print(f"  PID(s):       {_format_gateway_pids(snapshot.gateway_pids)}")
+            _kv("PID(s):", _format_gateway_pids(snapshot.gateway_pids))
         if snapshot.has_process_service_mismatch:
-            print("  Service:      installed but not managing the current running gateway")
+            _kv("Service:", "installed but not managing the current running gateway")
         elif _is_termux() and not snapshot.gateway_pids:
-            print("  Start with:   hermes gateway")
-            print("  Note:         Android may stop background jobs when Termux is suspended")
+            _kv("Start with:", "hermes gateway")
+            _kv("Note:", "Android may stop background jobs when Termux is suspended")
         elif snapshot.service_installed and not snapshot.service_running:
-            print("  Service:      installed but stopped")
+            _kv("Service:", "installed but stopped")
     except Exception:
         if _is_termux():
             status_text, manager = "unknown", "Termux / manual process"
         else:
             platform = "linux" if sys.platform.startswith("linux") else sys.platform
             status_text, manager = _GATEWAY_FALLBACK.get(platform, ("N/A", "(not supported on this platform)"))
-        print(f"  Status:       {color(status_text, Colors.DIM)}")
-        print(f"  Manager:      {manager}")
+        _kv("Status:", color(status_text, Colors.DIM))
+        _kv("Manager:", manager)
+
+
+def _load_json(path: Path, encoding: str = "utf-8"):
+    with open(path, encoding=encoding) as f:
+        return json.load(f)
 
 
 def _render_cron(ctx):
     _section("Scheduled Jobs")
     jobs_file = get_hermes_home() / "cron" / "jobs.json"
     if not jobs_file.exists():
-        print("  Jobs:         0")
+        _kv("Jobs:", 0)
         return
     try:
-        # utf-8-sig: same dialect as cron/jobs.load_jobs — Windows editors
-        # may leave a UTF-8 BOM that plain utf-8 json.load rejects.
-        with open(jobs_file, encoding="utf-8-sig") as f:
-            jobs = json.load(f).get("jobs", [])
-        print(f"  Jobs:         {sum(1 for j in jobs if j.get('enabled', True))} active, {len(jobs)} total")
+        # utf-8-sig: same dialect as cron/jobs.load_jobs — Windows editors may leave a UTF-8 BOM
+        # that plain utf-8 json.load rejects.
+        jobs = _load_json(jobs_file, "utf-8-sig").get("jobs", [])
+        _kv("Jobs:", f"{sum(1 for j in jobs if j.get('enabled', True))} active, {len(jobs)} total")
     except Exception:
-        print("  Jobs:         (error reading jobs file)")
+        _kv("Jobs:", "(error reading jobs file)")
 
 
 def _render_sessions(ctx):
     _section("Sessions")
-    # Gateway session count: state.db is the source of truth; fall back to
-    # sessions.json for pre-migration installs.
+    # Gateway session count: state.db is the source of truth; fall back to sessions.json for
+    # pre-migration installs.
     gateway_rows = []
     try:
         from hermes_state import SessionDB
         db = SessionDB()
         try:
-            lister = getattr(db, "list_gateway_sessions", None)
-            if callable(lister):
-                gateway_rows = lister(active_only=True) or []
+            gateway_rows = db.list_gateway_sessions(active_only=True) or []
         finally:
             db.close()
     except Exception:
         gateway_rows = []
 
     if gateway_rows:
-        print(f"  Active:       {len(gateway_rows)} session(s)")
+        _kv("Active:", f"{len(gateway_rows)} session(s)")
         freshest = max((float(r.get("last_active") or 0) for r in gateway_rows), default=0.0)
         if freshest > 0:
             from hermes_cli.timefmt import relative_time
@@ -294,23 +297,21 @@ def _render_sessions(ctx):
         sessions_file = get_hermes_home() / "sessions" / "sessions.json"
         if sessions_file.exists():
             try:
-                with open(sessions_file, encoding="utf-8") as f:
-                    data = json.load(f)
+                data = _load_json(sessions_file)
                 entries = [k for k in data if not str(k).startswith("_")] if isinstance(data, dict) else []
-                print(f"  Active:       {len(entries)} session(s)")
+                _kv("Active:", f"{len(entries)} session(s)")
             except Exception:
-                print("  Active:       (error reading sessions file)")
+                _kv("Active:", "(error reading sessions file)")
         else:
-            print("  Active:       0")
+            _kv("Active:", 0)
 
-    # Slot usage, only when max_concurrent_sessions is set. The cap is shared
-    # across CLI, desktop/TUI and the messaging gateway, so the surface that
-    # gets rejected is rarely the one holding the slots — without this the only
-    # way to find out is reading runtime/active_sessions.json by hand.
+    # Slot usage, only when max_concurrent_sessions is set. The cap is shared across CLI,
+    # desktop/TUI and the messaging gateway, so the surface that gets rejected is rarely the one
+    # holding the slots — without this the only way to find out is reading
+    # runtime/active_sessions.json by hand.
     try:
         from hermes_cli.active_sessions import (
-            active_session_registry_snapshot, format_age, resolve_max_concurrent_sessions,
-        )
+            active_session_registry_snapshot, format_age, resolve_max_concurrent_sessions)
         cap = resolve_max_concurrent_sessions(ctx.config)
     except Exception:
         cap = None
@@ -319,7 +320,7 @@ def _render_sessions(ctx):
             held = active_session_registry_snapshot()
         except Exception:
             held = []
-        print("  Slots:        " + color(f"{len(held)}/{cap} in use", Colors.YELLOW if len(held) >= cap else Colors.GREEN))
+        _kv("Slots:", color(f"{len(held)}/{cap} in use", Colors.YELLOW if len(held) >= cap else Colors.GREEN))
         now = time.time()
         for entry in sorted(held, key=lambda e: e.get("started_at") or 0):
             age = format_age(now - float(entry.get("started_at") or now))
@@ -335,17 +336,16 @@ def _render_deep(ctx):
         try:
             import httpx
             response = httpx.get(OPENROUTER_MODELS_URL, headers={"Authorization": f"Bearer {openrouter_key}"}, timeout=10)
-            ok = response.status_code == 200
-            print(f"  OpenRouter:   {check_mark(ok)} {'reachable' if ok else f'error ({response.status_code})'}")
+            _kv_flag("OpenRouter:", response.status_code == 200, "reachable", f"error ({response.status_code})")
         except Exception as e:
-            print(f"  OpenRouter:   {check_mark(False)} error: {e}")
+            _kv("OpenRouter:", f"{check_mark(False)} error: {e}")
     try:  # gateway port, informational: in use == gateway likely running
         import socket
         sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         sock.settimeout(1)
         port_in_use = sock.connect_ex(('127.0.0.1', 18789)) == 0
         sock.close()
-        print(f"  Port 18789:   {'in use' if port_in_use else 'available'}")
+        _kv("Port 18789:", 'in use' if port_in_use else 'available')
     except OSError:
         pass
 
@@ -361,8 +361,7 @@ def _render_footer(ctx):
 _SECTIONS = (
     _render_header, _render_environment, _render_api_keys, _render_auth_providers, _render_nous_gateway,
     _render_apikey_providers, _render_terminal, _render_platforms, _render_gateway, _render_cron,
-    _render_sessions, _render_deep, _render_footer,
-)
+    _render_sessions, _render_deep, _render_footer)
 
 
 def show_status(args):

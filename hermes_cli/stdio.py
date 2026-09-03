@@ -1,7 +1,7 @@
 """Windows-safe stdio configuration.
 
-The fix is to force UTF-8 on the Python side and also flip the console's code page to UTF-8 (65001).
-Both matter: Python-level only helps when Python's stdout is a real TTY; code-page flipping lets
+Forces UTF-8 on the Python side and also flips the console's code page to UTF-8 (65001). Both
+matter: Python-level only helps when Python's stdout is a real TTY; code-page flipping lets
 subprocesses and child Python ``print()`` calls agree on encoding.
 """
 
@@ -12,7 +12,6 @@ import sys
 
 __all__ = ["configure_windows_stdio", "is_windows"]
 
-
 _CONFIGURED = False
 
 
@@ -22,174 +21,100 @@ def is_windows() -> bool:
 
 
 def _flip_console_code_page_to_utf8() -> None:
-    """Set the attached console's input and output code pages to UTF-8.
-
-    Uses ``SetConsoleCP`` / ``SetConsoleOutputCP`` (CP_UTF8 = 65001). Failure is silent: without an
-    attached console (redirected stdout, service, PTY-less CI) the calls return 0 and we move on.
-    """
+    """``SetConsoleCP``/``SetConsoleOutputCP`` to CP_UTF8 (65001). Silent on failure: without an
+    attached console (redirected stdout, service, PTY-less CI) the calls return 0 and we move on."""
     try:
         import ctypes
 
         kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
-        # Best-effort; if there's no console attached these just fail silently.
         kernel32.SetConsoleCP(65001)
         kernel32.SetConsoleOutputCP(65001)
     except Exception:
-        # ctypes import, missing kernel32, or non-Windows — any failure here
-        # is non-fatal.  We've still reconfigured Python's own streams below.
         pass
 
 
 def _reconfigure_stream(stream, *, encoding: str = "utf-8", errors: str = "replace") -> None:
-    """Reconfigure a text stream to UTF-8 in place.
-
-    Skips rather than raising when the stream isn't a ``TextIOWrapper`` (e.g. redirected to an
-    ``io.StringIO`` during tests).
-    """
+    """Reconfigure a text stream to UTF-8 in place; skips streams without ``reconfigure`` (e.g. an
+    ``io.StringIO`` substituted during tests)."""
     try:
         reconfigure = getattr(stream, "reconfigure", None)
-        if reconfigure is None:
-            return
-        reconfigure(encoding=encoding, errors=errors)
+        if reconfigure is not None:
+            reconfigure(encoding=encoding, errors=errors)
     except Exception:
         pass
 
 
 def configure_windows_stdio() -> bool:
-    """Force UTF-8 stdio on Windows.  No-op elsewhere.
+    """Force UTF-8 stdio on Windows. No-op elsewhere.
 
     Idempotent; returns ``True`` only when something actually changed. Set
     ``HERMES_DISABLE_WINDOWS_UTF8=1`` to opt out (forces the old cp1252 path for diagnosing
-    encoding bugs). Also sets a default ``EDITOR`` on Windows if none is set (see
-    ``_default_windows_editor``).
+    encoding bugs). Also sets a default ``EDITOR`` on Windows if none is set.
     """
     global _CONFIGURED
 
     if _CONFIGURED:
         return False
-    if not is_windows():
-        # Mark configured so repeated calls on POSIX are true no-ops.
-        _CONFIGURED = True
+    if not is_windows() or os.environ.get("HERMES_DISABLE_WINDOWS_UTF8") in {"1", "true", "True", "yes"}:
+        _CONFIGURED = True  # repeated calls on POSIX / opted-out are true no-ops
         return False
 
-    if os.environ.get("HERMES_DISABLE_WINDOWS_UTF8") in {"1", "true", "True", "yes"}:
-        _CONFIGURED = True
-        return False
-
-    # Encourage every child Python process spawned by the agent to also use
-    # UTF-8 for its stdio.  PYTHONIOENCODING wins over the locale-based
-    # default in subprocesses.  Don't override an explicit user setting.
+    # Make child Python processes use UTF-8 stdio too (PYTHONIOENCODING wins over the locale
+    # default; PYTHONUTF8=1 enables UTF-8 Mode, PEP 540). Never override an explicit user setting.
     os.environ.setdefault("PYTHONIOENCODING", "utf-8")
-    # PYTHONUTF8 = 1 enables UTF-8 Mode globally for any Python subprocess
-    # (PEP 540).  Again, don't override an explicit setting.
     os.environ.setdefault("PYTHONUTF8", "1")
 
-    # Set EDITOR to a working Windows default if neither EDITOR nor VISUAL
-    # is set.  prompt_toolkit's ``open_in_editor`` falls back to POSIX-only
-    # paths (``/usr/bin/nano``, ``/usr/bin/vi``) that don't exist on
-    # Windows — Ctrl+X Ctrl+E and ``/edit`` silently do nothing there
-    # otherwise.  This happens even with full Git for Windows installed,
-    # so it's not a MinGit-specific issue.
+    # prompt_toolkit's ``open_in_editor`` falls back to POSIX-only paths (/usr/bin/nano, /usr/bin/vi)
+    # that don't exist on Windows — Ctrl+X Ctrl+E and ``/edit`` silently do nothing there
+    # otherwise, even with full Git for Windows installed.
     _default_editor = _default_windows_editor()
     if _default_editor and not os.environ.get("EDITOR") and not os.environ.get("VISUAL"):
         os.environ["EDITOR"] = _default_editor
 
-    # Augment PATH with the Hermes-managed Git install directories so
-    # subprocess calls (bash, rg, grep, etc.) resolve even in sessions
-    # that started before the User PATH broadcast reached them.  When
-    # install.ps1 adds these to User PATH via SetEnvironmentVariable,
-    # already-running shells don't see the change — which means hermes
-    # launched from the install session won't find rg / bash / grep
-    # even though they're "installed".  Prepending the known paths here
-    # closes that gap.  No-op when the paths don't exist (e.g. system-Git
-    # install without Hermes-managed PortableGit).
     _augment_path_with_known_tools()
-
-    # Flip the console code page first so that any subprocess that
-    # inherits the console (e.g. a launched shell) also sees CP_UTF8.
+    # Flip the console code page first so any subprocess inheriting the console also sees CP_UTF8.
     _flip_console_code_page_to_utf8()
-
-    # Reconfigure Python's own stdio wrappers so ``print()`` calls from
-    # this process round-trip emoji / box-drawing / non-Latin text.
-    # ``errors="replace"`` means a genuinely unencodable byte sequence
-    # gets a ``?`` rather than crashing the interpreter — we prefer
-    # degraded output over a stack trace.
-    _reconfigure_stream(sys.stdout)
-    _reconfigure_stream(sys.stderr)
-    # stdin is re-configured for completeness; Hermes's interactive
-    # input path uses prompt_toolkit which manages its own encoding,
-    # but batch/pipe input benefits from UTF-8 decoding on stdin too.
-    _reconfigure_stream(sys.stdin)
-
+    # ``errors="replace"``: a genuinely unencodable sequence prints ``?`` rather than crashing the
+    # interpreter. stdin is included for batch/pipe input (prompt_toolkit manages its own encoding).
+    for stream in (sys.stdout, sys.stderr, sys.stdin):
+        _reconfigure_stream(stream)
     _CONFIGURED = True
     return True
 
 
 def _default_windows_editor() -> str:
-    """Return a Windows-appropriate default for ``$EDITOR``.
-
-    Priority order, first match wins:
-
-    1. ``notepad`` — ships with every Windows install, no deps, works as a blocking editor
-    (``subprocess.call(["notepad", file])`` blocks until the user closes the window). This is the
-    "always-works" default.
-    """
+    """Windows default for ``$EDITOR``: ``notepad`` (ships with every install, blocks until the
+    window closes). The bare name keeps prompt_toolkit's shlex split away from paths with spaces;
+    "" when even notepad is missing (WinPE, Nano Server) so prompt_toolkit's no-op applies."""
     import shutil
-
-    # notepad.exe is always in %SystemRoot%\System32 on Windows, so shutil.which
-    # will reliably find it.  Return the bare name so prompt_toolkit's shlex
-    # split doesn't trip over a path containing spaces.
-    if shutil.which("notepad"):
-        return "notepad"
-    # On the extreme off-chance notepad is missing (WinPE, Nano Server), fall
-    # back to nothing and let prompt_toolkit's silent no-op do its thing.
-    return ""
+    return "notepad" if shutil.which("notepad") else ""
 
 
 def _augment_path_with_known_tools() -> None:
-    r"""Prepend well-known Hermes-managed tool directories to os.environ['PATH'].
+    r"""Prepend Hermes-managed tool directories to ``PATH`` (no-op on POSIX / missing dirs).
 
-    Fixes the "User PATH was just updated but my process can't see it" gap on Windows. When
-    install.ps1 runs, it adds entries like ``%LOCALAPPDATA%\hermes\git\bin`` to the User PATH via
-    ``SetEnvironmentVariable(..., "User")``.
-
-    Patch-up strategy: add the known Hermes-managed tool directories to our PATH at startup so
-    subprocess calls resolve correctly. No-op on POSIX and when the directories don't exist. The
-    User PATH broadcast still happens in the background for future shells; this just smooths over
-    the first-launch gap.
+    install.ps1 adds entries like ``%LOCALAPPDATA%\hermes\git\bin`` to the User PATH via
+    ``SetEnvironmentVariable``, but already-running shells never see that broadcast, so a hermes
+    launched from the install session would not find rg / bash / grep. Prepending the known dirs
+    at startup closes that first-launch gap.
     """
     if not is_windows():
         return
-
     local_appdata = os.environ.get("LOCALAPPDATA", "")
     if not local_appdata:
         return
 
-    # Known tool dirs installed by scripts/install.ps1.  Kept in sync with
-    # the PATH entries that installer adds to User scope — the two lists
-    # should match so this prefill fully mirrors what a fresh shell would
-    # see on next launch.
+    # Kept in sync with the PATH entries scripts/install.ps1 adds to User scope. The venv Scripts
+    # dir hosts hermes.exe + pip console scripts; WinGet\Links is where ``winget install`` drops
+    # CLI shims (ripgrep lands there as rg.exe).
     candidate_dirs = [
         os.path.join(local_appdata, "hermes", "git", "cmd"),
         os.path.join(local_appdata, "hermes", "git", "bin"),
         os.path.join(local_appdata, "hermes", "git", "usr", "bin"),
-        # Hermes venv Scripts directory — host of the hermes.exe shim itself,
-        # also where any pip-installed console scripts land.  Usually already
-        # on PATH when the user invokes hermes, but harmless to include.
         os.path.join(local_appdata, "hermes", "hermes-agent", "venv", "Scripts"),
-        # WinGet packages directory — where ``winget install`` drops CLI
-        # shims by default (ripgrep lands here as rg.exe).  Covers the case
-        # of a system-Git install + ripgrep-via-winget that isn't yet on
-        # the spawning shell's PATH.
-        os.path.join(local_appdata, "Microsoft", "WinGet", "Links"),
-    ]
-
+        os.path.join(local_appdata, "Microsoft", "WinGet", "Links")]
     existing = os.environ.get("PATH", "")
     existing_lower = {p.lower() for p in existing.split(os.pathsep) if p}
-    prepend = []
-    for d in candidate_dirs:
-        if os.path.isdir(d) and d.lower() not in existing_lower:
-            prepend.append(d)
-
+    prepend = [d for d in candidate_dirs if os.path.isdir(d) and d.lower() not in existing_lower]
     if prepend:
         os.environ["PATH"] = os.pathsep.join([*prepend, existing])
