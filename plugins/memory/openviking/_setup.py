@@ -158,6 +158,10 @@ def _reroute_key_type(select, cancelled, current: str):
     return _SETUP_CANCELLED
 
 
+class _Cancelled(Exception):
+    """Internal unwind for the manual-connection loop (converted to _SETUP_CANCELLED at the boundary)."""
+
+
 def _prompt_manual_connection_values(prompt, select, cancelled, *, service: bool = False):
     """Loop until a validated connection dict is built, or _SETUP_CANCELLED.
     ``continue`` re-enters the loop with ``api_key_type`` / ``prefilled_api_key`` carried over."""
@@ -174,96 +178,88 @@ def _prompt_manual_connection_values(prompt, select, cancelled, *, service: bool
     api_key_type = "user" if service else ""
     prefilled_api_key = ""
 
-    def cancelled_after_retry(title: str, message: str) -> bool:
-        return _retry_or_cancel_manual_setup(select, title, message, cancelled) is _SETUP_CANCELLED
+    def retry(title: str, message: str) -> None:
+        """Retry/Cancel menu; returns to loop again, raises _Cancelled to abort."""
+        if _retry_or_cancel_manual_setup(select, title, message, cancelled) is _SETUP_CANCELLED:
+            raise _Cancelled
 
-    def reroute(current: str):
-        """Apply a role reroute; -> True when cancelled."""
+    def reroute(current: str) -> None:
         nonlocal api_key_type, prefilled_api_key
         routed = _reroute_key_type(select, cancelled, current)
         if routed is _SETUP_CANCELLED:
-            return True
+            raise _Cancelled
         api_key_type, prefill = routed
         prefilled_api_key = values["api_key"] if prefill else ""
-        return False
 
-    while True:
-        values = {"endpoint": endpoint, "api_key": "", "root_api_key": "", "account": "", "user": "", "agent": ""}
-        if not api_key_type:
-            options = [
-                ("User API key", "recommended; server derives account/user automatically" if is_local else "server derives account/user automatically"),
-                ("Root API key", "requires account and user IDs"),
-            ]
-            if is_local:
-                options.append(("No API key", "only for explicitly unauthenticated local development"))
-            credential_choice = select(
-                "  OpenViking credential" if is_local else "  OpenViking API key type",
-                options, default=0, cancel_returns=cancelled,
-            )
-            if credential_choice == cancelled:
-                return _SETUP_CANCELLED
-            if is_local and credential_choice == 2:
-                _say("Validating OpenViking local dev access...")
-                valid, message, _role = ov._validate_openviking_setup_values(values)
-                if valid:
-                    _say("OpenViking local dev access validated.")
-                    return values
-                if cancelled_after_retry("  OpenViking credential failed", message):
-                    return _SETUP_CANCELLED
-                continue
-            api_key_type = "root" if credential_choice == 1 else "user"
-
-        values["api_key_type"] = api_key_type
-        api_key_label = "OpenViking API key" if service else f"OpenViking {api_key_type} API key"
-        if prefilled_api_key:
-            values["api_key"], prefilled_api_key = prefilled_api_key, ""
-        else:
-            values["api_key"] = ov._clean_config_value(prompt(api_key_label, secret=True))
-        if not values["api_key"]:
-            if cancelled_after_retry("  OpenViking API key required", f"{api_key_label} is required."):
-                return _SETUP_CANCELLED
-            continue
-
-        if api_key_type == "root":
-            _say("Validating OpenViking root API key...")
-            valid, message, role = ov._validate_openviking_setup_values(values, require_api_key=True)
-            if not (valid and role == "root"):
-                if valid and role == "user":
-                    if reroute("root"):
-                        return _SETUP_CANCELLED
+    try:
+        while True:
+            values = {"endpoint": endpoint, "api_key": "", "root_api_key": "", "account": "", "user": "", "agent": ""}
+            if not api_key_type:
+                options = [
+                    ("User API key", "recommended; server derives account/user automatically" if is_local else "server derives account/user automatically"),
+                    ("Root API key", "requires account and user IDs"),
+                ]
+                if is_local:
+                    options.append(("No API key", "only for explicitly unauthenticated local development"))
+                credential_choice = select("  OpenViking credential" if is_local else "  OpenViking API key type", options, default=0, cancel_returns=cancelled)
+                if credential_choice == cancelled:
+                    raise _Cancelled
+                if is_local and credential_choice == 2:
+                    _say("Validating OpenViking local dev access...")
+                    valid, message, _role = ov._validate_openviking_setup_values(values)
+                    if valid:
+                        _say("OpenViking local dev access validated.")
+                        return values
+                    retry("  OpenViking credential failed", message)
                     continue
-                if cancelled_after_retry("  OpenViking root API key failed", message):
-                    return _SETUP_CANCELLED
-                continue
-            _say("OpenViking root API key validated.")
-            values["root_api_key"] = values["api_key"]
-            identity_errors = []
-            for field, label in (("account", "OpenViking account"), ("user", "OpenViking user")):
-                ok, error, values[field] = ov._validate_openviking_identity_value(prompt(label), field=field)
-                if not ok:
-                    identity_errors.append(error)
-            if identity_errors:
-                if cancelled_after_retry("  OpenViking tenant identity required", identity_errors[0]):
-                    return _SETUP_CANCELLED
-                prefilled_api_key = values["api_key"]
+                api_key_type = "root" if credential_choice == 1 else "user"
+
+            values["api_key_type"] = api_key_type
+            api_key_label = "OpenViking API key" if service else f"OpenViking {api_key_type} API key"
+            if prefilled_api_key:
+                values["api_key"], prefilled_api_key = prefilled_api_key, ""
+            else:
+                values["api_key"] = ov._clean_config_value(prompt(api_key_label, secret=True))
+            if not values["api_key"]:
+                retry("  OpenViking API key required", f"{api_key_label} is required.")
                 continue
 
-        _say("Validating OpenViking API access...")
-        valid, message, role = ov._validate_openviking_setup_values(values, require_api_key=service or not is_local)
-        if not valid:
-            if cancelled_after_retry("  OpenViking API access failed", message):
-                return _SETUP_CANCELLED
-            continue
-        if api_key_type == "user" and role == "root":
-            if reroute("user"):
-                return _SETUP_CANCELLED
-            continue
-        if api_key_type == "root" and role != "root":
-            if cancelled_after_retry("  OpenViking root API key failed", "The supplied key was not accepted as a root API key."):
-                return _SETUP_CANCELLED
-            continue
-        _say("OpenViking API access validated.")
-        return values
+            if api_key_type == "root":
+                _say("Validating OpenViking root API key...")
+                valid, message, role = ov._validate_openviking_setup_values(values, require_api_key=True)
+                if valid and role == "user":
+                    reroute("root")
+                    continue
+                if not (valid and role == "root"):
+                    retry("  OpenViking root API key failed", message)
+                    continue
+                _say("OpenViking root API key validated.")
+                values["root_api_key"] = values["api_key"]
+                identity_errors = []
+                for field, label in (("account", "OpenViking account"), ("user", "OpenViking user")):
+                    ok, error, values[field] = ov._validate_openviking_identity_value(prompt(label), field=field)
+                    if not ok:
+                        identity_errors.append(error)
+                if identity_errors:
+                    retry("  OpenViking tenant identity required", identity_errors[0])
+                    prefilled_api_key = values["api_key"]
+                    continue
+
+            _say("Validating OpenViking API access...")
+            valid, message, role = ov._validate_openviking_setup_values(values, require_api_key=service or not is_local)
+            if not valid:
+                retry("  OpenViking API access failed", message)
+                continue
+            if api_key_type == "user" and role == "root":
+                reroute("user")
+                continue
+            if api_key_type == "root" and role != "root":
+                retry("  OpenViking root API key failed", "The supplied key was not accepted as a root API key.")
+                continue
+            _say("OpenViking API access validated.")
+            return values
+    except _Cancelled:
+        return _SETUP_CANCELLED
 
 
 def _set_openviking_provider(config: dict, provider_config: dict) -> None:
