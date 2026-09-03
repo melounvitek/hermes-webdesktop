@@ -196,7 +196,6 @@ def _tts_xai_step(config: dict) -> str:
     from hermes_cli.setup import (
         get_env_value, print_success, print_warning, prompt, prompt_choice, _run_xai_oauth_login_from_setup,
         save_env_value, _xai_oauth_logged_in_for_setup)
-    selected = "xai"
     if _xai_oauth_logged_in_for_setup():
         print_success("xAI TTS will use your xAI Grok OAuth (SuperGrok / Premium+) credentials")
     elif get_env_value("XAI_API_KEY"):
@@ -208,12 +207,12 @@ def _tts_xai_step(config: dict) -> str:
             choices=["Sign in with xAI Grok OAuth (SuperGrok / Premium+) — browser login",
                      "Paste an xAI API key (console.x.ai)", "Skip → fallback to Edge TTS"],
             default=0)
+        fallback = None  # warning printed when xAI auth did not happen; result is then "edge"
         if choice_idx == 0:
             if _run_xai_oauth_login_from_setup():
                 print_success("Logged in — xAI TTS will use these OAuth credentials")
             else:
-                print_warning("xAI Grok OAuth login did not complete. Falling back to Edge TTS.")
-                selected = "edge"
+                fallback = "xAI Grok OAuth login did not complete. Falling back to Edge TTS."
         elif choice_idx == 1:
             api_key = prompt("xAI API key for TTS", password=True)
             if api_key:
@@ -221,20 +220,20 @@ def _tts_xai_step(config: dict) -> str:
                 print_success("xAI TTS API key saved")
             else:
                 from hermes_constants import display_hermes_home as _dhh
-                print_warning("No xAI API key provided for TTS. Configure XAI_API_KEY "
-                              f"via hermes setup model or {_dhh()}/.env to use xAI TTS. Falling back to Edge TTS.")
-                selected = "edge"
+                fallback = ("No xAI API key provided for TTS. Configure XAI_API_KEY "
+                            f"via hermes setup model or {_dhh()}/.env to use xAI TTS. Falling back to Edge TTS.")
         else:
-            print_warning("xAI TTS skipped. Falling back to Edge TTS.")
-            selected = "edge"
+            fallback = "xAI TTS skipped. Falling back to Edge TTS."
+        if fallback:
+            print_warning(fallback)
+            return "edge"
 
-    if selected == "xai":
-        print()
-        voice_id = (prompt("xAI voice_id (Enter for 'eve', or paste a custom voice ID)") or "").strip()
-        if voice_id:
-            config.setdefault("tts", {}).setdefault("xai", {})["voice_id"] = voice_id
-            print_success(f"xAI voice_id set to: {voice_id}")
-    return selected
+    print()
+    voice_id = (prompt("xAI voice_id (Enter for 'eve', or paste a custom voice ID)") or "").strip()
+    if voice_id:
+        config.setdefault("tts", {}).setdefault("xai", {})["voice_id"] = voice_id
+        print_success(f"xAI voice_id set to: {voice_id}")
+    return "xai"
 
 
 def _setup_tts_provider(config: dict):

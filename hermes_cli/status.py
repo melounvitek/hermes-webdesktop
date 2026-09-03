@@ -47,6 +47,11 @@ def _kv(label: str, value) -> None:
     print(f"  {label:<14}{value}")
 
 
+def _kv_flag(label: str, ok, on: str, off: str) -> None:
+    """``_kv`` with a ✓/✗ mark followed by ``on`` or ``off`` text."""
+    _kv(label, f"{check_mark(bool(ok))} {on if ok else off}")
+
+
 def _first_env_value(names) -> str:
     """Return the first non-empty env value among ``names`` (a str or tuple of names)."""
     return next((v for v in (get_env_value(n) or "" for n in ((names,) if isinstance(names, str) else names)) if v), "")
@@ -151,8 +156,7 @@ def _render_environment(ctx):
     _section("Environment")
     _kv("Project:", PROJECT_ROOT)
     _kv("Python:", sys.version.split()[0])
-    env_exists = get_env_path().exists()
-    _kv(".env file:", f"{check_mark(env_exists)} {'exists' if env_exists else 'not found'}")
+    _kv_flag(".env file:", get_env_path().exists(), "exists", "not found")
     try:
         ctx.config = load_config()
     except Exception:
@@ -176,10 +180,9 @@ def _render_terminal(ctx):
         persist_enabled = (bool(terminal_cfg.get("container_persistent", True)) if persist is None
                            else persist.lower() in {"1", "true", "yes", "on"})
         auth_status = describe_vercel_auth()
-        sdk_ok = importlib.util.find_spec("vercel") is not None
-        sdk_label = "installed" if sdk_ok else "missing (install: pip install 'hermes-agent[vercel]')"
         _kv("Runtime:", os.getenv('TERMINAL_VERCEL_RUNTIME') or terminal_cfg.get('vercel_runtime') or 'node24')
-        _kv("SDK:", f"{check_mark(sdk_ok)} {sdk_label}")
+        _kv_flag("SDK:", importlib.util.find_spec("vercel") is not None, "installed",
+                 "missing (install: pip install 'hermes-agent[vercel]')")
         _kv("Auth:", f"{check_mark(auth_status.ok)} {auth_status.label}")
         for line in auth_status.detail_lines:
             _kv("Auth detail:", line)
@@ -199,8 +202,7 @@ def _render_terminal(ctx):
         except Exception:
             pass
 
-    sudo_password = os.getenv("SUDO_PASSWORD", "")
-    _kv("Sudo:", f"{check_mark(bool(sudo_password))} {'enabled' if sudo_password else 'disabled'}")
+    _kv_flag("Sudo:", os.getenv("SUDO_PASSWORD", ""), "enabled", "disabled")
 
 
 def _render_platforms(ctx):
@@ -230,7 +232,7 @@ def _render_gateway(ctx):
         from hermes_cli.gateway import get_gateway_runtime_snapshot, _format_gateway_pids
 
         snapshot = get_gateway_runtime_snapshot()
-        _kv("Status:", f"{check_mark(snapshot.running)} {'running' if snapshot.running else 'stopped'}")
+        _kv_flag("Status:", snapshot.running, "running", "stopped")
         _kv("Manager:", snapshot.manager)
         if snapshot.gateway_pids:
             _kv("PID(s):", _format_gateway_pids(snapshot.gateway_pids))
@@ -337,8 +339,7 @@ def _render_deep(ctx):
         try:
             import httpx
             response = httpx.get(OPENROUTER_MODELS_URL, headers={"Authorization": f"Bearer {openrouter_key}"}, timeout=10)
-            ok = response.status_code == 200
-            _kv("OpenRouter:", f"{check_mark(ok)} {'reachable' if ok else f'error ({response.status_code})'}")
+            _kv_flag("OpenRouter:", response.status_code == 200, "reachable", f"error ({response.status_code})")
         except Exception as e:
             _kv("OpenRouter:", f"{check_mark(False)} error: {e}")
     try:  # gateway port, informational: in use == gateway likely running
