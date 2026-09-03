@@ -93,10 +93,7 @@ def validate_platform_toolsets(
                     )
                 continue
             hint = f" — did you mean '{default}'?" if default_valid else ""
-            warnings.append(
-                f"platform '{platform}' references unknown toolset "
-                f"'{name}'{hint}"
-            )
+            warnings.append(f"platform '{platform}' references unknown toolset '{name}'{hint}")
 
         if platform_valid_count == 0:
             reason = "is configured with an empty toolset list" if not raw else "has no valid toolsets configured"

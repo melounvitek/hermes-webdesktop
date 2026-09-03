@@ -12,8 +12,7 @@ from hermes_cli.cli_output import (
 )
 from hermes_cli.colors import Colors, color
 from hermes_cli.toolset_scope import (
-    _TOOLSET_PLATFORM_RESTRICTIONS,
-    toolset_allowed_for_platform as _toolset_allowed_for_platform,
+    _TOOLSET_PLATFORM_RESTRICTIONS, toolset_allowed_for_platform as _toolset_allowed_for_platform
 )
 
 

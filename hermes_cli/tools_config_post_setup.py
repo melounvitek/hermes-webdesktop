@@ -18,10 +18,7 @@ from hermes_cli.cli_output import (
 )
 from hermes_cli.config import get_env_value
 from hermes_cli.tools_config_cua import (
-    _cua_driver_install_ready,
-    _pip_install,
-    _post_setup_no_window_flags,
-    install_cua_driver,
+    _cua_driver_install_ready, _pip_install, _post_setup_no_window_flags, install_cua_driver
 )
 
 logger = logging.getLogger("hermes_cli.tools_config")
@@ -76,9 +73,8 @@ def _install_chromium(install_cmd: list[str]) -> None:
     _print_info("    Installing Chromium (~170MB one-time download)...")
     try:
         result = subprocess.run(
-            install_cmd,
-            capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=str(PROJECT_ROOT), timeout=600,
-            creationflags=_post_setup_no_window_flags(),
+            install_cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=str(PROJECT_ROOT), timeout=600, creationflags=_post_setup_no_window_flags(),
         )
         if result.returncode == 0:
             _print_success("    Chromium installed")
@@ -449,9 +445,7 @@ def run_post_setup_command(args) -> int:
 # binary/dependency install (otherwise toggling the toolset on silently skips the hook). Only add an
 # entry when the post_setup is the ONLY install side-effect for a no-key provider and the check is
 # local, bounded, and import-light.
-_POST_SETUP_INSTALLED: dict = {
-    "cua_driver": lambda: _cua_driver_install_ready(),
-}
+_POST_SETUP_INSTALLED: dict = {"cua_driver": lambda: _cua_driver_install_ready()}
 
 
 def _post_setup_already_installed(post_setup_key: str) -> bool:

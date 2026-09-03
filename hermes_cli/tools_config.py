@@ -407,10 +407,7 @@ TOOL_CATEGORIES = {
 # configurable: reconfigure menu + "[no API key]" suffix); its setup runs through `_configure_vision_backend()`
 # (full provider+model picker, never forcing OpenRouter) and `_toolset_has_keys("vision")` uses
 # `resolve_vision_provider_client()`.
-TOOLSET_ENV_REQUIREMENTS = {
-    "vision":     [("OPENROUTER_API_KEY",   "https://openrouter.ai/keys")],
-}
-
+TOOLSET_ENV_REQUIREMENTS = {"vision": [("OPENROUTER_API_KEY", "https://openrouter.ai/keys")]}
 
 # --- Platform / Toolset Helpers ---
 _PLATFORM_ENABLE_ENV_VARS = (

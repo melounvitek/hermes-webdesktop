@@ -360,10 +360,8 @@ def _web_tier_matches(provider: dict, config: dict) -> bool:
 
 # Managed-row marker -> (config section, key) the pick writes, in check order.
 _MANAGED_SELECTION_KEYS: tuple[tuple[str, str, str], ...] = (
-    ("tts_provider", "tts", "provider"),
-    ("stt_provider", "stt", "provider"),
-    ("browser_provider", "browser", "cloud_provider"),
-    ("web_backend", "web", "backend"),
+    ("tts_provider", "tts", "provider"), ("stt_provider", "stt", "provider"),
+    ("browser_provider", "browser", "cloud_provider"), ("web_backend", "web", "backend"),
 )
 
 
@@ -665,7 +663,6 @@ def _select_plugin_gen_provider(section: str, plugin_name: str, config: dict, *,
 
 _select_plugin_image_gen_provider = partial(_select_plugin_gen_provider, "image_gen")
 _select_plugin_video_gen_provider = partial(_select_plugin_gen_provider, "video_gen")
-
 
 # Per-provider STT model catalogs for the picker; keys are ``stt.<provider>`` sections, first entry is the
 # default. Kept in sync with the dashboard selects (web_server _CONFIG_FIELD_META) and the desktop settings
