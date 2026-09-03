@@ -399,15 +399,12 @@ def _resolve_push_conflict(client: SyncClient, identity: Dict[str, Any], actual_
         conflict_ref = f"refs/user/{owner}/conflict/{_next_conflict_index(client, owner)}"
         with suppress(SyncConflict):  # someone else grabbed this index; the head still exists
             client.cas_ref(conflict_ref, None, our_commit)
-        return {
-            "ok": False, "conflict": True, "conflict_ref": conflict_ref,
-            "overlapping_skills": sorted(overlaps), "actual_head": actual_head,
-            "message": (
-                f"{len(overlaps)} skill(s) changed on both sides; wrote "
-                f"{conflict_ref}. Resolve out-of-band (hermes sync / NAS UI).")}
+        return {"ok": False, "conflict": True, "conflict_ref": conflict_ref, "overlapping_skills": sorted(overlaps),
+                "actual_head": actual_head, "message": (f"{len(overlaps)} skill(s) changed on both sides; wrote "
+                                                        f"{conflict_ref}. Resolve out-of-band (hermes sync / NAS UI).")}
     # Merge commit (parents: actual, ours); re-add our objects so the merge push is self-contained.
     merge_objects = ObjectSet()
-    merge_objects.objects.update(objects.objects)
+    merge_objects.objects |= objects.objects
     merged_root = assemble_root_from_skill_trees(merged, merge_objects)
     merge_commit = build_commit(merged_root, [actual_head, our_commit], owner=owner,
                                 device=stable_device_id(), message=f"merge: {message}", objects=merge_objects)
@@ -415,9 +412,8 @@ def _resolve_push_conflict(client: SyncClient, identity: Dict[str, Any], actual_
     try:
         client.cas_ref(user_head_ref(owner), actual_head, merge_commit)
     except SyncConflict as c2:
-        return {
-            "ok": False, "conflict": True, "actual_head": c2.actual,
-            "message": f"merge CAS lost again (head now {c2.actual}); retry sync."}
+        return {"ok": False, "conflict": True, "actual_head": c2.actual,
+                "message": f"merge CAS lost again (head now {c2.actual}); retry sync."}
     _record_head(read_sync_state(), merge_commit, merged_root)
     return {"ok": True, "head": merge_commit, "merged": True}
 
@@ -484,11 +480,10 @@ def maybe_pull_skills() -> Optional[Dict[str, Any]]:
 
 def sync_status() -> Dict[str, Any]:
     """Snapshot for ``hermes sync status``; never raises. ``org_available`` False = not in a shared org."""
-    status: Dict[str, Any] = {
-        "nous_admin": False, "logged_in": False, "feature_enabled": sync_feature_enabled(),
-        "default_opt_in": sync_default_opt_in(), "base_url": resolve_sync_base_url(),
-        "opted_in_skills": [], "local_head": None, "owner": None, "org_available": False,
-        "org_id": None, "org_role": None, "org_skills": [], "org_skills_modified": []}
+    status: Dict[str, Any] = {"nous_admin": False, "logged_in": False, "feature_enabled": sync_feature_enabled(),
+                              "default_opt_in": sync_default_opt_in(), "base_url": resolve_sync_base_url(),
+                              "opted_in_skills": [], "local_head": None, "owner": None, "org_available": False,
+                              "org_id": None, "org_role": None, "org_skills": [], "org_skills_modified": []}
     try:
         identity = resolve_identity()
         status.update(logged_in=True, owner=identity.get("owner"), nous_admin=bool(identity.get("nous_admin")))

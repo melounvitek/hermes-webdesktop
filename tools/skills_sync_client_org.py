@@ -202,12 +202,10 @@ def pull_org_skills(client: Optional[SyncClient] = None, *, identity: Optional[D
     if not head:
         return {"ok": True, "org_id": org_id, "head": None, "updated": []}
     head_commit = client.get_commit_json(head, org_scope=True)
-    skill_trees = skill_trees_of_root(client, head_commit["tree"], org_scope=True)
-    dest_root = _mirror_root(org_id)
     updated, conflicted = [], []
     baseline = _read_org_baseline(org_id)
-    for rel_path, tree_hash in sorted(skill_trees.items()):
-        dest = dest_root / PurePosixPath(rel_path)
+    for rel_path, tree_hash in sorted(skill_trees_of_root(client, head_commit["tree"], org_scope=True).items()):
+        dest = _mirror_root(org_id) / PurePosixPath(rel_path)
         try:
             if dest.exists():
                 if org_skill_is_locally_modified(rel_path, org_id):
@@ -215,8 +213,7 @@ def pull_org_skills(client: Optional[SyncClient] = None, *, identity: Optional[D
                         conflicted.append(rel_path)
                     continue
                 shutil.rmtree(dest)
-            dest.mkdir(parents=True, exist_ok=True)
-            materialize_tree(client, tree_hash, dest, org_scope=True)
+            materialize_tree(client, tree_hash, dest, org_scope=True)  # creates dest
             baseline[rel_path] = {"fingerprint": _skill_dir_fingerprint(dest), "tree": tree_hash}
             updated.append(rel_path)
         except Exception as e:
