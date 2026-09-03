@@ -1,7 +1,7 @@
-"""Default configuration data for Hermes Agent.
+"""Default configuration data for Hermes Agent: DEFAULT_CONFIG and OPTIONAL_ENV_VARS.
 
-Pure-data leaf module: DEFAULT_CONFIG and OPTIONAL_ENV_VARS, extracted verbatim from
-hermes_cli/config.py. Must not import from hermes_cli.config.
+Pure-data leaf module — must not import from hermes_cli.config. Comments are the user-facing
+docs of config.yaml.
 """
 
 
@@ -911,7 +911,6 @@ DEFAULT_CONFIG = {
         },
     },
 
-    # Web dashboard settings
     "dashboard": {
         # Visual theme: "default" | "midnight" | "ember" | "mono" | "cyberpunk" | "rose"
         "theme": "default",
@@ -977,7 +976,6 @@ DEFAULT_CONFIG = {
         "public_url": "",
     },
 
-    # Privacy settings
     "privacy": {
         "redact_pii": False,  # hash user IDs and strip phone numbers from LLM context
     },
@@ -1380,7 +1378,6 @@ DEFAULT_CONFIG = {
     # IANA timezone (e.g. "Asia/Kolkata", "America/New_York"). Empty = server-local time.
     "timezone": "",
 
-    # Slack platform settings (gateway mode)
     "slack": {
         "require_mention": True,  # require @mention to respond in channels
         "free_response_channels": "",  # comma-separated channel IDs answered without mention
@@ -1393,7 +1390,6 @@ DEFAULT_CONFIG = {
         "channel_prompts": {},  # per-channel ephemeral system prompts
     },
 
-    # Discord platform settings (gateway mode)
     "discord": {
         "require_mention": True,  # require @mention to respond in server channels
         "free_response_channels": "",  # comma-separated channel IDs answered without mention
@@ -1468,12 +1464,10 @@ DEFAULT_CONFIG = {
         },
     },
 
-    # WhatsApp platform settings (gateway mode)
     "whatsapp": {
         # reply_prefix: None = built-in "⚕ *Hermes Agent*" header; "" disables; \n allowed.
     },
 
-    # Telegram platform settings (gateway mode)
     "telegram": {
         "reactions": False,  # add 👀/✅/❌ reactions to messages during processing
         # per-chat/topic ephemeral system prompts (topics inherit from parent group)
@@ -1489,7 +1483,6 @@ DEFAULT_CONFIG = {
         },
     },
 
-    # Mattermost platform settings (gateway mode)
     "mattermost": {
         "require_mention": True,  # require @mention to respond in channels
         "free_response_channels": "",  # comma-separated channel IDs answered without mention
@@ -1497,7 +1490,6 @@ DEFAULT_CONFIG = {
         "channel_prompts": {},  # per-channel ephemeral system prompts
     },
 
-    # Matrix platform settings (gateway mode)
     "matrix": {
         "require_mention": True,  # require @mention to respond in rooms
         "free_response_rooms": "",  # comma-separated room IDs answered without mention
@@ -1839,7 +1831,6 @@ DEFAULT_CONFIG = {
         "url": "",  # empty = default https://models.dev/api.json
     },
 
-    # Network workarounds.
     "network": {
         # Force IPv4. With broken/unreachable IPv6, Python tries AAAA first and hangs for the
         # full TCP timeout before falling back. True skips IPv6 entirely.
@@ -2081,13 +2072,11 @@ DEFAULT_CONFIG = {
         },
     },
 
-    # ``hermes doctor`` behaviour.
     "doctor": {
         # Per-probe timeout (seconds) for `hermes doctor --live` real-call probes.
         "live_probe_timeout": 10,
     },
 
-    # ``hermes update`` behaviour.
     "updates": {
         # Pre-update backup. quick = snapshot small critical state (pairing JSONs,
         # cron jobs, config.yaml, .env, auth.json, profile DBs) into
@@ -2222,7 +2211,6 @@ DEFAULT_CONFIG = {
     "paste_collapse_threshold_fallback": 5,
     "paste_collapse_char_threshold": 2000,
 
-    # Computer Use (cua-driver) toolset settings.
     "computer_use": {
         # cua-driver's upstream PostHog telemetry defaults ON; Hermes sets
         # CUA_DRIVER_RS_TELEMETRY_ENABLED=0 in every child env unless this is true.
