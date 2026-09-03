@@ -322,9 +322,8 @@ class GatewayShutdownMixin:
                 return  # not opted in — normal, stay quiet
             active = [getattr(p, "value", p) for p in self._scale_to_zero_active_messaging_platforms()]
             logger.info(
-                "scale-to-zero: NOT armed despite opt-in — "
-                "relay_only_or_absent=%s (enabled platforms=%s), wake_url=%s. "
-                "Need relay-only messaging + a registered wake URL.",
+                "scale-to-zero: NOT armed despite opt-in — relay_only_or_absent=%s (enabled platforms=%s), "
+                "wake_url=%s. Need relay-only messaging + a registered wake URL.",
                 messaging_is_relay_only_or_absent(active), active or "none",
                 "set" if self._relay_wake_url_or_none() else "MISSING",
             )
@@ -1398,9 +1397,8 @@ class GatewayShutdownMixin:
         ctx.active_agents, ctx.timed_out = await self._drain_active_agents(timeout, _cron_timeout)
         ctx.drain_elapsed = time.monotonic() - _drain_started_at
         logger.info(
-            "Shutdown phase: drain done at +%.2fs (drain took %.2fs, "
-            "timed_out=%s, active_at_start=%d, active_now=%d, cron_at_start=%d, cron_now=%d, "
-            "api_at_start=%d, api_now=%d, "
+            "Shutdown phase: drain done at +%.2fs (drain took %.2fs, timed_out=%s, active_at_start=%d, "
+            "active_now=%d, cron_at_start=%d, cron_now=%d, api_at_start=%d, api_now=%d, "
             "deferred_at_start=%d, deferred_now=%d)", ctx.elapsed(), ctx.drain_elapsed,
             ctx.timed_out, len(ctx.active_agents), self._running_agent_count(), _cron_at_start,
             self._active_cron_job_count(), _api_at_start, self._active_api_run_count(),
@@ -1559,9 +1557,8 @@ class GatewayShutdownMixin:
             # so skip the close and let SQLite recover from its WAL on next open (a transient
             # "database is locked" on an immediate --replace at worst, not a corrupt file).
             logger.warning(
-                "Shutdown phase: %d executor worker(s) still running after "
-                "a %.2fs quiesce — skipping the SessionDB close/checkpoint "
-                "to avoid racing a live write (#101093); handles are left "
+                "Shutdown phase: %d executor worker(s) still running after a %.2fs quiesce — skipping the "
+                "SessionDB close/checkpoint to avoid racing a live write (#101093); handles are left "
                 "open for SQLite to recover on next open", _exec_live, _exec_quiesce_budget,
             )
             return

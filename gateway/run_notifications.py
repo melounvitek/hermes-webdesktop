@@ -720,11 +720,10 @@ class GatewayNotificationsMixin:
         from hermes_state import classify_persistence_error, format_session_db_unavailable
         if classify_persistence_error(error) == "corrupt":
             message = (
-                "⚠️ Session database corruption detected. Messages may not be "
-                "persisted. Recovery options:\n1. Run `hermes doctor --fix`\n"
-                "2. Salvage with: sqlite3 ~/.hermes/state.db \".recover\" (then replace state.db)\n"
-                "3. Restore from a backup in ~/.hermes/backups/\n"
-                "Run `hermes doctor` for sanitized diagnostics."
+                "⚠️ Session database corruption detected. Messages may not be persisted. Recovery "
+                "options:\n1. Run `hermes doctor --fix`\n2. Salvage with: sqlite3 ~/.hermes/state.db "
+                "\".recover\" (then replace state.db)\n3. Restore from a backup in ~/.hermes/backups/\nRun "
+                "`hermes doctor` for sanitized diagnostics."
             )
         else:
             message = (

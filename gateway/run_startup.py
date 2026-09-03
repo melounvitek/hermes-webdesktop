@@ -222,9 +222,8 @@ class GatewayStartupMixin:
             return
         await self._wait_bounded_or_release(
             {boot_task}, timeout,
-            "Boot-path sends still running after %.0fs; releasing inbound gate so other "
-            "platforms are not frozen. Restart notification / obligation redelivery continue "
-            "in the background.",
+            "Boot-path sends still running after %.0fs; releasing inbound gate so other platforms are not "
+            "frozen. Restart notification / obligation redelivery continue in the background.",
             "background boot-path send failed after gate release: see traceback", track=True,
         )
 
@@ -691,9 +690,8 @@ class GatewayStartupMixin:
                 )
             else:
                 logger.warning(
-                    "Secret redaction: DISABLED (HERMES_REDACT_SECRETS=%s). "
-                    "API keys and tokens may appear verbatim in chat output, "
-                    "session JSONs, and logs. Set security.redact_secrets: true "
+                    "Secret redaction: DISABLED (HERMES_REDACT_SECRETS=%s). API keys and tokens may appear "
+                    "verbatim in chat output, session JSONs, and logs. Set security.redact_secrets: true "
                     "in config.yaml to re-enable.", _redact_raw,
                 )
         with suppress(Exception):
@@ -728,11 +726,10 @@ class GatewayStartupMixin:
             )
             if _alignment is not None and _alignment.get("mismatch"):
                 logger.warning(
-                    "Stale systemd unit detected: %s has TimeoutStopSec=%.0fs but "
-                    "drain_timeout=%.0fs cron_drain_timeout=%.0fs (expected >=%.0fs). "
-                    "systemd may SIGKILL the gateway mid-drain. Run "
-                    "`hermes gateway install --force` to regenerate the unit, or "
-                    "shorten agent.restart_drain_timeout / agent.cron_drain_timeout.",
+                    "Stale systemd unit detected: %s has TimeoutStopSec=%.0fs but drain_timeout=%.0fs "
+                    "cron_drain_timeout=%.0fs (expected >=%.0fs). systemd may SIGKILL the gateway "
+                    "mid-drain. Run `hermes gateway install --force` to regenerate the unit, or shorten "
+                    "agent.restart_drain_timeout / agent.cron_drain_timeout.",
                     _alignment.get("unit", "(unknown)"), _alignment["timeout_stop_sec"],
                     _alignment["drain_timeout"],
                     _alignment.get("cron_drain_timeout", DEFAULT_GATEWAY_CRON_DRAIN_TIMEOUT),
@@ -1069,9 +1066,8 @@ class GatewayStartupMixin:
         for _skipped in _multiplex_skipped_platforms:
             if not any(_skipped in _profile_map for _profile_map in self._profile_adapters.values()):
                 logger.warning(
-                    "%s is enabled but no profile (default or secondary) "
-                    "provided a bot credential for it — the platform is not "
-                    "being served. Add its token to the profile that should "
+                    "%s is enabled but no profile (default or secondary) provided a bot credential for it — "
+                    "the platform is not being served. Add its token to the profile that should "
                     "own it, or disable the platform.", _skipped.value,
                 )
         return False, connected_count
