@@ -28,41 +28,17 @@ from typing import Iterable, Iterator, Optional
 # descriptions). Deliberately conservative: a benign class accidentally excluded costs the user
 # one manual config edit; a destructive class accidentally proposed costs them data.
 _UNSAFE_CLASS_PATTERNS = [
-    r"delete",              # recursive delete, find -delete, branch force delete, ...
-    r"\brm\b",              # xargs with rm, find -exec rm
-    r"destro",              # git reset --hard (destroys ...), destructive
-    r"wipe",
-    r"format",              # format filesystem
-    r"\bdisk\b",
-    r"block device",
-    r"fork bomb",
-    r"kill (?:all )?process",   # force/regex/all process kills
-    r"kill all",
-    r"self-termination",
-    r"\bsudo\b",
-    r"privilege",
-    r"credential",
-    r"\bssh\b",
-    r"shell.rc",
-    r"system config",
-    r"system file",
-    r"\bsql\b",             # SQL DROP / TRUNCATE / DELETE without WHERE
-    r"\bchown\b",
-    r"\bchmod\b",
-    r"writable",            # world/other-writable permissions
-    r"overwrite",
-    r"in-place edit",
-    r"pipe",                # pipe remote/decoded content to shell
-    r"obfuscation",
-    r"remote content",
-    r"remote script",
-    r"heredoc",
-    r"encoded",             # PowerShell encoded command execution
-    r"command substitution",
-    r"process substitution",
-    r"\bdd\b",
-    r"shutdown",
-    r"reboot",
+    # deletion / destruction: recursive delete, find -delete, xargs rm, git reset --hard, mkfs, dd
+    r"delete", r"\brm\b", r"destro", r"wipe", r"format", r"\bdisk\b", r"block device", r"\bdd\b",
+    # process / host: fork bomb, force/regex/all kills, self-termination, shutdown
+    r"fork bomb", r"kill (?:all )?process", r"kill all", r"self-termination", r"shutdown", r"reboot",
+    # privilege / credentials / system files
+    r"\bsudo\b", r"privilege", r"credential", r"\bssh\b", r"shell.rc", r"system config", r"system file",
+    # data & permissions: SQL DROP/TRUNCATE/DELETE-without-WHERE, chown/chmod, world-writable, overwrite
+    r"\bsql\b", r"\bchown\b", r"\bchmod\b", r"writable", r"overwrite", r"in-place edit",
+    # remote/obfuscated execution: pipe-to-shell, encoded PowerShell, heredoc, substitutions
+    r"pipe", r"obfuscation", r"remote content", r"remote script", r"heredoc", r"encoded",
+    r"command substitution", r"process substitution",
     r"hardline",
 ]
 _UNSAFE_CLASS_RE = re.compile("|".join(_UNSAFE_CLASS_PATTERNS), re.IGNORECASE)
