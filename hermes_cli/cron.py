@@ -714,46 +714,46 @@ def _job_action(action: str, job_id: str, success_verb: str) -> int:
     if action in {"resume", "run"} and result.get("job", {}).get("next_run_at"):
         print(f"  Next run: {result['job']['next_run_at']}")
     if action == "run":
-        job = result.get("job", {})
-        # A manual run may be dispatched to the gateway daemon's background delegation worker
-        # (execution_mode="background" and/or a delegation_id) and keeps running AFTER this
-        # CLI exits — a terminal success/failure verdict would be a lie, so report the dispatch.
-        delegation_id = job.get("delegation_id")
-        if delegation_id:
-            print(f"  Running in background (delegation {delegation_id}).")
-        elif job.get("execution_mode") == "background":
-            print("  Running in background.")
-        elif job.get("executed"):
-            print(f"  Ran now: {'succeeded' if job.get('execution_success') else 'failed'}.")
-        elif job.get("execution_skipped"):
-            print(f"  {job['execution_skipped']}")
-        else:
-            print("  It will run on the next scheduler tick.")
+        print(f"  {_run_outcome(result.get('job', {}))}")
     return 0
+
+
+def _run_outcome(job: Dict[str, Any]) -> str:
+    """One-line verdict for a manual run.
+
+    A run may be dispatched to the gateway daemon's background delegation worker
+    (execution_mode="background" and/or a delegation_id) and keeps running AFTER this CLI
+    exits — a terminal success/failure verdict would be a lie, so report the dispatch.
+    """
+    if job.get("delegation_id"):
+        return f"Running in background (delegation {job['delegation_id']})."
+    if job.get("execution_mode") == "background":
+        return "Running in background."
+    if job.get("executed"):
+        return f"Ran now: {'succeeded' if job.get('execution_success') else 'failed'}."
+    return job.get("execution_skipped") or "It will run on the next scheduler tick."
 
 
 def cron_resume(args) -> int:
     """Resume a paused job or explicitly re-arm a completed one-shot."""
     run_at = getattr(args, "run_at", None)
     run_now = getattr(args, "run_now", False)
-    if bool(run_at) == bool(run_now):
-        if run_at or run_now:
-            print(color("Use exactly one of --at or --run-now.", Colors.RED))
-            return 1
+    if run_at and run_now:
+        print(color("Use exactly one of --at or --run-now.", Colors.RED))
+        return 1
+    if not run_at and not run_now:
         return _job_action("resume", args.job_id, "Resumed")
     from cron.jobs import AmbiguousJobReference, _hermes_now, rearm_oneshot
-    if run_now:
-        run_at = _hermes_now().isoformat()
     try:
-        job = rearm_oneshot(args.job_id, run_at)
+        job = rearm_oneshot(args.job_id, _hermes_now().isoformat() if run_now else run_at)
     except (AmbiguousJobReference, ValueError) as exc:
         print(color(f"Failed to re-arm job: {exc}", Colors.RED))
         return 1
     if not job:
         print(color(f"Job not found: {args.job_id}", Colors.RED))
         return 1
-    print(color(f"Re-armed job: {job.get('name', args.job_id)} ({args.job_id})", Colors.GREEN))
-    print(f"  Next run: {job.get('next_run_at')}")
+    print(color(f"Re-armed job: {job.get('name', args.job_id)} ({args.job_id})", Colors.GREEN)
+          + f"\n  Next run: {job.get('next_run_at')}")
     return 0
 
 
