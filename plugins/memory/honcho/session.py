@@ -145,7 +145,8 @@ class HonchoSessionManager(SessionAuthMixin, SessionPeersMixin, SessionContextMi
                 for kind, peer in peers
             ]
             self._authed_call("session peer setup", lambda: self._sdk_session(session_id).add_peers(peer_entries))
-            try:
+
+            def _adopt_server_config() -> None:
                 server_cfgs = self._authed_call(
                     "peer configuration read",
                     lambda: [self._sdk_session(session_id).get_peer_configuration(peer) for _, peer in peers],
@@ -157,10 +158,9 @@ class HonchoSessionManager(SessionAuthMixin, SessionPeersMixin, SessionContextMi
                             setattr(self, f"_{kind}_{field_name}", value)
                 logger.debug("Honcho observation synced from server: user(me=%s,others=%s) ai(me=%s,others=%s)",
                              self._user_observe_me, self._user_observe_others, self._ai_observe_me, self._ai_observe_others)
-            except HonchoAuthError:
-                raise
-            except Exception as e:
-                logger.debug("Honcho get_peer_configuration failed (using local config): %s", e)
+
+            self._guarded(_adopt_server_config, None, logging.DEBUG,
+                          "Honcho get_peer_configuration failed (using local config): %s")
         except HonchoAuthError:
             return False
         except Exception as e:
