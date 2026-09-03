@@ -1,10 +1,10 @@
 """Long-form chunking, ffmpeg encoding, container repair and delivery packing.
 
-Everything here is provider-agnostic post-processing for ``tools.tts_tool``:
-split text under a per-request cap, wrap raw PCM as WAV, convert WAV/MP3 to
-the target container, sniff/repair mislabelled ``.ogg`` files, and combine
-final-encoded chunks under a destination platform's upload limit. Origin
-module re-imports every name under its historical spelling.
+Provider-agnostic post-processing for ``tools.tts_tool``: split text under a
+per-request cap, wrap raw PCM as WAV, convert WAV/MP3 to the target container,
+sniff/repair mislabelled ``.ogg`` files, and combine final-encoded chunks under a
+destination platform's upload limit. Origin module re-imports every name under
+its historical spelling.
 """
 
 from __future__ import annotations
@@ -62,16 +62,15 @@ ELEVENLABS_MODEL_MAX_TEXT_LENGTH: Dict[str, int] = {
     "eleven_flash_v2_5": 40000,
 }
 
-def _positive_int_override(value: Any) -> Optional[int]:
-    """A user ``max_text_length`` override, or None when absent/bool/non-positive."""
+
+def _positive_int(value: Any) -> Optional[int]:
+    """*value* when it is a positive non-bool int, else None."""
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         return None
     return value
 
-def _resolve_max_text_length(
-    provider: Optional[str],
-    tts_config: Optional[Dict[str, Any]] = None,
-) -> int:
+
+def _resolve_max_text_length(provider: Optional[str], tts_config: Optional[Dict[str, Any]] = None) -> int:
     """Return the input-character cap for *provider*.
 
     Order: ``tts.<provider>.max_text_length`` > ElevenLabs model table >
@@ -84,34 +83,33 @@ def _resolve_max_text_length(
         return FALLBACK_MAX_TEXT_LENGTH
     key = provider.lower().strip()
     cfg = tts_config or {}
-
-    prov_cfg = cfg.get(key) if isinstance(cfg.get(key), dict) else {}
-    override = _positive_int_override(prov_cfg.get("max_text_length") if prov_cfg else None)
+    prov_cfg = cfg.get(key)
+    if not isinstance(prov_cfg, dict):
+        prov_cfg = {}
+    override = _positive_int(prov_cfg.get("max_text_length"))
     if override:
         return override
 
     if key == "elevenlabs":
         from tools.tts_tool_providers import DEFAULT_ELEVENLABS_MODEL_ID  # providers imports this module
 
-        model_id = (prov_cfg or {}).get("model_id") or DEFAULT_ELEVENLABS_MODEL_ID
+        model_id = prov_cfg.get("model_id") or DEFAULT_ELEVENLABS_MODEL_ID
         mapped = ELEVENLABS_MODEL_MAX_TEXT_LENGTH.get(str(model_id).strip())
         if mapped:
             return mapped
-
     if key in PROVIDER_MAX_TEXT_LENGTH:
         return PROVIDER_MAX_TEXT_LENGTH[key]
-
     if key not in BUILTIN_TTS_PROVIDERS:
         named = _get_named_provider_config(cfg, key)
         if _is_command_provider_config(named):
-            return _positive_int_override(named.get("max_text_length")) or DEFAULT_COMMAND_TTS_MAX_TEXT_LENGTH
-
+            return _positive_int(named.get("max_text_length")) or DEFAULT_COMMAND_TTS_MAX_TEXT_LENGTH
     return FALLBACK_MAX_TEXT_LENGTH
 
-# PCM output specs for Gemini TTS (fixed by the API)
+
+# PCM output specs for Gemini TTS (fixed by the API): 24kHz mono 16-bit (L16).
 GEMINI_TTS_SAMPLE_RATE = 24000
 GEMINI_TTS_CHANNELS = 1
-GEMINI_TTS_SAMPLE_WIDTH = 2  # 16-bit PCM (L16)
+GEMINI_TTS_SAMPLE_WIDTH = 2
 
 # ffmpeg args producing the Ogg/Opus voice-bubble encoding Telegram & co expect.
 _OPUS_VOICE_ARGS = [
@@ -120,9 +118,9 @@ _OPUS_VOICE_ARGS = [
 ]
 
 
-# ===========================================================================
+# ---------------------------------------------------------------------------
 # Text chunking and delivery profiles
-# ===========================================================================
+# ---------------------------------------------------------------------------
 
 @dataclass(frozen=True)
 class AudioDeliveryProfile:
@@ -146,8 +144,7 @@ _PLATFORM_AUDIO_DEFAULTS: Dict[str, Dict[str, Any]] = {
 
 
 def _resolve_audio_delivery_profile(
-    platform: Optional[str],
-    tts_config: Optional[Dict[str, Any]] = None,
+    platform: Optional[str], tts_config: Optional[Dict[str, Any]] = None,
 ) -> AudioDeliveryProfile:
     """Resolve upload constraints, including optional ``tts.delivery_profiles`` overrides."""
     key = (platform or "default").lower().strip() or "default"
@@ -157,18 +154,10 @@ def _resolve_audio_delivery_profile(
     if isinstance(overrides, dict):
         defaults.update({k: v for k, v in overrides.items() if v is not None})
 
-    max_file_bytes = defaults.get("max_file_bytes")
-    if isinstance(max_file_bytes, bool) or not isinstance(max_file_bytes, int) or max_file_bytes <= 0:
-        max_file_bytes = _PLATFORM_AUDIO_DEFAULTS["default"]["max_file_bytes"]
-
+    max_file_bytes = _positive_int(defaults.get("max_file_bytes")) or _PLATFORM_AUDIO_DEFAULTS["default"]["max_file_bytes"]
     safety_ratio = defaults.get("safety_ratio", 0.85)
-    if (
-        isinstance(safety_ratio, bool)
-        or not isinstance(safety_ratio, (int, float))
-        or not 0 < safety_ratio <= 1
-    ):
+    if isinstance(safety_ratio, bool) or not isinstance(safety_ratio, (int, float)) or not 0 < safety_ratio <= 1:
         safety_ratio = 0.85
-
     return AudioDeliveryProfile(platform=key, max_file_bytes=max_file_bytes, safety_ratio=float(safety_ratio))
 
 
@@ -236,10 +225,7 @@ def _split_text_for_tts(text: str, max_chars: int) -> List[str]:
     return _pack_under_cap(expanded, max_chars)
 
 
-def _pack_audio_files_for_delivery(
-    audio_paths: List[str],
-    profile: AudioDeliveryProfile,
-) -> List[List[str]]:
+def _pack_audio_files_for_delivery(audio_paths: List[str], profile: AudioDeliveryProfile) -> List[List[str]]:
     """Group already-final-encoded chunks under the conservative size target.
 
     A group never mixes container suffixes (they can't be concat-copied).
@@ -262,23 +248,25 @@ def _pack_audio_files_for_delivery(
     return groups
 
 
-# ===========================================================================
+# ---------------------------------------------------------------------------
 # ffmpeg encoding helpers
-# ===========================================================================
+# ---------------------------------------------------------------------------
 
-def _has_ffmpeg() -> bool:
-    return shutil.which("ffmpeg") is not None
-
-
-def _ffmpeg_run(args: List[str], *, timeout: int = 30) -> subprocess.CompletedProcess:
+def _ffmpeg_run(
+    ffmpeg: str, args: List[str], *, timeout: int = 30, check: bool = False, capture: bool = True,
+) -> subprocess.CompletedProcess:
     """Run ``ffmpeg <args>`` headless (no stdin, hidden window on Windows)."""
     return subprocess.run(
-        ["ffmpeg", *args],
-        capture_output=True,
-        timeout=timeout,
-        stdin=subprocess.DEVNULL,
-        creationflags=windows_hide_flags(),
+        [ffmpeg, *args],
+        capture_output=capture, check=check, timeout=timeout, stdin=subprocess.DEVNULL, creationflags=windows_hide_flags(),
     )
+
+
+def _remove_quietly(path) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def _wav_sidecar_path(output_path: str) -> str:
@@ -289,24 +277,17 @@ def _wav_sidecar_path(output_path: str) -> str:
 
 
 def _finalize_wav_output(wav_path: str, output_path: str) -> str:
-    """Move a WAV-native engine's output into the caller's requested container.
+    """Move a WAV-native engine's output (NeuTTS / Piper / KittenTTS) into the requested container.
 
-    Shared by NeuTTS / Piper / KittenTTS: ffmpeg-convert when available,
-    otherwise rename the WAV to the expected path so the tool stays usable
-    (the extension is then misleading but the audio plays).
+    ffmpeg-convert when available, otherwise rename the WAV to the expected path so the
+    tool stays usable (the extension is then misleading but the audio plays).
     """
     if wav_path == output_path:
         return output_path
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg:
-        subprocess.run(
-            [ffmpeg, "-i", wav_path, "-y", "-loglevel", "error", output_path],
-            check=True, timeout=30, stdin=subprocess.DEVNULL, creationflags=windows_hide_flags(),
-        )
-        try:
-            os.remove(wav_path)
-        except OSError:
-            pass
+        _ffmpeg_run(ffmpeg, ["-i", wav_path, "-y", "-loglevel", "error", output_path], check=True, capture=False)
+        _remove_quietly(wav_path)
     else:
         os.rename(wav_path, output_path)
     return output_path
@@ -334,11 +315,10 @@ def _wrap_pcm_as_wav(
 def _write_wav_bytes_as(wav_bytes: bytes, output_path: str) -> str:
     """Write in-memory WAV to *output_path*, ffmpeg-converting to its container.
 
-    ``.wav`` is written directly; ``.ogg`` is forced to Opus (ffmpeg's .ogg
-    default is Vorbis, which voice bubbles reject); anything else is a plain
-    ffmpeg conversion. A failed conversion raises RuntimeError. Without
-    ffmpeg the raw WAV is written under the requested name (misleading
-    extension, but the audio still plays).
+    ``.wav`` is written directly; ``.ogg`` is forced to Opus (ffmpeg's .ogg default is
+    Vorbis, which voice bubbles reject); anything else is a plain ffmpeg conversion. A
+    failed conversion raises RuntimeError. Without ffmpeg the raw WAV is written under
+    the requested name (misleading extension, but the audio still plays).
     """
     if output_path.lower().endswith(".wav"):
         with open(output_path, "wb") as f:
@@ -352,45 +332,36 @@ def _write_wav_bytes_as(wav_bytes: bytes, output_path: str) -> str:
         ffmpeg = shutil.which("ffmpeg")
         if ffmpeg:
             opus = _OPUS_VOICE_ARGS if output_path.lower().endswith(".ogg") else []
-            cmd = [ffmpeg, "-i", wav_path, *opus, "-y", "-loglevel", "error", output_path]
-            result = subprocess.run(cmd, capture_output=True, timeout=30, stdin=subprocess.DEVNULL, creationflags=windows_hide_flags())
+            result = _ffmpeg_run(ffmpeg, ["-i", wav_path, *opus, "-y", "-loglevel", "error", output_path])
             if result.returncode != 0:
                 stderr = result.stderr.decode("utf-8", errors="ignore")[:300]
                 raise RuntimeError(f"ffmpeg conversion failed: {stderr}")
         else:
-            logger.warning(
-                "ffmpeg not found; writing raw WAV to %s (extension may be misleading)",
-                output_path,
-            )
+            logger.warning("ffmpeg not found; writing raw WAV to %s (extension may be misleading)", output_path)
             shutil.copyfile(wav_path, output_path)
     finally:
-        try:
-            os.remove(wav_path)
-        except OSError:
-            pass
+        _remove_quietly(wav_path)
     return output_path
 
 
 def _convert_to_opus(mp3_path: str) -> Optional[str]:
     """Convert any ffmpeg-readable audio file to OGG Opus next to it; None on failure."""
-    if not _has_ffmpeg():
-        return None
     return _ffmpeg_transcode_to_opus(mp3_path, mp3_path.rsplit(".", 1)[0] + ".ogg")
 
 
 def _ffmpeg_transcode_to_opus(input_path: str, ogg_path: str) -> Optional[str]:
     """Transcode *input_path* to real Ogg/Opus at *ogg_path* via ffmpeg.
 
-    Safe when ``input_path == ogg_path`` (writes to a temp file, then
-    replaces). Returns the output path on success, None on failure.
+    Safe when ``input_path == ogg_path`` (writes to a temp file, then replaces).
+    Returns the output path on success, None on failure.
     """
-    if not _has_ffmpeg():
+    if shutil.which("ffmpeg") is None:
         return None
 
     in_place = os.path.abspath(input_path) == os.path.abspath(ogg_path)
     work_path = ogg_path + ".tmp.ogg" if in_place else ogg_path
     try:
-        result = _ffmpeg_run(["-i", input_path, *_OPUS_VOICE_ARGS, "-f", "ogg", work_path, "-y"])
+        result = _ffmpeg_run("ffmpeg", ["-i", input_path, *_OPUS_VOICE_ARGS, "-f", "ogg", work_path, "-y"])
         if result.returncode != 0:
             logger.warning("ffmpeg conversion failed with return code %d: %s",
                           result.returncode, result.stderr.decode('utf-8', errors='ignore')[:200])
@@ -407,20 +378,17 @@ def _ffmpeg_transcode_to_opus(input_path: str, ogg_path: str) -> Optional[str]:
         logger.warning("ffmpeg OGG conversion failed: %s", e, exc_info=True)
     finally:
         if in_place and os.path.exists(work_path):
-            try:
-                os.remove(work_path)
-            except OSError:
-                pass
+            _remove_quietly(work_path)
     return None
 
 
-# ===========================================================================
+# ---------------------------------------------------------------------------
 # Container sniffing / repair
-# ===========================================================================
-# Several backends silently ignore the requested opus format (Edge only emits
-# MP3, Piper writes WAV, xAI writes MP3, some OpenAI-compatible servers ignore
-# response_format="opus"), which breaks native voice bubbles. Sniff the magic
-# bytes once after synthesis and repair when they don't match the extension.
+# ---------------------------------------------------------------------------
+# Several backends silently ignore the requested opus format (Edge only emits MP3, Piper
+# writes WAV, xAI writes MP3, some OpenAI-compatible servers ignore response_format="opus"),
+# which breaks native voice bubbles. Sniff the magic bytes once after synthesis and repair
+# when they don't match the extension.
 
 def _sniff_audio_container(path: str) -> str:
     """Return a container id ('ogg', 'wav', 'mp3', 'flac', ...) or 'unknown'."""
@@ -437,9 +405,9 @@ def _sniff_audio_container(path: str) -> str:
 def _repair_ogg_container(file_str: str) -> str:
     """Ensure a path claiming ``.ogg`` actually contains an Ogg container.
 
-    MP3/WAV/FLAC bytes are transcoded in place to real Ogg/Opus. On failure
-    the file is renamed to its sniffed real extension so platforms get an
-    honest file instead of a 0-second voice bubble.
+    MP3/WAV/FLAC bytes are transcoded in place to real Ogg/Opus. On failure the file is
+    renamed to its sniffed real extension so platforms get an honest file instead of a
+    0-second voice bubble.
     """
     if not file_str.endswith(".ogg"):
         return file_str
@@ -447,10 +415,7 @@ def _repair_ogg_container(file_str: str) -> str:
     if container in ("ogg", "unknown"):
         return file_str
 
-    logger.info(
-        "TTS wrote %s bytes into a .ogg path (%s) — transcoding to real Ogg/Opus",
-        container, file_str,
-    )
+    logger.info("TTS wrote %s bytes into a .ogg path (%s) — transcoding to real Ogg/Opus", container, file_str)
     repaired = _ffmpeg_transcode_to_opus(file_str, file_str)
     if repaired:
         return repaired
@@ -467,22 +432,17 @@ def _repair_ogg_container(file_str: str) -> str:
         return file_str
 
 
-# ===========================================================================
+# ---------------------------------------------------------------------------
 # Long-form audio combination and delivery packing
-# ===========================================================================
+# ---------------------------------------------------------------------------
 
-def _concat_audio_files(
-    audio_paths: List[str],
-    output_path: str,
-    *,
-    voice_compatible: bool = False,
-) -> Optional[str]:
+def _concat_audio_files(audio_paths: List[str], output_path: str, *, voice_compatible: bool = False) -> Optional[str]:
     """Combine independently encoded chunks with ffmpeg.
 
-    OGG/Opus is always decoded and re-encoded (even without voice opt-in);
-    matching MP3 chunks keep their encoded frames (``-c:a copy``). Structured
-    containers are never byte-joined. Returns ``None`` when ffmpeg is missing
-    or fails so callers keep the individually valid files.
+    OGG/Opus is always decoded and re-encoded (even without voice opt-in); matching MP3
+    chunks keep their encoded frames (``-c:a copy``). Structured containers are never
+    byte-joined. Returns ``None`` when ffmpeg is missing or fails so callers keep the
+    individually valid files.
     """
     if not audio_paths:
         raise ValueError("No audio chunks to combine")
@@ -499,64 +459,42 @@ def _concat_audio_files(
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     concat_path = destination.with_name(f".{destination.name}.{uuid.uuid4().hex}.concat.txt")
-    temp_output = destination.with_name(
-        f".{destination.stem}.{uuid.uuid4().hex}.combining{destination.suffix}"
-    )
+    temp_output = destination.with_name(f".{destination.stem}.{uuid.uuid4().hex}.combining{destination.suffix}")
     try:
         with concat_path.open("w", encoding="utf-8") as concat_file:
             for path in audio_paths:
                 concat_file.write(f"file {shlex.quote(os.path.abspath(path))}\n")
 
-        command = [
-            ffmpeg, "-y", "-loglevel", "error", "-f", "concat", "-safe", "0",
-            "-i", str(concat_path), "-vn",
-        ]
+        args = ["-y", "-loglevel", "error", "-f", "concat", "-safe", "0", "-i", str(concat_path), "-vn"]
         suffix = destination.suffix.lower()
         if voice_compatible or suffix in {".ogg", ".opus"}:
-            command.extend(["-c:a", "libopus", "-ac", "1", "-b:a", "64k", "-vbr", "off"])
+            args += ["-c:a", "libopus", "-ac", "1", "-b:a", "64k", "-vbr", "off"]
         elif suffix == ".mp3" and all(Path(path).suffix.lower() == ".mp3" for path in audio_paths):
-            command.extend(["-c:a", "copy"])
-        command.append(str(temp_output))
+            args += ["-c:a", "copy"]
+        args.append(str(temp_output))
 
-        result = subprocess.run(
-            command,
-            capture_output=True,
-            timeout=120,
-            stdin=subprocess.DEVNULL,
-            creationflags=windows_hide_flags(),
-        )
+        result = _ffmpeg_run(ffmpeg, args, timeout=120)
         if result.returncode == 0 and temp_output.exists() and temp_output.stat().st_size > 0:
             os.replace(temp_output, destination)
             return str(destination)
-        logger.warning(
-            "ffmpeg audio combine failed: %s",
-            result.stderr.decode("utf-8", errors="ignore")[:500],
-        )
+        logger.warning("ffmpeg audio combine failed: %s", result.stderr.decode("utf-8", errors="ignore")[:500])
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.warning("ffmpeg audio combine failed: %s", exc)
     finally:
         for path in (concat_path, temp_output):
-            try:
-                path.unlink()
-            except OSError:
-                pass
+            _remove_quietly(path)
     return None
 
 
 def _build_audio_delivery_files(
-    audio_paths: List[str],
-    output_path: str,
-    profile: AudioDeliveryProfile,
-    *,
-    voice_compatible: bool = False,
+    audio_paths: List[str], output_path: str, profile: AudioDeliveryProfile, *, voice_compatible: bool = False,
 ) -> Tuple[List[str], bool]:
     """Pack final-encoded chunks and enforce the hard upload limit.
 
-    Groups are packed against the conservative target, then every combined
-    artifact is checked at its real post-encoding size; an over-limit group is
-    split in half and retried. A failed combine returns the constituent files
-    separately. A single chunk above the hard limit fails closed. Returns
-    ``(final_paths, combined_any)``.
+    Groups are packed against the conservative target, then every combined artifact is
+    checked at its real post-encoding size; an over-limit group is split in half and
+    retried. A failed combine returns the constituent files separately. A single chunk
+    above the hard limit fails closed. Returns ``(final_paths, combined_any)``.
     """
     if not audio_paths:
         raise ValueError("No final-encoded TTS audio chunks")
@@ -577,11 +515,8 @@ def _build_audio_delivery_files(
         nonlocal combined_any, combine_index
         if len(group) == 1:
             return list(group)
-
         combine_index += 1
-        scratch = base.with_name(
-            f".{base.stem}.delivery{combine_index:03d}.{uuid.uuid4().hex}{base.suffix}"
-        )
+        scratch = base.with_name(f".{base.stem}.delivery{combine_index:03d}.{uuid.uuid4().hex}{base.suffix}")
         combined = _concat_audio_files(group, str(scratch), voice_compatible=voice_compatible)
         if not combined:
             return list(group)
@@ -589,11 +524,7 @@ def _build_audio_delivery_files(
         if Path(combined).stat().st_size <= profile.max_file_bytes:
             combined_any = True
             return [combined]
-
-        try:
-            Path(combined).unlink()
-        except OSError:
-            pass
+        _remove_quietly(combined)
         midpoint = max(1, len(group) // 2)
         return emit(group[:midpoint]) + emit(group[midpoint:])
 
@@ -606,15 +537,12 @@ def _build_audio_delivery_files(
         if len(packed) == 1:
             destination = base
         else:
-            source_suffix = Path(source).suffix or base.suffix
-            destination = base.with_name(f"{base.stem}.part{index:02d}{source_suffix}")
+            destination = base.with_name(f"{base.stem}.part{index:02d}{Path(source).suffix or base.suffix}")
         if os.path.abspath(source) != os.path.abspath(destination):
             destination.parent.mkdir(parents=True, exist_ok=True)
             os.replace(source, destination)
         if destination.stat().st_size > profile.max_file_bytes:
-            raise ValueError(
-                f"Final TTS deliverable exceeds {profile.platform} delivery limit: {destination}"
-            )
+            raise ValueError(f"Final TTS deliverable exceeds {profile.platform} delivery limit: {destination}")
         final_paths.append(str(destination))
 
     try:
@@ -622,7 +550,4 @@ def _build_audio_delivery_files(
     finally:
         for scratch in scratch_outputs:
             if scratch not in final_paths:
-                try:
-                    Path(scratch).unlink()
-                except OSError:
-                    pass
+                _remove_quietly(scratch)
