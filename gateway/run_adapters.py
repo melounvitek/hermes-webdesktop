@@ -38,11 +38,9 @@ class GatewayAdapterLifecycleMixin:
 
     @staticmethod
     async def _wait_or_detach(task: "asyncio.Future", timeout: float) -> bool:
-        """Wait up to ``timeout`` for ``task``; on deadline (or our own cancellation) detach it.
-
-        Not ``asyncio.wait_for``: that WAITS for the cancelled child to exit, so a connect()/close()
-        that swallows ``CancelledError`` blocks recovery forever. Returns True if it finished in time.
-        """
+        """Wait up to ``timeout`` for ``task``; on deadline (or our own cancellation) detach it. Not
+        ``asyncio.wait_for``: that WAITS for the cancelled child, so a connect()/close() swallowing
+        ``CancelledError`` blocks recovery forever. True if it finished in time."""
         try:
             done, _pending = await asyncio.wait({task}, timeout=timeout)
         except asyncio.CancelledError:
@@ -67,11 +65,8 @@ class GatewayAdapterLifecycleMixin:
         return True
 
     async def _safe_adapter_disconnect(self, adapter, platform) -> None:
-        """Call adapter.disconnect() defensively (bounded, never raises).
-
-        After a failed connect() partial resources (ClientSession, poll tasks, subprocesses) would
-        otherwise leak; must tolerate partial-init state.
-        """
+        """Call adapter.disconnect() defensively (bounded, never raises, tolerates partial-init state):
+        after a failed connect() partial resources (ClientSession, poll tasks, subprocesses) leak."""
         timeout = self._adapter_disconnect_timeout_secs()
         label = platform.value if platform is not None else "adapter"
         with _log_suppressed(logging.DEBUG, "Defensive %s disconnect after failed connect raised: %s", label):
@@ -82,18 +77,14 @@ class GatewayAdapterLifecycleMixin:
                 )
 
     async def _bounded_adapter_teardown(self, adapter, platform, *, profile: Optional[str] = None) -> None:
-        """Tear down one adapter on the shutdown path with bounded awaits (never raises).
-
-        Unbounded, a half-dead transport stalls shutdown past systemd's ``TimeoutStopSec``; the
-        SIGKILL skips ``atexit`` PID-file cleanup and the next start dies with "PID file race lost".
-        """
+        """Tear down one adapter on the shutdown path with bounded awaits (never raises). Unbounded,
+        a half-dead transport stalls past systemd's ``TimeoutStopSec``; the SIGKILL skips ``atexit``
+        PID-file cleanup and the next start dies with "PID file race lost"."""
         timeout = self._adapter_disconnect_timeout_secs()
         suffix = f" (profile: {profile})" if profile else ""
         started_at = time.monotonic()
         try:
-            if not await self._await_adapter_cleanup_with_timeout(
-                adapter.cancel_background_tasks(), timeout
-            ):
+            if not await self._await_adapter_cleanup_with_timeout(adapter.cancel_background_tasks(), timeout):
                 logger.warning(
                     "✗ %s background-task cancel timed out after %.1fs - forcing continue%s",
                     platform.value, timeout, suffix,
@@ -177,11 +168,9 @@ class GatewayAdapterLifecycleMixin:
             await self.hooks.emit(event_name, ctx)
 
     async def _handle_adapter_fatal_error(self, adapter: BasePlatformAdapter) -> None:
-        """React to an adapter failure after startup (retryable → background reconnect queue).
-
-        Detached task: the notification arrives on the failing adapter's own polling task, which
-        the handler's disconnect can cancel mid-flight, stranding the platform half-handled.
-        """
+        """React to an adapter failure after startup (retryable → background reconnect queue). Runs
+        detached: the notification arrives on the failing adapter's own polling task, which the
+        handler's disconnect can cancel mid-flight, stranding the platform half-handled."""
         tasks = getattr(self, "_fatal_handler_tasks", None)
         if tasks is None:
             tasks = self._fatal_handler_tasks = set()
@@ -363,16 +352,12 @@ class GatewayAdapterLifecycleMixin:
     def _spawn_supervised(
         self, coro_factory, name, *, restart=True, _attempt=0, on_spawn=None, on_give_up=None
     ):
-        """Launch a long-lived background task with task-level supervision.
-
-        Catches outer-loop/pre-try exceptions a bare ``create_task`` drops silently. Restarts with
-        capped backoff up to ``_MAX_SUPERVISED_RESTARTS`` rapid failures; the counter resets after
-        ``_SUPERVISED_HEALTHY_SECS`` of healthy running. Each spawn uses a fresh ``Context`` (an
-        inherited delegated-child marker would make the Kanban dispatcher reject its own writes).
-        ``on_spawn`` fires on EVERY spawn incl. respawns — callers tracking the handle elsewhere
-        MUST pass it or a respawn leaves a stale handle and a SECOND watcher. ``on_give_up(name)``
-        fires when the restart budget is spent.
-        """
+        """Launch a long-lived supervised background task: exceptions a bare ``create_task`` drops
+        are logged, and it respawns with capped backoff up to ``_MAX_SUPERVISED_RESTARTS`` rapid
+        failures (counter resets after ``_SUPERVISED_HEALTHY_SECS`` healthy). Fresh ``Context`` per
+        spawn (an inherited delegated-child marker would make the Kanban dispatcher reject its own
+        writes). ``on_spawn`` fires on EVERY spawn incl. respawns — handle trackers MUST pass it or a
+        respawn leaves a stale handle and a SECOND watcher; ``on_give_up(name)`` fires at budget end."""
         # Spawn timestamp lets ``_done`` tell a rapid crash-loop from a healthy-run-then-crash.
         _started = time.monotonic()
 
@@ -434,11 +419,9 @@ class GatewayAdapterLifecycleMixin:
         return task
 
     async def _handoff_watcher(self, interval: float = 2.0, drain_timeout: float = 30.0) -> None:
-        """Process pending CLI→gateway session handoffs from ``state.db``.
-
-        Claim atomically (pending → running), re-bind the home channel to the CLI session_id,
-        dispatch a synthetic ``MessageEvent``, mark ``completed``/``failed``.
-        """
+        """Process pending CLI→gateway session handoffs from ``state.db``: claim atomically (pending
+        → running), re-bind the home channel to the CLI session_id, dispatch a synthetic event, mark
+        ``completed``/``failed``."""
         from gateway.run import _async_profile_runtime_scope, _handoff_watch_scopes, _reclaim_stale
         await asyncio.sleep(5)  # let platforms connect before dispatching through them
 
@@ -470,12 +453,9 @@ class GatewayAdapterLifecycleMixin:
                 inflight.pop(session_id, None)
 
         async def _tick(profile_name: Optional[str] = None) -> None:
-            """One poll of the CURRENTLY-SCOPED store; ``profile_name`` (None = root) routes
-            delivery to that profile's OWN adapter.
-
-            A closure, not a method: tests bind ``_handoff_watcher`` onto a ``SimpleNamespace``
-            with only ``_session_db``/``_running``/``_process_handoff``.
-            """
+            """One poll of the CURRENTLY-SCOPED store; ``profile_name`` (None = root) routes delivery
+            to that profile's OWN adapter. A closure, not a method: tests bind ``_handoff_watcher`` onto
+            a ``SimpleNamespace`` with only ``_session_db``/``_running``/``_process_handoff``."""
             session_db = getattr(self, "_session_db", None)
             if session_db is None:
                 return
@@ -637,8 +617,7 @@ class GatewayAdapterLifecycleMixin:
             queued_for / 3600.0, info.get("attempts", 0),
         )
         self._update_platform_runtime_status(
-            platform.value, platform_state="retrying", needs_attention=True,
-            retrying_since=retrying_since_iso,
+            platform.value, platform_state="retrying", needs_attention=True, retrying_since=retrying_since_iso
         )
 
     def _mark_platform_fatal(self, status_key: str, adapter) -> None:
@@ -763,9 +742,7 @@ class GatewayAdapterLifecycleMixin:
         try:
             self._schedule_resume_pending_sessions(platform=platform)
         except Exception:
-            logger.debug(
-                "resume-pending reschedule after %s reconnect failed", platform.value, exc_info=True
-            )
+            logger.debug("resume-pending reschedule after %s reconnect failed", platform.value, exc_info=True)
 
     async def _cancel_secondary_profile_reconnect_tasks(self) -> None:
         """Cancel profile-scoped reconnects before tearing down their registry, so a reconnect
@@ -794,10 +771,8 @@ class GatewayAdapterLifecycleMixin:
 
     async def _start_secondary_profile_adapters(self) -> int:
         """Bring up adapters for every non-active profile (multiplex only); returns connected count.
-
-        Each profile connects under its own HERMES_HOME + secret scope; credential/listener
-        collisions are refused here — the only point seeing every profile's credentials together.
-        """
+        Each profile connects under its own HERMES_HOME + secret scope; credential/listener collisions
+        are refused here — the only point seeing every profile's credentials together."""
         from gateway.run import (
             MultiplexConfigError, SecondaryPortBindingConfigError, _multiplex_profile_homes
         )
@@ -825,9 +800,7 @@ class GatewayAdapterLifecycleMixin:
             except MultiplexConfigError:
                 raise
             except Exception as e:
-                logger.error(
-                    "Failed to start adapters for profile '%s': %s", profile_name, e, exc_info=True
-                )
+                logger.error("Failed to start adapters for profile '%s': %s", profile_name, e, exc_info=True)
 
         self._record_served_profiles(active, profile_homes)
         return connected
@@ -863,11 +836,9 @@ class GatewayAdapterLifecycleMixin:
             write_runtime_status(served_profiles=served)
 
     async def _load_secondary_profile_config(self, profile_name: str, profile_home: "Path"):
-        """Hydrate + enter ``profile_home``'s scope once; return its gateway config.
-
-        Raises ``MultiplexConfigError`` (open dm/group policy) or ``SecondaryPortBindingConfigError``
-        (the default profile owns the single shared HTTP listener).
-        """
+        """Hydrate + enter ``profile_home``'s scope once; return its gateway config. Raises
+        ``MultiplexConfigError`` (open dm/group policy) or ``SecondaryPortBindingConfigError`` (the
+        default profile owns the single shared HTTP listener)."""
         from gateway.run import (
             MultiplexConfigError, SecondaryPortBindingConfigError, _load_gateway_runtime_config,
             _own_policy_open_startup_violation, _profile_runtime_scope,
@@ -897,8 +868,7 @@ class GatewayAdapterLifecycleMixin:
             raise MultiplexConfigError(
                 f"Profile '{profile_name}' enables {violation}. "
                 "Enable GATEWAY_ALLOW_ALL_USERS or the platform allow-all flag "
-                "for that profile, or change dm_policy/group_policy away from "
-                "'open'."
+                "for that profile, or change dm_policy/group_policy away from 'open'."
             )
 
         port_binding_platforms = sorted(
@@ -1074,11 +1044,9 @@ class GatewayAdapterLifecycleMixin:
         adapter._hermes_profile_name = profile_name
 
     async def _secondary_reconnect_attempt(self, profile_name: str, platform: Platform):
-        """One scoped attempt to rebuild+connect a secondary adapter → ``(adapter, success)``.
-
-        ``(None, None)`` = give up for good (disabled, credential removed, adapter unavailable).
-        Caller tears down a RETURNED adapter; one whose configure/connect raised is torn down here.
-        """
+        """One scoped attempt to rebuild+connect a secondary adapter → ``(adapter, success)``;
+        ``(None, None)`` = give up for good (disabled, credential removed, adapter unavailable). Caller
+        tears down a RETURNED adapter; one whose configure/connect raised is torn down here."""
         from gateway.run import _platform_has_bot_credential, _profile_runtime_scope
         # Lazy + per-attempt: keeps test monkeypatches on these modules live.
         from hermes_cli.profiles import get_profile_dir
@@ -1162,8 +1130,7 @@ class GatewayAdapterLifecycleMixin:
                 attempts += 1
                 backoff = _reconnect_backoff(attempts)
                 logger.info(
-                    "Secondary %s reconnect retry in %ds (profile: %s)", platform.value, backoff,
-                    profile_name,
+                    "Secondary %s reconnect retry in %ds (profile: %s)", platform.value, backoff, profile_name
                 )
                 await asyncio.sleep(backoff)
         finally:

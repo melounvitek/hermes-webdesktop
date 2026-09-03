@@ -385,13 +385,10 @@ class GatewayShutdownMixin:
         return self.adapters.get(Platform.RELAY)
 
     async def _scale_to_zero_watcher(self, interval: float = 30.0) -> None:
-        """Watch for idle, drive the relay dormant, then self-suspend the machine.
-
-        On sustained idle: status `draining` (NOT _running=False), relay go_dormant() (socket close,
-        NOT disconnect()), no mark_resume_pending (suspend preserves RAM), THEN suspend via the flaps
-        socket. The gateway owns the suspend because Fly autostop sees only INBOUND connections and
-        would freeze mid-job or before the relay flip. Off-Fly the watcher does not quiesce at all.
-        """
+        """Watch for idle, drive the relay dormant, then self-suspend. On sustained idle: status
+        `draining` (NOT _running=False), relay go_dormant() (socket close, NOT disconnect()), no
+        mark_resume_pending (suspend preserves RAM), THEN suspend via the flaps socket — Fly autostop
+        sees only INBOUND connections and would freeze mid-job. Off-Fly: no quiesce at all."""
         await asyncio.sleep(min(interval, 30.0))  # let startup settle
         while self._running:
             try:
@@ -473,8 +470,7 @@ class GatewayShutdownMixin:
         self._external_drain_active = True
         logger.info(
             "External drain ENGAGED (.drain_request.json present) — refusing "
-            "new turns; %d in-flight turn(s) will finish. Process stays up.",
-            self._active_work_count(),
+            "new turns; %d in-flight turn(s) will finish. Process stays up.", self._active_work_count(),
         )
         # Flip persisted lifecycle state so /api/status.gateway_busy / gateway_drainable track the
         # drain; active_agents is preserved (read-merge keeps the live count), only state changes.
@@ -502,9 +498,8 @@ class GatewayShutdownMixin:
         from gateway.drain_control import drain_requested
         while self._running:
             try:
-                # drain_requested() does a synchronous read_text() on the marker file: at 1s cadence
-                # that is a blocking disk read on the event loop ~86k times/day, and under host I/O
-                # pressure one read can stall 30s+ and take every platform heartbeat down. Off-thread it.
+                # Off-thread: a synchronous marker read at 1s cadence can stall 30s+ under host I/O
+                # pressure and take every platform heartbeat down.
                 if await asyncio.to_thread(drain_requested):
                     self._enter_external_drain()
                     # API and cron work live outside messaging's _running_agents map; refresh the
@@ -1085,9 +1080,8 @@ class GatewayShutdownMixin:
         )
         watcher_env = GatewayShutdownMixin._restart_watcher_env()
         project_root = Path(__file__).resolve().parent.parent
-        # Console python under CREATE_NO_WINDOW owns one hidden console inherited by the restart
-        # child, so nothing flashes. Do NOT swap in pythonw.exe — a console-less watcher forces
-        # every console-subsystem descendant to allocate a visible conhost.
+        # Console python under CREATE_NO_WINDOW: nothing flashes. NOT pythonw.exe — a console-less
+        # watcher makes every console-subsystem descendant allocate a visible conhost.
         watcher_python = sys.executable
         venv_dir = Path(watcher_env.get("VIRTUAL_ENV") or project_root / "venv")
         site_packages = venv_dir / "Lib" / "site-packages"
@@ -1102,10 +1096,8 @@ class GatewayShutdownMixin:
             str(current_pid), str(restart_after_s), *hermes_cmd, "gateway", "restart",
         ]
         popen_kwargs = dict(stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=watcher_env)
-        # The watcher must break away from the parent CLI's job object (Desktop wrappers, Windows
-        # Terminal, schtasks) or it is reaped when the CLI exits. A job without
-        # JOB_OBJECT_LIMIT_BREAKAWAY_OK rejects CREATE_BREAKAWAY_FROM_JOB (OSError); retry once
-        # without the bit, preserving argv and the scrubbed env.
+        # Break away from the parent CLI's job object or be reaped when the CLI exits; a job without
+        # BREAKAWAY_OK rejects CREATE_BREAKAWAY_FROM_JOB (OSError) — retry once without the bit.
         try:
             subprocess.Popen(watcher_argv, **popen_kwargs, **windows_detach_popen_kwargs())
         except OSError:
@@ -1406,8 +1398,7 @@ class GatewayShutdownMixin:
         if _cron_at_start and _cron_timeout > timeout:
             logger.info(
                 "Shutdown drain: %d in-flight cron job(s) — waiting up to "
-                "%.0fs for them (cron_drain_timeout=%.0fs, "
-                "restart_drain_timeout=%.0fs)",
+                "%.0fs for them (cron_drain_timeout=%.0fs, restart_drain_timeout=%.0fs)",
                 _cron_at_start, _cron_timeout, _cron_drain_cfg, timeout,
             )
         _drain_started_at = time.monotonic()
@@ -1415,8 +1406,7 @@ class GatewayShutdownMixin:
         ctx.drain_elapsed = time.monotonic() - _drain_started_at
         logger.info(
             "Shutdown phase: drain done at +%.2fs (drain took %.2fs, "
-            "timed_out=%s, active_at_start=%d, active_now=%d, "
-            "cron_at_start=%d, cron_now=%d, "
+            "timed_out=%s, active_at_start=%d, active_now=%d, cron_at_start=%d, cron_now=%d, "
             "api_at_start=%d, api_now=%d, "
             "deferred_at_start=%d, deferred_now=%d)", ctx.elapsed(), ctx.drain_elapsed,
             ctx.timed_out, len(ctx.active_agents), self._running_agent_count(), _cron_at_start,
@@ -1439,15 +1429,12 @@ class GatewayShutdownMixin:
         from gateway.run import GatewayRunner
         logger.warning(
             "Gateway drain timed out after %.1fs with %d active agent(s), "
-            "%d in-flight cron job(s), %d api_server run(s), and "
-            "%d deferred agent worker(s); "
+            "%d in-flight cron job(s), %d api_server run(s), and %d deferred agent worker(s); "
             "interrupting remaining work.", ctx.drain_elapsed, self._running_agent_count(),
             self._active_cron_job_count(), self._active_api_run_count(), ctx.deferred_count(),
         )
-        # Mark forcibly-interrupted sessions resume_pending BEFORE interrupting so the next message
-        # auto-resumes instead of becoming a fresh session via suspend_recently_active(); stuck
-        # sessions still escalate via ``.restart_failure_counts`` (suspended=True wins). Uses the
-        # CURRENT _running_agents, not the drain-start snapshot, so cleanly finished sessions get no note.
+        # Mark resume_pending BEFORE interrupting so the next message auto-resumes (stuck sessions
+        # still escalate via .restart_failure_counts). CURRENT _running_agents, not the drain snapshot.
         await GatewayRunner._mark_running_sessions_resume_pending(self, "mark_resume_pending")
         reason = GatewayRunner._shutdown_interrupt_reason(self)
         self._interrupt_running_agents(reason)
@@ -1568,11 +1555,9 @@ class GatewayShutdownMixin:
     def _stop_quiesce_and_close_session_dbs(self, timeout: float, ctx: "GatewayShutdownMixin._StopContext") -> None:
         """Quiesce the executor, then close SessionDB handles only if no worker is still live."""
         from gateway.run import GatewayRunner, _EXECUTOR_QUIESCE_TIMEOUT
-        # Quiesce the thread pool BEFORE closing session DBs: otherwise a coroutine can mint a fresh
-        # pool (``_executor_closing`` still False) or an already-started run_in_executor future keeps
-        # writing after ``SessionDB.close()`` checkpointed the WAL — the late write reopens the handle
-        # and mints a split WAL generation (close-time corruption). Bounded and clamped to what is
-        # left of the watchdog leash minus a second for the close itself.
+        # Quiesce the thread pool BEFORE closing session DBs: a late executor write after
+        # SessionDB.close() checkpointed the WAL reopens the handle and splits the WAL generation
+        # (close-time corruption). Clamped to the remaining watchdog leash minus 1s for the close.
         _exec_quiesce_budget = max(
             0.0, min(_EXECUTOR_QUIESCE_TIMEOUT, resolve_shutdown_watchdog_delay(timeout) - ctx.elapsed() - 1.0),
         )
@@ -1637,8 +1622,7 @@ class GatewayShutdownMixin:
         else:
             logger.info(
                 "Skipping .clean_shutdown marker — drain timed out with "
-                "interrupted agents; next startup will suspend recently "
-                "active sessions."
+                "interrupted agents; next startup will suspend recently active sessions."
             )
         # Stuck-loop detection: the counter increments for sessions active at each restart; at
         # the threshold (3 consecutive) the next startup auto-suspends the session.
@@ -1661,14 +1645,12 @@ class GatewayShutdownMixin:
             self._exit_code = GATEWAY_SERVICE_RESTART_EXIT_CODE
             self._exit_reason = self._exit_reason or "Gateway restart requested"
         self._draining = False
-        # Terminal gateway_state: "stopped" by default, "running" on an UNEXPECTED signal (s6 SIGTERM
-        # on docker restart, OOM-kill) — container_boot.py only auto-starts gateways last seen
-        # "running". Operator stops write a planned-stop marker BEFORE signalling; restarts persist "stopped".
+        # Terminal gateway_state: "stopped", or "running" on an UNEXPECTED signal (docker restart,
+        # OOM) — container_boot.py only auto-starts gateways last seen "running".
         if getattr(self, "_signal_initiated_shutdown", False) and not self._restart_requested:
             logger.info(
                 "Gateway stopped by an unexpected signal — persisting "
-                "gateway_state=running so container_boot auto-starts on "
-                "the next boot (issue #42675)"
+                "gateway_state=running so container_boot auto-starts on the next boot (issue #42675)"
             )
             self._update_runtime_status("running", self._exit_reason)
         else:
@@ -1694,9 +1676,8 @@ class GatewayShutdownMixin:
     async def _stop_impl(self) -> None:
         """Run every ``_stop_*`` phase under the thread-based shutdown watchdog."""
         from gateway.run import GatewayRunner
-        # Thread-based watchdog (asyncio timeouts cannot recover a frozen loop): if teardown never
-        # finishes within drain+grace it dumps faulthandler stacks and os._exit so KeepAlive/systemd
-        # can revive. Skipped under pytest (no delayed hard-exit in the worker).
+        # Thread-based watchdog (asyncio timeouts cannot recover a frozen loop): dumps stacks and
+        # os._exit past drain+grace so the service manager revives us. Skipped under pytest.
         _watchdog_done = threading.Event()
         self._shutdown_watchdog_done = _watchdog_done
         # Shutdown-path tests and third-party runner doubles may only implement the older
@@ -1706,10 +1687,8 @@ class GatewayShutdownMixin:
         )
         if not os.environ.get("PYTEST_CURRENT_TEST"):
             arm_shutdown_watchdog(
-                resolve_shutdown_watchdog_delay(self._restart_drain_timeout),
-                done_event=_watchdog_done,
-                snapshot_fn=lambda: GatewayRunner._shutdown_watchdog_snapshot(self, ctx),
-                exit_code=1,
+                resolve_shutdown_watchdog_delay(self._restart_drain_timeout), done_event=_watchdog_done,
+                snapshot_fn=lambda: GatewayRunner._shutdown_watchdog_snapshot(self, ctx), exit_code=1,
             )
         try:
             await GatewayRunner._stop_begin_teardown(self, ctx)
@@ -1725,8 +1704,7 @@ class GatewayShutdownMixin:
             _watchdog_done.set()
 
     async def stop(
-        self, *, restart: bool = False, detached_restart: bool = False,
-        service_restart: bool = False,
+        self, *, restart: bool = False, detached_restart: bool = False, service_restart: bool = False
     ) -> None:
         """Stop the gateway and disconnect all adapters."""
         from gateway.run import GatewayRunner

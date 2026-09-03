@@ -245,31 +245,24 @@ class GatewayNotificationsMixin:
         if switched is None:
             logger.warning(
                 "Async-delegation completion could not bind routing key %s to "
-                "owning session %s; dropping injection.",
-                session_entry.session_key, target_session_id,
+                "owning session %s; dropping injection.", session_entry.session_key, target_session_id,
             )
             return None
 
         logger.info(
-            "Pinned async-delegation completion to owning session %s "
-            "(was %s) for routing key %s (#57498)",
+            "Pinned async-delegation completion to owning session %s (was %s) for routing key %s (#57498)",
             target_session_id, prior_session_id, session_entry.session_key,
         )
         return switched
 
     async def _deliver_media_from_response(
-        self, response: str, event: MessageEvent, adapter,
-        thread_metadata: Optional[Dict[str, Any]] = None,
+        self, response: str, event: MessageEvent, adapter, thread_metadata: Optional[Dict[str, Any]] = None
     ) -> None:
-        """Extract explicit MEDIA: tags from an already-streamed response and deliver them.
-
-        The text is already delivered; this only handles file attachments. Unlike the non-streaming
-        path in ``gateway/platforms/base.py`` this rescan is EXPLICIT-ONLY: a bare local path in a
-        streamed reply was either shown as text or is stale inspected content, and promoting it sent
-        files the model never asked to deliver. MEDIA tags are NOT deduped against prior turns: a
-        MEDIA: directive in the final reply is a deliberate attach (incl. user-requested resends);
-        stale auto-appended tags are deduped upstream (_collect_auto_append_media_tags).
-        """
+        """Deliver explicit MEDIA: tags from an already-streamed response (text already delivered).
+        EXPLICIT-ONLY, unlike the non-streaming path in ``gateway/platforms/base.py``: a bare local
+        path in a streamed reply is shown text or stale inspected content, and promoting it sent
+        files the model never asked for. MEDIA tags are NOT deduped against prior turns (a final-reply
+        directive is a deliberate attach); stale auto-appended tags are deduped upstream."""
         from urllib.parse import quote as _quote
         with _log_suppressed(logging.WARNING, "Post-stream media extraction failed: %s"):
             # Capture [[as_document]] before extract_media strips it: image files then go through
@@ -378,8 +371,7 @@ class GatewayNotificationsMixin:
         from gateway.run import _hermes_home
         return cls._UpdatePaths(
             pending=_hermes_home / ".update_pending.json",
-            claimed=_hermes_home / ".update_pending.claimed.json",
-            output=_hermes_home / ".update_output.txt",
+            claimed=_hermes_home / ".update_pending.claimed.json", output=_hermes_home / ".update_output.txt",
             exit_code=_hermes_home / ".update_exit_code",
             prompt=_hermes_home / ".update_prompt.json", response=_hermes_home / ".update_response",
         )
@@ -664,8 +656,7 @@ class GatewayNotificationsMixin:
             platform_cfg = self.config.platforms.get(platform)
             if platform_cfg is not None and not platform_cfg.gateway_restart_notification:
                 logger.info(
-                    "Restart notification suppressed: %s has gateway_restart_notification=false",
-                    platform_str,
+                    "Restart notification suppressed: %s has gateway_restart_notification=false", platform_str
                 )
                 return None
 
@@ -833,8 +824,7 @@ class GatewayNotificationsMixin:
 
         try:
             platform = Platform(platform_name)
-            # Reject arbitrary strings (dynamic pseudo-members): built-ins are always valid, plugin
-            # platforms must be registered in the platform registry.
+            # Reject dynamic pseudo-members: plugin platforms must be registered.
             if platform.value not in _BUILTIN_PLATFORM_VALUES:
                 try:
                     from gateway.platform_registry import platform_registry
@@ -851,15 +841,12 @@ class GatewayNotificationsMixin:
 
         scope_id = _opt("scope_id")
         if scope_id is None and chat_type not in ("dm", "thread"):
-            # Reconstructed (non-persisted) source for a scoped chat with no scope discriminator: a
-            # relay connector's fail-closed tenant guard may decline the reply unless user_id resolves
-            # it. Don't fail — DMs/author-bound chats still route and native adapters need no
-            # scope_id — but warn so a post-restart egress decline isn't silent.
+            # Reconstructed scoped-chat source without scope_id: a relay connector's tenant guard may
+            # decline the reply. Warn, don't fail (native adapters need no scope_id).
             logger.warning(
                 "Synthetic event source for %s chat=%s (%s) reconstructed "
                 "without scope_id; scoped relay egress may be declined by "
-                "the connector's tenant guard (user_id fallback only).",
-                platform_name, chat_id, chat_type,
+                "the connector's tenant guard (user_id fallback only).", platform_name, chat_id, chat_type,
             )
         return SessionSource(
             platform=platform, chat_id=chat_id, chat_type=chat_type, thread_id=_opt("thread_id"),
@@ -916,15 +903,9 @@ class GatewayNotificationsMixin:
             return False
 
     def _resolve_injection_adapter(self, platform_name: str):
-        """Adapter for a synthetic-event platform: transport resolver first, literal scan as fallback.
-
-        Alias-aware resolution (relay-plane): one adapter under Platform.RELAY fronts N logical
-        platforms, so a literal ``p.value == platform_name`` scan misses "slack" and drops the
-        completion as "no gateway route". Native adapter wins; relay is eligible only when it
-        advertises fronting the logical platform. The legacy literal scan is still correct for
-        native adapters and keeps minimal runner stubs (tests) / exotic platform strings working
-        when the resolver can't run.
-        """
+        """Adapter for a synthetic-event platform: alias-aware transport resolver first (one
+        Platform.RELAY adapter fronts N logical platforms; native wins), literal ``p.value`` scan as
+        fallback for minimal runner stubs / exotic platform strings when the resolver can't run."""
         from gateway.run import resolve_delivery_transport
         try:
             _transport = resolve_delivery_transport(Platform(platform_name), self.config, self.adapters)
@@ -1042,15 +1023,10 @@ class GatewayNotificationsMixin:
             return seen
 
     async def _classify_completion_target(self, parent_session_id: str) -> str:
-        """Classify an async-completion delivery target before adapter acceptance.
-
-        - ``"deliver"``: spawning session live (or compression-rotated with a live continuation);
-          proves deliverability only, the resolver still retargets.
-        - ``"terminal"``: parent gone for good (unknown / explicit user boundary like /new); drop
-          the durable row rather than falsely ack or replay forever.
-        - ``"retry"``: transient uncertainty (DB unavailable, rotation mid-flight); release the
-          claim for a later consumer; the attempt cap bounds churn.
-        """
+        """Classify an async-completion target before adapter acceptance: ``"deliver"`` (spawning
+        session live or compression-rotated with a live continuation; the resolver still retargets),
+        ``"terminal"`` (parent gone for good — unknown / user boundary like /new; drop the durable row
+        rather than falsely ack), ``"retry"`` (DB unavailable / rotation mid-flight; release the claim)."""
         from gateway.run import _USER_BOUNDARY_END_REASONS
         session_db = getattr(self, "_session_db", None)
         if session_db is None:
@@ -1139,8 +1115,7 @@ class GatewayNotificationsMixin:
                 logger.warning(
                     "Background process %s completion targets "
                     "permanently-gone session %s (user boundary such as "
-                    "/new); dropping notification (output remains "
-                    "available via process(action='log')).",
+                    "/new); dropping notification (output remains available via process(action='log')).",
                     evt.get("session_id") or "<unknown>", parent_session_id,
                 )
             claim.proceed = False
@@ -1309,12 +1284,10 @@ class GatewayNotificationsMixin:
         # Some unit tests construct GatewayRunner with object.__new__.  Keep the
         # batching seam lazy so those focused lifecycle tests remain valid.
         for attr, default in (
-            ("_completion_notification_batches", dict),
-            ("_completion_notification_batch_tasks", dict),
+            ("_completion_notification_batches", dict), ("_completion_notification_batch_tasks", dict),
             ("_completion_notification_batch_flush_tasks", set),
             ("_completion_notification_batch_window", lambda: 0.1),
-            ("_completion_notification_batches_stopping", lambda: False),
-            ("_background_tasks", set),
+            ("_completion_notification_batches_stopping", lambda: False), ("_background_tasks", set),
         ):
             if not hasattr(self, attr):
                 setattr(self, attr, default())
@@ -1360,14 +1333,10 @@ class GatewayNotificationsMixin:
                 logger.debug(fail_msg, exc_info=True)
 
     async def _deliver_async_delegation_group(self, group: list[dict]) -> Optional[bool]:
-        """Deliver a same-session batch of async completions as ONE turn.
-
-        Single-event groups ride the per-event path. Multi-event groups deliver the primary via
-        ``_deliver_completion_notification`` with consolidated text of every sibling THIS runner
-        claimed; sibling claims are acked only after adapter acceptance, and siblings claimed by
-        another consumer are excluded (no double delivery). Returns True after acceptance, False
-        to requeue the group, None when nothing is deliverable here (retry siblings requeued).
-        """
+        """Deliver a same-session batch of async completions as ONE turn: the primary carries the
+        consolidated text of every sibling THIS runner claimed (siblings owned elsewhere are excluded;
+        their claims are acked only after adapter acceptance). True after acceptance, False to requeue
+        the group, None when nothing is deliverable here (retry siblings requeued)."""
         from gateway.run import _format_gateway_process_notification
         from tools.process_registry import process_registry as _pr
         deliverable: list[tuple[dict, str]] = []
@@ -1547,13 +1516,10 @@ class GatewayNotificationsMixin:
         )
 
     async def _run_process_watcher(self, watcher: dict) -> None:
-        """Periodically check a background process and push updates to the user.
-
-        Runs as an asyncio task. Stays silent when nothing changed. Auto-removes when the process
-        exits or is killed. Notification mode (``display.background_process_notifications``):
-        concise (default, one-line; failures append output tail) / all (running updates + final
-        raw output) / result (final raw only) / error (final raw only if exit != 0) / off.
-        """
+        """Poll a background process and push updates until it exits. Mode
+        (``display.background_process_notifications``): concise (default one-liner; failures append
+        the output tail) / all (running updates + final raw) / result (final raw) / error (final raw
+        if exit != 0) / off."""
         from tools.process_registry import format_process_notification, process_registry
         session_id = watcher["session_id"]
         interval = watcher["check_interval"]
