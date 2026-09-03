@@ -94,8 +94,7 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
     skills_install.add_argument(
         "--force", action="store_true", help="Install despite blocked scan verdict")
     skills_install.add_argument(
-        "--yes",
-        "-y", action="store_true", help="Skip confirmation prompt (needed in TUI mode)")
+        "--yes", "-y", action="store_true", help="Skip confirmation prompt (needed in TUI mode)")
 
     skills_inspect = skills_subparsers.add_parser(
         "inspect", help="Preview a skill without installing")
@@ -104,8 +103,7 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
     skills_list = skills_subparsers.add_parser("list", help="List installed skills")
     skills_list.add_argument("--source", default="all", choices=["all", "hub", "builtin", "local"])
     skills_list.add_argument(
-        "--enabled-only",
-        action="store_true",
+        "--enabled-only", action="store_true",
         help="Hide disabled skills. Use with -p <profile> to see exactly "
         "which skills will load for that profile.")
 
@@ -130,85 +128,70 @@ def build_skills_parser(subparsers, *, cmd_skills: Callable) -> None:
         "uninstall", help="Remove a hub-installed skill")
     skills_uninstall.add_argument("name", help="Skill name to remove")
     skills_uninstall.add_argument(
-        "--yes",
-        "-y", action="store_true", help="Skip confirmation prompt")
+        "--yes", "-y", action="store_true", help="Skip confirmation prompt")
 
     skills_reset = skills_subparsers.add_parser(
         "reset",
         help="Reset a bundled skill — clears 'user-modified' tracking so updates work again",
-        description=(
-            "Clear a bundled skill's entry from the sync manifest (~/.hermes/skills/.bundled_manifest) "
+        description="Clear a bundled skill's entry from the sync manifest (~/.hermes/skills/.bundled_manifest) "
             "so future 'hermes update' runs stop marking it as user-modified. Pass --restore to also "
-            "replace the current copy with the bundled version."))
+            "replace the current copy with the bundled version.")
     skills_reset.add_argument("name", help="Skill name to reset (e.g. google-workspace)")
     skills_reset.add_argument(
         "--restore", action="store_true",
         help="Also delete the current copy and re-copy the bundled version")
     skills_reset.add_argument(
-        "--yes",
-        "-y", action="store_true", help="Skip confirmation prompt when using --restore")
+        "--yes", "-y", action="store_true", help="Skip confirmation prompt when using --restore")
 
     skills_list_modified = skills_subparsers.add_parser(
-        "list-modified",
-        help="List bundled skills you've edited (which `hermes update` keeps)",
-        description=(
-            "Show the bundled skills whose local copy differs from the version last "
+        "list-modified", help="List bundled skills you've edited (which `hermes update` keeps)",
+        description="Show the bundled skills whose local copy differs from the version last "
             "synced, i.e. the ones `hermes update` reports as user-modified and skips. "
             "Use `hermes skills diff <name>` to see changes and `hermes skills reset "
-            "<name>` to resume updates."))
+            "<name>` to resume updates.")
     skills_list_modified.add_argument("--json", action="store_true", help="Output the list as JSON")
 
     skills_diff = skills_subparsers.add_parser(
-        "diff",
-        help="Show how your copy of a bundled skill differs from the stock version",
-        description=(
-            "Print a unified diff between your local copy of a bundled skill and the "
+        "diff", help="Show how your copy of a bundled skill differs from the stock version",
+        description="Print a unified diff between your local copy of a bundled skill and the "
             "current bundled (stock) version, so you can confirm what changed before "
-            "running `hermes skills reset`."))
+            "running `hermes skills reset`.")
     skills_diff.add_argument("name", help="Skill name to diff (e.g. google-workspace)")
 
     skills_opt_out = skills_subparsers.add_parser(
-        "opt-out",
-        help="Stop bundled skills from being seeded into this profile",
-        description=(
-            "Write the .no-bundled-skills marker so the installer, "
+        "opt-out", help="Stop bundled skills from being seeded into this profile",
+        description="Write the .no-bundled-skills marker so the installer, "
             "`hermes update`, and any direct sync stop seeding bundled skills "
             "into the active profile. By default nothing already on disk is "
             "touched. Pass --remove to ALSO delete bundled skills that are "
-            "unmodified (user-edited and hub/local skills are never removed)."))
+            "unmodified (user-edited and hub/local skills are never removed).")
     skills_opt_out.add_argument(
         "--remove", action="store_true",
         help="Also delete already-present unmodified bundled skills")
     skills_opt_out.add_argument(
-        "--yes",
-        "-y", action="store_true", help="Skip confirmation prompt when using --remove")
+        "--yes", "-y", action="store_true", help="Skip confirmation prompt when using --remove")
 
     skills_opt_in = skills_subparsers.add_parser(
-        "opt-in",
-        help="Re-enable bundled-skill seeding (undo opt-out)",
-        description=(
-            "Remove the .no-bundled-skills marker so bundled skills are seeded "
-            "again on the next `hermes update`. Pass --sync to re-seed now."))
+        "opt-in", help="Re-enable bundled-skill seeding (undo opt-out)",
+        description="Remove the .no-bundled-skills marker so bundled skills are seeded "
+            "again on the next `hermes update`. Pass --sync to re-seed now.")
     skills_opt_in.add_argument(
         "--sync", action="store_true",
         help="Re-seed bundled skills immediately instead of waiting for update")
 
     skills_repair_official = skills_subparsers.add_parser(
-        "repair-official",
-        help="Backfill or restore official optional skills from repo source",
-        description=(
-            "Repair official optional skill provenance. By default, only backfills "
+        "repair-official", help="Backfill or restore official optional skills from repo source",
+        description="Repair official optional skill provenance. By default, only backfills "
             "hub metadata for exact matches. Pass --restore to replace missing or "
             "mutated active copies from optional-skills/, moving existing copies to "
-            "a restore backup first. Use name 'all' to repair every optional skill."))
+            "a restore backup first. Use name 'all' to repair every optional skill.")
     skills_repair_official.add_argument(
         "name", help="Official optional skill folder/frontmatter name, or 'all'")
     skills_repair_official.add_argument(
         "--restore", action="store_true",
         help="Restore from official optional source, backing up existing matching copies")
     skills_repair_official.add_argument(
-        "--yes",
-        "-y", action="store_true", help="Skip confirmation prompt when using --restore")
+        "--yes", "-y", action="store_true", help="Skip confirmation prompt when using --restore")
 
     skills_publish = skills_subparsers.add_parser("publish", help="Publish a skill to a registry")
     skills_publish.add_argument("skill_path", help="Path to skill directory")

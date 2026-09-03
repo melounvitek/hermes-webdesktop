@@ -17,13 +17,11 @@ DEFAULT_READY_TIMEOUT = 60.0
 def build_verify_parser(subparsers, *, cmd_verify: Callable) -> None:
     """Attach the ``verify`` subcommand to ``subparsers``."""
     verify_parser = subparsers.add_parser(
-        "verify",
-        help="Detect a project's run recipe and smoke-test it",
-        description=(
-            "Detect how the current project is built, tested, and started "
+        "verify", help="Detect a project's run recipe and smoke-test it",
+        description="Detect how the current project is built, tested, and started "
             "(or load the saved manifest at .hermes/environment.json), then "
             "run a verification pass: bootstrap -> build -> test -> start in "
-            "background -> poll readiness -> teardown."))
+            "background -> poll readiness -> teardown.")
     verify_parser.add_argument(
         "path", nargs="?", default=None, help="Project root to verify (default: current directory)")
     verify_parser.add_argument(

@@ -9,8 +9,7 @@ from typing import Callable
 def build_debug_parser(subparsers, *, cmd_debug: Callable) -> None:
     """Attach the ``debug`` subcommand to ``subparsers``."""
     debug_parser = subparsers.add_parser(
-        "debug",
-        help="Debug tools — upload logs and system info for support",
+        "debug", help="Debug tools — upload logs and system info for support",
         description="Debug utilities for Hermes Agent. Use 'hermes debug share' to "
         "upload a debug report (system info + recent logs) to a paste "
         "service and get a shareable URL.",
@@ -25,8 +24,7 @@ Examples:
     hermes debug share --no-redact  Disable upload-time secret redaction
     hermes debug share --nous       Upload to Nous-internal storage (private)
     hermes debug delete <url>       Delete a previously uploaded paste
-""",
-    )
+""")
     debug_sub = debug_parser.add_subparsers(dest="debug_command")
     share_parser = debug_sub.add_parser(
         "share", help="Upload debug report to a paste service and print a shareable URL")
@@ -38,30 +36,23 @@ Examples:
     share_parser.add_argument(
         "--local", action="store_true", help="Print the report locally instead of uploading")
     share_parser.add_argument(
-        "-y",
-        "--yes",
-        action="store_true",
-        help=(
-            "Skip the confirmation prompt and upload immediately. Required "
+        "-y", "--yes", action="store_true",
+        help="Skip the confirmation prompt and upload immediately. Required "
             "in non-interactive contexts (scripts/CI); without it, and with "
-            "no TTY on stdin, the command refuses rather than upload silently."))
+            "no TTY on stdin, the command refuses rather than upload silently.")
     share_parser.add_argument(
-        "--no-redact",
-        action="store_true",
-        help=(
-            "Disable upload-time secret redaction (default: redact). Logs "
+        "--no-redact", action="store_true",
+        help="Disable upload-time secret redaction (default: redact). Logs "
             "are normally run through agent.redact.redact_sensitive_text "
             "with force=True before upload so credentials are not leaked "
-            "into the public paste service."))
+            "into the public paste service.")
     share_parser.add_argument(
-        "--nous",
-        action="store_true",
-        help=(
-            "Upload the debug bundle to Nous-internal storage (AWS S3) instead "
+        "--nous", action="store_true",
+        help="Upload the debug bundle to Nous-internal storage (AWS S3) instead "
             "of a public paste service. The bundle is private — viewable only "
             "by Nous staff (and allowlisted Discord mods) via a Google-login-"
             "gated viewer — and auto-deletes after 14 days. Still force-redacts "
-            "secrets unless --no-redact is also passed."))
+            "secrets unless --no-redact is also passed.")
     delete_parser = debug_sub.add_parser(
         "delete", help="Delete a paste uploaded by 'hermes debug share'")
     delete_parser.add_argument(

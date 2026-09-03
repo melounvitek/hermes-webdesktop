@@ -27,9 +27,8 @@ def build_login_parser(subparsers, *, cmd_login: Callable) -> None:
     """
     login_parser = subparsers.add_parser(
         "login",
-        description=(
-            "Deprecated. Use `hermes auth` to manage credentials, "
-            "`hermes model` to select a provider, or `hermes setup` for full setup."))
+        description="Deprecated. Use `hermes auth` to manage credentials, "
+            "`hermes model` to select a provider, or `hermes setup` for full setup.")
     # No ``choices=`` on purpose — the handler is a deprecation notice that
     # ignores the value, and a restrictive list would reject providers the user
     # legitimately wants (e.g. ``anthropic``) with an argparse error before the

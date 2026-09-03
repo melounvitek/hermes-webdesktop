@@ -17,26 +17,22 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
     sessions_list.add_argument("--source", help="Filter by source (cli, telegram, discord, etc.)")
     sessions_list.add_argument("--limit", type=int, default=20, help="Max sessions to show")
     sessions_list.add_argument(
-        "--workspace",
-        metavar="NEEDLE",
+        "--workspace", metavar="NEEDLE",
         help="Only sessions in one workspace: a git repo root or project dir "
         "(matched by path substring or basename).")
 
     def _add_session_filter_args(p, default_older_help):
         p.add_argument("--older-than", metavar="AGE", help=default_older_help)
         p.add_argument(
-            "--newer-than",
-            metavar="AGE",
+            "--newer-than", metavar="AGE",
             help="Only match sessions active within the last AGE "
             "(e.g. '5h', '2d') or after an ISO timestamp")
         p.add_argument(
-            "--before",
-            metavar="TIME",
+            "--before", metavar="TIME",
             help="Only match sessions started before TIME "
             "(duration ago like '5h', or ISO timestamp like '2026-07-05 14:30')")
         p.add_argument(
-            "--after",
-            metavar="TIME",
+            "--after", metavar="TIME",
             help="Only match sessions started at/after TIME "
             "(duration ago like '5h', or ISO timestamp)")
         p.add_argument("--source", help="Only match sessions from this source")
@@ -84,37 +80,27 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
     sessions_export = sessions_subparsers.add_parser(
         "export", help="Export sessions to JSONL, Markdown, or QMD")
     sessions_export.add_argument(
-        "output",
-        nargs="?",
-        help=(
-            "Output path. JSONL: file path (use - for stdout, required). "
-            "md/qmd: output directory (default: <hermes home>/session-exports)"))
+        "output", nargs="?",
+        help="Output path. JSONL: file path (use - for stdout, required). "
+            "md/qmd: output directory (default: <hermes home>/session-exports)")
     sessions_export.add_argument(
-        "--format",
-        choices=["jsonl", "md", "qmd", "html", "trace"],
-        default="jsonl",
-        help=(
-            "Export format (default: jsonl). 'trace' emits Claude Code JSONL "
-            "for the Hugging Face Agent Trace Viewer"))
+        "--format", choices=["jsonl", "md", "qmd", "html", "trace"], default="jsonl",
+        help="Export format (default: jsonl). 'trace' emits Claude Code JSONL "
+            "for the Hugging Face Agent Trace Viewer")
     sessions_export.add_argument(
-        "--upload",
-        action="store_true",
-        help=(
-            "trace only: upload to your Hugging Face traces dataset instead "
-            "of writing a local file (needs HF_TOKEN)"))
+        "--upload", action="store_true",
+        help="trace only: upload to your Hugging Face traces dataset instead "
+            "of writing a local file (needs HF_TOKEN)")
     sessions_export.add_argument(
         "--public", action="store_true",
         help="trace --upload only: create/update a public dataset instead of private")
     sessions_export.add_argument(
-        "--no-redact",
-        action="store_true",
+        "--no-redact", action="store_true",
         help=("trace only: skip the forced secret redaction; only use after manual review"))
     sessions_export.add_argument(
-        "--only",
-        choices=["user-prompts"],
-        help=(
-            "Export only a filtered view (user-prompts: one prompt record "
-            "per line for jsonl, headed sections for md)"))
+        "--only", choices=["user-prompts"],
+        help="Export only a filtered view (user-prompts: one prompt record "
+            "per line for jsonl, headed sections for md)")
     sessions_export.add_argument("--session-id", help="Session ID or unique prefix to export")
     _add_session_filter_args(
         sessions_export, "Only export sessions older than AGE (duration like '5h'/'2d', "
@@ -148,13 +134,11 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
         "--include-pinned", action="store_true",
         help="Also delete pinned sessions (excluded by default — pin is a keep flag)")
     sessions_prune.add_argument(
-        "--never-active",
-        action="store_true",
-        help=(
-            "Instead of ended sessions, delete keyed gateway rows that were "
+        "--never-active", action="store_true",
+        help="Instead of ended sessions, delete keyed gateway rows that were "
             "opened and never used (no messages, tokens, tool calls or title) "
             "and are older than AGE (default 30 days). Ordinary prune can "
-            "never reach these — it only ever selects ended sessions"))
+            "never reach these — it only ever selects ended sessions")
 
     sessions_archive = sessions_subparsers.add_parser(
         "archive", help="Bulk-archive (soft-hide) sessions matching filters — no deletion")
@@ -168,15 +152,14 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
     sessions_clean_markers = sessions_subparsers.add_parser(
         "clean-markers",
         help="Permanently clear stale tool-call marker content left by sessions from before #78148",
-        description=(
-            "Before the #78148 fix, a local tool-call template could persist a "
+        description="Before the #78148 fix, a local tool-call template could persist a "
             "bare bracketed marker (e.g. \"[memory]\") as an assistant turn's "
             "content instead of real text. This is already repaired in memory "
             "on every session load, so running this is optional — it rewrites "
             "the affected rows once, in place, so long-lived sessions stop "
             "re-scanning/re-repairing the same rows on every resume. Only the "
             "content column is touched; tool_calls and every other column on "
-            "the row are left untouched."))
+            "the row are left untouched.")
     sessions_clean_markers.add_argument(
         "--dry-run", action="store_true", default=False,
         help="Report the affected row count without writing")
@@ -187,15 +170,14 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
     sessions_optimize_storage = sessions_subparsers.add_parser(
         "optimize-storage",
         help="Migrate the search index to the compact v23 layout (reclaims disk on large DBs)",
-        description=(
-            "Rebuild the full-text search index in the compact v23 "
+        description="Rebuild the full-text search index in the compact v23 "
             "external-content layout. On large databases this reclaims a "
             "large fraction of state.db (the old layout stored duplicate "
             "copies of every message and indexed tool output). Runs "
             "foreground with a progress bar, throttles so a running gateway "
             "stays responsive, and VACUUMs at the end. Safe to interrupt and "
             "re-run — it resumes where it left off. No conversation data is "
-            "changed; only the search index is rebuilt."))
+            "changed; only the search index is rebuilt.")
     sessions_optimize_storage.add_argument(
         "--no-vacuum", action="store_true", default=False,
         help="Skip the final VACUUM (index is rebuilt but freed pages aren't returned to the OS until a later VACUUM)",
@@ -205,13 +187,11 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
         help="Skip the disk-space confirmation prompt")
 
     sessions_repair = sessions_subparsers.add_parser(
-        "repair",
-        help="Repair a malformed state.db schema so hidden sessions reappear",
-        description=(
-            "Recover a state.db whose schema is malformed (e.g. 'table "
+        "repair", help="Repair a malformed state.db schema so hidden sessions reappear",
+        description="Recover a state.db whose schema is malformed (e.g. 'table "
             "messages_fts already exists'), which makes Desktop/Dashboard show "
             "no sessions. A backup is made first; sessions and messages are "
-            "preserved and the FTS search index is rebuilt if needed."))
+            "preserved and the FTS search index is rebuilt if needed.")
     sessions_repair.add_argument(
         "--check-only", action="store_true",
         help="Only report whether the database opens cleanly; do not modify it")
@@ -220,37 +200,30 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
         help="Skip the timestamped backup copy (not recommended)")
 
     sessions_repair_routing = sessions_subparsers.add_parser(
-        "repair-routing",
-        help="Re-stamp gateway sessions that lost their routing identity",
-        description=(
-            "Find gateway conversations stranded in session rows whose "
+        "repair-routing", help="Re-stamp gateway sessions that lost their routing identity",
+        description="Find gateway conversations stranded in session rows whose "
             "routing identity (session_key/chat_id/origin) was never "
             "written — the damage a corrupt state.db write path leaves "
             "behind (#82616). Such a row is invisible to restart recovery, "
             "so the chat resumes an older session instead. Re-stamps each "
             "orphan from the keyed predecessor it continues, and only when "
             "that predecessor is unambiguous. Reports without touching the "
-            "database unless --apply is given."))
+            "database unless --apply is given.")
     sessions_repair_routing.add_argument(
         "--apply", action="store_true", help="Perform the adoptions (default: report only)")
     sessions_repair_routing.add_argument(
-        "--max-gap-seconds",
-        type=float,
-        default=None,
-        help=(
-            "Window between a keyed predecessor's last activity and an "
+        "--max-gap-seconds", type=float, default=None,
+        help="Window between a keyed predecessor's last activity and an "
             "orphan's start for them to count as the same conversation "
-            "(default: 900)"))
+            "(default: 900)")
 
     sessions_recover = sessions_subparsers.add_parser(
-        "recover",
-        help="Rebuild canonical session data into a separate clean database",
-        description=(
-            "Offline, non-destructive recovery for a damaged state.db. The "
+        "recover", help="Rebuild canonical session data into a separate clean database",
+        description="Offline, non-destructive recovery for a damaged state.db. The "
             "source database and its WAL/SHM/rollback-journal sidecars are "
             "copied before SQLite opens anything. Canonical rows are rebuilt "
             "into a new output database; derived search indexes are recreated "
-            "and the active database is never replaced automatically."))
+            "and the active database is never replaced automatically.")
     sessions_recover.add_argument(
         "--source", type=Path, required=True,
         help="Source state.db or preserved backup to inspect/recover")
@@ -266,11 +239,9 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
         "--chunk-size", type=int, default=1000,
         help="Rows committed per recovery batch (default: 1000)")
     sessions_recover.add_argument(
-        "--allow-partial",
-        action="store_true",
-        help=(
-            "Best-effort salvage across damaged row ranges; the output remains "
-            "separate and every skipped range is recorded"))
+        "--allow-partial", action="store_true",
+        help="Best-effort salvage across damaged row ranges; the output remains "
+            "separate and every skipped range is recorded")
     sessions_recover.add_argument(
         "--report", type=Path, help="JSON report path (defaults to <output>.recovery.json)")
 
@@ -282,13 +253,11 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
     sessions_rename.add_argument("title", nargs="+", help="New title for the session")
 
     sessions_pin = sessions_subparsers.add_parser(
-        "pin",
-        help="Pin session(s) — durable keep flag, exempt from auto-archive",
-        description=(
-            "Set the durable 'keep' flag on one or more sessions. Pinned "
+        "pin", help="Pin session(s) — durable keep flag, exempt from auto-archive",
+        description="Set the durable 'keep' flag on one or more sessions. Pinned "
             "sessions are exempt from the sessions.auto_archive stale sweep "
             "and always appear in listings. The same flag drives the Desktop "
-            "sidebar's Pinned section — pin from either surface, both see it."))
+            "sidebar's Pinned section — pin from either surface, both see it.")
     sessions_pin.add_argument(
         "session_ids", nargs="+", help="Session ID(s) or unique prefix(es) to pin")
 
@@ -303,14 +272,12 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
         help="Emit machine-readable JSON (for backup/restore scripting)")
 
     sessions_retitle = sessions_subparsers.add_parser(
-        "retitle-skills",
-        help="Re-title sessions whose auto-title came from a /skill's own text",
-        description=(
-            "Sessions opened with a /skill were auto-titled from the expanded "
+        "retitle-skills", help="Re-title sessions whose auto-title came from a /skill's own text",
+        description="Sessions opened with a /skill were auto-titled from the expanded "
             "message, which embeds the whole skill body — so the title "
             "describes the SKILL, not the request. This regenerates those "
             "titles from what the user actually typed. Lists what it would "
-            "change unless --apply is passed."))
+            "change unless --apply is passed.")
     sessions_retitle.add_argument(
         "--apply", action="store_true", help="Write the new titles (default: dry run)")
     sessions_retitle.add_argument(
@@ -323,13 +290,11 @@ def build_sessions_parser(subparsers, *, cmd_sessions: Callable) -> None:
         "--limit", type=int, default=500, help="Max sessions to load (default: 500)")
 
     sessions_import = sessions_subparsers.add_parser(
-        "import",
-        help="Import a Claude Code or Codex CLI session into Hermes",
-        description=(
-            "Pull a conversation started in Claude Code (~/.claude/projects) "
+        "import", help="Import a Claude Code or Codex CLI session into Hermes",
+        description="Pull a conversation started in Claude Code (~/.claude/projects) "
             "or Codex CLI (~/.codex/sessions) into the Hermes session store "
             "so it can be resumed with 'hermes --resume <id>'. The foreign "
-            "files are only read, never modified."))
+            "files are only read, never modified.")
     sessions_import.add_argument(
         "--from", dest="from_source", choices=["claude", "codex"],
         help="Which tool to import from (default: pick across both)")

@@ -32,8 +32,7 @@ def build_gateway_parser(
     gateway_run = gateway_subparsers.add_parser(
         "run", help="Run gateway in foreground (recommended for WSL, Docker, Termux)")
     gateway_run.add_argument(
-        "-v",
-        "--verbose", action="count", default=0,
+        "-v", "--verbose", action="count", default=0,
         help="Increase stderr log verbosity (-v=INFO, -vv=DEBUG)")
     gateway_run.add_argument(
         "-q", "--quiet", action="store_true", help="Suppress all stderr log output")
@@ -41,32 +40,26 @@ def build_gateway_parser(
         "--replace", action="store_true",
         help="Replace any existing gateway instance (useful for systemd)")
     gateway_run.add_argument(
-        "--force",
-        action="store_true",
-        help=(
-            "Start a foreground gateway even when a systemd/launchd/s6 service "
+        "--force", action="store_true",
+        help="Start a foreground gateway even when a systemd/launchd/s6 service "
             "already supervises this profile. Without --force, the command "
             "refuses because a second dispatcher escapes the service and can "
-            "corrupt shared gateway state."))
+            "corrupt shared gateway state.")
     gateway_run.add_argument(
-        "--no-supervise",
-        action="store_true",
-        help=(
-            "Inside the s6-overlay Docker image, normally `gateway run` is "
+        "--no-supervise", action="store_true",
+        help="Inside the s6-overlay Docker image, normally `gateway run` is "
             "automatically redirected to the supervised s6 service (so the "
             "gateway gets auto-restart on crash, plus a supervised dashboard "
             "if HERMES_DASHBOARD is set). Pass --no-supervise to opt out and "
             "get the historical pre-s6 foreground behavior: the gateway is "
             "the container's main process and the container exits with the "
-            "gateway's exit code. No effect outside an s6 container."))
+            "gateway's exit code. No effect outside an s6 container.")
     gateway_run.add_argument(
-        "--external-supervisor",
-        action="store_true",
-        help=(
-            "Declare that an external process manager owns this foreground "
+        "--external-supervisor", action="store_true",
+        help="Declare that an external process manager owns this foreground "
             "gateway. In-chat restarts and updates exit back to that manager "
             "instead of spawning a detached replacement. Use this when a "
-            "launchd/systemd wrapper strips its native environment markers."))
+            "launchd/systemd wrapper strips its native environment markers.")
     add_accept_hooks_flag(gateway_run)
     add_accept_hooks_flag(gateway_parser)
 
@@ -100,8 +93,7 @@ def build_gateway_parser(
     gateway_status = gateway_subparsers.add_parser("status", help="Show gateway status")
     gateway_status.add_argument("--deep", action="store_true", help="Deep status check")
     gateway_status.add_argument(
-        "-l",
-        "--full", action="store_true",
+        "-l", "--full", action="store_true",
         help="Show full, untruncated service/log output where supported")
     gateway_status.add_argument(
         "--system", action="store_true", help="Target the Linux system-level gateway service")
@@ -145,19 +137,16 @@ def build_gateway_parser(
 
     # gateway migrate-legacy
     gateway_migrate_legacy = gateway_subparsers.add_parser(
-        "migrate-legacy",
-        help="Remove legacy hermes.service units from pre-rename installs",
-        description=(
-            "Stop, disable, and remove legacy Hermes gateway unit files "
+        "migrate-legacy", help="Remove legacy hermes.service units from pre-rename installs",
+        description="Stop, disable, and remove legacy Hermes gateway unit files "
             "(e.g. hermes.service) left over from older installs. Profile "
             "units (hermes-gateway-<profile>.service) and unrelated "
-            "third-party services are never touched."))
+            "third-party services are never touched.")
     gateway_migrate_legacy.add_argument(
         "--dry-run", dest="dry_run", action="store_true",
         help="List what would be removed without doing it")
     gateway_migrate_legacy.add_argument(
-        "-y",
-        "--yes", dest="yes", action="store_true", help="Skip the confirmation prompt")
+        "-y", "--yes", dest="yes", action="store_true", help="Skip the confirmation prompt")
 
     # gateway enroll — enroll a self-hosted gateway with a relay connector
     # (connector⇄gateway auth). Redeems a single-use enrollment token for the
@@ -167,45 +156,33 @@ def build_gateway_parser(
     gateway_enroll = gateway_subparsers.add_parser(
         "enroll",
         help="Enroll this gateway with a relay connector (writes relay auth creds to .env)",
-        description=(
-            "Redeem a single-use enrollment token with a relay connector. "
+        description="Redeem a single-use enrollment token with a relay connector. "
             "Authenticates as your Nous Portal account (the connector derives the "
             "authoritative tenant from it), mints this gateway's per-gateway secret "
             "and per-tenant delivery key, and writes GATEWAY_RELAY_ID / "
             "GATEWAY_RELAY_SECRET / GATEWAY_RELAY_DELIVERY_KEY into ~/.hermes/.env. "
-            "Requires being logged in (hermes setup). Not available in managed installs."))
+            "Requires being logged in (hermes setup). Not available in managed installs.")
     gateway_enroll.add_argument(
-        "--token",
-        default=None,
-        help=(
-            "The single-use enrollment token from the connector (delivered with "
-            "your gateway config). Also settable via GATEWAY_RELAY_ENROLL_TOKEN."))
+        "--token", default=None,
+        help="The single-use enrollment token from the connector (delivered with "
+            "your gateway config). Also settable via GATEWAY_RELAY_ENROLL_TOKEN.")
     gateway_enroll.add_argument(
-        "--connector-url",
-        dest="connector_url",
-        default=None,
-        help=(
-            "The connector base/relay URL, e.g. wss://connector.example.com/relay "
+        "--connector-url", dest="connector_url", default=None,
+        help="The connector base/relay URL, e.g. wss://connector.example.com/relay "
             "or https://connector.example.com. Also settable via GATEWAY_RELAY_URL "
-            "/ gateway.relay_url in config.yaml."))
+            "/ gateway.relay_url in config.yaml.")
     gateway_enroll.add_argument(
-        "--gateway-id",
-        dest="gateway_id",
-        default=None,
-        help=(
-            "A stable id for this gateway instance (kill-switch granularity). "
-            "Defaults to gw-<hostname>."))
+        "--gateway-id", dest="gateway_id", default=None,
+        help="A stable id for this gateway instance (kill-switch granularity). "
+            "Defaults to gw-<hostname>.")
     gateway_enroll.add_argument(
-        "--wake-url",
-        dest="wake_url",
-        default=None,
-        help=(
-            "Phase 5 §5.2 wake URL: a reachable URL the connector pokes "
+        "--wake-url", dest="wake_url", default=None,
+        help="Phase 5 §5.2 wake URL: a reachable URL the connector pokes "
             "(payload-free GET) to wake this gateway when buffered work arrives "
             "while it's idle/suspended, so it reconnects and drains. Persisted as "
             "GATEWAY_RELAY_WAKE_URL in ~/.hermes/.env and forwarded at provision. "
             "Optional — without it the gateway still drains whenever it next "
-            "reconnects on its own."))
+            "reconnects on its own.")
     gateway_enroll.set_defaults(func=cmd_gateway_enroll)
 
     # proxy command — local OpenAI-compatible proxy that attaches the user's
@@ -213,13 +190,11 @@ def build_gateway_parser(
     # external apps (OpenViking, Karakeep, Open WebUI, ...) ride a logged-in
     # subscription without copy-pasting static API keys.
     proxy_parser = subparsers.add_parser(
-        "proxy",
-        help="Local OpenAI-compatible proxy to OAuth providers",
-        description=(
-            "Run a local HTTP server that forwards OpenAI-compatible requests "
+        "proxy", help="Local OpenAI-compatible proxy to OAuth providers",
+        description="Run a local HTTP server that forwards OpenAI-compatible requests "
             "to an OAuth-authenticated provider (e.g. Nous Portal). External "
             "apps can point at the proxy with any bearer token; the proxy "
-            "attaches your real credentials."))
+            "attaches your real credentials.")
     proxy_subparsers = proxy_parser.add_subparsers(dest="proxy_command")
 
     proxy_start = proxy_subparsers.add_parser("start", help="Run the proxy in the foreground")

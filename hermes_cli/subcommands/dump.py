@@ -8,8 +8,7 @@ from typing import Callable
 def build_dump_parser(subparsers, *, cmd_dump: Callable) -> None:
     """Attach the ``dump`` subcommand to ``subparsers``."""
     dump_parser = subparsers.add_parser(
-        "dump",
-        help="Dump setup summary for support/debugging",
+        "dump", help="Dump setup summary for support/debugging",
         description="Output a compact, plain-text summary of your Hermes setup "
         "that can be copy-pasted into Discord/GitHub for support context")
     dump_parser.add_argument(

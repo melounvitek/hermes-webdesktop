@@ -8,10 +8,8 @@ import sys
 def build_computer_use_parser(subparsers) -> None:
     """Attach the ``computer-use`` subcommand to ``subparsers``."""
     computer_use_parser = subparsers.add_parser(
-        "computer-use",
-        help="Manage the Computer Use (cua-driver) backend (macOS/Windows/Linux)",
-        description=(
-            "Install or check the cua-driver binary used by the\n"
+        "computer-use", help="Manage the Computer Use (cua-driver) backend (macOS/Windows/Linux)",
+        description="Install or check the cua-driver binary used by the\n"
             "`computer_use` toolset. Supported on macOS, Windows, and\n"
             "Linux.\n\n"
             "Use `hermes computer-use install` to fetch and run the\n"
@@ -23,39 +21,31 @@ def build_computer_use_parser(subparsers) -> None:
             "Use `hermes computer-use doctor` to run cua-driver's\n"
             "`health_report` MCP tool and surface its check matrix\n"
             "(TCC, bundle identity, version, platform support, ...)\n"
-            "in human-readable form."))
+            "in human-readable form.")
     computer_use_sub = computer_use_parser.add_subparsers(dest="computer_use_action")
 
     computer_use_install = computer_use_sub.add_parser(
         "install", help="Install or repair the cua-driver binary (macOS/Windows/Linux)")
     computer_use_install.add_argument(
-        "--upgrade",
-        action="store_true",
-        help=(
-            "Re-run the upstream installer even if cua-driver is already on "
+        "--upgrade", action="store_true",
+        help="Re-run the upstream installer even if cua-driver is already on "
             "PATH. The upstream install.sh always pulls the latest release, "
-            "so this performs an in-place upgrade."))
+            "so this performs an in-place upgrade.")
     computer_use_sub.add_parser("status", help="Print whether cua-driver is installed and on PATH")
     computer_use_doctor = computer_use_sub.add_parser(
-        "doctor",
-        help="Run cua-driver `health_report` and surface the check matrix",
-        description=(
-            "Drive cua-driver's stable `health_report` MCP tool and render\n"
+        "doctor", help="Run cua-driver `health_report` and surface the check matrix",
+        description="Drive cua-driver's stable `health_report` MCP tool and render\n"
             "its check matrix (TCC permissions, bundle identity, version,\n"
             "platform support, screenshot probe, …) as human-readable\n"
             "output. cua-driver owns the health model; this command stays\n"
             "thin so new checks added upstream surface here without code\n"
             "changes. Exits 0 when overall=ok, 1 when degraded/failed, 2\n"
-            "when the binary is missing or unreachable."))
+            "when the binary is missing or unreachable.")
     computer_use_doctor.add_argument(
-        "--include",
-        action="append",
-        default=[],
-        metavar="CHECK",
-        help=(
-            "Run only the listed checks. Repeat for multiple "
+        "--include", action="append", default=[], metavar="CHECK",
+        help="Run only the listed checks. Repeat for multiple "
             "(e.g. --include tcc_accessibility --include bundle_identity). "
-            "Unknown names are reported by cua-driver."))
+            "Unknown names are reported by cua-driver.")
     computer_use_doctor.add_argument(
         "--skip", action="append", default=[], metavar="CHECK",
         help="Skip the listed checks. Repeat for multiple. Wins over --include.")
@@ -63,14 +53,12 @@ def build_computer_use_parser(subparsers) -> None:
         "--json", action="store_true",
         help="Emit the raw structured payload as JSON (same shape as `tools/call`).")
     computer_use_perms = computer_use_sub.add_parser(
-        "permissions",
-        help="Check or grant macOS Accessibility + Screen Recording (macOS)",
-        description=(
-            "Computer Use drives the Mac through cua-driver, whose TCC grants\n"
+        "permissions", help="Check or grant macOS Accessibility + Screen Recording (macOS)",
+        description="Computer Use drives the Mac through cua-driver, whose TCC grants\n"
             "attach to cua-driver's own identity (com.trycua.driver) — not the\n"
             "terminal or the Hermes app. `status` reports the driver's grant\n"
             "state; `grant` launches CuaDriver via LaunchServices so the macOS\n"
-            "permission dialog is attributed to the process that does the work."))
+            "permission dialog is attributed to the process that does the work.")
     computer_use_perms_sub = computer_use_perms.add_subparsers(dest="computer_use_perms_action")
     computer_use_perms_status = computer_use_perms_sub.add_parser(
         "status", help="Report Accessibility + Screen Recording grant state (read-only)")
@@ -100,10 +88,8 @@ def build_computer_use_parser(subparsers) -> None:
                 try:
                     from hermes_cli.tools_config import _cua_driver_env
                     version = subprocess.run(
-                        [path, "--version"],
-                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
-                        env=_cua_driver_env(),
-                    ).stdout.strip()
+                        [path, "--version"], capture_output=True, text=True, encoding="utf-8",
+                        errors="replace", timeout=5, env=_cua_driver_env()).stdout.strip()
                 except Exception:
                     pass
                 from hermes_cli.tools_config import _cua_version_summary

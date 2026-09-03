@@ -17,8 +17,7 @@ def build_uninstall_parser(subparsers, *, cmd_uninstall: Callable) -> None:
         "--gui", action="store_true",
         help="Uninstall only the desktop Chat GUI, leaving the agent intact")
     uninstall_parser.add_argument(
-        "--gui-summary",
-        action="store_true",
+        "--gui-summary", action="store_true",
         help="Print a JSON summary of installed GUI/agent artifacts and exit "
         "(used by the desktop app to gate uninstall options)")
     uninstall_parser.add_argument(

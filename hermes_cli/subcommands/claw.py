@@ -14,8 +14,7 @@ def build_claw_parser(subparsers, *, cmd_claw: Callable) -> None:
 
     # claw migrate
     claw_migrate = claw_subparsers.add_parser(
-        "migrate",
-        help="Migrate from OpenClaw to Hermes",
+        "migrate", help="Migrate from OpenClaw to Hermes",
         description="Import settings, memories, skills, and API keys from an OpenClaw installation. "
         "Always shows a preview before making changes.")
     claw_migrate.add_argument("--source", help="Path to OpenClaw directory (default: ~/.openclaw)")
@@ -23,22 +22,18 @@ def build_claw_parser(subparsers, *, cmd_claw: Callable) -> None:
         "--dry-run", action="store_true",
         help="Preview only — stop after showing what would be migrated")
     claw_migrate.add_argument(
-        "--preset",
-        choices=["user-data", "full"],
-        default="full",
+        "--preset", choices=["user-data", "full"], default="full",
         help="Migration preset (default: full). Neither preset imports secrets — "
         "pass --migrate-secrets to include API keys.")
     claw_migrate.add_argument(
         "--overwrite", action="store_true",
         help="Overwrite existing files (default: refuse to apply when the plan has conflicts)")
     claw_migrate.add_argument(
-        "--migrate-secrets",
-        action="store_true",
+        "--migrate-secrets", action="store_true",
         help="Include allowlisted secrets (TELEGRAM_BOT_TOKEN, API keys, etc.). "
         "Required even under --preset full.")
     claw_migrate.add_argument(
-        "--no-backup",
-        action="store_true",
+        "--no-backup", action="store_true",
         help="Skip the pre-migration zip snapshot of ~/.hermes/ (by default a "
         "single restore-point archive is written to ~/.hermes/backups/ "
         "before apply; restorable with 'hermes import').")

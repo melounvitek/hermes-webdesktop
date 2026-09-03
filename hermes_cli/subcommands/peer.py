@@ -89,8 +89,7 @@ def _request(
     from hermes_cli.urllib_security import open_credentialed_url
     data = json.dumps(body).encode("utf-8") if body is not None else None
     request_headers = {
-        "Authorization": f"Bearer {key}",
-        "Content-Type": "application/json",
+        "Authorization": f"Bearer {key}", "Content-Type": "application/json",
         "User-Agent": "hermes-peer-dm"}
     if headers:
         request_headers.update(headers)
@@ -155,8 +154,7 @@ def _ensure_bot_chat(base: str, key: str) -> str:
                 f"Peer already has a '{BOT_CHAT_TITLE}' session but it is hidden and the "
                 f"peer's gateway is too old to expose hidden sessions to this lookup "
                 f"(HTTP 400: {detail}). Update the peer's hermes-agent, or unhide the "
-                f"session there: PATCH /api/sessions/<id> {{\"hidden\": false}}."
-            ) from exc
+                f"session there: PATCH /api/sessions/<id> {{\"hidden\": false}}.") from exc
         raise
     # Real api_server wraps the row: {"object": "hermes.session", "session": {...}}.
     session = created.get("session") if isinstance(created.get("session"), dict) else created
@@ -297,8 +295,7 @@ def cmd_peer(args) -> int:
                 result = _request(
                     f"{base}/v1/runs/{urllib.parse.quote(run_id, safe='')}"
                     + ("/stop" if action == "stop" else ""),
-                    key,
-                    method="POST" if action == "stop" else "GET",
+                    key, method="POST" if action == "stop" else "GET",
                     body={} if action == "stop" else None)
             except urllib.error.HTTPError as exc:
                 print(
@@ -362,12 +359,8 @@ def cmd_peer(args) -> int:
                 print(f"Peer '{peer_name}' did not return a run ID.", file=sys.stderr)
                 return 1
             payload = {
-                "peer": peer_name,
-                "profile": profile,
-                "session_id": session_id,
-                "run_id": run_id,
-                "status": result.get("status") or "started",
-                "idempotency_key": idempotency_key,
+                "peer": peer_name, "profile": profile, "session_id": session_id, "run_id": run_id,
+                "status": result.get("status") or "started", "idempotency_key": idempotency_key,
                 "replayed": bool(result.get("replayed", False))}
             if getattr(args, "json", False):
                 print(json.dumps(payload))
@@ -410,15 +403,13 @@ def cmd_peer(args) -> int:
 def build_peer_parser(subparsers) -> None:
     """Attach the ``peer`` subcommand to ``subparsers``."""
     parser = subparsers.add_parser(
-        "peer",
-        help="Bot-to-bot DMs across machines (peer Hermes gateways)",
-        description=(
-            "Register other Hermes gateways as peers and message their agents. "
+        "peer", help="Bot-to-bot DMs across machines (peer Hermes gateways)",
+        description="Register other Hermes gateways as peers and message their agents. "
             "'hermes peer dm <peer>[/<agent>] \"...\"' delivers into the remote "
             "agent's canonical Bot Chat over the peer's API server and prints "
             "the reply — the cross-machine twin of 'hermes -p <bot> chat'. "
             "The peer must run the api_server platform; its API_SERVER_KEY is "
-            "stored locally as a credential in ~/.hermes/.env."),
+            "stored locally as a credential in ~/.hermes/.env.",
         epilog=(
             "Examples:\n"
             "  hermes peer add spark --url http://spark.lan:8377 --key <API_SERVER_KEY>\n"

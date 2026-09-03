@@ -8,14 +8,12 @@ import sys
 def build_browser_parser(subparsers) -> None:
     """Attach the ``browser`` subcommand to ``subparsers``."""
     browser_parser = subparsers.add_parser(
-        "browser",
-        help="Real-profile browsing helpers (close a browser locking its profile)",
-        description=(
-            "Helpers for real-profile browsing (browser.use_real_profile). "
+        "browser", help="Real-profile browsing helpers (close a browser locking its profile)",
+        description="Helpers for real-profile browsing (browser.use_real_profile). "
             "close-profile terminates the browser process tree holding your "
             "default profile so Hermes can copy it — DESTRUCTIVE (unsaved tabs "
             "in that browser are lost). The agent runs this only after you "
-            "approve closing the browser."))
+            "approve closing the browser.")
     browser_subparsers = browser_parser.add_subparsers(dest="browser_action")
     browser_close = browser_subparsers.add_parser(
         "close-profile",

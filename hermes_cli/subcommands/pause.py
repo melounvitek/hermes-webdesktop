@@ -46,12 +46,10 @@ def cmd_resume(args: argparse.Namespace) -> int:
 def build_pause_parser(subparsers) -> None:
     """Attach the ``pause`` and ``resume`` subcommands to ``subparsers``."""
     pause_parser = subparsers.add_parser(
-        "pause",
-        help="Emergency stop: pause cron/kanban dispatch and new gateway turns",
-        description=(
-            "Engage the global emergency stop. Halts NEW work only — cron "
+        "pause", help="Emergency stop: pause cron/kanban dispatch and new gateway turns",
+        description="Engage the global emergency stop. Halts NEW work only — cron "
             "dispatch, kanban dispatch, and new gateway turns — until "
-            "`hermes resume`. In-flight work is never killed."))
+            "`hermes resume`. In-flight work is never killed.")
     pause_parser.add_argument(
         "--reason", default=None, help="Optional reason stored in the sentinel and shown to users")
     pause_parser.set_defaults(func=cmd_pause)

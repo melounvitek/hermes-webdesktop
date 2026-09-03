@@ -31,19 +31,16 @@ from typing import Callable
 def build_sync_parser(subparsers, *, cmd_sync: Callable) -> None:
     """Attach the ``sync`` subcommand (and its sub-actions) to ``subparsers``."""
     sync_parser = subparsers.add_parser(
-        "sync",
-        help="Skill Sync — sync your skills across devices and with your team",
-        description=(
-            "Skill Sync keeps your skills with you. Personal sync moves your "
+        "sync", help="Skill Sync — sync your skills across devices and with your team",
+        description="Skill Sync keeps your skills with you. Personal sync moves your "
             "own skills between your devices; if you belong to an "
             "organisation, you also get its shared skills and can propose "
-            "your own back to the team."),
-        epilog=(
-            "Examples:\n"
+            "your own back to the team.",
+        epilog="Examples:\n"
             "  hermes sync status            what is synced, and from where\n"
             "  hermes sync enable my-skill   include a skill in your sync\n"
             "  hermes sync now               pull, then push\n"
-            "  hermes sync propose my-skill  share a skill with your team\n"),
+            "  hermes sync propose my-skill  share a skill with your team\n",
         formatter_class=argparse.RawDescriptionHelpFormatter)
     sync_sub = sync_parser.add_subparsers(dest="sync_command")
 
@@ -61,9 +58,7 @@ def build_sync_parser(subparsers, *, cmd_sync: Callable) -> None:
     device = sync_sub.add_parser(
         "device", help="Show or set this device's label (shown in the sync console)")
     device.add_argument(
-        "--name",
-        dest="device_name",
-        default=None,
+        "--name", dest="device_name", default=None,
         help="Set a human-friendly label for this device (e.g. \"Ben's Laptop\"). "
         "Omit to print the current label.")
 
@@ -71,16 +66,13 @@ def build_sync_parser(subparsers, *, cmd_sync: Callable) -> None:
     # reviews; an admin's merges straight into the shared set. Accounts that
     # aren't in a shared organisation are told so plainly.
     propose = sync_sub.add_parser(
-        "propose",
-        help="Share a skill with your organisation",
-        description=(
-            "Submit one of your skills to your organisation's shared set. If "
+        "propose", help="Share a skill with your organisation",
+        description="Submit one of your skills to your organisation's shared set. If "
             "you are an admin it is added directly; otherwise it becomes a "
             "proposal for an admin to review. Accounts that aren't part of a "
-            "shared organisation don't have this workflow."))
+            "shared organisation don't have this workflow.")
     propose.add_argument("name", help="Skill name to share")
     propose.add_argument(
-        "-m",
-        "--message", default=None, help="Optional message describing the change")
+        "-m", "--message", default=None, help="Optional message describing the change")
 
     sync_parser.set_defaults(func=cmd_sync)

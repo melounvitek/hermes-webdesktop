@@ -8,24 +8,20 @@ from typing import Callable
 def build_plugins_parser(subparsers, *, cmd_plugins: Callable) -> None:
     """Attach the ``plugins`` subcommand to ``subparsers``."""
     plugins_parser = subparsers.add_parser(
-        "plugins",
-        help="Manage and validate plugins",
-        description=(
-            "Install, update, remove, list, or validate native Hermes plugins "
-            "and portable Agent Plugins v1 packages. Portable packages install disabled."))
+        "plugins", help="Manage and validate plugins",
+        description="Install, update, remove, list, or validate native Hermes plugins "
+            "and portable Agent Plugins v1 packages. Portable packages install disabled.")
     plugins_subparsers = plugins_parser.add_subparsers(dest="plugins_action")
 
     plugins_install = plugins_subparsers.add_parser(
         "install", help="Install a plugin from a Git URL, owner/repo, or index name")
     plugins_install.add_argument(
         "identifier",
-        help=(
-            "Git URL, owner/repo shorthand (e.g. anpicasso/hermes-plugin-chrome-profiles), "
+        help="Git URL, owner/repo shorthand (e.g. anpicasso/hermes-plugin-chrome-profiles), "
             "or a bare plugin name resolved through the community index "
-            "(see `hermes plugins search`)"))
+            "(see `hermes plugins search`)")
     plugins_install.add_argument(
-        "--force",
-        "-f", action="store_true", help="Remove existing plugin and reinstall")
+        "--force", "-f", action="store_true", help="Remove existing plugin and reinstall")
     plugins_install.add_argument(
         "--ref", metavar="COMMIT_SHA",
         help="Install exactly one immutable 40-character Git commit SHA")
@@ -41,9 +37,7 @@ def build_plugins_parser(subparsers, *, cmd_plugins: Callable) -> None:
     plugins_search = plugins_subparsers.add_parser(
         "search", help="Search the community plugin index")
     plugins_search.add_argument(
-        "term",
-        nargs="?",
-        default="",
+        "term", nargs="?", default="",
         help="Search term matched fuzzily against name, description, and tags "
         "(omit to browse the full index)")
     plugins_search.add_argument("--json", action="store_true", help="Print machine-readable JSON")
@@ -77,8 +71,7 @@ def build_plugins_parser(subparsers, *, cmd_plugins: Callable) -> None:
     plugins_enable.add_argument("name", help="Plugin name to enable")
     _enable_override_group = plugins_enable.add_mutually_exclusive_group()
     _enable_override_group.add_argument(
-        "--allow-tool-override",
-        action="store_true",
+        "--allow-tool-override", action="store_true",
         help="Grant this plugin permission to replace built-in tools "
         "(e.g. shell_exec, write_file). Skips the confirmation prompt.")
     _enable_override_group.add_argument(
@@ -90,12 +83,10 @@ def build_plugins_parser(subparsers, *, cmd_plugins: Callable) -> None:
     plugins_disable.add_argument("name", help="Plugin name to disable")
 
     plugins_capabilities = plugins_subparsers.add_parser(
-        "capabilities",
-        help="Show declared vs granted capabilities per plugin",
-        description=(
-            "Show each plugin's declared capabilities (from plugin.yaml) "
+        "capabilities", help="Show declared vs granted capabilities per plugin",
+        description="Show each plugin's declared capabilities (from plugin.yaml) "
             "against what the user has granted. Capabilities are a consent "
-            "and audit layer over host API surfaces — NOT a sandbox."))
+            "and audit layer over host API surfaces — NOT a sandbox.")
     plugins_capabilities.add_argument(
         "name", nargs="?", default=None,
         help="Plugin id to inspect (omit to list all plugins with capabilities)")
@@ -109,21 +100,18 @@ def build_plugins_parser(subparsers, *, cmd_plugins: Callable) -> None:
         "--ci", action="store_true", help="Exit non-zero when validation reports an error")
 
     plugins_pack = plugins_subparsers.add_parser(
-        "pack",
-        help="Declarative, shareable plugin sets (hermes-pack.yaml)",
-        description=(
-            "Install, export, or inspect plugin packs — a single YAML file "
+        "pack", help="Declarative, shareable plugin sets (hermes-pack.yaml)",
+        description="Install, export, or inspect plugin packs — a single YAML file "
             "pinning a set of plugins to exact commit SHAs, with optional "
             "non-secret config seeds. Installing a pack fans out to ordinary "
-            "pinned installs; capability consent stays per-plugin."))
+            "pinned installs; capability consent stays per-plugin.")
     pack_subparsers = plugins_pack.add_subparsers(dest="pack_action")
 
     pack_install = pack_subparsers.add_parser(
         "install", help="Review and install a pack from a file path or https URL")
     pack_install.add_argument("source", help="Path to a hermes-pack.yaml file, or an https:// URL")
     pack_install.add_argument(
-        "--force",
-        "-f", action="store_true", help="Reinstall plugins that already exist")
+        "--force", "-f", action="store_true", help="Reinstall plugins that already exist")
 
     pack_export = pack_subparsers.add_parser(
         "export", help="Emit a pack YAML for the current install on stdout")

@@ -8,13 +8,10 @@ from typing import Callable
 def build_gui_parser(subparsers, *, cmd_gui: Callable) -> None:
     """Attach the ``gui`` subcommand to ``subparsers``."""
     gui_parser = subparsers.add_parser(
-        "desktop",
-        aliases=["gui"],
-        help="Build and launch the native desktop app",
-        description=(
-            "Launch the Hermes Electron desktop app. By default this installs "
+        "desktop", aliases=["gui"], help="Build and launch the native desktop app",
+        description="Launch the Hermes Electron desktop app. By default this installs "
             "workspace Node dependencies, builds the current OS's unpacked "
-            "Electron app, then launches that packaged artifact."))
+            "Electron app, then launches that packaged artifact.")
     gui_parser.add_argument(
         "--source", action="store_true",
         help="Launch via `electron .` against apps/desktop/dist instead of the packaged app")
@@ -44,15 +41,13 @@ def build_gui_parser(subparsers, *, cmd_gui: Callable) -> None:
         "--force-build", action="store_true",
         help="Force a full rebuild even if the content stamp matches")
     gui_parser.add_argument(
-        "--setup-tcc-identity",
-        action="store_true",
-        help=(
-            "macOS only: create/import a self-signed code-signing certificate "
+        "--setup-tcc-identity", action="store_true",
+        help="macOS only: create/import a self-signed code-signing certificate "
             "in the login keychain and point desktop.macos_signing_identity at "
             "it, then re-sign the packaged app. Makes macOS TCC grants (Full "
             "Disk Access, Accessibility, Files and Folders, microphone) survive "
             "rebuilds with a certificate-anchored identity. Idempotent — safe "
-            "to re-run after updates."))
+            "to re-run after updates.")
     gui_parser.add_argument(
         "--identity", default="Hermes Local Signing",
         help="Certificate name to create/use for --setup-tcc-identity (default: Hermes Local Signing)",

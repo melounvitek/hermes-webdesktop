@@ -29,8 +29,7 @@ def build_config_parser(subparsers, *, cmd_config: Callable) -> None:
         "key", nargs="?", help="Configuration key (e.g., model, terminal.backend)")
     config_set.add_argument("value", nargs="?", help="Value to set")
     config_set.add_argument(
-        "--force",
-        action="store_true",
+        "--force", action="store_true",
         help="Skip the unknown-key notice printed after writing a key the "
         "running version doesn't recognize (the value is saved either way).")
 

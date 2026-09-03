@@ -19,9 +19,6 @@ def add_accept_hooks_flag(parser: argparse.ArgumentParser) -> None:
     position.
     """
     parser.add_argument(
-        "--accept-hooks",
-        action="store_true",
-        default=argparse.SUPPRESS,
-        help=(
-            "Auto-approve unseen shell hooks without a TTY prompt "
-            "(equivalent to HERMES_ACCEPT_HOOKS=1 / hooks_auto_accept: true)."))
+        "--accept-hooks", action="store_true", default=argparse.SUPPRESS,
+        help="Auto-approve unseen shell hooks without a TTY prompt "
+            "(equivalent to HERMES_ACCEPT_HOOKS=1 / hooks_auto_accept: true).")

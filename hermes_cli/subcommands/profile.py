@@ -33,8 +33,7 @@ def build_profile_parser(subparsers, *, cmd_profile: Callable) -> None:
         help="Create an empty profile with no bundled skills (opts out of `hermes update` skill sync)",
     )
     profile_create.add_argument(
-        "--description",
-        default=None,
+        "--description", default=None,
         help="One- or two-sentence description of what this profile is good at. "
              "Used by the kanban decomposer to route tasks based on role instead "
              "of profile name alone. Skip and add later via `hermes profile describe`.")
@@ -52,13 +51,11 @@ def build_profile_parser(subparsers, *, cmd_profile: Callable) -> None:
         "--text", default=None,
         help="Set description to this exact text (overwrites any existing description)")
     profile_describe.add_argument(
-        "--auto",
-        action="store_true",
+        "--auto", action="store_true",
         help="Auto-generate description via the auxiliary LLM "
              "(uses auxiliary.profile_describer)")
     profile_describe.add_argument(
-        "--overwrite",
-        action="store_true",
+        "--overwrite", action="store_true",
         help="With --auto, replace user-authored descriptions too (default: only "
              "fill in missing or previously-auto descriptions)")
     profile_describe.add_argument(
@@ -97,12 +94,10 @@ def build_profile_parser(subparsers, *, cmd_profile: Callable) -> None:
 
     # ---------- Distribution subcommands (issue #20456) ----------
     profile_install = profile_subparsers.add_parser(
-        "install",
-        help="Install a profile distribution from a git URL or local directory",
-        description=(
-            "Install a Hermes profile distribution. SOURCE can be a git URL "
+        "install", help="Install a profile distribution from a git URL or local directory",
+        description="Install a Hermes profile distribution. SOURCE can be a git URL "
             "(github.com/user/repo, https://..., git@...) or a local "
-            "directory containing distribution.yaml at its root."))
+            "directory containing distribution.yaml at its root.")
     profile_install.add_argument("source", help="Distribution source (git URL or local directory)")
     profile_install.add_argument(
         "--name", dest="install_name", metavar="NAME",
@@ -117,13 +112,11 @@ def build_profile_parser(subparsers, *, cmd_profile: Callable) -> None:
         "-y", "--yes", action="store_true", help="Skip manifest preview confirmation")
 
     profile_update = profile_subparsers.add_parser(
-        "update",
-        help="Re-pull a distribution and apply updates (user data preserved)",
-        description=(
-            "Fetch the distribution from its recorded source and overwrite "
+        "update", help="Re-pull a distribution and apply updates (user data preserved)",
+        description="Fetch the distribution from its recorded source and overwrite "
             "distribution-owned files (SOUL.md, skills/, cron/, mcp.json). "
             "User data (memories, sessions, auth, .env) is never touched. "
-            "config.yaml is preserved unless --force-config is passed."))
+            "config.yaml is preserved unless --force-config is passed.")
     profile_update.add_argument("profile_name", help="Profile to update")
     profile_update.add_argument(
         "--force-config", action="store_true",
