@@ -8,6 +8,7 @@ context before each model iteration.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import json
 import logging
@@ -366,8 +367,7 @@ def _run_reference(
     label = _slot_label(slot)
     runtime = _slot_runtime(slot)
     trace_fields = {
-        "model": slot.get("model"), "provider": runtime.get("provider") or slot.get("provider"),
-        "temperature": temperature,
+        "model": slot.get("model"), "provider": runtime.get("provider") or slot.get("provider"), "temperature": temperature,
     }
     # The advisory view already stripped the agent's system prompt; this is the only one.
     messages = [{"role": "system", "content": _REFERENCE_SYSTEM_PROMPT}, *ref_messages]
@@ -384,18 +384,15 @@ def _run_reference(
         )
         # Per-slot max_tokens beats the preset-level reference_max_tokens.
         slot_max_tokens = slot.get("max_tokens")
-        extra_headers = None
-        # Normalize provider aliases (github, github-copilot, ...) via the canonical table.
+        # Copilot gates premium models on request attribution; MoA fan-out serves the
+        # user's current turn, so mirror the main agent's x-initiator header.
         from agent.auxiliary_client import _normalize_aux_provider
-        if _normalize_aux_provider(str(runtime.get("provider") or "")) in ("copilot", "copilot-acp"):
-            # Copilot gates premium models on request attribution; MoA fan-out serves the
-            # user's current turn, so mirror the main agent's x-initiator header.
-            extra_headers = {"x-initiator": "user"}
+        is_copilot = _normalize_aux_provider(str(runtime.get("provider") or "")) in ("copilot", "copilot-acp")
         response = call_llm(
             task="moa_reference", messages=trimmed, temperature=temperature,
             max_tokens=slot_max_tokens if slot_max_tokens is not None else max_tokens,
             timeout=reference_timeout, reasoning_config=_slot_reasoning_config(slot),
-            extra_headers=extra_headers, **runtime,
+            extra_headers={"x-initiator": "user"} if is_copilot else None, **runtime,
         )
         output_text = _extract_text(response) or "(empty response)"
         acct = _RefAccounting(
@@ -416,6 +413,32 @@ _REFERENCE_DEFAULT_OUTPUT_RESERVE = 8192
 _REFERENCE_TRIM_SAFETY_FRACTION = 0.10
 
 
+def _reference_context_length(slot: dict[str, Any], runtime: dict[str, Any], cache: Any) -> int | None:
+    """Context window for a slot, memoized in ``cache`` per (provider, model) when given.
+
+    Failures are cached too so a flaky metadata source is not re-probed per reference.
+    """
+    from agent.model_metadata import get_model_context_length
+
+    model = str(slot.get("model") or "")
+    provider = str(runtime.get("provider") or slot.get("provider") or "")
+    key = (provider, model)
+    has_cache = isinstance(cache, dict)
+    if has_cache and key in cache:
+        return cache[key]
+    try:
+        context_length = get_model_context_length(
+            model=model, base_url=str(runtime.get("base_url") or ""),
+            api_key=str(runtime.get("api_key") or ""), provider=provider,
+        )
+    except Exception:
+        logger.debug("MoA reference context-length resolution failed for %s", _slot_label(slot))
+        context_length = None
+    if has_cache:
+        cache[key] = context_length
+    return context_length
+
+
 def _trim_messages_for_reference(
     messages: list[dict[str, Any]], slot: dict[str, str], runtime: dict[str, Any], *,
     reserve_output_tokens: int | None = None, context_length_cache: Any = None,
@@ -428,45 +451,19 @@ def _trim_messages_for_reference(
     budget). ``context_length_cache`` memoizes the window per (provider, model);
     unresolvable windows leave messages unchanged.
     """
-    if not messages:
+    if not messages or not slot.get("model"):
         return messages
+    from agent.model_metadata import estimate_messages_tokens_rough
 
-    from agent.model_metadata import estimate_messages_tokens_rough, get_model_context_length
-
-    model = str(slot.get("model") or "")
-    provider = str(runtime.get("provider") or slot.get("provider") or "")
-    if not model:
-        return messages
-
-    cache_key = (provider, model)
-    has_cache = isinstance(context_length_cache, dict)
-    if has_cache and cache_key in context_length_cache:
-        context_length = context_length_cache[cache_key]
-    else:
-        try:
-            context_length = get_model_context_length(
-                model=model, base_url=str(runtime.get("base_url") or ""),
-                api_key=str(runtime.get("api_key") or ""), provider=provider,
-            )
-        except Exception:
-            logger.debug("MoA reference context-length resolution failed for %s", _slot_label(slot))
-            context_length = None
-        if has_cache:
-            # Cache failures too so a flaky metadata source is not re-probed per reference.
-            context_length_cache[cache_key] = context_length
-
+    context_length = _reference_context_length(slot, runtime, context_length_cache)
     if not isinstance(context_length, int) or context_length <= 0:
         return messages
-
     if not (isinstance(reserve_output_tokens, int) and reserve_output_tokens > 0):
         reserve_output_tokens = _REFERENCE_DEFAULT_OUTPUT_RESERVE
     reserve = int(reserve_output_tokens)
     budget = int(context_length * (1.0 - _REFERENCE_TRIM_SAFETY_FRACTION)) - reserve
-    if budget <= 0:
-        return messages
-
     estimated = estimate_messages_tokens_rough(messages)
-    if estimated <= budget:
+    if budget <= 0 or estimated <= budget:
         return messages
 
     has_system = messages[0].get("role") == "system"
@@ -522,16 +519,19 @@ def _settle_interrupted(
         else:
             results[idx] = _placeholder_output(slot, _INTERRUPTED_REFERENCE_NOTE)
             if late_accounting_sink is not None:
-                def _record_late(f: Any, _label: str = results[idx][0]) -> None:
-                    try:
-                        _lbl, _txt, _acct = f.result()
-                    except Exception:  # pragma: no cover - defensive
-                        return
-                    try:
-                        late_accounting_sink(_label, _acct)
-                    except Exception:  # pragma: no cover - defensive
-                        logger.debug("MoA: late accounting sink failed for %s", _label)
-                future.add_done_callback(_record_late)
+                future.add_done_callback(functools.partial(_record_late, late_accounting_sink, results[idx][0]))
+
+
+def _record_late(sink: Any, label: str, future: Any) -> None:
+    """Done-callback for an abandoned reference future: forward its real accounting."""
+    try:
+        _lbl, _txt, acct = future.result()
+    except Exception:  # pragma: no cover - defensive
+        return
+    try:
+        sink(label, acct)
+    except Exception:  # pragma: no cover - defensive
+        logger.debug("MoA: late accounting sink failed for %s", label)
 
 
 def _run_references_parallel(
@@ -550,17 +550,16 @@ def _run_references_parallel(
     if not reference_models:
         return []
 
-    results: list[tuple[str, str, Any] | None] = [None] * len(reference_models)
+    total = len(reference_models)
+    results: list[tuple[str, str, Any] | None] = [None] * total
     futures: dict[Any, int] = {}
     # Propagate the turn's contextvars (approval callbacks, Nous conversation tag).
     from tools.thread_context import propagate_context_to_thread
-    total = len(reference_models)
     completed = 0
     executor = ThreadPoolExecutor(max_workers=min(_MAX_REFERENCE_WORKERS, total))
     interrupted = False
     # Shared per-fan-out context-length cache (dict get/set is GIL-atomic).
     ctx_len_cache: dict[tuple[str, str], int | None] = {}
-    # Agent's cache disable + TTL for every advisor request; clamped in the decorator.
     cache_disabled, cache_ttl = _agent_cache_opts(agent)
     try:
         for idx, slot in enumerate(reference_models):
