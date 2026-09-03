@@ -235,12 +235,9 @@ def stream_current(
         completed_response_predicate=completed_response_predicate,
     )
     if completed_response_predicate is not None:
-        # Relay may defer the provider callback until the first pull; prime once so a
-        # completed response surfaces (a real first chunk is buffered).
+        # Relay may defer the provider callback until the first pull; prime once (a real first chunk is buffered).
         managed._prime_completed_response()
-        if managed.final_response is not None:
-            return managed.final_response
-    return managed
+    return managed.final_response if managed.final_response is not None else managed
 
 
 def _aclose_on_loop(loop: asyncio.AbstractEventLoop, stream: Any) -> None:
@@ -421,12 +418,8 @@ class ManagedLlmStream(Iterator[Any]):
         if self._prefetched_chunks:
             return self._prefetched_chunks.pop()
         if self._loop is None:
-            try:
-                chunk = next(self._stream)
-            except StopIteration:
-                self._close(logical_outcome="cancelled")
-                raise
-            if self._accept_chunk is not None and not self._accept_chunk(chunk):
+            chunk = next(self._stream, self)  # self: exhausted sentinel
+            if chunk is self or (self._accept_chunk is not None and not self._accept_chunk(chunk)):
                 self._close(logical_outcome="cancelled")
                 raise StopIteration
             return chunk
@@ -596,10 +589,9 @@ class AnthropicStreamAccumulator:
         for block in blocks:
             partial = block.pop("_partial_json", None)
             if partial is not None:
-                try:
-                    block["input"] = json.loads(partial)
-                except (TypeError, ValueError):
-                    block["input"] = partial
+                with contextlib.suppress(TypeError, ValueError):
+                    partial = json.loads(partial)
+                block["input"] = partial
         return {**self._message, "content": blocks}
 
     def response(self, base: Any = None) -> Any:
@@ -788,11 +780,11 @@ def _codec_round_trip_request_body(
     try:
         encoded = codec.encode(codec.decode(relay_request), relay_request)
         content = getattr(encoded, "content", encoded)
-        if isinstance(content, dict):
-            return _provider_request_body(content, metadata)
     except Exception:
         logger.warning("NeMo Relay request codec baseline failed; ignoring request rewrites", exc_info=True)
         return None
+    if isinstance(content, dict):
+        return _provider_request_body(content, metadata)
     logger.warning("NeMo Relay request codec returned an unsupported baseline; ignoring request rewrites")
     return None
 
@@ -809,10 +801,7 @@ def _provider_request_body(content: dict[str, Any], metadata: dict[str, Any] | N
 
 def _codec(relay: Any, metadata: dict[str, Any] | None) -> Any:
     protocol = _RELAY_PROTOCOL_BY_API_MODE.get(_api_mode(metadata))
-    codecs = getattr(relay, "codecs", None)
-    if protocol is None or codecs is None:
-        return None
-    codec = getattr(codecs, protocol[1], None)
+    codec = getattr(getattr(relay, "codecs", None), protocol[1], None) if protocol is not None else None
     return codec() if callable(codec) else None
 
 

@@ -100,8 +100,7 @@ def pop_relay_scope(relay: Any, handle: Any, *, output: Any = None, metadata: An
     """Pop a Relay scope, forwarding only the kwargs the live binding accepts.
     ``scope.pop`` gained ``metadata`` in nemo-relay 0.4+; older wheels raise TypeError."""
     pop = relay.scope.pop
-    candidates = (("output", output), ("metadata", metadata), ("timestamp", timestamp))
-    kwargs = {key: value for key, value in candidates if value is not None}
+    kwargs = {k: v for k, v in (("output", output), ("metadata", metadata), ("timestamp", timestamp)) if v is not None}
     try:
         params = inspect.signature(pop).parameters
     except (TypeError, ValueError):
@@ -180,8 +179,7 @@ class RelayOperationLease:
     """Keep process-wide Relay plugins alive across a deferred operation."""
 
     def __init__(self, runtime: "RelayRuntime") -> None:
-        self._lock = threading.Lock()
-        self._runtime: RelayRuntime | None = runtime
+        self._lock, self._runtime = threading.Lock(), runtime
 
     def run_in_session(self, session: RelaySession, callback: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
         """Run cleanup while this lease still owns the runtime lifetime."""
@@ -406,9 +404,9 @@ class RelayRuntime:
                 return None
             session = self._sessions.get(session_id)
             if session is None:
-                parent_session_id = self._subagent_parents.get(session_id, "")
-                session = RelaySession(session_id=session_id, parent_session_id=parent_session_id)
-                self._sessions[session_id] = session
+                session = self._sessions[session_id] = RelaySession(
+                    session_id=session_id, parent_session_id=self._subagent_parents.get(session_id, "")
+                )
         with session.lock:
             if session.closing:
                 return None
@@ -461,12 +459,8 @@ class RelayRuntime:
             return None
         parent = self.ensure_session({"session_id": parent_session_id})
         parent_handle = None if parent is None else parent.handle
-        turn = active_turn(parent_session_id)
-        # active_turn() already proved liveness and, for a RelayRuntime host, an open session.
-        if (
-            turn is not None and turn.handle is not None and turn.lease.host is self
-            and turn.lease.session.session_id == parent_session_id
-        ):
+        turn = active_turn(parent_session_id)  # already proved liveness and (RelayRuntime host) an open session
+        if turn is not None and turn.handle is not None and turn.lease.host is self:
             parent_handle = turn.handle
         with self._sessions_lock:
             if self._closing:
@@ -503,14 +497,13 @@ class RelayRuntime:
             return None if session.closing else session
 
     def _session_context(self, session: RelaySession, *, allow_closing: bool) -> contextvars.Context:
-        """Copy the current context and overlay the session's saved Relay vars."""
+        """Copy the current context and overlay the session's saved Relay vars (a copy: re-entrant from callbacks)."""
         with session.lock:
             if session.closing and not allow_closing:
                 raise RuntimeError("Hermes Relay session is closing")
             if session.context is None or session.handle is None:
                 raise RuntimeError("Hermes Relay session context is unavailable")
             relay_context = session.context.copy()
-        # A copy lets a helper inside a Relay callback re-enter the session's Context.
         context = contextvars.copy_context()
         for variable, value in relay_context.items():
             context.run(variable.set, value)
@@ -606,9 +599,8 @@ class RelayRuntime:
     def apply_tool_request_intercepts(self, *, session_id: str, tool_name: str, args: dict[str, Any]) -> dict[str, Any]:
         """Apply Relay request rewriting before Hermes authorizes a tool call."""
         request_intercepts = getattr(getattr(self.relay, "tools", None), "request_intercepts", None)
-        if not self.managed_execution_enabled() or not callable(request_intercepts):
-            return args
-        session = self.ensure_session({"session_id": session_id})
+        managed = self.managed_execution_enabled() and callable(request_intercepts)
+        session = self.ensure_session({"session_id": session_id}) if managed else None
         if session is None:
             return args
         result = self.run_in_session(session, request_intercepts, tool_name, args)
@@ -784,8 +776,7 @@ class RelayHostRegistry:
 
     def shutdown_all(self) -> None:
         with self._lock:
-            hosts = list(self._hosts.values())
-            self._hosts.clear()
+            hosts, self._hosts = list(self._hosts.values()), {}
         for host in hosts:
             host.shutdown()
 
@@ -904,9 +895,7 @@ class RelaySessionCoordinator:
     def acquire_conversation(
         self, *, profile_key: str, session_id: str, platform: str, parent_session_id: str = "", model: str = "",
     ) -> ConversationLease:
-        host = self.registry.for_profile(profile_key) or NoopRelayRuntime(
-            profile_key, "Relay host creation was disabled"
-        )
+        host = self.registry.for_profile(profile_key) or NoopRelayRuntime(profile_key, "Relay host creation was disabled")
         session = None
         if isinstance(host, RelayRuntime):
             context = {
@@ -924,9 +913,8 @@ class RelaySessionCoordinator:
         session_id, parent_session_id = context["session_id"], context["parent_session_id"]
         metadata = {"hermes.execution_surface": context["platform"] or "unknown"}
         if parent_session_id and parent_session_id != session_id:
-            return host.register_subagent(
-                {"parent_session_id": parent_session_id, "child_session_id": session_id}, metadata=metadata,
-            )
+            event = {"parent_session_id": parent_session_id, "child_session_id": session_id}
+            return host.register_subagent(event, metadata=metadata)
         return host.ensure_session({"session_id": session_id}, metadata=metadata)
 
     def begin_turn(self, lease: ConversationLease, *, turn_id: str, task_id: str) -> RelayTurnContext:
@@ -1191,9 +1179,7 @@ def current_profile_key() -> str:
     home = get_hermes_home().expanduser()
     if not home.is_absolute():
         return str(home.resolve())
-    raw = str(home)
-    cached = _PROFILE_KEY_CACHE.get(raw)
-    return cached if cached is not None else _PROFILE_KEY_CACHE.setdefault(raw, str(home.resolve()))
+    return _PROFILE_KEY_CACHE.get(str(home)) or _PROFILE_KEY_CACHE.setdefault(str(home), str(home.resolve()))
 
 
 def _load_nemo_relay() -> Any:
@@ -1230,11 +1216,10 @@ def _resolve_plugin_awaitable(value: Any) -> Any:
     """Resolve Relay's async plugin API from synchronous host construction."""
     if not inspect.isawaitable(value):
         return value
-    try:
+    with contextlib.suppress(RuntimeError):
         asyncio.get_running_loop()
-    except RuntimeError:
-        return asyncio.run(value)
-    return _run_on_daemon_thread(lambda: asyncio.run(value), name="hermes-nemo-relay-plugin-lifecycle")
+        return _run_on_daemon_thread(lambda: asyncio.run(value), name="hermes-nemo-relay-plugin-lifecycle")
+    return asyncio.run(value)
 
 
 def _session_id(event: dict[str, Any]) -> str:
