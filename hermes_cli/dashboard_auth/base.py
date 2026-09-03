@@ -42,11 +42,10 @@ class TokenPrincipal:
 class LoginStart:
     """First leg of the OAuth round trip.
 
-    ``redirect_url`` is where the browser goes (the IDP's authorize endpoint);
-    ``cookie_payload`` maps cookie name -> serialised PKCE/CSRF state that the
-    auth route sets (HttpOnly, Secure over HTTPS, TTL <= 10 min). The PKCE
-    cookie is ``SameSite=None; Secure`` over HTTPS so it survives the cross-site
-    redirect chain — see :func:`hermes_cli.dashboard_auth.cookies.set_pkce_cookie`.
+    ``redirect_url`` is the IDP's authorize endpoint; ``cookie_payload`` maps
+    cookie name -> serialised PKCE/CSRF state that the auth route sets
+    (HttpOnly, Secure over HTTPS, TTL <= 10 min, ``SameSite=None`` over HTTPS
+    so it survives the cross-site redirect chain — see ``cookies.set_pkce_cookie``).
     """
 
     redirect_url: str
@@ -88,6 +87,8 @@ def classify_jwks_lookup_error(exc: BaseException) -> Exception:
         import jwt
     except Exception:  # pragma: no cover - jwt is a hard dep of these providers
         return ProviderError(f"JWKS lookup failed: {exc!r}")
+    # Order matters: DecodeError/PyJWKSetError are checked before their
+    # PyJWKClientError / InvalidTokenError parents.
     if isinstance(exc, jwt.PyJWKClientConnectionError):
         return ProviderError(f"JWKS lookup failed: {exc}")
     if isinstance(exc, (jwt.DecodeError, jwt.PyJWKSetError)):
@@ -140,12 +141,7 @@ class DashboardAuthProvider(ABC):
 
     @abstractmethod
     def complete_login(
-        self,
-        *,
-        code: str,
-        state: str,
-        code_verifier: str,
-        redirect_uri: str,
+        self, *, code: str, state: str, code_verifier: str, redirect_uri: str,
     ) -> Session: ...
 
     @abstractmethod
@@ -157,9 +153,7 @@ class DashboardAuthProvider(ABC):
     @abstractmethod
     def revoke_session(self, *, refresh_token: str) -> None: ...
 
-    def complete_password_login(
-        self, *, username: str, password: str
-    ) -> "Session":
+    def complete_password_login(self, *, username: str, password: str) -> "Session":
         """Verify a username/password pair and mint a :class:`Session`.
 
         Only called when ``supports_password`` is True. Raise
@@ -197,17 +191,12 @@ def assert_protocol_compliance(cls: type) -> None:
     """
     for attr in ("name", "display_name"):
         if not getattr(cls, attr, ""):
-            raise TypeError(
-                f"{cls.__name__} missing or empty attribute: {attr!r}"
-            )
-    for method in (
-        "start_login", "complete_login", "verify_session",
-        "refresh_session", "revoke_session",
-    ):
+            raise TypeError(f"{cls.__name__} missing or empty attribute: {attr!r}")
+    for method in ("start_login", "complete_login", "verify_session", "refresh_session",
+                   "revoke_session"):
         if not callable(getattr(cls, method, None)):
             raise TypeError(f"{cls.__name__} missing method: {method}")
     if getattr(cls, "__abstractmethods__", None):
         raise TypeError(
-            f"{cls.__name__} has unimplemented abstract methods: "
-            f"{sorted(cls.__abstractmethods__)}"
+            f"{cls.__name__} has unimplemented abstract methods: {sorted(cls.__abstractmethods__)}"
         )

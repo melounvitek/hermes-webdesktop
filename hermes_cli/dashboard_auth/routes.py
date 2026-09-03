@@ -28,7 +28,9 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from pydantic import BaseModel
 
-from hermes_cli.dashboard_auth import get_provider, list_providers, list_session_providers, native_flow
+from hermes_cli.dashboard_auth import (
+    get_provider, list_providers, list_session_providers, native_flow,
+)
 from hermes_cli.dashboard_auth import prefix as _prefix_mod
 from hermes_cli.dashboard_auth.audit import AuditEvent, audit_log
 from hermes_cli.dashboard_auth.base import (
@@ -124,7 +126,9 @@ def _bearer_payload(session: Session) -> dict[str, Any]:
     }
 
 
-def _finish_native_login(request: Request, *, broker_state: str, session: Session, provider: str) -> str:
+def _finish_native_login(
+    request: Request, *, broker_state: str, session: Session, provider: str,
+) -> str:
     """Mint the one-time loopback code for a pending native authorization.
 
     Shared tail of ``/auth/callback`` and ``/auth/password-login``: returns the
@@ -136,16 +140,19 @@ def _finish_native_login(request: Request, *, broker_state: str, session: Sessio
         pending = native_flow.get_pending(broker_state)
         gw_code = native_flow.complete_pending(broker_state, session=session)
     except native_flow.NativeFlowError:
-        audit_log(AuditEvent.NATIVE_TOKEN_FAILURE, provider=provider, reason="pending_not_found", ip=ip)
+        audit_log(AuditEvent.NATIVE_TOKEN_FAILURE, provider=provider, reason="pending_not_found",
+                  ip=ip)
         raise _http(400, _NATIVE_EXPIRED_DETAIL)
     sep = "&" if "?" in pending.redirect_uri else "?"
-    loopback = f"{pending.redirect_uri}{sep}{urlencode({'code': gw_code, 'state': pending.client_state})}"
+    query = urlencode({'code': gw_code, 'state': pending.client_state})
+    loopback = f"{pending.redirect_uri}{sep}{query}"
     audit_log(AuditEvent.NATIVE_CODE_ISSUED, provider=provider, user_id=session.user_id, ip=ip)
     return loopback
 
 
 def _login_failure(request: Request, provider: str, reason: str, **extra) -> None:
-    audit_log(AuditEvent.LOGIN_FAILURE, provider=provider, reason=reason, **extra, ip=_client_ip(request))
+    audit_log(AuditEvent.LOGIN_FAILURE, provider=provider, reason=reason, **extra,
+              ip=_client_ip(request))
 
 
 def _login_success(request: Request, session: Session, provider: str) -> None:
@@ -301,7 +308,9 @@ async def auth_native_authorize(
         _set_pkce(resp, request, {"provider": p.name, "broker": broker_state})
         return resp
 
-    resp = _start_upstream_login(request, p, audit_failure=False, extra_pkce={"broker": broker_state})
+    resp = _start_upstream_login(
+        request, p, audit_failure=False, extra_pkce={"broker": broker_state},
+    )
     audit_log(AuditEvent.NATIVE_AUTHORIZE_START, provider=p.name, ip=_client_ip(request))
     return resp
 
@@ -435,7 +444,8 @@ async def auth_password_login(request: Request, body: _PasswordLoginBody):
     pkce_parts = parse_pkce_payload(pkce_raw) if pkce_raw else {}
     broker_state = pkce_parts.get("broker", "")
     if broker_state and pkce_parts.get("provider", "") != body.provider:
-        audit_log(AuditEvent.NATIVE_TOKEN_FAILURE, provider=body.provider, reason="provider_mismatch", ip=ip)
+        audit_log(AuditEvent.NATIVE_TOKEN_FAILURE, provider=body.provider,
+                  reason="provider_mismatch", ip=ip)
         raise _http(400, "This native sign-in was started for a different provider; "
                          "use that provider's form or restart sign-in.")
 
@@ -518,7 +528,8 @@ async def api_auth_ws_ticket(request: Request):
     from hermes_cli.dashboard_auth.ws_tickets import TTL_SECONDS, mint_ticket
 
     ticket = mint_ticket(user_id=sess.user_id, provider=sess.provider)
-    audit_log(AuditEvent.WS_TICKET_MINTED, provider=sess.provider, user_id=sess.user_id, ip=_client_ip(request))
+    audit_log(AuditEvent.WS_TICKET_MINTED, provider=sess.provider, user_id=sess.user_id,
+              ip=_client_ip(request))
     return {"ticket": ticket, "ttl_seconds": TTL_SECONDS}
 
 
@@ -541,7 +552,8 @@ async def auth_native_token(request: Request, body: _NativeTokenBody):
     try:
         session = native_flow.redeem_code(code=body.code, code_verifier=body.code_verifier)
     except native_flow.CodeInvalid:
-        audit_log(AuditEvent.NATIVE_TOKEN_FAILURE, reason="invalid_code_or_pkce", ip=_client_ip(request))
+        audit_log(AuditEvent.NATIVE_TOKEN_FAILURE, reason="invalid_code_or_pkce",
+                  ip=_client_ip(request))
         raise _http(400, "Invalid or expired authorization code.")
     audit_log(
         AuditEvent.NATIVE_TOKEN_SUCCESS, provider=session.provider, user_id=session.user_id,
@@ -578,8 +590,10 @@ async def auth_native_refresh(request: Request, body: _NativeRefreshBody):
             ip=_client_ip(request),
         )
         return _bearer_payload(session)
-    audit_log(AuditEvent.REFRESH_FAILURE, reason="all_providers_rejected_rt", ip=_client_ip(request))
+    audit_log(AuditEvent.REFRESH_FAILURE, reason="all_providers_rejected_rt",
+              ip=_client_ip(request))
     return JSONResponse(
-        {"error": "session_expired", "detail": "Refresh token expired or invalid; start a new sign-in."},
+        {"error": "session_expired",
+         "detail": "Refresh token expired or invalid; start a new sign-in."},
         status_code=401,
     )

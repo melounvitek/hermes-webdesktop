@@ -1,12 +1,11 @@
 """X-Forwarded-Prefix and public-URL resolution for reverse-proxied deploys.
 
-Mission-control style deploys proxy the dashboard at a path prefix and inject
-``X-Forwarded-Prefix: /hermes`` so the backend can build prefixed URLs
-(Location headers, OAuth redirect_uri, cookie Path, SPA asset URLs). When the
-operator declares a complete ``HERMES_DASHBOARD_PUBLIC_URL`` /
-``dashboard.public_url`` instead, that is used verbatim for the OAuth
-redirect_uri (relief valve for unreliable proxy header chains). Single source
-of truth so the gate, routes, cookies and SPA mount agree on validation.
+Proxies mounting the dashboard at a path inject ``X-Forwarded-Prefix: /hermes``
+so the backend can build prefixed URLs (Location headers, OAuth redirect_uri,
+cookie Path, SPA asset URLs). An operator-declared ``HERMES_DASHBOARD_PUBLIC_URL``
+/ ``dashboard.public_url`` is used verbatim for the OAuth redirect_uri instead
+(relief valve for unreliable proxy header chains). Single source of truth so
+the gate, routes, cookies and SPA mount agree on validation.
 """
 from __future__ import annotations
 
@@ -32,19 +31,13 @@ _warned_malformed_prefixes: set = set()
 
 
 def _warn_if_malformed(source: str, raw: str) -> None:
-    """Warn once when a non-empty public-url value was rejected.
-
-    Almost always a missing scheme; without this the value is silently
-    discarded and the OAuth callback falls back to header reconstruction,
-    which behind a proxy can yield the wrong scheme.
-    """
+    """Warn once when a non-empty public-url value was rejected (almost always
+    a missing scheme; silently falling back to header reconstruction can yield
+    the wrong scheme behind a proxy)."""
     cleaned = raw.strip() if raw else ""
-    if not cleaned:
-        return  # empty/unset is a legitimate "no override"
-    key = (source, cleaned)
-    if key in _warned_malformed_public_urls:
+    if not cleaned or (source, cleaned) in _warned_malformed_public_urls:
         return
-    _warned_malformed_public_urls.add(key)
+    _warned_malformed_public_urls.add((source, cleaned))
     _log.warning(
         "%s is set to %r but was ignored because it is not a valid "
         "absolute URL — it must include an http:// or https:// scheme "
@@ -60,12 +53,9 @@ def _warn_if_malformed(source: str, raw: str) -> None:
 def _warn_if_malformed_prefix(raw: Optional[str], reason: str) -> None:
     """Warn once when a non-empty X-Forwarded-Prefix value is rejected."""
     cleaned = raw.strip() if raw else ""
-    if not cleaned:
+    if not cleaned or (cleaned, reason) in _warned_malformed_prefixes:
         return
-    key = (cleaned, reason)
-    if key in _warned_malformed_prefixes:
-        return
-    _warned_malformed_prefixes.add(key)
+    _warned_malformed_prefixes.add((cleaned, reason))
     _log.warning(
         "X-Forwarded-Prefix header %r was ignored because %s. "
         "Dashboard URLs will be generated without a reverse-proxy path prefix.",
@@ -86,14 +76,10 @@ def normalise_prefix(raw: Optional[str]) -> str:
         p = "/" + p
     p = p.rstrip("/")
     if "//" in p or ".." in p or any(c in p for c in _REJECT_CHARS):
-        _warn_if_malformed_prefix(
-            raw, "it contains a disallowed character or path sequence",
-        )
+        _warn_if_malformed_prefix(raw, "it contains a disallowed character or path sequence")
         return ""
     if len(p) > _MAX_PREFIX_LENGTH:
-        _warn_if_malformed_prefix(
-            raw, f"it is longer than {_MAX_PREFIX_LENGTH} characters",
-        )
+        _warn_if_malformed_prefix(raw, f"it is longer than {_MAX_PREFIX_LENGTH} characters")
         return ""
     return p
 
@@ -103,16 +89,14 @@ def prefix_from_request(request) -> str:
     return normalise_prefix(request.headers.get("x-forwarded-prefix"))
 
 
-# ---------------------------------------------------------------------------
-# HERMES_DASHBOARD_PUBLIC_URL / dashboard.public_url
-# ---------------------------------------------------------------------------
+# --- HERMES_DASHBOARD_PUBLIC_URL / dashboard.public_url --------------------
 
 
 def _normalise_public_url(raw: Optional[str]) -> str:
     """Cleaned ``scheme://netloc[/path]`` (trailing slash stripped so callers
     can append paths) or ``""`` when empty/malformed/injection-suspect. Callers
-    must treat ``""`` as "fall back to request reconstruction" — an explicit
-    empty value is indistinguishable from an unset env var.
+    treat ``""`` as "fall back to request reconstruction" — an explicit empty
+    value is indistinguishable from an unset env var.
     """
     url = raw.strip() if raw else ""
     if not url or any(c in url for c in _REJECT_CHARS):

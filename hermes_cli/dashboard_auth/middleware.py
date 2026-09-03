@@ -98,9 +98,12 @@ def _unauth_response(request: Request, *, reason: str) -> Response:
     prefix = prefix_from_request(request)
     login_url = f"{prefix}/login?next={next_param}" if next_param else f"{prefix}/login"
     if request.url.path.startswith("/api/"):
-        error_code = "session_expired" if reason == "invalid_or_expired_session" else "unauthenticated"
+        error_code = (
+            "session_expired" if reason == "invalid_or_expired_session" else "unauthenticated"
+        )
         return JSONResponse(
-            {"error": error_code, "detail": "Unauthorized", "reason": reason, "login_url": login_url},
+            {"error": error_code, "detail": "Unauthorized", "reason": reason,
+             "login_url": login_url},
             status_code=401,
         )
     return RedirectResponse(url=login_url, status_code=302)
@@ -134,7 +137,8 @@ def _auto_sso_response(request: Request) -> Response | None:
         auth_login = f"{auth_login}&next={next_param}"
     resp = RedirectResponse(url=auth_login, status_code=302)
     set_sso_attempt_cookie(resp, use_https=detect_https(request), prefix=prefix)
-    audit_log(AuditEvent.LOGIN_START, provider=provider.name, reason="auto_sso", ip=_client_ip(request))
+    audit_log(AuditEvent.LOGIN_START, provider=provider.name, reason="auto_sso",
+              ip=_client_ip(request))
     return resp
 
 
@@ -232,7 +236,8 @@ async def gated_auth_middleware(
             )
             return response
 
-        audit_log(AuditEvent.SESSION_VERIFY_FAILURE, reason="no_provider_recognises", ip=_client_ip(request))
+        audit_log(AuditEvent.SESSION_VERIFY_FAILURE, reason="no_provider_recognises",
+                  ip=_client_ip(request))
         response = _unauth_response(request, reason="invalid_or_expired_session")
         # Refresh failed (or no RT): clear the dead cookies under the active
         # prefix so the deletion Path matches the set Path.
@@ -262,7 +267,8 @@ def _attempt_refresh(request: Request, *, refresh_token, provider_hint: str | No
 
     def _audit_failure(reason):
         return lambda provider: audit_log(
-            AuditEvent.REFRESH_FAILURE, provider=provider.name, reason=reason, ip=_client_ip(request),
+            AuditEvent.REFRESH_FAILURE, provider=provider.name, reason=reason,
+            ip=_client_ip(request),
         )
 
     def _refresh(provider):
@@ -271,5 +277,6 @@ def _attempt_refresh(request: Request, *, refresh_token, provider_hint: str | No
 
     return scan_session_providers(
         provider_hint, _refresh, phase="refresh", log=_log, swallow=(RefreshExpiredError,),
-        on_swallow=_audit_failure("refresh_expired"), on_unreachable=_audit_failure("provider_unreachable"),
+        on_swallow=_audit_failure("refresh_expired"),
+        on_unreachable=_audit_failure("provider_unreachable"),
     )

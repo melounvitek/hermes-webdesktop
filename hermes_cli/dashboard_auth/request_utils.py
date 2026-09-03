@@ -88,7 +88,8 @@ def scan_session_providers(
                 on_swallow(provider)
             continue
         except ProviderError as e:
-            log.warning("dashboard-auth: provider %r unreachable during %s: %s", provider.name, phase, e)
+            log.warning("dashboard-auth: provider %r unreachable during %s: %s",
+                        provider.name, phase, e)
             if on_unreachable is not None:
                 on_unreachable(provider)
             if unreachable is None:

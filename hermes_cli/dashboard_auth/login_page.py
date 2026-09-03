@@ -449,25 +449,17 @@ def render_login_html(*, next_path: str = "") -> str:
     providers = list_session_providers()
     if not providers:
         return _EMPTY_HTML
-
     # URL-encode then HTML-escape, matching the gate's ``_safe_next_target``
     # shape so a round-tripped value is byte-identical.
-    next_qs = (
-        f"&next={html.escape(quote(next_path, safe=''), quote=True)}" if next_path else ""
-    )
-
-    buttons = []
-    needs_password_script = False
-    for p in providers:
-        if getattr(p, "supports_password", False):
-            needs_password_script = True
-            buttons.append(_render_password_form(p, next_path))
-        else:
-            buttons.append(
-                f'      <a class="provider-btn" '
-                f'href="/auth/login?provider={html.escape(p.name, quote=True)}{next_qs}">'
-                f'Sign in with {html.escape(p.display_name)}</a>'
-            )
+    next_qs = f"&next={html.escape(quote(next_path, safe=''), quote=True)}" if next_path else ""
+    buttons = [
+        _render_password_form(p, next_path) if getattr(p, "supports_password", False) else
+        f'      <a class="provider-btn" '
+        f'href="/auth/login?provider={html.escape(p.name, quote=True)}{next_qs}">'
+        f'Sign in with {html.escape(p.display_name)}</a>'
+        for p in providers
+    ]
+    needs_password_script = any(getattr(p, "supports_password", False) for p in providers)
     return _LOGIN_HTML_TEMPLATE.format(
         provider_buttons="\n".join(buttons),
         password_script=_PASSWORD_FORM_SCRIPT if needs_password_script else "",

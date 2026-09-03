@@ -151,7 +151,9 @@ def clear_session_cookies(response: Response, *, prefix: str = "") -> None:
     """Delete the AT, RT and provider cookies (every name variant, active path)."""
     bare_attrs = _lax_bare_attrs(prefix)
     for name in (SESSION_AT_COOKIE, SESSION_RT_COOKIE, SESSION_PROVIDER_COOKIE):
-        _clear_cookie_variants(response, name, prefix=prefix, https_samesite="lax", bare_attrs=bare_attrs)
+        _clear_cookie_variants(
+            response, name, prefix=prefix, https_samesite="lax", bare_attrs=bare_attrs,
+        )
 
 
 def encode_pkce_payload(parts: dict[str, str]) -> str:
@@ -167,7 +169,9 @@ def encode_pkce_payload(parts: dict[str, str]) -> str:
     return base64.urlsafe_b64encode(raw.encode("utf-8")).decode("ascii").rstrip("=")
 
 
-def set_pkce_cookie(response: Response, *, payload: dict[str, str], use_https: bool, prefix: str = "") -> None:
+def set_pkce_cookie(
+    response: Response, *, payload: dict[str, str], use_https: bool, prefix: str = "",
+) -> None:
     """Set the PKCE cookie (``payload`` is the segment dict; see module docstring
     for the SameSite=None rationale)."""
     _set(response, PKCE_COOKIE, encode_pkce_payload(payload), max_age=_PKCE_MAX_AGE,
@@ -195,7 +199,10 @@ def _read_with_fallback(request: Request, bare_name: str) -> Optional[str]:
 
 def read_session_cookies(request: Request) -> Tuple[Optional[str], Optional[str]]:
     """Returns (access_token, refresh_token), either may be None."""
-    return _read_with_fallback(request, SESSION_AT_COOKIE), _read_with_fallback(request, SESSION_RT_COOKIE)
+    return (
+        _read_with_fallback(request, SESSION_AT_COOKIE),
+        _read_with_fallback(request, SESSION_RT_COOKIE),
+    )
 
 
 def read_session_provider(request: Request) -> Optional[str]:
@@ -237,7 +244,8 @@ def parse_pkce_payload(raw: str) -> dict[str, str]:
 
 def set_sso_attempt_cookie(response: Response, *, use_https: bool, prefix: str = "") -> None:
     """Set the auto-SSO loop-guard marker; only its presence matters."""
-    _set(response, SSO_ATTEMPT_COOKIE, "1", max_age=_SSO_ATTEMPT_MAX_AGE, use_https=use_https, prefix=prefix)
+    _set(response, SSO_ATTEMPT_COOKIE, "1", max_age=_SSO_ATTEMPT_MAX_AGE,
+         use_https=use_https, prefix=prefix)
 
 
 def read_sso_attempt_cookie(request: Request) -> Optional[str]:
@@ -249,7 +257,8 @@ def clear_sso_attempt_cookie(response: Response, *, prefix: str = "") -> None:
     """Delete the auto-SSO marker (every variant) so it never suppresses a
     later silent attempt."""
     _clear_cookie_variants(
-        response, SSO_ATTEMPT_COOKIE, prefix=prefix, https_samesite="lax", bare_attrs=_lax_bare_attrs(prefix),
+        response, SSO_ATTEMPT_COOKIE, prefix=prefix, https_samesite="lax",
+        bare_attrs=_lax_bare_attrs(prefix),
     )
 
 
