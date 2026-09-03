@@ -47,11 +47,7 @@ def _terminal_env_type_for_task(task_id: str = "default") -> str:
     """Best-effort terminal backend type for path-resolution decisions."""
     try:
         from tools.terminal_tool import (
-            _active_environments,
-            _env_lock,
-            _get_env_config,
-            _resolve_container_task_id,
-        )
+            _active_environments, _env_lock, _get_env_config, _resolve_container_task_id)
 
         try:
             container_key = _resolve_container_task_id(task_id)
@@ -61,14 +57,11 @@ def _terminal_env_type_for_task(task_id: str = "default") -> str:
             env = _active_environments.get(container_key) or _active_environments.get(task_id)
         if env is not None:
             name = env.__class__.__name__.lower()
-            for hint in _ENV_CLASS_NAME_HINTS:
-                if hint in name:
-                    return hint
+            hint = next((h for h in _ENV_CLASS_NAME_HINTS if h in name), None)
             stamped = getattr(env, "_hermes_backend_name", None)
-            if isinstance(stamped, str) and stamped:
-                return stamped
-        cfg = _get_env_config()
-        return str(cfg.get("env_type") or os.getenv("TERMINAL_ENV") or "local").lower()
+            if hint or (isinstance(stamped, str) and stamped):
+                return hint or stamped
+        return str(_get_env_config().get("env_type") or os.getenv("TERMINAL_ENV") or "local").lower()
     except Exception:
         return str(os.getenv("TERMINAL_ENV") or "local").lower()
 
@@ -103,9 +96,7 @@ def _sentinel_free_abs_cwd(raw: str | None) -> str | None:
     if raw.lower() in _TERMINAL_CWD_SENTINELS:
         return None
     expanded = _expand_tilde(raw)
-    if not os.path.isabs(expanded):
-        return None
-    return expanded
+    return expanded if os.path.isabs(expanded) else None
 
 
 def _configured_terminal_cwd() -> str | None:
@@ -151,19 +142,11 @@ def _authoritative_workspace_root(task_id: str = "default") -> str | None:
         recorded = get_session_cwd(task_id)
     except Exception:
         recorded = None
-    if recorded:
-        return recorded
-    registered = _registered_task_cwd_override(task_id)
-    if registered:
-        return registered
-    return _configured_terminal_cwd()
+    return recorded or _registered_task_cwd_override(task_id) or _configured_terminal_cwd()
 
 
 def _resolve_base_dir(
-    task_id: str = "default",
-    *,
-    container_paths: bool | None = None,
-) -> Path | PurePosixPath:
+    task_id: str = "default", *, container_paths: bool | None = None) -> Path | PurePosixPath:
     """Return the ABSOLUTE base directory for resolving relative paths.
 
     Uses ``_authoritative_workspace_root`` (live cwd → registered override →
@@ -255,16 +238,13 @@ def _path_resolution_warning(filepath: str, resolved: Path, task_id: str = "defa
             root = _normalize_without_host_deref(Path(_expand_tilde(workspace_root)))
         else:
             root = Path(_expand_tilde(workspace_root)).resolve()
-        try:
-            resolved.relative_to(root)
+        if resolved.is_relative_to(root):
             return None
-        except ValueError:
-            return (
-                f"Relative path {filepath!r} resolved to {str(resolved)!r}, which is "
-                f"OUTSIDE the active workspace ({str(root)!r}). The edit will land in "
-                f"a different directory than the terminal's cwd. If this is not "
-                f"intended (e.g. a git-worktree session writing into the main "
-                f"checkout), pass an absolute path under the workspace instead."
-            )
+        return (
+            f"Relative path {filepath!r} resolved to {str(resolved)!r}, which is "
+            f"OUTSIDE the active workspace ({str(root)!r}). The edit will land in "
+            f"a different directory than the terminal's cwd. If this is not "
+            f"intended (e.g. a git-worktree session writing into the main "
+            f"checkout), pass an absolute path under the workspace instead.")
     except Exception:
         return None
