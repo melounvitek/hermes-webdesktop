@@ -1264,6 +1264,25 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
             logger.log(*verdict.log)
         return False
 
+    def register_approval_transport(self, name: str, present_fn: Callable, *, plugin_id: str) -> None:
+        """Manager-level registration (public API kept for out-of-tree plugins); the PluginContext
+        method is the tracked path plugins normally use. Same validation, no unload tracking."""
+        from hermes_cli.approval_transport import RegisteredApprovalTransport
+        clean = str(name).strip().lower()
+        if clean == "builtin":
+            raise ValueError("approval transport name 'builtin' is reserved")
+        if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,63}", clean):
+            raise ValueError("approval transport name must match [a-z0-9][a-z0-9_-]{0,63}")
+        if not callable(present_fn):
+            raise TypeError("approval transport present_fn must be callable")
+        if clean in self._approval_transports:
+            owner = self._approval_transports[clean].plugin_id
+            raise ValueError(f"approval transport {clean!r} is already registered by {owner!r}")
+        self._approval_transports[clean] = RegisteredApprovalTransport(
+            name=clean, present=present_fn, plugin_id=plugin_id, profile_home=str(get_hermes_home().resolve()),
+        )
+        logger.info("Plugin %s registered approval transport: %s", plugin_id, clean)
+
     def get_approval_transport(self, name: str):
         """Return a transport only inside the profile that registered it."""
         registered = self._approval_transports.get(str(name).strip().lower())
@@ -1323,6 +1342,10 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
         adapter)`` at connect (see :meth:`PluginContext.register_platform_handler`)."""
         return list(self._platform_handler_factories.get((platform or "").strip().lower(), []))
 
+    def get_telegram_handler_factories(self) -> List[tuple]:
+        """Back-compat alias for ``get_platform_handler_factories("telegram")``."""
+        return self.get_platform_handler_factories("telegram")
+
     def list_plugins(self) -> List[Dict[str, Any]]:
         """Return a list of info dicts for all discovered plugins."""
         return [
@@ -1353,6 +1376,9 @@ class PluginManager(PluginLoaderMixin, PluginDispatchMixin, PluginLedgerMixin):
                 "category": "plugin", "frontmatter": dict(entry.get("frontmatter", {})),
             } for qualified, entry in sorted(self._plugin_skills.items())
         ]
+
+    def has_portable_mcp_servers(self) -> bool:
+        return bool(self._portable_mcp_servers)
 
     def get_portable_mcp_servers(self) -> Dict[str, Dict[str, Any]]:
         """Return a defensive copy of enabled portable MCP server configs."""

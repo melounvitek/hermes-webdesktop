@@ -452,10 +452,12 @@ def get_nous_subscription_features(config: Optional[Dict[str, object]] = None, *
     use_gateway = {key: value == "nous" for key, value in selected.items()}
     # Managed availability per feature. A stored VENDOR selection pins the category to direct
     # credentials — managed availability must not light it up (the runtime errors, not reroutes).
+    # Features without a config selection field (modal) have no pin and read as unselected.
     managed = {
         key: (
             managed_tools_flag and is_managed_tool_gateway_ready(spec.gateway)
-            and account_info.tool_gateway_entitled_for(spec.coverage) and (selected[key] is None or use_gateway[key])
+            and account_info.tool_gateway_entitled_for(spec.coverage)
+            and (selected.get(key) is None or use_gateway.get(key, False))
         )
         for key, spec in _FEATURES.items()
     }

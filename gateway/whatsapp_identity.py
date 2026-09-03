@@ -87,5 +87,10 @@ def canonical_whatsapp_identifier(identifier: str) -> str:
     """Stable sender identity across phone-JID/LID variants (DM ``chat_id`` and group
     ``participant_id`` alike): the shortest alias from :func:`expand_whatsapp_aliases`, which
     degrades to the normalized input when no mapping files exist.  ``""`` for empty input."""
-    aliases = expand_whatsapp_aliases(identifier)
-    return min(aliases, key=lambda c: (len(c), c)) if aliases else ""
+    normalized = normalize_whatsapp_identifier(identifier)
+    if not normalized:
+        return ""
+    # expand_whatsapp_aliases includes ``normalized`` itself, so min() degrades to it
+    # when no lid-mapping files are present.
+    aliases = expand_whatsapp_aliases(normalized)
+    return min(aliases, key=lambda c: (len(c), c))

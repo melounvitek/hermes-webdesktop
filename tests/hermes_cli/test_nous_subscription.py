@@ -186,6 +186,24 @@ def _capture_checklist(monkeypatch, *, selected_idx):
     return captured
 
 
+def test_logged_in_entitled_account_yields_a_state_for_every_feature(monkeypatch):
+    """The logged-in + entitled branch must produce a state for EVERY feature, including
+    those with no config selection field (modal). Regression: the managed-availability
+    table indexed the selection map by every feature key and raised KeyError('modal'),
+    crashing `hermes status`, `hermes tools`, and the dashboard toolsets API."""
+    monkeypatch.setattr(ns, "get_nous_portal_account_info", lambda **kw: _pool_account())
+    monkeypatch.setattr(ns, "is_managed_tool_gateway_ready", lambda gateway: True)
+    monkeypatch.setattr(ns, "get_env_value", lambda name: "")
+    monkeypatch.setattr(ns, "_has_agent_browser", lambda: False)
+    monkeypatch.setattr(ns, "resolve_openai_audio_api_key", lambda: "")
+    monkeypatch.setattr(ns, "has_direct_modal_credentials", lambda: False)
+
+    result = ns.get_nous_subscription_features({"model": {"provider": "nous"}})
+
+    assert set(result.features) == set(ns._FEATURES)
+    assert result.modal.available is True  # entitled + gateway ready → managed modal is offered
+
+
 def test_prompt_enable_tool_gateway_pool_offers_covered_tools_only(monkeypatch):
     """Pool user's checklist lists web/image/tts/browser and never video."""
     monkeypatch.setattr(ns, "get_nous_portal_account_info", lambda **kw: _pool_account())

@@ -56,7 +56,7 @@ def append_output_contract(context: Optional[str], schema: Dict[str, Any]) -> st
     return f"{base}\n\n{block}" if base else block
 
 
-def _extract_json_candidate(text: str) -> str:
+def extract_json_candidate(text: str) -> str:
     """Strip markdown fences and prose around the outermost ``{...}``/``[...]``."""
     raw = (text or "").strip()
     if raw.startswith("```"):
@@ -78,7 +78,7 @@ def _extract_json_candidate(text: str) -> str:
 
 def validate_output(text: str, schema: Dict[str, Any]) -> Tuple[bool, List[str]]:
     """``(True, [])`` or ``(False, errors)`` with strings suitable for the retry turn."""
-    candidate = _extract_json_candidate(text or "")
+    candidate = extract_json_candidate(text or "")
     if not candidate.strip():
         return False, ["Response was empty — expected a JSON object matching the schema."]
     try:
