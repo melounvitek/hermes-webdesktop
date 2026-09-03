@@ -179,8 +179,7 @@ def _resolve_plain_custom_api_mode(model_cfg: Dict[str, Any], base_url: str) -> 
     detected_mode = _detect_api_mode_for_url(base_url)
     if configured_mode == "codex_responses" and detected_mode != "codex_responses":
         logger.info(
-            "Ignoring persisted custom api_mode=codex_responses for non-OpenAI endpoint %s",
-            base_url or "(unknown)",
+            "Ignoring persisted custom api_mode=codex_responses for non-OpenAI endpoint %s", base_url or "(unknown)",
         )
         configured_mode = None
     return configured_mode or detected_mode or "chat_completions"
@@ -571,13 +570,8 @@ def _pool_entry_mode_and_url(provider, entry, model_cfg, effective_model, base_u
 
 
 def _resolve_runtime_from_pool_entry(
-    *,
-    provider: str,
-    entry: PooledCredential,
-    requested_provider: str,
-    model_cfg: Optional[Dict[str, Any]] = None,
-    pool: Optional[CredentialPool] = None,
-    target_model: Optional[str] = None,
+    *, provider: str, entry: PooledCredential, requested_provider: str, model_cfg: Optional[Dict[str, Any]] = None,
+    pool: Optional[CredentialPool] = None, target_model: Optional[str] = None,
 ) -> Dict[str, Any]:
     model_cfg = model_cfg or _get_model_config()
     api_mode, base_url = _pool_entry_mode_and_url(
@@ -741,13 +735,8 @@ _EXPLICIT_RESOLVERS: Dict[str, Callable[..., Dict[str, Any]]] = {
 
 
 def _resolve_explicit_runtime(
-    *,
-    provider: str,
-    requested_provider: str,
-    model_cfg: Dict[str, Any],
-    explicit_api_key: Optional[str] = None,
-    explicit_base_url: Optional[str] = None,
-    target_model: Optional[str] = None,
+    *, provider: str, requested_provider: str, model_cfg: Dict[str, Any], explicit_api_key: Optional[str] = None,
+    explicit_base_url: Optional[str] = None, target_model: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     explicit_api_key = str(explicit_api_key or "").strip()
     explicit_base_url = str(explicit_base_url or "").strip().rstrip("/")
@@ -818,12 +807,9 @@ def _resolve_oauth_runtime(provider, requested_provider, model_cfg, target_model
     if callable(api_mode):
         api_mode = api_mode(_effective_model(model_cfg, target_model))
     return _runtime(
-        provider, api_mode,
-        (creds.get("base_url") or "").rstrip("/") or spec.default_base_url,
-        creds.get("api_key", ""),
-        source=creds.get("source", spec.default_source),
-        **{spec.expiry_key: creds.get(spec.expiry_key)},
-        requested_provider=requested_provider,
+        provider, api_mode, (creds.get("base_url") or "").rstrip("/") or spec.default_base_url,
+        creds.get("api_key", ""), source=creds.get("source", spec.default_source),
+        **{spec.expiry_key: creds.get(spec.expiry_key)}, requested_provider=requested_provider,
     )
 
 
@@ -1021,11 +1007,8 @@ def _opencode_free_runtime(provider, requested_provider, model_cfg, target_model
 
 
 def resolve_runtime_provider(
-    *,
-    requested: Optional[str] = None,
-    explicit_api_key: Optional[str] = None,
-    explicit_base_url: Optional[str] = None,
-    target_model: Optional[str] = None,
+    *, requested: Optional[str] = None, explicit_api_key: Optional[str] = None,
+    explicit_base_url: Optional[str] = None, target_model: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Resolve runtime provider credentials for agent execution.
 

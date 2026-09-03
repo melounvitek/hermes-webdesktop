@@ -507,10 +507,7 @@ def _opencode_family_for_custom(requested_provider: str, base_url: str) -> Optio
 
 
 def _resolve_named_custom_runtime(
-    *,
-    requested_provider: str,
-    explicit_api_key: Optional[str] = None,
-    explicit_base_url: Optional[str] = None,
+    *, requested_provider: str, explicit_api_key: Optional[str] = None, explicit_base_url: Optional[str] = None,
     target_model: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Runtime for a llamacpp alias, a bare-custom direct alias, or a configured custom entry.

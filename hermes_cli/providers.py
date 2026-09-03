@@ -384,8 +384,7 @@ def resolve_user_provider(name: str, user_config: Dict[str, Any]) -> Optional[Pr
     if not isinstance(entry, dict):
         return None
     return _user_pdef(
-        name,
-        entry.get("name", "") or name,
+        name, entry.get("name", "") or name,
         entry.get("api", "") or entry.get("url", "") or entry.get("base_url", "") or "",
         entry.get("key_env") or entry.get("api_key_env") or "",
         entry.get("transport", "openai_chat") or "openai_chat",
@@ -491,8 +490,7 @@ def _llamacpp_pdef() -> Optional[ProviderDef]:
 
 
 def resolve_provider_full(
-    name: str,
-    user_providers: Optional[Dict[str, Any]] = None,
+    name: str, user_providers: Optional[Dict[str, Any]] = None,
     custom_providers: Optional[List[Dict[str, Any]]] = None,
 ) -> Optional[ProviderDef]:
     """Full resolution chain: user ``providers.<raw name>`` -> lossy-alias registry id -> built-in

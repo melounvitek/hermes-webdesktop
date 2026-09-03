@@ -48,12 +48,8 @@ def normalize_route_base_url(base_url: Any) -> str:
 
 
 def should_clear_context_pin(
-    configured_model: Any,
-    active_model: Any,
-    configured_base_url: Any,
-    active_base_url: Any,
-    configured_provider: Any,
-    active_provider: Any,
+    configured_model: Any, active_model: Any, configured_base_url: Any, active_base_url: Any,
+    configured_provider: Any, active_provider: Any,
 ) -> bool:
     """True when a configured ``model.context_length`` pin no longer matches its runtime route.
 
@@ -66,23 +62,14 @@ def should_clear_context_pin(
     try:
         from agent.agent_init import _context_route_mismatch
 
-        return _context_route_mismatch(
-            configured_base_url,
-            active_base_url,
-            configured_provider,
-            active_provider,
-        )
+        return _context_route_mismatch(configured_base_url, active_base_url, configured_provider, active_provider)
     except Exception:
         return True
 
 
 async def should_clear_context_pin_async(
-    configured_model: Any,
-    active_model: Any,
-    configured_base_url: Any,
-    active_base_url: Any,
-    configured_provider: Any,
-    active_provider: Any,
+    configured_model: Any, active_model: Any, configured_base_url: Any, active_base_url: Any,
+    configured_provider: Any, active_provider: Any,
 ) -> bool:
     """Async wrapper for ``should_clear_context_pin``.
 
@@ -93,11 +80,6 @@ async def should_clear_context_pin_async(
     import asyncio
 
     return await asyncio.to_thread(
-        should_clear_context_pin,
-        configured_model,
-        active_model,
-        configured_base_url,
-        active_base_url,
-        configured_provider,
-        active_provider,
+        should_clear_context_pin, configured_model, active_model, configured_base_url, active_base_url,
+        configured_provider, active_provider,
     )
