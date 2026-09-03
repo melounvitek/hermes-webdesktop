@@ -18,18 +18,10 @@ from pathlib import Path, PurePosixPath
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("tools.skills_sync_client")
-
 WIRE_VERSION = "1"
 DEFAULT_MAX_OBJECT_BYTES = 26214400  # 25 MiB, mirrors capabilities default
-
-KIND_BLOB = "blob"
-KIND_TREE = "tree"
-KIND_COMMIT = "commit"
-
-MODE_FILE = "file"
-MODE_EXEC = "exec"
-MODE_DIR = "dir"
-
+KIND_BLOB, KIND_TREE, KIND_COMMIT = "blob", "tree", "commit"
+MODE_FILE, MODE_EXEC, MODE_DIR = "file", "exec", "dir"
 ARTIFACT_TYPE_SKILL = "skill"
 _EXEC_BITS = _stat.S_IXUSR | _stat.S_IXGRP | _stat.S_IXOTH
 
@@ -37,16 +29,13 @@ _EXEC_BITS = _stat.S_IXUSR | _stat.S_IXGRP | _stat.S_IXOTH
 # a root-level blob in the tree at refs/user/<owner>/HEAD recording {name, enabled}. The plane
 # manifest is authoritative; the local `.usage.json` `sync` flag is only the editable intent
 # (reconciled FROM it on pull, TO it on push). Shape MUST match gateway-gateway src/sync/manifest.ts.
-SYNC_MANIFEST_ENTRY_NAME = "sync-manifest"
-SYNC_MANIFEST_TYPE = "sync-manifest"
+SYNC_MANIFEST_ENTRY_NAME = SYNC_MANIFEST_TYPE = "sync-manifest"
 SYNC_MANIFEST_VERSION = 1
 
 
 # Content addressing: the wire uses the FULL 64-hex sha256 -- a different namespace from the
 # truncated 16-hex local `content_hash` (skills_guard.py).
-
 def wire_address(data: bytes) -> str:
-    """``sha256:<64-hex>`` -- the wire address of ``data``."""
     return "sha256:" + hashlib.sha256(data).hexdigest()
 
 
@@ -71,10 +60,8 @@ def parse_sync_manifest(data: bytes) -> Optional[Dict[str, bool]]:
         value = json.loads(data.decode("utf-8"))
     except Exception:
         return None
-    if (
-        not isinstance(value, dict) or value.get("type") != SYNC_MANIFEST_TYPE
-        or value.get("version") != SYNC_MANIFEST_VERSION or not isinstance(value.get("skills"), list)
-    ):
+    if (not isinstance(value, dict) or value.get("type") != SYNC_MANIFEST_TYPE
+            or value.get("version") != SYNC_MANIFEST_VERSION or not isinstance(value.get("skills"), list)):
         return None
     out: Dict[str, bool] = {}
     for raw in value["skills"]:
@@ -86,7 +73,6 @@ def parse_sync_manifest(data: bytes) -> Optional[Dict[str, bool]]:
 
 
 # Object building
-
 class ObjectSet:
     """Objects to push, ``hash -> (kind, bytes)``, deduped by content address."""
 
@@ -128,8 +114,8 @@ def build_tree(dir_path: Path, objects: ObjectSet, *, max_object_bytes: int) -> 
         if child.is_symlink():
             logger.debug("skills_sync_client: skipping symlink %s", child)
         elif child.is_dir():
-            sub_hash = build_tree(child, objects, max_object_bytes=max_object_bytes)
-            entries.append(_entry(child.name, KIND_TREE, sub_hash, MODE_DIR))
+            entries.append(_entry(child.name, KIND_TREE, build_tree(child, objects, max_object_bytes=max_object_bytes),
+                                  MODE_DIR))
         elif child.is_file():
             data = child.read_bytes()
             if len(data) > max_object_bytes:
@@ -153,10 +139,9 @@ def build_root_tree(node: Dict[str, Any], objects: ObjectSet, *, manifest_hash: 
     adds the root ``sync-manifest`` BLOB entry (cannot collide with a skill dir: those are trees)."""
     entries: List[Dict[str, str]] = []
     for name, child in node.items():
-        if isinstance(child, dict) and "__tree__" in child and len(child) == 1:
-            entries.append(_entry(name, KIND_TREE, child["__tree__"], MODE_DIR))
-        else:
-            entries.append(_entry(name, KIND_TREE, build_root_tree(child, objects), MODE_DIR))
+        leaf = isinstance(child, dict) and "__tree__" in child and len(child) == 1
+        entries.append(_entry(name, KIND_TREE, child["__tree__"] if leaf else build_root_tree(child, objects),
+                              MODE_DIR))
     if manifest_hash is not None:
         entries.append(_entry(SYNC_MANIFEST_ENTRY_NAME, KIND_BLOB, manifest_hash, MODE_FILE))
     return _add_tree(entries, objects)
@@ -180,7 +165,6 @@ def assemble_root_from_skill_trees(skill_trees: Dict[str, str], objects: ObjectS
 
 
 # HTTP client (routes under /v1/sync/)
-
 class SyncError(RuntimeError):
     """A non-recoverable wire error (4xx the client can't retry)."""
 
@@ -195,22 +179,27 @@ class SyncConflict(RuntimeError):
 
     def __init__(self, actual: Optional[str]):
         self.actual: Optional[str] = actual or None
-        super().__init__(
-            f"CAS conflict; actual head {self.actual}" if self.actual else "CAS conflict; the ref does not exist yet"
-        )
+        super().__init__(f"CAS conflict; actual head {self.actual}" if self.actual
+                         else "CAS conflict; the ref does not exist yet")
 
 
 def _check_version(caps: Dict[str, Any]) -> None:
     """Reject an incompatible server major version."""
     ver = str(caps.get("hsp_version") or "")  # wire field name
     if ver.split(".", 1)[0] != WIRE_VERSION:
-        raise SyncError(
-            f"this server speaks sync version {ver!r}, but this Hermes speaks "
-            f"{WIRE_VERSION} — update Hermes to sync with it")
+        raise SyncError(f"this server speaks sync version {ver!r}, but this Hermes speaks "
+                        f"{WIRE_VERSION} — update Hermes to sync with it")
 
 
 def _body(r) -> Dict[str, Any]:
     return r.json() if r.content else {}
+
+
+def checked_capabilities(client: "SyncClient") -> Tuple[Dict[str, Any], int]:
+    """Version-checked ``(caps, max_object_bytes)`` for a sync session."""
+    caps = client.capabilities()
+    _check_version(caps)
+    return caps, int(caps.get("max_object_bytes") or DEFAULT_MAX_OBJECT_BYTES)
 
 
 class SyncClient:
@@ -226,19 +215,14 @@ class SyncClient:
         self._session = requests.Session()
         self._session.headers["Authorization"] = f"Bearer {api_key}"
 
-    def _url(self, path: str) -> str:
-        return f"{self.base}/v1/sync/{path.lstrip('/')}"
-
     def _request(self, method: str, path: str, op: str, *, ok=(200,), errors: Optional[Dict[int, Any]] = None, **kw):
-        """One wire call; SyncError unless the status is in *ok*. *errors* maps a status to a message
-        (str or ``fn(response)``); anything else gets ``"<op> failed: <code>"``."""
-        r = self._session.request(method, self._url(path), timeout=self.timeout, **kw)
+        """One wire call to ``/v1/sync/<path>``; SyncError unless the status is in *ok*. *errors* maps a
+        status to a message (str or ``fn(response)``); anything else gets ``"<op> failed: <code>"``."""
+        r = self._session.request(method, f"{self.base}/v1/sync/{path.lstrip('/')}", timeout=self.timeout, **kw)
         if r.status_code in ok:
             return r
         msg = (errors or {}).get(r.status_code)
-        if callable(msg):
-            msg = msg(r)
-        raise SyncError(msg or f"{op} failed: {r.status_code}", status=r.status_code)
+        raise SyncError((msg(r) if callable(msg) else msg) or f"{op} failed: {r.status_code}", status=r.status_code)
 
     def capabilities(self) -> Dict[str, Any]:
         """GET capabilities (no auth required)."""
@@ -248,15 +232,12 @@ class SyncClient:
         """GET refs?prefix=... (or org/refs, filtered client-side by *prefix*)."""
         path, params = ("org/refs", None) if org_scope else ("refs", {"prefix": prefix})
         refs = (self._request("GET", path, "get_refs", params=params).json() or {}).get("refs", [])
-        if org_scope:
-            refs = [r_ for r_ in refs if str(r_.get("name", "")).startswith(prefix)]
-        return refs
+        return [r_ for r_ in refs if str(r_.get("name", "")).startswith(prefix)] if org_scope else refs
 
     def get_object(self, obj_hash: str, *, org_scope: bool = False) -> Tuple[str, bytes]:
         """GET objects/:hash -> ``(kind, bytes)``; kind from the object-type header, blob default."""
-        r = self._request(
-            "GET", f"org/objects/{obj_hash}" if org_scope else f"objects/{obj_hash}", "get_object",
-            errors={404: f"object {obj_hash} not found", 403: f"object {obj_hash} not readable"})
+        r = self._request("GET", f"{'org/' if org_scope else ''}objects/{obj_hash}", "get_object",
+                          errors={404: f"object {obj_hash} not found", 403: f"object {obj_hash} not readable"})
         return r.headers.get("X-HSP-Object-Type") or KIND_BLOB, r.content
 
     def _get_json_of_kind(self, obj_hash: str, expected: str, org_scope: bool) -> Dict[str, Any]:
@@ -276,18 +257,16 @@ class SyncClient:
         bytes; no base64-in-JSON). The server rehashes and 422s the whole batch on mismatch; known
         hashes are no-ops. ``org_scope`` adds ``?scope=org`` (required before an org CAS/propose)."""
         files = [(h, (kind, data, "application/octet-stream")) for h, (kind, data) in objects.items()]
-        r = self._request(
+        return _body(self._request(
             "POST", "objects", "put_objects", ok=(200, 201), files=files,
             params={"scope": "org"} if org_scope else None,
-            errors={413: "object too large (413)", 422: lambda r: f"hash_mismatch (422): {r.text}"})
-        return _body(r)
+            errors={413: "object too large (413)", 422: lambda r: f"hash_mismatch (422): {r.text}"}))
 
     def cas_ref(self, name: str, from_hash: Optional[str], to_hash: str) -> Dict[str, Any]:
         """POST refs/:name -- atomic CAS; SyncConflict on 409. A member's CAS on an org HEAD becomes a
         proposal (202) -> ``{"proposal_pending": True, ...}``: success-shaped, never present as live."""
-        r = self._request(
-            "POST", f"refs/{name}", "cas_ref", ok=(200, 202, 409), json={"from": from_hash, "to": to_hash},
-            errors={403: "forbidden (403) -- owner/permission"})
+        r = self._request("POST", f"refs/{name}", "cas_ref", ok=(200, 202, 409),
+                          json={"from": from_hash, "to": to_hash}, errors={403: "forbidden (403) -- owner/permission"})
         if r.status_code == 202:
             return {"proposal_pending": True, **_body(r)}
         if r.status_code == 409:  # "" actual = the ref does not exist server-side (-> None)
@@ -296,7 +275,6 @@ class SyncClient:
 
 
 # Reading remote trees
-
 def read_ref_hash(client: SyncClient, ref: str, *, org_scope: bool = False) -> Optional[str]:
     """Hash of *ref* (queried with itself as prefix), or None if absent."""
     refs = client.get_refs(ref, org_scope=org_scope)
@@ -310,7 +288,6 @@ def root_tree_of_commit(client: SyncClient, commit_hash: str, *, org_scope: bool
 def skill_trees_of_root(client: SyncClient, root_tree_hash: str, *, org_scope: bool = False) -> Dict[str, str]:
     """``{posix_rel_path: skill_tree_hash}`` for every subtree containing a ``SKILL.md`` blob."""
     result: Dict[str, str] = {}
-
     def _walk(tree_hash: str, prefix: str) -> None:
         entries = client.get_tree_json(tree_hash, org_scope=org_scope).get("entries", [])
         if prefix and any(e.get("name") == "SKILL.md" and e.get("kind") == KIND_BLOB for e in entries):
@@ -319,7 +296,6 @@ def skill_trees_of_root(client: SyncClient, root_tree_hash: str, *, org_scope: b
         for e in entries:
             if e.get("kind") == KIND_TREE:
                 _walk(e["hash"], f"{prefix}/{e['name']}" if prefix else e["name"])
-
     _walk(root_tree_hash, "")
     return result
 
@@ -327,18 +303,11 @@ def skill_trees_of_root(client: SyncClient, root_tree_hash: str, *, org_scope: b
 def read_manifest_of_root(client: SyncClient, root_tree_hash: str) -> Optional[Dict[str, bool]]:
     """``{name: enabled}`` from the root ``sync-manifest`` blob (how a device learns another's opt-ins)."""
     try:
-        tree = client.get_tree_json(root_tree_hash)
+        for e in client.get_tree_json(root_tree_hash).get("entries", []):
+            if e.get("name") == SYNC_MANIFEST_ENTRY_NAME and e.get("kind") == KIND_BLOB:
+                return parse_sync_manifest(client.get_object(e["hash"])[1])
     except Exception as e:
-        logger.debug("skills_sync_client: manifest root read failed: %s", e)
-        return None
-    for e in tree.get("entries", []):
-        if e.get("name") == SYNC_MANIFEST_ENTRY_NAME and e.get("kind") == KIND_BLOB:
-            try:
-                _kind, data = client.get_object(e["hash"])
-            except Exception as ex:
-                logger.debug("skills_sync_client: manifest blob fetch failed: %s", ex)
-                return None
-            return parse_sync_manifest(data)
+        logger.debug("skills_sync_client: manifest read failed: %s", e)
     return None
 
 
@@ -351,8 +320,7 @@ def materialize_tree(client: SyncClient, tree_hash: str, dest: Path, *, org_scop
         if not name or "/" in name or name in (".", ".."):
             logger.warning("skills_sync_client: skipping unsafe tree entry %r", name)
             continue
-        target = dest / name
-        kind = entry.get("kind")
+        target, kind = dest / name, entry.get("kind")
         if kind == KIND_TREE:
             materialize_tree(client, entry["hash"], target, org_scope=org_scope)
         elif kind == KIND_BLOB:

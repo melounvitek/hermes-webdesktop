@@ -12,18 +12,16 @@ import hashlib
 import json
 import logging
 import shutil
+from contextlib import suppress
 from pathlib import Path, PurePosixPath
 from typing import Any, Callable, Dict, List, Optional
 
 from tools.skills_sync_client_wire import (
-    DEFAULT_MAX_OBJECT_BYTES, ObjectSet, SyncClient, SyncConflict, SyncError, _check_version,
-    assemble_root_from_skill_trees, build_commit, build_tree, materialize_tree, read_ref_hash,
-    root_tree_of_commit, skill_trees_of_root)
+    ObjectSet, SyncClient, SyncConflict, SyncError, assemble_root_from_skill_trees, build_commit, build_tree,
+    checked_capabilities, materialize_tree, read_ref_hash, root_tree_of_commit, skill_trees_of_root)
 
 logger = logging.getLogger("tools.skills_sync_client")
-
 ORG_DIR_NAME = "_org"
-
 # Propose re-splices onto a moved org HEAD at most this many times. Small: contention means
 # other members are actively proposing; unbounded would spin.
 _ORG_CAS_MAX_ATTEMPTS = 5
@@ -41,33 +39,31 @@ def org_head_ref(org_id: str) -> str:
 def resolve_org_identity() -> Dict[str, Any]:
     """``resolve_identity()`` + ``org_id``/``org_role``; SyncInertError without an ``org_role`` claim
     (personal org / old issuer): org sync unavailable, NOT an error."""
-    from tools.skills_sync_client import SyncInertError, resolve_identity
-    identity = resolve_identity()
+    ssc = _ssc()
+    identity = ssc.resolve_identity()
     claims = identity.get("claims") or {}
     org_id, org_role = claims.get("org_id"), claims.get("org_role")
     if not org_id:
-        raise SyncInertError("no organisation associated with this account")
+        raise ssc.SyncInertError("no organisation associated with this account")
     if not isinstance(org_role, str) or not org_role:
-        raise SyncInertError("this account isn't a member of a shared organisation")
+        raise ssc.SyncInertError("this account isn't a member of a shared organisation")
     identity.update(org_id=str(org_id), org_role=org_role)
     return identity
 
 
 def _org_client(identity: Optional[Dict[str, Any]], client: Optional[SyncClient]):
-    """(identity, client, caps) for an org operation; SyncInertError when the base URL is
+    """(identity, client, max_object_bytes) for an org operation; SyncInertError when the base URL is
     missing or the server lacks the ``org`` feature."""
     ssc = _ssc()
     identity = identity or resolve_org_identity()
     if client is None:
-        base_url = ssc.resolve_sync_base_url()
-        if not base_url:
+        if not (base_url := ssc.resolve_sync_base_url()):
             raise ssc.SyncInertError("no sync base URL configured")
         client = SyncClient(base_url, identity["api_key"])
-    caps = client.capabilities()
-    _check_version(caps)
+    caps, max_bytes = checked_capabilities(client)
     if "org" not in (caps.get("features") or []):
         raise ssc.SyncInertError("this server does not support org-shared skills")
-    return identity, client, caps
+    return identity, client, max_bytes
 
 
 def _read_org_head(client: SyncClient, org_id: str) -> Optional[str]:
@@ -76,9 +72,9 @@ def _read_org_head(client: SyncClient, org_id: str) -> Optional[str]:
 
 
 # Local mirror sidecars
-
-def _mirror_root(org_id: str) -> Path:
-    return _ssc()._org_dir() / org_id
+def _mirror_root(org_id: Optional[str]) -> Path:
+    """``<_org_dir>/<org_id>``; the org-level ``_org/`` root itself when *org_id* is None."""
+    return _ssc()._org_dir() / org_id if org_id else _ssc()._org_dir()
 
 
 def _write_sidecar(what: str, path_fn: Callable[[], Path], text: str) -> None:
@@ -109,7 +105,7 @@ def _skill_dir_fingerprint(path: Path) -> str:
 def _sidecar_path(org_id: Optional[str], const: str) -> Path:
     """``<mirror>/<agent.skill_utils.<const>>`` (org-level when org_id is None)."""
     import agent.skill_utils as sku
-    return (_mirror_root(org_id) if org_id else _ssc()._org_dir()) / getattr(sku, const)
+    return _mirror_root(org_id) / getattr(sku, const)
 
 
 def _read_org_baseline(org_id: str) -> Dict[str, Any]:
@@ -150,18 +146,20 @@ def _clear_active_org_marker() -> None:
 def org_skill_is_locally_modified(skill_rel_path: str, org_id: str) -> bool:
     """Local copy differs from upstream's fingerprint. No baseline (pre-existing mirror) => unmodified."""
     dest = _mirror_root(org_id) / PurePosixPath(skill_rel_path)
-    if not dest.is_dir():
-        return False
     entry = _read_org_baseline(org_id).get(skill_rel_path) or {}
     recorded = entry.get("fingerprint") if isinstance(entry, dict) else entry
-    return bool(recorded) and _skill_dir_fingerprint(dest) != recorded
+    return dest.is_dir() and bool(recorded) and _skill_dir_fingerprint(dest) != recorded
+
+
+def _active_org_id() -> Optional[str]:
+    from agent.skill_utils import read_active_org_id
+    return read_active_org_id(_ssc()._skills_dir())
 
 
 def list_locally_modified_org_skills(org_id: Optional[str] = None) -> List[str]:
     """Org skills with local edits that upstream has not seen."""
     try:
-        from agent.skill_utils import read_active_org_id
-        org_id = org_id or read_active_org_id(_ssc()._skills_dir())
+        org_id = org_id or _active_org_id()
         if not org_id:
             return []
         return sorted(rel for rel in _read_org_baseline(org_id) if org_skill_is_locally_modified(rel, org_id))
@@ -174,21 +172,17 @@ def list_org_skill_names() -> List[str]:
     """Skill names present in the local org mirror (empty when none pulled)."""
     names: List[str] = []
     try:
-        from agent.skill_utils import read_active_org_id
-        org_id = read_active_org_id(_ssc()._skills_dir())
+        org_id = _active_org_id()
         root = _mirror_root(org_id) if org_id else None
         if root and root.is_dir():
-            for skill_md in root.rglob("SKILL.md"):
-                rel = skill_md.parent.relative_to(root)
-                if rel.parts:
-                    names.append(str(rel).replace("\\", "/"))
+            names = [str(rel).replace("\\", "/") for rel in (p.parent.relative_to(root) for p in root.rglob("SKILL.md"))
+                     if rel.parts]
     except Exception as e:
         logger.debug("skills_sync_client: org skill listing failed: %s", e)
     return sorted(names)
 
 
 # Pull / propose
-
 def pull_org_skills(client: Optional[SyncClient] = None, *, identity: Optional[Dict[str, Any]] = None,
                     ) -> Dict[str, Any]:
     """Pull the org canonical set into the mirror (fast-forward only, no client merge). A skill with
@@ -197,24 +191,19 @@ def pull_org_skills(client: Optional[SyncClient] = None, *, identity: Optional[D
     identity = identity or resolve_org_identity()
     if "org_id" not in identity:
         raise _ssc().SyncInertError("no organisation context available")
-    identity, client, _caps = _org_client(identity, client)
+    identity, client, _ = _org_client(identity, client)
     org_id = identity["org_id"]
-
     head = _read_org_head(client, org_id)
     # Marker written HERE: only after the token's org_id + org_role were verified, so a stale mirror
     # from a previous org stops resolving on a pull under another org.
     _write_active_org_marker(org_id)
     if not head:
         return {"ok": True, "org_id": org_id, "head": None, "updated": []}
-
     head_commit = client.get_commit_json(head, org_scope=True)
-    skill_trees = skill_trees_of_root(client, head_commit["tree"], org_scope=True)
-    dest_root = _mirror_root(org_id)
-    updated: List[str] = []
-    conflicted: List[str] = []
+    updated, conflicted = [], []
     baseline = _read_org_baseline(org_id)
-    for rel_path, tree_hash in sorted(skill_trees.items()):
-        dest = dest_root / PurePosixPath(rel_path)
+    for rel_path, tree_hash in sorted(skill_trees_of_root(client, head_commit["tree"], org_scope=True).items()):
+        dest = _mirror_root(org_id) / PurePosixPath(rel_path)
         try:
             if dest.exists():
                 if org_skill_is_locally_modified(rel_path, org_id):
@@ -222,8 +211,7 @@ def pull_org_skills(client: Optional[SyncClient] = None, *, identity: Optional[D
                         conflicted.append(rel_path)
                     continue
                 shutil.rmtree(dest)
-            dest.mkdir(parents=True, exist_ok=True)
-            materialize_tree(client, tree_hash, dest, org_scope=True)
+            materialize_tree(client, tree_hash, dest, org_scope=True)  # creates dest
             baseline[rel_path] = {"fingerprint": _skill_dir_fingerprint(dest), "tree": tree_hash}
             updated.append(rel_path)
         except Exception as e:
@@ -231,10 +219,9 @@ def pull_org_skills(client: Optional[SyncClient] = None, *, identity: Optional[D
     # Provenance for the skill_view header: the HEAD author is token-verified by the plane at
     # push time, so it is trustworthy to display.
     author = head_commit.get("author") or {}
-    _write_org_provenance(org_id, {
-        "org_id": org_id, "head": head, "author_user_id": author.get("owner", ""),
-        "author_device": author.get("device", ""), "ts": head_commit.get("ts", ""), "skills": updated,
-    })
+    _write_org_provenance(org_id, {"org_id": org_id, "head": head, "author_user_id": author.get("owner", ""),
+                                   "author_device": author.get("device", ""), "ts": head_commit.get("ts", ""),
+                                   "skills": updated})
     _write_org_baseline(org_id, baseline)
     if conflicted:
         logger.warning("skills_sync_client: %d org skill(s) have local edits AND upstream "
@@ -250,17 +237,14 @@ def propose_skill(skill_name: str, client: Optional[SyncClient] = None, *,
     proposal_pending: True, proposal_id, ref}`` (never presented as live). If HEAD moves before the
     CAS the skill is re-spliced onto the NEW head (replaying the old root would drop others' skills)."""
     ssc = _ssc()
-    identity, client, caps = _org_client(identity, client)
+    identity, client, max_bytes = _org_client(identity, client)
     org_id = identity["org_id"]
-    max_bytes = int(caps.get("max_object_bytes") or DEFAULT_MAX_OBJECT_BYTES)
-
     rel = ssc._skill_rel_path(skill_name)
     if rel is None:
         raise SyncError(f"skill '{skill_name}' not found under the skills dir")
     skill_dir = ssc._skills_dir() / rel
     if not (skill_dir / "SKILL.md").exists():
         raise SyncError(f"skill '{skill_name}' has no SKILL.md")
-
     objects = ObjectSet()
     skill_tree = build_tree(skill_dir, objects, max_object_bytes=max_bytes)
     for attempt in range(1, _ORG_CAS_MAX_ATTEMPTS + 1):
@@ -269,10 +253,9 @@ def propose_skill(skill_name: str, client: Optional[SyncClient] = None, *,
             client, root_tree_of_commit(client, base_head, org_scope=True), org_scope=True)
         skill_map[str(rel)] = skill_tree
         root_hash = assemble_root_from_skill_trees(skill_map, objects)
-        commit_hash = build_commit(
-            root_hash, [base_head] if base_head else [], owner=identity["owner"],
-            device=ssc.stable_device_id(), message=message or f"propose {skill_name}", objects=objects,
-        )
+        commit_hash = build_commit(root_hash, [base_head] if base_head else [], owner=identity["owner"],
+                                   device=ssc.stable_device_id(), message=message or f"propose {skill_name}",
+                                   objects=objects)
         client.put_objects(objects.objects, org_scope=True)
         try:
             result = client.cas_ref(org_head_ref(org_id), base_head, commit_hash)
@@ -284,7 +267,6 @@ def propose_skill(skill_name: str, client: Optional[SyncClient] = None, *,
                                 "the race — run the command again", status=409) from conflict
             logger.debug("propose_skill: org HEAD moved (actual=%r), re-splicing (attempt %d)",
                          conflict.actual, attempt)
-
     if result.get("proposal_pending"):
         return {"ok": True, "proposal_pending": True, "proposal_id": result.get("proposal_id"),
                 "ref": result.get("ref"), "commit": commit_hash, "org_id": org_id}
@@ -300,11 +282,9 @@ def maybe_pull_org_skills() -> Optional[Dict[str, Any]]:
     try:
         identity = resolve_org_identity()
     except ssc.SyncInertError:
-        try:
+        with suppress(Exception):
             if not (ssc.resolve_identity().get("claims") or {}).get("org_role"):
                 _clear_active_org_marker()
-        except Exception:
-            pass
         return None
     except Exception as e:
         logger.debug("skills_sync_client: maybe_pull_org_skills inert/failed: %s", e)

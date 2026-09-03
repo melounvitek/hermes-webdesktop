@@ -20,12 +20,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from tools.skills_sync_client_wire import (  # noqa: F401  (re-exports)
     DEFAULT_MAX_OBJECT_BYTES, KIND_BLOB, KIND_COMMIT, KIND_TREE, MODE_EXEC, MODE_FILE, ObjectSet,
     SyncClient, SyncConflict, SyncError, _check_version, assemble_root_from_skill_trees, build_commit,
-    build_root_tree, build_sync_manifest_bytes, build_tree, canonical_json_bytes, materialize_tree,
-    merge_skill, nest_skill_tree, parse_sync_manifest, read_manifest_of_root, read_ref_hash,
-    root_tree_of_commit, skill_trees_of_root, wire_address)
+    build_root_tree, build_sync_manifest_bytes, build_tree, canonical_json_bytes, checked_capabilities,
+    materialize_tree, merge_skill, nest_skill_tree, parse_sync_manifest, read_manifest_of_root,
+    read_ref_hash, root_tree_of_commit, skill_trees_of_root, wire_address)
 
 logger = logging.getLogger(__name__)
-
 # Gate claim (NAS's wire name; means "Nous admin" / Permissions.ADMIN_ACCESS). The bearer comes
 # from resolve_nous_runtime_credentials(); its payload is decoded unverified to read this.
 NOUS_ADMIN_CLAIM = "tool_gateway_admin"
@@ -44,8 +43,7 @@ def resolve_identity() -> Dict[str, Any]:
         creds = resolve_nous_runtime_credentials() or {}
     except Exception as e:
         raise SyncInertError(f"no Nous credentials: {e}") from e
-    api_key = creds.get("api_key")
-    if not api_key:
+    if not (api_key := creds.get("api_key")):
         raise SyncInertError("no bearer token available")
     try:
         import jwt  # PyJWT, a core dependency
@@ -63,8 +61,7 @@ def resolve_identity() -> Dict[str, Any]:
 # the inference URL; enabled; default_opt_in; org_auto_propose).
 DEFAULT_SYNC_BASE_URL = "https://gateway-gateway.nousresearch.com"
 
-_TRUE = {"1", "true", "yes", "on"}
-_FALSE = {"0", "false", "no", "off", ""}
+_TRUE, _FALSE = {"1", "true", "yes", "on"}, {"0", "false", "no", "off", ""}
 
 
 def _sync_config(key: str) -> Any:
@@ -99,11 +96,9 @@ def _parse_bool(value: Any) -> Optional[bool]:
 
 def _sync_config_bool(env_var: str, config_key: str, *, default: bool) -> bool:
     """``env_var`` -> ``sync.<config_key>`` -> default."""
-    env_val = _parse_bool(os.getenv(env_var))
-    if env_val is not None:
-        return env_val
-    cfg_val = _parse_bool(_sync_config(config_key))
-    return default if cfg_val is None else cfg_val
+    if (val := _parse_bool(os.getenv(env_var))) is not None:
+        return val
+    return default if (val := _parse_bool(_sync_config(config_key))) is None else val
 
 
 def sync_feature_enabled() -> bool:
@@ -124,14 +119,12 @@ def sync_default_opt_in() -> bool:
 
 
 # Local skill eligibility + the personal opt-in flag
-
 def _skills_dir() -> Path:
     from hermes_constants import get_hermes_home
     return get_hermes_home() / "skills"
 
 
-def _org_dir() -> Path:
-    """Local mirror root for org skills (read-only by convention)."""
+def _org_dir() -> Path:  # local mirror root for org skills (read-only by convention)
     return _skills_dir() / ORG_DIR_NAME
 
 
@@ -145,10 +138,7 @@ def _rel_to_skills_dir(skill_dir: Path) -> Optional[Path]:
 
 def _skill_rel_path(skill_name: str) -> Optional[PurePosixPath]:
     """The skill's path relative to ~/.hermes/skills/ (posix), or None."""
-    try:
-        from tools.skill_usage import _find_skill_dir
-    except Exception:
-        return None
+    from tools.skill_usage import _find_skill_dir
     skill_dir = _find_skill_dir(skill_name)
     rel = _rel_to_skills_dir(skill_dir) if skill_dir is not None else None
     return PurePosixPath(rel.as_posix()) if rel is not None else None
@@ -157,14 +147,9 @@ def _skill_rel_path(skill_name: str) -> Optional[PurePosixPath]:
 def is_sync_eligible(skill_name: str) -> bool:
     """Sync candidate (before opt-in): local, NOT bundled/hub-installed/external, NOT under ``_org/``
     (enterprise content never rides a personal push). Mirrors the curator's exclusions."""
-    try:
-        from tools.skill_usage import is_bundled, is_hub_installed, _find_skill_dir
-        from agent.skill_utils import is_external_skill_path
-    except Exception:
-        return False
-    if is_bundled(skill_name) or is_hub_installed(skill_name):
-        return False
-    skill_dir = _find_skill_dir(skill_name)
+    from tools.skill_usage import is_bundled, is_hub_installed, _find_skill_dir
+    from agent.skill_utils import is_external_skill_path
+    skill_dir = None if is_bundled(skill_name) or is_hub_installed(skill_name) else _find_skill_dir(skill_name)
     if skill_dir is None or is_external_skill_path(skill_dir):
         return False
     rel = _rel_to_skills_dir(skill_dir)
@@ -174,17 +159,11 @@ def is_sync_eligible(skill_name: str) -> bool:
 def list_synced_skill_names() -> List[str]:
     """Sorted skill names that should sync: opt-in -> eligible skills with ``sync: true``;
     opt-out (``sync_default_opt_in()``) -> every eligible skill unless ``sync: false``."""
-    try:
-        from tools.skill_usage import load_usage
-    except Exception:
-        return []
-    usage = load_usage() or {}
-    flags = {n: rec.get("sync") for n, rec in usage.items() if isinstance(rec, dict)}
+    from tools.skill_usage import load_usage
+    flags = {n: rec.get("sync") for n, rec in (load_usage() or {}).items() if isinstance(rec, dict)}
     if sync_default_opt_in():
-        names = [n for n in _all_local_skill_names() if flags.get(n) is not False and is_sync_eligible(n)]
-    else:
-        names = [n for n, f in flags.items() if f is True and is_sync_eligible(n)]
-    return sorted(set(names))
+        return sorted({n for n in _all_local_skill_names() if flags.get(n) is not False and is_sync_eligible(n)})
+    return sorted({n for n, f in flags.items() if f is True and is_sync_eligible(n)})
 
 
 def _all_local_skill_names() -> List[str]:
@@ -216,11 +195,9 @@ def _adopt_manifest_opt_ins(remote_manifest: Optional[Dict[str, bool]]) -> List[
     """Enable local sync intent for skills the plane manifest enabled that are locally
     curation-eligible. Enables only -- a pull never silently disables. Returns adopted names."""
     adopted: List[str] = []
-    if not remote_manifest:
-        return adopted
     try:
         from tools.skill_usage import set_sync, is_curation_eligible, is_sync_enabled
-        for sname, enabled in remote_manifest.items():
+        for sname, enabled in (remote_manifest or {}).items():
             if enabled and is_curation_eligible(sname) and not is_sync_enabled(sname):
                 set_sync(sname, True)
                 adopted.append(sname)
@@ -230,11 +207,9 @@ def _adopt_manifest_opt_ins(remote_manifest: Optional[Dict[str, bool]]) -> List[
 
 
 # Device label (commit ``author.device``; advisory, never an auth input)
-
 def _default_device_label() -> str:
     """Short hostname + random suffix (two machines can share a hostname); bare uuid if unusable."""
-    import socket
-    import uuid
+    import socket, uuid
     try:
         host = socket.gethostname() or ""
     except OSError:
@@ -263,14 +238,13 @@ def _device_id_path() -> Path:
 
 
 def _write_device_id(val: str) -> None:
-    _device_id_path().parent.mkdir(parents=True, exist_ok=True)
+    _skills_dir().mkdir(parents=True, exist_ok=True)
     _device_id_path().write_text(val, encoding="utf-8")
 
 
 def set_device_name(name: str) -> str:
     """Overwrite the device label with the trimmed *name*; returns it. ValueError on empty."""
-    cleaned = (name or "").strip()
-    if not cleaned:
+    if not (cleaned := (name or "").strip()):
         raise ValueError("device name must be a non-empty string")
     _write_device_id(cleaned)
     return cleaned
@@ -278,12 +252,7 @@ def set_device_name(name: str) -> str:
 
 # Local sync STATE: last HEAD pushed/pulled + its root tree (FULL-digest namespace). Distinct from
 # the bundled manifest (skills_sync.py) and the plane's `sync-manifest`. ~/.hermes/skills/.sync_state.
-
 _EMPTY_STATE: Dict[str, Any] = {"head": None, "skills": {}}
-
-
-def _sync_state_path() -> Path:
-    return _skills_dir() / ".sync_state"
 
 
 def _load_state_file(path: Path, what: str = "sync state read") -> Optional[Dict[str, Any]]:
@@ -299,10 +268,9 @@ def _load_state_file(path: Path, what: str = "sync state read") -> Optional[Dict
 def read_sync_state() -> Dict[str, Any]:
     """``{"head": "sha256:...|null", "skills": {...}}``; a default on missing/corrupt. A legacy
     ``.sync_manifest`` is migrated to ``.sync_state`` on read so no head record is lost."""
-    path = _sync_state_path()
+    path, legacy = _skills_dir() / ".sync_state", _skills_dir() / ".sync_manifest"
     if path.exists():
         return _load_state_file(path) or dict(_EMPTY_STATE)
-    legacy = _skills_dir() / ".sync_manifest"
     data = _load_state_file(legacy, "legacy sync state migrate") if legacy.exists() else None
     if data is not None:
         write_sync_state(data)
@@ -315,19 +283,13 @@ def write_sync_state(data: Dict[str, Any]) -> None:
     """Write the local sync state atomically. Best-effort."""
     try:
         from tools.skill_usage import _atomic_write
-        _atomic_write(_sync_state_path(), ".sync_state_",
+        _atomic_write(_skills_dir() / ".sync_state", ".sync_state_",
                       lambda f: json.dump(data, f, indent=2, sort_keys=True, ensure_ascii=False))
     except Exception as e:
         logger.debug("skills_sync_client: sync state write failed: %s", e)
 
 
-def _record_head(state: Dict[str, Any], head: str, root: str) -> None:
-    state.update(head=head, root=root)
-    write_sync_state(state)
-
-
 # Profile snapshot -- the root tree mirrors each skill's relative path (categories = intermediate trees).
-
 def snapshot_profile(skill_names: List[str], *, max_object_bytes: int = DEFAULT_MAX_OBJECT_BYTES,
                      ) -> Tuple[ObjectSet, str, Dict[str, str]]:
     """All objects for *skill_names* + profile root -> ``(objects, root_hash, {name: tree_hash})``.
@@ -337,8 +299,7 @@ def snapshot_profile(skill_names: List[str], *, max_object_bytes: int = DEFAULT_
     skill_tree_map: Dict[str, str] = {}
     root: Dict[str, Any] = {}
     for name in sorted(set(skill_names)):
-        rel = _skill_rel_path(name)
-        skill_dir = _find_skill_dir(name)
+        rel, skill_dir = _skill_rel_path(name), _find_skill_dir(name)
         if rel is None or skill_dir is None:
             continue
         try:
@@ -353,7 +314,6 @@ def snapshot_profile(skill_names: List[str], *, max_object_bytes: int = DEFAULT_
 
 
 # Personal refs, push, pull
-
 def user_head_ref(owner: str) -> str:
     return f"refs/user/{owner}/HEAD"
 
@@ -362,9 +322,8 @@ def _personal_client(identity: Optional[Dict[str, Any]], client: Optional[SyncCl
                      ) -> Tuple[Dict[str, Any], Optional[SyncClient]]:
     """Identity + client for a personal sync op; ``client`` is None when no base URL is configured."""
     identity = identity if identity is not None else resolve_identity()
-    if client is None:
-        base = resolve_sync_base_url()
-        client = SyncClient(base, identity["api_key"]) if base else None
+    if client is None and (base := resolve_sync_base_url()):
+        client = SyncClient(base, identity["api_key"])
     return identity, client
 
 
@@ -379,24 +338,18 @@ def push_skills(client: Optional[SyncClient] = None, *, skill_names: Optional[Li
     if client is None:
         return dict(_NO_BASE_URL)
     owner = identity["owner"]
-    if skill_names is None:
-        skill_names = list_synced_skill_names()
+    skill_names = list_synced_skill_names() if skill_names is None else skill_names
     if not skill_names:
         return {"ok": True, "reason": "no skills opted into sync", "noop": True}
-
-    caps = client.capabilities()
-    _check_version(caps)
-    max_bytes = int(caps.get("max_object_bytes") or DEFAULT_MAX_OBJECT_BYTES)
+    _caps, max_bytes = checked_capabilities(client)
     objects, root_hash, _ = snapshot_profile(skill_names, max_object_bytes=max_bytes)
     state = read_sync_state()
     base_head = state.get("head")
     # Idempotency: objects are immutable, so an unchanged root hash means identical content.
     if base_head and state.get("root") == root_hash:
         return {"ok": True, "head": base_head, "reason": "unchanged", "noop": True}
-
-    commit_hash = build_commit(
-        root_hash, [base_head] if base_head else [], owner=owner, device=stable_device_id(),
-        message=message, objects=objects)
+    commit_hash = build_commit(root_hash, [base_head] if base_head else [], owner=owner,
+                               device=stable_device_id(), message=message, objects=objects)
     client.put_objects(objects.objects)
     ref = user_head_ref(owner)
     result = {"ok": True, "head": commit_hash, "pushed_objects": len(objects)}
@@ -404,12 +357,11 @@ def push_skills(client: Optional[SyncClient] = None, *, skill_names: Optional[Li
         client.cas_ref(ref, base_head, commit_hash)
     except SyncConflict as conflict:
         if conflict.actual:
-            return _resolve_push_conflict(
-                client, identity, conflict.actual, root_hash, commit_hash, objects, message, base_head
-            )
+            return _resolve_push_conflict(client, identity, conflict.actual, root_hash, commit_hash,
+                                          objects, message, base_head)
         client.cas_ref(ref, None, commit_hash)
         result["recovered_stale_head"] = True
-    _record_head(state, commit_hash, root_hash)
+    write_sync_state({**state, "head": commit_hash, "root": root_hash})
     return result
 
 
@@ -422,7 +374,6 @@ def _resolve_push_conflict(client: SyncClient, identity: Dict[str, Any], actual_
     ours_trees = skill_trees_of_root(client, our_root)
     theirs_trees = skill_trees_of_root(client, root_tree_of_commit(client, actual_head))
     base_trees = skill_trees_of_root(client, root_tree_of_commit(client, base_head)) if base_head else {}
-
     merged: Dict[str, str] = {}
     overlaps: List[str] = []
     for path in set(ours_trees) | set(theirs_trees) | set(base_trees):
@@ -435,33 +386,26 @@ def _resolve_push_conflict(client: SyncClient, identity: Dict[str, Any], actual_
         pick = {"overlap": o, "ours": o, "theirs": t, "either": o if o is not None else t}.get(decision)
         if pick is not None:
             merged[path] = pick
-
     if overlaps:
         conflict_ref = f"refs/user/{owner}/conflict/{_next_conflict_index(client, owner)}"
         with suppress(SyncConflict):  # someone else grabbed this index; the head still exists
             client.cas_ref(conflict_ref, None, our_commit)
-        return {
-            "ok": False, "conflict": True, "conflict_ref": conflict_ref,
-            "overlapping_skills": sorted(overlaps), "actual_head": actual_head,
-            "message": (
-                f"{len(overlaps)} skill(s) changed on both sides; wrote "
-                f"{conflict_ref}. Resolve out-of-band (hermes sync / NAS UI).")}
-
+        return {"ok": False, "conflict": True, "conflict_ref": conflict_ref, "overlapping_skills": sorted(overlaps),
+                "actual_head": actual_head, "message": (f"{len(overlaps)} skill(s) changed on both sides; wrote "
+                                                        f"{conflict_ref}. Resolve out-of-band (hermes sync / NAS UI).")}
     # Merge commit (parents: actual, ours); re-add our objects so the merge push is self-contained.
     merge_objects = ObjectSet()
-    merge_objects.objects.update(objects.objects)
+    merge_objects.objects |= objects.objects
     merged_root = assemble_root_from_skill_trees(merged, merge_objects)
-    merge_commit = build_commit(
-        merged_root, [actual_head, our_commit], owner=owner, device=stable_device_id(),
-        message=f"merge: {message}", objects=merge_objects)
+    merge_commit = build_commit(merged_root, [actual_head, our_commit], owner=owner,
+                                device=stable_device_id(), message=f"merge: {message}", objects=merge_objects)
     client.put_objects(merge_objects.objects)
     try:
         client.cas_ref(user_head_ref(owner), actual_head, merge_commit)
     except SyncConflict as c2:
-        return {
-            "ok": False, "conflict": True, "actual_head": c2.actual,
-            "message": f"merge CAS lost again (head now {c2.actual}); retry sync."}
-    _record_head(read_sync_state(), merge_commit, merged_root)
+        return {"ok": False, "conflict": True, "actual_head": c2.actual,
+                "message": f"merge CAS lost again (head now {c2.actual}); retry sync."}
+    write_sync_state({**read_sync_state(), "head": merge_commit, "root": merged_root})
     return {"ok": True, "head": merge_commit, "merged": True}
 
 
@@ -471,8 +415,7 @@ def _next_conflict_index(client: SyncClient, owner: str) -> int:
         refs = client.get_refs(f"refs/user/{owner}/conflict/")
     except SyncError:
         return 1
-    used = [int(t) for t in (r.get("name", "").rsplit("/", 1)[-1] for r in refs) if t.isdigit()]
-    return (max(used) + 1) if used else 1
+    return 1 + max((int(t) for t in (r.get("name", "").rsplit("/", 1)[-1] for r in refs) if t.isdigit()), default=0)
 
 
 def pull_skills(client: Optional[SyncClient] = None, *, identity: Optional[Dict[str, Any]] = None,
@@ -483,14 +426,13 @@ def pull_skills(client: Optional[SyncClient] = None, *, identity: Optional[Dict[
     if client is None:
         return dict(_NO_BASE_URL)
     owner = identity["owner"]
-    _check_version(client.capabilities())
+    checked_capabilities(client)
     head = read_ref_hash(client, user_head_ref(owner))
     if not head:
         return {"ok": True, "reason": "no remote HEAD yet", "noop": True}
     state = read_sync_state()
     if head == state.get("head"):
         return {"ok": True, "reason": "already up to date", "head": head, "noop": True}
-
     root_tree = root_tree_of_commit(client, head)
     remote_trees = skill_trees_of_root(client, root_tree)
     adopted = _adopt_manifest_opt_ins(read_manifest_of_root(client, root_tree))
@@ -498,13 +440,11 @@ def pull_skills(client: Optional[SyncClient] = None, *, identity: Optional[Dict[
     updated = [path for path in remote_trees if not opted_in or path in opted_in]
     for path in updated:
         materialize_tree(client, remote_trees[path], _skills_dir() / path)
-    state["head"] = head
-    write_sync_state(state)
+    write_sync_state({**state, "head": head})
     return {"ok": True, "head": head, "updated": sorted(updated), "opt_in_adopted": sorted(adopted)}
 
 
 # Gated public entrypoints (gate-and-swallow, like maybe_run_curator): never raise; dict or None.
-
 def _gate_and_swallow(op: str, run: Callable[[Dict[str, Any]], Optional[Dict[str, Any]]]):
     """Run *run(identity)* only if all gates hold (Nous admin, feature on, base URL); None if inert/error."""
     try:
@@ -530,11 +470,10 @@ def maybe_pull_skills() -> Optional[Dict[str, Any]]:
 
 def sync_status() -> Dict[str, Any]:
     """Snapshot for ``hermes sync status``; never raises. ``org_available`` False = not in a shared org."""
-    status: Dict[str, Any] = {
-        "nous_admin": False, "logged_in": False, "feature_enabled": sync_feature_enabled(),
-        "default_opt_in": sync_default_opt_in(), "base_url": resolve_sync_base_url(),
-        "opted_in_skills": [], "local_head": None, "owner": None, "org_available": False,
-        "org_id": None, "org_role": None, "org_skills": [], "org_skills_modified": []}
+    status: Dict[str, Any] = {"nous_admin": False, "logged_in": False, "feature_enabled": sync_feature_enabled(),
+                              "default_opt_in": sync_default_opt_in(), "base_url": resolve_sync_base_url(),
+                              "opted_in_skills": [], "local_head": None, "owner": None, "org_available": False,
+                              "org_id": None, "org_role": None, "org_skills": [], "org_skills_modified": []}
     try:
         identity = resolve_identity()
         status.update(logged_in=True, owner=identity.get("owner"), nous_admin=bool(identity.get("nous_admin")))
@@ -542,17 +481,13 @@ def sync_status() -> Dict[str, Any]:
         pass
     except Exception as e:
         logger.debug("skills_sync_client: sync_status identity failed: %s", e)
-    try:
-        status["opted_in_skills"] = list_synced_skill_names()
-        status["local_head"] = read_sync_state().get("head")
-    except Exception:
-        pass
+    with suppress(Exception):
+        status.update(opted_in_skills=list_synced_skill_names(), local_head=read_sync_state().get("head"))
     try:
         org_identity = resolve_org_identity()
-        status.update(
-            org_available=True, org_id=org_identity.get("org_id"), org_role=org_identity.get("org_role"),
-            org_skills=list_org_skill_names(),
-            org_skills_modified=list_locally_modified_org_skills(org_identity.get("org_id")))
+        status.update(org_available=True, org_id=org_identity.get("org_id"), org_role=org_identity.get("org_role"),
+                      org_skills=list_org_skill_names(),
+                      org_skills_modified=list_locally_modified_org_skills(org_identity.get("org_id")))
     except SyncInertError:
         pass
     except Exception as e:
