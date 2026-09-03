@@ -124,13 +124,12 @@ def _missing_api_key_toolsets_for_summary(unavailable: list[dict]) -> list[dict]
     return [item for item in api_key_unavailable if str(item.get("name") or "") in enabled_toolsets]
 
 
-def _check_git_and_rg(should_fix: bool) -> Finding:
-    f = Finding()
+@doctor_check()
+def _check_git_and_rg(should_fix: bool, f: Finding) -> None:
     check_bool(_safe_which("git"), "git", ("git not found", "(optional)"))
     if not check_bool(_safe_which("rg"), ("ripgrep (rg)", "(faster file search)"),
                       ("ripgrep (rg) not found", "(file search uses grep fallback)")):
         check_info(f"Install for faster search: {_system_package_install_cmd('ripgrep')}")
-    return f
 
 
 _BUILTIN_TERMINAL_BACKENDS = {"local", "docker", "singularity", "modal", "managed_modal", "daytona", "vercel_sandbox", "ssh"}
@@ -226,9 +225,9 @@ def _check_plugin_backend(terminal_env: str, issues: list[str]) -> None:
 _BACKEND_CHECKS = {"ssh": _check_ssh_backend, "daytona": _check_daytona_backend, "vercel_sandbox": _check_vercel_backend}
 
 
-def _check_terminal_backend(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_terminal_backend(should_fix: bool, f: Finding) -> None:
     """Docker/SSH/Daytona/Vercel/plugin terminal backends, gated on TERMINAL_ENV."""
-    f = Finding()
     terminal_env = os.getenv("TERMINAL_ENV", "local")
     try:
         from hermes_constants import is_container as _is_container
@@ -245,7 +244,6 @@ def _check_terminal_backend(should_fix: bool) -> Finding:
         _BACKEND_CHECKS[terminal_env](f.issues)
     elif terminal_env not in _BUILTIN_TERMINAL_BACKENDS:
         _check_plugin_backend(terminal_env, f.issues)
-    return f
 
 
 def _check_agent_browser(should_fix: bool) -> bool:
@@ -331,9 +329,9 @@ def _check_lightpanda() -> None:
         check_info(LIGHTPANDA_INSTALL_HINT)
 
 
-def _check_node_and_browser(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_node_and_browser(should_fix: bool, f: Finding) -> None:
     """Node.js, agent-browser resolution, Playwright Chromium, Lightpanda engine."""
-    f = Finding()
     if _safe_which("node"):
         check_ok("Node.js")
         if _check_agent_browser(should_fix) and not _is_termux():  # Chromium check is not a tested Termux path
@@ -344,7 +342,6 @@ def _check_node_and_browser(should_fix: bool) -> Finding:
     else:
         check_warn("Node.js not found", "(optional, needed for browser tools)")
     _check_lightpanda()
-    return f
 
 
 def _plural(n: int) -> str:
@@ -384,7 +381,8 @@ def _audit_one(npm_bin: str, npm_dir, label: str, audit_extra: list[str], issues
         pass
 
 
-def _check_npm_audit(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_npm_audit(should_fix: bool, f: Finding) -> None:
     """npm audit per Node package tree (root, web/ui-tui workspaces, WhatsApp bridge).
 
     PROJECT_ROOT is audited with --workspaces=false so the apps/* glob (Electron, node-pty, ...) is never
@@ -392,7 +390,6 @@ def _check_npm_audit(should_fix: bool) -> Finding:
     HERMES_HOME mirror rather than the (possibly read-only) Docker install tree, hence the shared resolver.
     """
     from hermes_cli.doctor import PROJECT_ROOT
-    f = Finding()
     npm_bin = _safe_which("npm")
     if npm_bin:
         try:
@@ -413,7 +410,6 @@ def _check_npm_audit(should_fix: bool) -> Finding:
         check_info("Termux compatibility fallbacks:")
         for note in _TERMUX_INSTALL_ALL_FALLBACK_NOTES:
             check_info(note)
-    return f
 
 
 @doctor_check("Could not check tool availability", "({e})")

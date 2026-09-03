@@ -137,10 +137,10 @@ def _check_mcp_security(should_fix: bool, f: Finding) -> None:
         check_ok("No suspicious MCP stdio commands")
 
 
-def _check_env_file(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_env_file(should_fix: bool, f: Finding) -> None:
     """Managed scope plus ~/.hermes/.env presence and provider credentials."""
     from hermes_cli.doctor import HERMES_HOME, PROJECT_ROOT, _DHH
-    f = Finding()
     managed_scope_check()
     env_path = HERMES_HOME / '.env'
     if env_path.exists():
@@ -170,7 +170,6 @@ def _check_env_file(should_fix: bool) -> Finding:
         else:
             check_info("Run 'hermes setup' to create one")
             f.issues.append("Run 'hermes setup' to create .env")
-    return f
 
 
 def _known_provider_ids(cfg: dict) -> tuple[set, list, object, object, object]:
@@ -291,10 +290,10 @@ def _validate_model_config(config_path, issues: list) -> None:
             pass
 
 
-def _check_config_file(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_config_file(should_fix: bool, f: Finding) -> None:
     """config.yaml presence (project cli-config.yaml as fallback); model/provider validation."""
     from hermes_cli.doctor import HERMES_HOME, PROJECT_ROOT, _DHH
-    f = Finding()
     config_path = HERMES_HOME / 'config.yaml'
     if config_path.exists():
         check_ok(f"{_DHH}/config.yaml exists")
@@ -316,7 +315,6 @@ def _check_config_file(should_fix: bool) -> Finding:
         f.fixed += 1
     else:
         check_warn("config.yaml not found", "(using defaults)")
-    return f
 
 
 def _drift_config_version(f: Finding, should_fix: bool, config_path) -> None:
@@ -427,13 +425,13 @@ _CONFIG_DRIFT_STEPS = (
 )
 
 
-def _check_config_drift(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_config_drift(should_fix: bool, f: Finding) -> None:
     """Config version, stale root keys, HERMES_MAX_ITERATIONS ghost, deprecations, structure.
 
     Each step is independent and best-effort: a failure in one never hides the next.
     """
     from hermes_cli.doctor import HERMES_HOME
-    f = Finding()
     config_path = HERMES_HOME / 'config.yaml'
     if not config_path.exists():
         config_path = None
@@ -442,7 +440,6 @@ def _check_config_drift(should_fix: bool) -> Finding:
             step(f, should_fix, config_path)
         except Exception:
             pass
-    return f
 
 
 @doctor_check("xAI retirement check skipped", "({e})")

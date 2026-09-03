@@ -57,16 +57,22 @@ class Finding:
 
 def doctor_check(on_error: str | None = None, detail: str = ""):
     """Turn ``fn(should_fix, f: Finding)`` into a ``(should_fix) -> Finding`` doctor check.
-    If *fn* raises, prints ``check_warn(on_error.format(e=e), detail.format(e=e))`` (nothing when *on_error*
-    is None); the partial Finding is still returned, so issues recorded before the crash survive."""
+
+    *on_error* None: exceptions propagate (as they always did for that check). Otherwise the check is
+    best-effort: a crash prints ``check_warn(on_error.format(e=e), detail.format(e=e))`` (nothing for
+    ``""``) and the partial Finding is still returned, so issues recorded before the crash survive.
+    """
     def deco(fn):
         @functools.wraps(fn)
         def check(should_fix: bool) -> Finding:
             f = Finding()
+            if on_error is None:
+                fn(should_fix, f)
+                return f
             try:
                 fn(should_fix, f)
             except Exception as e:
-                if on_error is not None:
+                if on_error:
                     check_warn(on_error.format(e=e), detail.format(e=e))
             return f
         return check

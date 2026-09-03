@@ -100,10 +100,10 @@ def _memory_store_flags(hermes_home: Path) -> tuple:
     return get_builtin_memory_store_flags({"memory": _doctor_memory_config(hermes_home)})
 
 
-def _check_directory_structure(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_directory_structure(should_fix: bool, f: Finding) -> None:
     """HERMES_HOME, expected subdirs, SOUL.md, and the enabled built-in memory files."""
     from hermes_cli.doctor import HERMES_HOME, _DHH
-    f = Finding()
     hermes_home = HERMES_HOME
     ensure_dir(f, should_fix, hermes_home, f"{_DHH} directory exists", f"Created {_DHH} directory", f"{_DHH} not found")
     _memory_enabled, _user_profile_enabled = _memory_store_flags(hermes_home)
@@ -148,7 +148,6 @@ def _check_directory_structure(should_fix: bool) -> Finding:
                 check_ok(f"{fname} exists ({len(mem_file.read_text(encoding='utf-8').strip())} chars)")
             elif enabled:
                 check_info(f"{fname} not created yet (will be created when the agent first writes a memory)")
-    return f
 
 
 def _session_count(state_db_path: Path):
@@ -258,10 +257,10 @@ def _state_db_wal(f: Finding, should_fix: bool, state_db_path: Path) -> None:
         pass
 
 
-def _check_state_db(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_state_db(should_fix: bool, f: Finding) -> None:
     """state.db session count, FTS write health, schema repair, stats snapshot, WAL size."""
     from hermes_cli.doctor import HERMES_HOME, _DHH
-    f = Finding()
     state_db_path = HERMES_HOME / "state.db"
     if state_db_path.exists():
         _state_db_health(f, should_fix, state_db_path, _DHH)
@@ -269,7 +268,6 @@ def _check_state_db(should_fix: bool) -> Finding:
     else:
         check_info(f"{_DHH}/state.db not created yet (will be created on first session)")
     _state_db_wal(f, should_fix, state_db_path)
-    return f
 
 
 def _gh_authenticated() -> bool:
@@ -281,9 +279,9 @@ def _gh_authenticated() -> bool:
         return False
 
 
-def _check_skills_hub(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_skills_hub(should_fix: bool, f: Finding) -> None:
     from hermes_cli.doctor import HERMES_HOME, _DHH
-    f = Finding()
     hub_dir = HERMES_HOME / "skills" / ".hub"
     if not hub_dir.exists():
         check_warn("Skills Hub directory not initialized", "(run: hermes skills list)")
@@ -307,7 +305,6 @@ def _check_skills_hub(should_fix: bool) -> Finding:
     else:
         check_bool(_gh_authenticated(), ("GitHub authenticated via gh CLI", "(full API access — no GITHUB_TOKEN needed)"),
                    ("No GITHUB_TOKEN", f"(60 req/hr rate limit — set in {_DHH}/.env for better rates)"))
-    return f
 
 
 def _memory_provider_honcho(issues: list) -> None:
@@ -367,13 +364,13 @@ def _memory_provider_generic(name: str) -> None:
         check_warn(f"{name} plugin not found", "run: hermes memory setup")
 
 
-def _check_memory_provider(should_fix: bool) -> Finding:
+@doctor_check()
+def _check_memory_provider(should_fix: bool, f: Finding) -> None:
     from hermes_cli.doctor import HERMES_HOME
-    f = Finding()
     name = _doctor_memory_config(HERMES_HOME).get("provider", "")
     if not name:
         check_ok("Built-in memory active", "(no external provider configured — this is fine)")
-        return f
+        return
     checker, missing_row, missing_issue, label = _MEMORY_PROVIDER_CHECKS.get(name, (None, None, None, name))
     try:
         checker(f.issues) if checker else _memory_provider_generic(name)
@@ -384,10 +381,9 @@ def _check_memory_provider(should_fix: bool) -> Finding:
             _fail_and_issue(*missing_row, missing_issue, f.issues)
     except Exception as _e:
         check_warn(f"{label} check failed", str(_e))
-    return f
 
 
-@doctor_check()
+@doctor_check("")  # best-effort: profile enumeration must never break doctor
 def _check_profiles(should_fix: bool, f: Finding) -> None:
     from hermes_cli.profiles import list_profiles, _get_wrapper_dir, profile_exists
     import re as _re
