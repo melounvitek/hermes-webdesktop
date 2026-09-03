@@ -792,9 +792,11 @@ def _presence(approval_callback=None) -> tuple:
 
 
 def _run_approval_gate(
-    *, pattern_key: str, description: str, display_target: str, approval_callback=None, cron_deny_message: str,
-    single_query_deny_message: str, unattended_deny_message: str = "", autoapprove_log_prefix: str,
-    fail_closed_when_no_human: bool = False, no_human_block_message: str = "",
+    *, pattern_key: str, description: str, display_target: str, approval_callback=None,
+    subject: str = "", noun: str = "flagged actions",
+    advice: str = "Find an alternative approach that avoids this action.",
+    cron_deny_message: str = "", single_query_deny_message: str = "", unattended_deny_message: str = "",
+    autoapprove_log_prefix: str, fail_closed_when_no_human: bool = False, no_human_block_message: str = "",
 ) -> dict:
     """Shared human-approval gate for a flagged action (tool call or write): decision core for
     :func:`request_tool_approval` and the file-tool write gates.
@@ -803,6 +805,8 @@ def _run_approval_gate(
     prompt → persistence. Input-shape checks (hardline, allowlist, pattern detection) are the
     caller's job. ``fail_closed_when_no_human``: a non-interactive, non-gateway, non-cron
     context BLOCKS instead of auto-approving, so a plugin-flagged action never runs ungated.
+    Unattended deny text is ``ctx.block_message(subject, noun, advice)`` unless the caller passes
+    an explicit ``*_deny_message`` (the file-tool write gates word their own).
     """
     # Hardline blocks are the caller's job BEFORE this gate, so yolo here only skips the recoverable approval layer.
     if _yolo_active():
@@ -814,8 +818,7 @@ def _run_approval_gate(
     approval_callback, is_cli, is_gateway, is_ask = _presence(approval_callback)
     if not is_cli and not is_gateway:
         log_args = (autoapprove_log_prefix, pattern_key, description)
-        # Every unattended context resolves instantly — never a pending approval nobody
-        # can answer. Deny text is per-context (callers word the -q / cron variants).
+        # Every unattended context resolves instantly — never a pending approval nobody can answer.
         deny_messages = {
             "single_query": single_query_deny_message, "cron": cron_deny_message,
             "unattended": unattended_deny_message,
@@ -823,10 +826,12 @@ def _run_approval_gate(
         for ctx in _unattended_contexts():
             if ctx.mode() == "deny":
                 message = deny_messages[ctx.name]
-                if ctx.name == "unattended" and not message:
-                    message = ctx.block_message(
-                        f"approval required ({description})", noun="flagged actions",
-                        advice="Find an alternative approach that avoids this action.")
+                if not message and ctx.name == "unattended":
+                    # Platform contexts keep the generic wording (historical shape).
+                    message = ctx.block_message(f"approval required ({description})", noun="flagged actions",
+                                                advice="Find an alternative approach that avoids this action.")
+                elif not message:
+                    message = ctx.block_message(subject, noun=noun, advice=advice)
                 return _blocked(message, pattern_key=pattern_key, description=description)
             if ctx.name == "single_query":
                 # Return here rather than fall through: the fail-closed branch would
@@ -902,12 +907,10 @@ def check_dangerous_command(command: str, env_type: str,
     is_dangerous, pattern_key, description = detect_dangerous_command(command)
     if not is_dangerous:
         return _approved()
-    subject = f"Command flagged as dangerous ({description})"
-    advice = "Find an alternative approach that avoids this command."
     return _run_approval_gate(
         pattern_key=pattern_key, description=description, display_target=command, approval_callback=approval_callback,
-        cron_deny_message=_CRON_CTX.block_message(subject, noun="dangerous commands", advice=advice),
-        single_query_deny_message=_SINGLE_QUERY_CTX.block_message(subject, noun="dangerous commands", advice=advice),
+        subject=f"Command flagged as dangerous ({description})", noun="dangerous commands",
+        advice="Find an alternative approach that avoids this command.",
         autoapprove_log_prefix="AUTO-APPROVED dangerous command in non-interactive non-gateway context",
     )
 
@@ -927,26 +930,16 @@ def request_tool_approval(tool_name: str, reason: str, *, rule_key: str = "", ap
     if not rule_key:
         rule_key = f"{tool_name}:{hashlib.sha256(description.encode('utf-8')).hexdigest()[:12]}"
     subject = f"Tool '{tool_name}' requires approval ({description})"
-    advice = "Find an alternative approach."
     return _run_approval_gate(
-        # Namespaced so plugin-rule approvals share the allowlist machinery
-        # without ever colliding with a real command pattern key.
-        pattern_key=f"plugin_rule:{rule_key}",
-        description=description,
-        # Synthetic label for the display/allowlist layer; it never executes.
-        display_target=f"<{tool_name}> (plugin approval rule)",
-        approval_callback=approval_callback,
-        cron_deny_message=_CRON_CTX.block_message(subject, noun="flagged actions", advice=advice),
-        single_query_deny_message=_SINGLE_QUERY_CTX.block_message(subject, noun="flagged actions", advice=advice),
-        autoapprove_log_prefix=(
-            f"plugin-escalated tool call '{tool_name}' in "
-            "non-interactive non-gateway context"
-        ),
+        # Namespaced so plugin-rule approvals share the allowlist machinery without ever colliding with a real
+        # command pattern key; the display target is a synthetic label for the display/allowlist layer.
+        pattern_key=f"plugin_rule:{rule_key}", description=description,
+        display_target=f"<{tool_name}> (plugin approval rule)", approval_callback=approval_callback,
+        subject=subject, advice="Find an alternative approach.",
+        autoapprove_log_prefix=f"plugin-escalated tool call '{tool_name}' in non-interactive non-gateway context",
         fail_closed_when_no_human=True,
-        no_human_block_message=(
-            f"BLOCKED: {subject} but no interactive user or gateway is present "
-            "to approve it. A plugin flagged this action for human confirmation."
-        ),
+        no_human_block_message=(f"BLOCKED: {subject} but no interactive user or gateway is present "
+                                "to approve it. A plugin flagged this action for human confirmation."),
     )
 
 
