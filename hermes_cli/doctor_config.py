@@ -418,3 +418,20 @@ def _check_xai_retirement(should_fix: bool, f: Finding) -> None:
         check_warn(format_issue(ref))
     check_info(f"Migration guide: {MIGRATION_GUIDE_URL}")
     f.manual_issues.append(f"Update {len(retired_refs)} retired xAI model reference(s) in config.yaml — see {MIGRATION_GUIDE_URL}")
+
+
+@doctor_check("Plugin compat check skipped", "({e})")
+def _check_plugin_compat(should_fix: bool, f: Finding) -> None:
+    from hermes_cli.plugin_compat import ALLOW_KEY, COMPAT_REMOVAL, compat_report, removal_in_effect
+    report = compat_report()
+    if not report:
+        check_ok(f"No enabled plugin imports paths removed on {COMPAT_REMOVAL}")
+        return
+    for name, hits in sorted(report.items()):
+        (check_fail if removal_in_effect() else check_warn)(
+            f"{name}: {len(hits)} import(s) of paths removed on {COMPAT_REMOVAL}", f"{hits[0].old} -> {hits[0].new}")
+    check_info("Details: hermes plugins compat")
+    f.manual_issues.append(
+        f"Update {len(report)} plugin(s) still importing pre-decomposition paths (hermes plugins compat) — "
+        + ("they are NOT being loaded" if removal_in_effect() else f"they stop loading on {COMPAT_REMOVAL}")
+        + f"; escape hatch: plugins.{ALLOW_KEY}: true")

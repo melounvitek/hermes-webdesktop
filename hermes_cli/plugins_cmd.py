@@ -1997,6 +1997,42 @@ def _action_pack(args):
     pack_command(args)
 
 
+def cmd_compat(args: Any | None = None) -> None:
+    """``hermes plugins compat`` — which installed plugins import paths scheduled for removal, and where."""
+    import sys
+    from pathlib import Path
+    from hermes_cli.plugin_compat import (
+        ALLOW_KEY, COMPAT_REMOVAL, compat_report, removal_in_effect, scan_plugin, summary_lines)
+    console = _console()
+    path = getattr(args, "path", None)
+    if path:
+        hits = scan_plugin(Path(path).expanduser().resolve())
+        report = {Path(path).name: hits} if hits else {}
+    else:
+        report = compat_report(force=True)
+    if getattr(args, "json", False):
+        print(json.dumps({"removal_date": COMPAT_REMOVAL, "in_effect": removal_in_effect(),
+                          "plugins": {k: [h.__dict__ for h in v] for k, v in report.items()}}, indent=2))
+        sys.exit(1 if report else 0)
+    if not report:
+        console.print(f"[green]✓ No enabled plugin imports paths scheduled for removal on {COMPAT_REMOVAL}.[/green]")
+        return
+    head, tail = summary_lines(report)
+    console.print(f"[bold {'red' if removal_in_effect() else 'yellow'}]{head}[/]")
+    console.print(f"[dim]{tail}[/dim]")
+    for name, hits in sorted(report.items()):
+        table = _table(((f"{name}  ({len(hits)} import{'s' if len(hits) != 1 else ''})", "bold"), ("old path", "yellow"), ("new path", "green")),
+                       title=None, show_lines=False)
+        for h in hits:
+            table.add_row(f"{h.file}:{h.line}", h.old, h.new)
+        console.print()
+        console.print(table)
+    console.print()
+    console.print(f"[dim]After {COMPAT_REMOVAL} these plugins are not loaded. Update them, or force-load with "
+                  f"plugins.{ALLOW_KEY}: true in config.yaml (the old paths still break once the compat layer is reverted).[/dim]")
+    sys.exit(1)
+
+
 # Tri-state flags: neither --x nor --no-x given == None == interactive prompt.
 _PLUGIN_ACTIONS = {
     "install": lambda args: cmd_install(
@@ -2021,6 +2057,7 @@ _PLUGIN_ACTIONS = {
     "list": lambda args: cmd_list(args),
     "ls": lambda args: cmd_list(args),
     "doctor": lambda args: cmd_plugin_doctor(args.target, ci=getattr(args, "ci", False)),
+    "compat": lambda args: cmd_compat(args),
     "pack": _action_pack,
     "show": lambda args: cmd_show(args.name),
     "info": lambda args: cmd_show(args.name),

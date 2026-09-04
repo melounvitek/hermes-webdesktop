@@ -205,6 +205,10 @@ import { registerGitIpc } from './git-ipc'
 import { clearStaleGitLocks } from './gitlock'
 import { readAndConsumeHandoffResult } from './handoff-result'
 import {
+  pendingNotice as pendingPluginCompatNotice,
+  recordDismissed as recordPluginCompatDismissed
+} from './plugin-compat-notice'
+import {
   ATTACHMENT_UPLOAD_DEFAULT_MAX_BYTES,
   clampDataUrlReadMaxMb,
   DATA_URL_READ_DEFAULT_MAX_MB,
@@ -6715,6 +6719,44 @@ function getAppIconPath() {
   }
 }
 
+// One-time modal for plugins importing pre-decomposition module paths (see
+// electron/plugin-compat-notice.ts). The backend writes the report during plugin
+// discovery; we show each distinct report exactly once and remember the dismissal
+// in userData so the user is never nagged twice about the same set of plugins.
+let pluginCompatNoticeShown = false
+
+async function showPluginCompatNoticeOnce() {
+  if (pluginCompatNoticeShown) return
+  if (!mainWindow || mainWindow.isDestroyed()) return
+  let notice
+  try {
+    notice = pendingPluginCompatNotice(HERMES_HOME, app.getPath('userData'))
+  } catch (err) {
+    rememberLog(`[plugins] compat notice check failed: ${err.message}`)
+    return
+  }
+  if (!notice) return
+  pluginCompatNoticeShown = true
+  rememberLog(`[plugins] compat notice shown (${notice.key})`)
+  try {
+    await dialog.showMessageBox(mainWindow, {
+      type: 'warning',
+      title: notice.title,
+      message: notice.message,
+      detail: notice.detail,
+      buttons: ['OK'],
+      defaultId: 0,
+      noLink: true
+    })
+  } finally {
+    try {
+      recordPluginCompatDismissed(app.getPath('userData'), notice.key)
+    } catch (err) {
+      rememberLog(`[plugins] could not persist compat notice dismissal: ${err.message}`)
+    }
+  }
+}
+
 function sendOpenUpdatesRequested() {
   if (!mainWindow || mainWindow.isDestroyed()) {
     return
@@ -13048,6 +13090,10 @@ async function startHermes() {
     // failure starts fresh from attempt 1 instead of inheriting the
     // accumulated count of the resolved episode.
     bootstrapRepairAttempt = 0
+
+    // The backend's plugin discovery just ran and refreshed HERMES_HOME/.plugin-compat-report.json.
+    // Surface it once (per distinct set of affected plugins) after the window is up; never block boot.
+    setTimeout(() => void showPluginCompatNoticeOnce(), 1500)
 
     return {
       baseUrl,

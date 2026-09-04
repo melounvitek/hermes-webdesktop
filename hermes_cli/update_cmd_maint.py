@@ -936,6 +936,16 @@ def _refresh_cua_driver_after_update() -> None:
         install_cua_driver(upgrade=True, require_confirmed_update=True, show_installer_progress=False)
 
 
+def _print_plugin_compat_notice() -> None:
+    """Installed plugins importing paths that the Sep 2026 decomposition scheduled for removal."""
+    from hermes_cli.plugin_compat import compat_report, removal_in_effect, summary_lines
+    lines = summary_lines(compat_report(force=True))
+    if not lines:
+        return
+    colour = "\033[1;31m" if removal_in_effect() else "\033[1;33m"
+    print(f"\n{colour}⚠  {lines[0]}\033[0m\n   {lines[1]}")
+
+
 def _print_post_update_notices_and_self_heals() -> None:
     """Best-effort notices (FTS optimize, curator) and self-heals (FHS PATH, ACP launcher,
     Windows bin launchers, cua-driver refresh) that run after the summary."""
@@ -956,6 +966,7 @@ def _print_post_update_notices_and_self_heals() -> None:
         ('hermes-acp launcher self-heal failed: %s', _ensure_acp_launcher),
         ('Windows bin launcher migration failed: %s', _migrate_windows_bin_path),
         ('cua-driver refresh failed: %s', _refresh_cua_driver_after_update),
+        ('Plugin compat notice failed: %s', _print_plugin_compat_notice),
     ):
         with _best_effort(message):
             step()
