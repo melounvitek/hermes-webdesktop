@@ -268,19 +268,20 @@ entry points you'll actually edit.
 
 ```
 hermes-agent/
-├── run_agent.py          # AIAgent class — core conversation loop (~12k LOC)
+├── run_agent.py          # AIAgent class — public entry (~1.5k LOC); the turn loop lives in agent/turn_*.py
 ├── model_tools.py        # Tool orchestration, discover_builtin_tools(), handle_function_call()
 ├── toolsets.py           # Toolset definitions, _HERMES_CORE_TOOLS list
-├── cli.py                # HermesCLI class — interactive CLI orchestrator (~11k LOC)
-├── hermes_state.py       # SessionDB — SQLite session store (FTS5 search)
+├── cli.py                # HermesCLI class — interactive CLI orchestrator (~4.6k LOC + hermes_cli/cli_*_mixin.py)
+├── hermes_state.py       # SessionDB facade (~1.4k LOC); implementation in hermes_state_*.py (21 siblings)
 ├── hermes_constants.py   # get_hermes_home(), display_hermes_home() — profile-aware paths
 ├── hermes_logging.py     # setup_logging() — agent.log / errors.log / gateway.log (profile-aware)
 ├── batch_runner.py       # Parallel batch processing
-├── agent/                # Agent internals (provider adapters, memory, caching, compression, etc.)
+├── agent/                # Agent internals: turn_*.py (loop phases), provider adapters, memory, compression, ...
 ├── hermes_cli/           # CLI subcommands, setup wizard, plugins loader, skin engine
+│   └── web_routers/      # Dashboard FastAPI routers (one file per surface); web_server.py mounts them
 ├── tools/                # Tool implementations — auto-discovered via tools/registry.py
 │   └── environments/     # Terminal backends (local, docker, ssh, modal, daytona, singularity)
-├── gateway/              # Messaging gateway — run.py + session.py + platforms/
+├── gateway/              # Messaging gateway — run.py facade + run_*.py phases + session*.py + platforms/
 │   ├── platforms/        # Adapter per platform (telegram, discord, slack, whatsapp,
 │   │                     #   homeassistant, signal, matrix, mattermost, email, sms,
 │   │                     #   dingtalk, wecom, weixin, feishu, qqbot, bluebubbles,
@@ -300,13 +301,48 @@ hermes-agent/
 ├── skills/               # Built-in skills bundled with the repo
 ├── ui-tui/               # Ink (React) terminal UI — `hermes --tui`
 │   └── src/              # entry.tsx, app.tsx, gatewayClient.ts + app/components/hooks/lib
-├── tui_gateway/          # Python JSON-RPC backend for the TUI
+├── tui_gateway/          # Python JSON-RPC backend for the TUI — server.py + methods_*.py
 ├── acp_adapter/          # ACP server (VS Code / Zed / JetBrains integration)
-├── cron/                 # Scheduler — jobs.py, scheduler.py
-├── scripts/              # run_tests.sh, release.py, auxiliary scripts
+├── cron/                 # Scheduler — jobs.py, scheduler.py (+ scheduler_*.py)
+├── evals/                # Offline benchmarks (codebase_navigability/, compaction/, core_tool_deferral/, ...)
+├── scripts/              # run_tests.sh, release.py, check_compat_pointers.py, auxiliary scripts
 ├── website/              # Docusaurus docs site
-└── tests/                # Pytest suite (~17k tests across ~900 files as of May 2026)
+└── tests/                # Pytest suite (~39k test functions across ~3.7k files as of Sep 2026)
 ```
+
+### Facade + siblings layout (Sep 2026 decomposition)
+
+Every former god file is now a **facade** plus a family of **siblings** named `<stem>_<topic>.py`
+in the same directory. The facade keeps the public entry points and the names other packages
+import; each sibling owns one topic and is where the code actually lives. Families with the most
+siblings:
+
+| facade | siblings | topics |
+|---|---|---|
+| `hermes_state.py` | 21 `hermes_state_*.py` | schema, fts, search, compression, portability, gateway, errors, ... |
+| `gateway/run.py` | 15 `gateway/run_*.py` | startup, adapters, inbound, turn, busy, goals, notifications, shutdown, ... |
+| `tools/mcp_tool.py` | 15 `tools/mcp_tool_*.py` | config, discovery, transport, registration, content, errors, ... |
+| `hermes_cli/kanban.py` | 14 `hermes_cli/kanban_*.py` | boards, db, db_connect, db_dispatch, db_notify, workspace, ... |
+| `hermes_cli/web_server.py` | 13 `web_server_*.py` + 24 `web_routers/*.py` | one router file per dashboard surface |
+| `hermes_cli/auth.py` | 12 `auth_*.py` | device_flow, codex, minimax, model_picker, commands, ... |
+| `tools/browser_tool.py` | 11 `browser_tool_*.py` | cdp, cloud, install, lifecycle, session, real_profile, vision, ... |
+| `cli.py` | 12 `hermes_cli/cli_*_mixin.py` | commands, stream, status_bar, billing, ... — mixed into `HermesCLI` |
+| `run_agent.py` | `agent/turn_*.py`, `agent/agent_init.py`, `agent/conversation_loop.py` | turn phases: iteration_prep, api_call, api_error, overflow, truncation, recovery |
+
+Rules that follow from this layout:
+
+- **Find code by topic, not by facade.** `grep -rn "def name" <dir>/<stem>_*.py` lands on the
+  definition; reading the facade first is the expensive way (see `evals/codebase_navigability/`).
+- **Siblings may import each other and late-import the facade** (inside functions) to avoid cycles.
+  A facade never imports a sibling at module level *and* gets imported by that sibling at module level.
+- **Patch where production reads.** Many siblings deliberately do `from <facade> import name` inside
+  the function so tests can `monkeypatch.setattr(facade, "name", ...)`. Before writing a patch target,
+  check which binding the call site actually reads; a patch on the wrong module passes silently.
+- **`scripts/check_compat_pointers.py` runs in CI.** Old import paths kept alive for external plugins
+  (`PLUGIN-COMPAT` blocks, `COMPAT_MANIFEST.md`, `compat_manifest.json`) are OFF LIMITS to in-tree code
+  and tests; they are removed on schedule by reverting one commit. Import from the defining module.
+- **Don't recreate god files.** A sibling passing ~2,000 lines or a function passing ~300 is a signal
+  to split again along the same `<stem>_<topic>` convention.
 
 **User config:** `~/.hermes/config.yaml` (settings), `~/.hermes/.env` (API keys only).
 **Logs:** `~/.hermes/logs/` — `agent.log` (INFO+), `errors.log` (WARNING+),
@@ -350,7 +386,13 @@ run_agent.py, cli.py, batch_runner.py, environments/
 
 ---
 
-## AIAgent Class (run_agent.py)
+## AIAgent Class (run_agent.py + agent/)
+
+`run_agent.py` is the public entry: the `AIAgent` class assembled from mixins
+(`agent/turn_facade.py`, `agent/client_lifecycle.py`, `agent/stream_delivery.py`,
+`agent/session_persistence.py`, `agent/compression_facade.py`, ...). Construction runs
+`agent/agent_init.py::init_agent`; the turn itself is `agent/conversation_loop.py::run_conversation`,
+which `AIAgent.run_conversation` forwards to after taking the session turn lease.
 
 The real `AIAgent.__init__` takes ~60 parameters (credentials, routing, callbacks,
 session context, budget, credential pool, etc.). The signature below is the
@@ -388,8 +430,11 @@ class AIAgent:
 
 ### Agent Loop
 
-The core loop is inside `run_conversation()` — entirely synchronous, with
-interrupt checks, budget tracking, and a one-turn grace call:
+The core loop is `agent/conversation_loop.py::run_conversation()` — entirely synchronous, with
+interrupt checks, budget tracking, and a one-turn grace call. Each phase of an iteration is its own
+module under `agent/turn_*.py` (`turn_iteration_prep`, `turn_request_assembly`, `turn_api_call`,
+`turn_api_error`, `turn_overflow`, `turn_truncation`, `turn_recovery`, `turn_usage`, ...), so a change
+to, say, overflow handling touches one ~600-line file. Schematically:
 
 ```python
 while (api_call_count < self.max_iterations and self.iteration_budget.remaining > 0) \
@@ -410,13 +455,17 @@ Reasoning content is stored in `assistant_msg["reasoning"]`.
 
 ---
 
-## CLI Architecture (cli.py)
+## CLI Architecture (cli.py + hermes_cli/cli_*_mixin.py)
 
+- `cli.py` holds `HermesCLI` (REPL loop, config, slash dispatch); behaviour is split into mixins in
+  `hermes_cli/cli_commands_mixin.py`, `cli_stream_mixin.py`, `cli_status_bar_mixin.py`, `cli_billing_mixin.py`, ...
 - **Rich** for banner/panels, **prompt_toolkit** for input with autocomplete
 - **KawaiiSpinner** (`agent/display.py`) — animated faces during API calls, `┊` activity feed for tool results
 - `load_cli_config()` in cli.py merges hardcoded defaults + user config YAML
 - **Skin engine** (`hermes_cli/skin_engine.py`) — data-driven CLI theming; initialized from `display.skin` config key at startup; skins customize banner colors, spinner faces/verbs/wings, tool prefix, response box, branding text
-- `process_command()` is a method on `HermesCLI` — dispatches on canonical command name resolved via `resolve_command()` from the central registry
+- `process_command()` on `HermesCLI` resolves the canonical name via `resolve_command()` from the central
+  registry, then dispatches through the `_SLASH_DISPATCH` table (`canonical -> (method name, pass_arg)`),
+  falling back to a `_handle_<name>_command` method by naming convention. There is no `elif` ladder.
 - Skill slash commands: `agent/skill_commands.py` scans `~/.hermes/skills/`, injects as **user message** (not system prompt) to preserve prompt caching
 
 ### Slash Command Registry (`hermes_cli/commands.py`)
@@ -438,16 +487,16 @@ All slash commands are defined in a central `COMMAND_REGISTRY` list of `CommandD
 CommandDef("mycommand", "Description of what it does", "Session",
            aliases=("mc",), args_hint="[arg]"),
 ```
-2. Add handler in `HermesCLI.process_command()` in `cli.py`:
+2. Add the handler on the CLI. Name it `_handle_mycommand_command(self, cmd_original)` on the
+   relevant `hermes_cli/cli_*_mixin.py` and it is picked up by convention; or add an explicit entry to
+   `HermesCLI._SLASH_DISPATCH` in `cli.py` when the method name or arg-passing differs:
 ```python
-elif canonical == "mycommand":
-    self._handle_mycommand(cmd_original)
+"mycommand": ("_handle_mycommand", True),   # (method name, pass cmd_original?)
 ```
-3. If the command is available in the gateway, add a handler in `gateway/run.py`:
-```python
-if canonical == "mycommand":
-    return await self._handle_mycommand(event)
-```
+3. If the command is available in the gateway, add `_handle_mycommand_command(self, event)` on the
+   matching `gateway/slash_commands_*.py` mixin and list `"mycommand"` in `_IDLE_COMMANDS` (or
+   `_PLAIN_COMMANDS` if it must also work mid-run) in `gateway/run_busy.py`. Handlers are looked up
+   by name through `_command_handler_table`; there is no `if canonical == ...` chain to extend.
 4. For persistent settings, use `save_config_value()` in `cli.py`
 
 **CommandDef fields:**
