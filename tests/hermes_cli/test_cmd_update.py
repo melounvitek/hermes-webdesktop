@@ -1448,7 +1448,10 @@ class TestUpdateNodeDependencies:
         monkeypatch.setattr(hm, "PROJECT_ROOT", tmp_path)
         monkeypatch.setattr(hm, "_npm_lockfile_changed", lambda root: True)
         recorded = []
-        monkeypatch.setattr(update_cmd, "_record_npm_lockfile_hash", lambda root: recorded.append(root))
+        # _update_node_dependencies lives in update_cmd_deps and calls its own module-level
+        # _record_npm_lockfile_hash, so that binding is the real seam (update_cmd's is dead).
+        from hermes_cli import update_cmd_deps
+        monkeypatch.setattr(update_cmd_deps, "_record_npm_lockfile_hash", lambda root: recorded.append(root))
         mock_popen.side_effect = self._make_popen([], returncode=1, stderr_lines=["npm ERR!\n"])
 
         update_cmd._update_node_dependencies()

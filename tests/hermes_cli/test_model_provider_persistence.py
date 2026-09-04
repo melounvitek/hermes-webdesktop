@@ -165,7 +165,7 @@ class TestZaiEndpointPicker:
         from hermes_cli.auth import ZAI_ENDPOINTS
         custom_idx = len(ZAI_ENDPOINTS)
 
-        with patch("hermes_cli.main._prompt_provider_choice", return_value=custom_idx), \
+        with patch("hermes_cli.main_provider_setup._prompt_provider_choice", return_value=custom_idx), \
              patch("hermes_cli.auth._prompt_model_selection", return_value="glm-5"), \
              patch("hermes_cli.auth.deactivate_provider"), \
              patch("builtins.input", return_value="not-a-url"):
@@ -192,7 +192,7 @@ class TestZaiEndpointPicker:
             captured["choices"] = choices
             return default
 
-        with patch("hermes_cli.main._prompt_provider_choice", side_effect=fake_choice):
+        with patch("hermes_cli.main_provider_setup._prompt_provider_choice", side_effect=fake_choice):
             result = _select_zai_endpoint(coding_url)
 
         # Default should point at index 2 (coding-global)
