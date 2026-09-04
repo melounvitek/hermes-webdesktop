@@ -745,6 +745,8 @@ def test_real_binding_correlates_plugin_approval_denial_to_tool_metric(
 ):
     from hermes_cli.observability.shared_metrics import SharedMetricsStore
     from tools import approval
+    import tools.approval_prompt as approval_prompt
+    import tools.approval_context as approval_context
 
     assert real_binding_runtime._native is not None
     base = {
@@ -765,9 +767,12 @@ def test_real_binding_correlates_plugin_approval_denial_to_tool_metric(
     monkeypatch.setattr(approval, "is_current_session_yolo_enabled", lambda: False)
     monkeypatch.setattr(approval, "is_approved", lambda *args: False)
     monkeypatch.setattr(approval, "get_current_session_key", lambda: "session-key")
+    monkeypatch.setattr(approval_context, "get_current_session_key", lambda: "session-key")
     monkeypatch.setattr(approval, "_is_interactive_cli", lambda: True)
     monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: False)
+    monkeypatch.setattr(approval_context, "_is_gateway_approval_context", lambda: False)
     monkeypatch.setattr(approval, "prompt_dangerous_approval", lambda *args, **kwargs: "deny")
+    monkeypatch.setattr(approval_prompt, "prompt_dangerous_approval", lambda *args, **kwargs: "deny")
 
     lifecycle.invoke_hook("on_session_start", **base)
     lifecycle.invoke_hook("pre_llm_call", **base, messages=["sensitive-prompt"])

@@ -34,12 +34,25 @@ class TestLoginNous:
 
     def _run(self, monkeypatch, tmp_path):
         import hermes_cli.auth as auth_mod
+        import hermes_cli.auth_nous as auth_nous
         import hermes_cli.nous_subscription as ns
 
         seen: dict = {}
         monkeypatch.setenv("HERMES_HOME", str(tmp_path))
         monkeypatch.setattr(
             auth_mod,
+            "_nous_device_code_login",
+            lambda **_k: {
+                "access_token": "tok",
+                "agent_key": "key",
+                "inference_base_url": "https://inference.example.com",
+                "portal_base_url": "https://portal.example.com",
+                "refresh_token": "r",
+                "token_expires_at": 9999999999,
+            },
+        )
+        monkeypatch.setattr(
+            auth_nous,
             "_nous_device_code_login",
             lambda **_k: {
                 "access_token": "tok",

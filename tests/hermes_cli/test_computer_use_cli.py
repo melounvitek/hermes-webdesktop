@@ -53,12 +53,18 @@ def test_computer_use_status_returns_zero_for_compatible_driver(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from hermes_cli import tools_config
+    import hermes_cli.tools_config_cua as tools_config_cua
 
     driver = r"C:\Users\tester\.local\bin\cua-driver.exe"
     monkeypatch.delenv("HERMES_CUA_DRIVER_CMD", raising=False)
     monkeypatch.setattr(cua_backend_driver, "resolve_cua_driver_cmd", lambda: driver)
     monkeypatch.setattr(
         tools_config,
+        "_cua_driver_contract_status",
+        lambda _binary=None: {"ready": True},
+    )
+    monkeypatch.setattr(
+        tools_config_cua,
         "_cua_driver_contract_status",
         lambda _binary=None: {"ready": True},
     )
@@ -87,12 +93,21 @@ def test_computer_use_status_returns_nonzero_for_incompatible_standard_driver(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     from hermes_cli import tools_config
+    import hermes_cli.tools_config_cua as tools_config_cua
 
     driver = r"C:\Users\tester\.local\bin\cua-driver.exe"
     monkeypatch.delenv("HERMES_CUA_DRIVER_CMD", raising=False)
     monkeypatch.setattr(cua_backend_driver, "resolve_cua_driver_cmd", lambda: driver)
     monkeypatch.setattr(
         tools_config,
+        "_cua_driver_contract_status",
+        lambda _binary=None: {
+            "ready": False,
+            "reason": "required runtime features are missing",
+        },
+    )
+    monkeypatch.setattr(
+        tools_config_cua,
         "_cua_driver_contract_status",
         lambda _binary=None: {
             "ready": False,
@@ -111,12 +126,18 @@ def test_computer_use_status_returns_nonzero_for_incompatible_custom_driver(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     from hermes_cli import tools_config
+    import hermes_cli.tools_config_cua as tools_config_cua
 
     driver = r"C:\custom\cmd.exe"
     monkeypatch.setenv("HERMES_CUA_DRIVER_CMD", driver)
     monkeypatch.setattr(cua_backend_driver, "resolve_cua_driver_cmd", lambda: driver)
     monkeypatch.setattr(
         tools_config,
+        "_cua_driver_contract_status",
+        lambda _binary=None: {"ready": False, "reason": "manifest is invalid"},
+    )
+    monkeypatch.setattr(
+        tools_config_cua,
         "_cua_driver_contract_status",
         lambda _binary=None: {"ready": False, "reason": "manifest is invalid"},
     )
@@ -134,11 +155,17 @@ def test_computer_use_install_checks_resulting_runtime_contract(
     expected: int,
 ) -> None:
     from hermes_cli import tools_config
+    import hermes_cli.tools_config_cua as tools_config_cua
 
     install = Mock(return_value=True)
     monkeypatch.setattr(tools_config, "install_cua_driver", install)
     monkeypatch.setattr(
         tools_config,
+        "_cua_driver_contract_status",
+        lambda: {"ready": ready},
+    )
+    monkeypatch.setattr(
+        tools_config_cua,
         "_cua_driver_contract_status",
         lambda: {"ready": ready},
     )
@@ -151,6 +178,7 @@ def test_computer_use_install_returns_nonzero_for_unrepairable_custom_override(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from hermes_cli import tools_config
+    import hermes_cli.tools_config_cua as tools_config_cua
 
     driver = r"C:\custom\cmd.exe"
     monkeypatch.setenv("HERMES_CUA_DRIVER_CMD", driver)
@@ -158,6 +186,7 @@ def test_computer_use_install_returns_nonzero_for_unrepairable_custom_override(
     contract = Mock(side_effect=AssertionError("failed install must short-circuit"))
     monkeypatch.setattr(tools_config, "install_cua_driver", install)
     monkeypatch.setattr(tools_config, "_cua_driver_contract_status", contract)
+    monkeypatch.setattr(tools_config_cua, "_cua_driver_contract_status", contract)
 
     assert _invoke(monkeypatch, "install") == 1
     install.assert_called_once_with(upgrade=False)

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import hermes_cli.main as m
+import hermes_cli.main_install_repair as hermes_cli_main_install_repair
 from hermes_cli import main_install_repair
 from hermes_cli import update_cmd
 import pytest
@@ -22,6 +23,9 @@ def test_detect_returns_none_when_probe_subprocess_fails(tmp_path, monkeypatch):
     python.write_text("", encoding="utf-8")
     monkeypatch.setattr(
         m, "_resolve_install_target_python", lambda *a, **k: python
+    )
+    monkeypatch.setattr(
+        hermes_cli_main_install_repair, "_resolve_install_target_python", lambda *a, **k: python
     )
     monkeypatch.setattr(
         m.subprocess,
@@ -155,6 +159,11 @@ def test_restore_active_tool_dependencies_uses_static_allowlist(monkeypatch):
         "_run_package_only_install",
         lambda cmd, *, env=None: calls.append((cmd, env)),
     )
+    monkeypatch.setattr(
+        hermes_cli_main_install_repair,
+        "_run_package_only_install",
+        lambda cmd, *, env=None: calls.append((cmd, env)),
+    )
 
     env = {"VIRTUAL_ENV": "/tmp/venv"}
     m._restore_active_tool_dependencies(
@@ -202,6 +211,7 @@ def test_cmd_update_captures_and_propagates_pre_rebuild_snapshot(
         m, "_capture_active_tool_dependencies", lambda: tool_snapshot.copy()
     )
     monkeypatch.setattr(m, "_is_windows", lambda: False)
+    monkeypatch.setattr(hermes_cli_main_install_repair, "_is_windows", lambda: False)
     monkeypatch.setattr(m, "_run_pre_update_backup", lambda args: None)
     monkeypatch.setattr(m, "_pause_windows_gateways_for_update", lambda: None)
     monkeypatch.setattr(m, "_resume_windows_gateways_after_update", lambda state: None)

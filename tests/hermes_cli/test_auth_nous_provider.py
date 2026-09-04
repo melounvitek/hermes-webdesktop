@@ -184,6 +184,7 @@ def test_resolve_nous_runtime_credentials_invoke_jwt_is_idempotent(
     monkeypatch,
 ):
     import hermes_cli.auth as auth_mod
+    import hermes_cli.auth_nous as auth_nous
 
     hermes_home = tmp_path / "hermes"
     hermes_home.mkdir(parents=True, exist_ok=True)
@@ -232,8 +233,14 @@ def test_resolve_nous_runtime_credentials_invoke_jwt_is_idempotent(
     sync_calls = []
 
     monkeypatch.setattr(auth_mod, "_write_shared_nous_state", _unexpected_shared_write)
+    monkeypatch.setattr(auth_nous, "_write_shared_nous_state", _unexpected_shared_write)
     monkeypatch.setattr(
         auth_mod,
+        "_sync_nous_pool_from_auth_store",
+        lambda: sync_calls.append(True),
+    )
+    monkeypatch.setattr(
+        auth_nous,
         "_sync_nous_pool_from_auth_store",
         lambda: sync_calls.append(True),
     )
@@ -351,6 +358,7 @@ def test_nous_inference_auth_logs_do_not_include_secret_values(
     caplog,
 ):
     import hermes_cli.auth as auth_mod
+    import hermes_cli.auth_nous as auth_nous
 
     hermes_home = tmp_path / "hermes"
     token = _invoke_jwt(seconds=3600)
@@ -377,6 +385,7 @@ def test_nous_inference_auth_logs_do_not_include_secret_values(
         }
 
     monkeypatch.setattr(auth_mod, "_refresh_access_token", _fake_refresh_access_token)
+    monkeypatch.setattr(auth_nous, "_refresh_access_token", _fake_refresh_access_token)
 
     caplog.set_level(logging.DEBUG, logger="hermes_cli.auth")
     auth_mod.resolve_nous_runtime_credentials(
@@ -499,6 +508,7 @@ class TestLoginNousSkipKeepsCurrent:
     def _patch_login_internals(self, monkeypatch, *, prompt_returns):
         """Patch OAuth + model-list + prompt so _login_nous doesn't hit network."""
         import hermes_cli.auth as auth_mod
+        import hermes_cli.auth_nous as auth_nous
         import hermes_cli.models as models_mod
         from hermes_cli import models_pricing
         import hermes_cli.nous_subscription as ns
@@ -513,6 +523,10 @@ class TestLoginNousSkipKeepsCurrent:
         }
         monkeypatch.setattr(
             auth_mod, "_nous_device_code_login",
+            lambda **kwargs: dict(fake_auth_state),
+        )
+        monkeypatch.setattr(
+            auth_nous, "_nous_device_code_login",
             lambda **kwargs: dict(fake_auth_state),
         )
         monkeypatch.setattr(
@@ -963,6 +977,7 @@ def test_try_import_shared_rehydrates_on_success(shared_store_env, monkeypatch):
     every field persist_nous_credentials() needs.
     """
     from hermes_cli import auth as auth_mod
+    import hermes_cli.auth_nous as auth_nous
 
     auth_mod._write_shared_nous_state(_full_state_fixture())
     fresh_jwt = _invoke_jwt(seconds=7200)
@@ -979,6 +994,7 @@ def test_try_import_shared_rehydrates_on_success(shared_store_env, monkeypatch):
         }
 
     monkeypatch.setattr(auth_mod, "refresh_nous_oauth_from_state", _fake_refresh)
+    monkeypatch.setattr(auth_nous, "refresh_nous_oauth_from_state", _fake_refresh)
 
     result = auth_mod._try_import_shared_nous_state()
 
@@ -1032,6 +1048,7 @@ class TestStalePortalBaseUrlMigration:
     ):
         """An allowlisted production host is still unsafe over plain HTTP."""
         from hermes_cli import auth as auth_mod
+        import hermes_cli.auth_nous as auth_nous
 
         hermes_home = tmp_path / "hermes"
         monkeypatch.setenv("HERMES_HOME", str(hermes_home))
@@ -1065,6 +1082,9 @@ class TestStalePortalBaseUrlMigration:
 
         monkeypatch.setattr(
             auth_mod, "_refresh_access_token", _fake_refresh_access_token
+        )
+        monkeypatch.setattr(
+            auth_nous, "_refresh_access_token", _fake_refresh_access_token
         )
 
         auth_mod.resolve_nous_runtime_credentials()

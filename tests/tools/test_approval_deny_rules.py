@@ -10,6 +10,7 @@ import os
 import pytest
 
 from tools import approval as mod
+import tools.approval_floors as approval_floors
 from tools import approval_context
 
 
@@ -109,6 +110,8 @@ class TestDenyOrdering:
         deny_config(["git push --force*"])
         monkeypatch.setattr(
             mod, "_command_matches_permanent_allowlist", lambda c: True)
+        monkeypatch.setattr(
+            approval_floors, "_command_matches_permanent_allowlist", lambda c: True)
 
         result = mod.check_dangerous_command("git push --force origin main", "local")
         assert result["approved"] is False

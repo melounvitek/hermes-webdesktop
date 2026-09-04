@@ -16,6 +16,7 @@ import json
 import pytest
 
 import tools.approval as A
+import tools.approval_prompt as approval_prompt
 from tools import approval_context
 from tools import approval_detection, approval_floors
 from hermes_cli import approvals_test as at
@@ -42,6 +43,7 @@ def isolated_approvals(monkeypatch):
     def _boom(*_a, **_kw):  # pragma: no cover - failure path
         raise AssertionError("read-only tester touched a prompt/persistence path")
     monkeypatch.setattr(A, "prompt_dangerous_approval", _boom)
+    monkeypatch.setattr(approval_prompt, "prompt_dangerous_approval", _boom)
     monkeypatch.setattr(A, "save_permanent_allowlist", _boom)
     monkeypatch.setattr(A, "submit_pending", _boom, raising=False)
     yield A

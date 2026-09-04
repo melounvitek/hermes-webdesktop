@@ -295,6 +295,7 @@ def test_cli_selected_transport_replaces_builtin_prompt(monkeypatch):
 
 def test_gateway_selected_transport_does_not_require_gateway_notifier(monkeypatch):
     from tools import approval
+    import tools.approval_context as tools_approval_context
 
     manager = PluginManager()
     seen = []
@@ -304,6 +305,7 @@ def test_gateway_selected_transport_does_not_require_gateway_notifier(monkeypatc
     _configure_manual_guard(monkeypatch, approval, manager)
     monkeypatch.setattr(approval, "_is_interactive_cli", lambda: False)
     monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: True)
+    monkeypatch.setattr(tools_approval_context, "_is_gateway_approval_context", lambda: True)
     monkeypatch.setattr(approval, "_gateway_notify_cbs", {})
 
     result = approval.check_all_command_guards("rm -rf /tmp/example", "local")
@@ -315,6 +317,7 @@ def test_gateway_selected_transport_does_not_require_gateway_notifier(monkeypatc
 
 def test_execute_code_gateway_uses_selected_transport(monkeypatch):
     from tools import approval
+    import tools.approval_context as tools_approval_context
 
     manager = PluginManager()
     seen = []
@@ -323,9 +326,14 @@ def test_execute_code_gateway_uses_selected_transport(monkeypatch):
     )
     monkeypatch.setattr(approval_context, "_get_approval_mode", lambda: "manual")
     monkeypatch.setattr(approval, "_is_gateway_approval_context", lambda: True)
+    monkeypatch.setattr(tools_approval_context, "_is_gateway_approval_context", lambda: True)
     monkeypatch.setattr(approval, "_is_cron_approval_context", lambda: False)
+    monkeypatch.setattr(tools_approval_context, "_is_cron_approval_context", lambda: False)
     monkeypatch.setattr(
         approval, "get_current_session_key", lambda *args, **kwargs: "session-a"
+    )
+    monkeypatch.setattr(
+        tools_approval_context, "get_current_session_key", lambda *args, **kwargs: "session-a"
     )
     monkeypatch.setattr(approval, "is_approved", lambda *args: False)
     monkeypatch.setattr(approval_prompt, "get_plugin_manager", lambda: manager)
@@ -539,6 +547,7 @@ def register(ctx):
 
 def test_hardline_blocks_before_selected_transport(monkeypatch):
     from tools import approval
+    import tools.approval_detection as approval_detection
 
     manager = PluginManager()
     calls = []
@@ -548,6 +557,11 @@ def test_hardline_blocks_before_selected_transport(monkeypatch):
     _configure_manual_guard(monkeypatch, approval, manager)
     monkeypatch.setattr(
         approval,
+        "detect_hardline_command",
+        lambda command: (True, "recursive delete of root filesystem"),
+    )
+    monkeypatch.setattr(
+        approval_detection,
         "detect_hardline_command",
         lambda command: (True, "recursive delete of root filesystem"),
     )

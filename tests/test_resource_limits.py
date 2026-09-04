@@ -205,6 +205,7 @@ async def test_gateway_startup_applies_limit_before_gateway_initialization(monke
 
 def test_serve_startup_applies_limit_before_web_server(monkeypatch):
     from hermes_cli import main as cli_main
+    import hermes_cli.main_web_build as main_web_build
     import hermes_cli.plugins
     import hermes_cli.web_server
 
@@ -223,6 +224,7 @@ def test_serve_startup_applies_limit_before_web_server(monkeypatch):
     )
     monkeypatch.setattr(cli_main, "_sync_bundled_skills_quietly", lambda: None)
     monkeypatch.setattr(cli_main, "_build_web_ui", lambda *args, **kwargs: True)
+    monkeypatch.setattr(main_web_build, "_build_web_ui", lambda *args, **kwargs: True)
     monkeypatch.setattr(cli_main, "_maybe_setup_dashboard_auth_interactively", lambda args: None)
     monkeypatch.setattr(hermes_cli.plugins, "discover_plugins", lambda: None)
     monkeypatch.setattr(
@@ -320,6 +322,7 @@ def test_named_profile_reroute_defers_limit_to_final_process(monkeypatch, tmp_pa
 def test_dashboard_lifecycle_flags_skip_limit_adjustment(monkeypatch, lifecycle_flag):
     """Informational/stop-only commands must not mutate process limits."""
     from hermes_cli import main as cli_main
+    import hermes_cli.main_dashboard as hermes_cli_main_dashboard
 
     calls: list[str] = []
     monkeypatch.setattr(
@@ -329,6 +332,7 @@ def test_dashboard_lifecycle_flags_skip_limit_adjustment(monkeypatch, lifecycle_
     )
     monkeypatch.setattr(dashboard_procs, "_scan_dashboard_processes", lambda: [])
     monkeypatch.setattr(cli_main, "_find_stale_dashboard_pids", lambda: [])
+    monkeypatch.setattr(hermes_cli_main_dashboard, "_find_stale_dashboard_pids", lambda: [])
 
     args = SimpleNamespace(
         status=lifecycle_flag == "status",

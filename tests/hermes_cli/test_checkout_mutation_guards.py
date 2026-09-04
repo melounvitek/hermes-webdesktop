@@ -18,6 +18,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import hermes_cli.main as main_mod
+import hermes_cli.main_install_repair as hermes_cli_main_install_repair
 from hermes_cli import main_install_repair
 from hermes_cli import update_cmd
 from hermes_cli import _early_recovery as er
@@ -107,4 +108,5 @@ class TestLaunchRecovery:
             raise AssertionError("launch recovery ran against the live checkout")
 
         monkeypatch.setattr(main_mod, "_update_marker_path", _boom)
+        monkeypatch.setattr(hermes_cli_main_install_repair, "_update_marker_path", _boom)
         main_mod._recover_from_interrupted_install()

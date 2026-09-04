@@ -17,6 +17,7 @@ network or auth state is required.
 
 import pytest
 from hermes_cli import model_switch
+import hermes_cli.model_switch_providers as hermes_cli_model_switch_providers
 from hermes_cli import model_switch_providers
 
 
@@ -73,6 +74,7 @@ def test_passthrough_kwargs_to_base(monkeypatch):
         return []
 
     monkeypatch.setattr(model_switch, "list_authenticated_providers", _capture)
+    monkeypatch.setattr(hermes_cli_model_switch_providers, "list_authenticated_providers", _capture)
     monkeypatch.setattr("hermes_cli.models.fetch_openrouter_models",
                         lambda *a, **kw: [])
 
@@ -159,6 +161,7 @@ def _stub_kimi_discovery(monkeypatch, *, canonical):
     """
     import agent.models_dev as md
     import hermes_cli.models as hm
+    import hermes_cli.models_catalog_static as hermes_cli_models_catalog_static
     from hermes_cli import models_catalog_static
 
     kimi_map = {
@@ -181,6 +184,7 @@ def _stub_kimi_discovery(monkeypatch, *, canonical):
     monkeypatch.setattr(md, "get_provider_info", lambda _pid: _PInfo())
     monkeypatch.setattr("hermes_cli.providers.HERMES_OVERLAYS", {})
     monkeypatch.setattr(hm, "CANONICAL_PROVIDERS", canonical)
+    monkeypatch.setattr(hermes_cli_models_catalog_static, "CANONICAL_PROVIDERS", canonical)
     monkeypatch.setattr(hm, "cached_provider_model_ids",
                         lambda *a, **k: ["kimi-k2.6", "kimi-k2.5"])
     monkeypatch.setattr(hm, "clear_provider_models_cache", lambda *a, **k: None)

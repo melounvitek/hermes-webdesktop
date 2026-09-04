@@ -273,8 +273,10 @@ async def test_gateway_stop_kills_tool_subprocesses_before_adapter_disconnect_on
     # Patch the module-level names the stop() helper imports lazily.
     import tools.process_registry as _pr
     import tools.terminal_tool as _tt
+    import tools.terminal_tool_lifecycle as terminal_tool_lifecycle
     monkeypatch.setattr(_pr.process_registry, "kill_all", _fake_kill_all)
     monkeypatch.setattr(_tt, "cleanup_all_environments", _fake_cleanup_envs)
+    monkeypatch.setattr(terminal_tool_lifecycle, "cleanup_all_environments", _fake_cleanup_envs)
     monkeypatch.setattr(bt_lifecycle, "cleanup_all_browsers", _fake_cleanup_browsers)
 
     adapter.disconnect = _disconnect

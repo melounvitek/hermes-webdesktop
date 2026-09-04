@@ -764,6 +764,7 @@ def test_restore_rejects_invalid_python_and_keeps_clean_updated_tree(
     """A cleanly-applied stash must not be allowed to brick every agent turn."""
     import subprocess
     from hermes_cli import update_cmd
+    import hermes_cli.update_cmd_deps as update_cmd_deps
 
     def git(*args, check=True):
         return subprocess.run(
@@ -787,6 +788,7 @@ def test_restore_rejects_invalid_python_and_keeps_clean_updated_tree(
     stash_ref = hermes_main._stash_local_changes_if_needed(["git"], tmp_path)
     assert stash_ref
     monkeypatch.setattr(update_cmd, "_UPDATE_CRITICAL_MODULES", ())
+    monkeypatch.setattr(update_cmd_deps, "_UPDATE_CRITICAL_MODULES", ())
 
     with pytest.raises(SystemExit) as exc_info:
         hermes_main._restore_stashed_changes(
@@ -809,6 +811,7 @@ def test_restore_rejects_new_import_time_failure_and_preserves_stash(
     """A valid-Python stash must not introduce a critical import failure."""
     import subprocess
     from hermes_cli import update_cmd
+    import hermes_cli.update_cmd_deps as update_cmd_deps
 
     def git(*args, check=True):
         return subprocess.run(
@@ -831,6 +834,7 @@ def test_restore_rejects_new_import_time_failure_and_preserves_stash(
     stash_ref = hermes_main._stash_local_changes_if_needed(["git"], tmp_path)
     assert stash_ref
     monkeypatch.setattr(update_cmd, "_UPDATE_CRITICAL_MODULES", ("consumer",))
+    monkeypatch.setattr(update_cmd_deps, "_UPDATE_CRITICAL_MODULES", ("consumer",))
 
     with pytest.raises(SystemExit) as exc_info:
         hermes_main._restore_stashed_changes(
@@ -851,6 +855,7 @@ def test_restore_allows_preexisting_import_time_failure(monkeypatch, tmp_path):
     """A restore may proceed when it does not worsen an environment failure."""
     import subprocess
     from hermes_cli import update_cmd
+    import hermes_cli.update_cmd_deps as update_cmd_deps
 
     def git(*args, check=True):
         return subprocess.run(
@@ -876,6 +881,7 @@ def test_restore_allows_preexisting_import_time_failure(monkeypatch, tmp_path):
     stash_ref = hermes_main._stash_local_changes_if_needed(["git"], tmp_path)
     assert stash_ref
     monkeypatch.setattr(update_cmd, "_UPDATE_CRITICAL_MODULES", ("consumer",))
+    monkeypatch.setattr(update_cmd_deps, "_UPDATE_CRITICAL_MODULES", ("consumer",))
 
     assert hermes_main._restore_stashed_changes(
         ["git"], tmp_path, stash_ref, prompt_user=False
@@ -890,6 +896,7 @@ def test_restore_rejects_later_failure_masked_by_preexisting_failure(
     """Every critical module must be compared, not only the first failure."""
     import subprocess
     from hermes_cli import update_cmd
+    import hermes_cli.update_cmd_deps as update_cmd_deps
 
     def git(*args, check=True):
         return subprocess.run(
@@ -915,6 +922,7 @@ def test_restore_rejects_later_failure_masked_by_preexisting_failure(
     stash_ref = hermes_main._stash_local_changes_if_needed(["git"], tmp_path)
     assert stash_ref
     monkeypatch.setattr(update_cmd, "_UPDATE_CRITICAL_MODULES", ("first", "second"))
+    monkeypatch.setattr(update_cmd_deps, "_UPDATE_CRITICAL_MODULES", ("first", "second"))
 
     with pytest.raises(SystemExit) as exc_info:
         hermes_main._restore_stashed_changes(
@@ -937,6 +945,7 @@ def test_restore_rejects_system_exit_masked_by_preexisting_failure(
     """A terminating import must be compared instead of hiding the marker."""
     import subprocess
     from hermes_cli import update_cmd
+    import hermes_cli.update_cmd_deps as update_cmd_deps
 
     def git(*args, check=True):
         return subprocess.run(
@@ -962,6 +971,7 @@ def test_restore_rejects_system_exit_masked_by_preexisting_failure(
     stash_ref = hermes_main._stash_local_changes_if_needed(["git"], tmp_path)
     assert stash_ref
     monkeypatch.setattr(update_cmd, "_UPDATE_CRITICAL_MODULES", ("first", "second"))
+    monkeypatch.setattr(update_cmd_deps, "_UPDATE_CRITICAL_MODULES", ("first", "second"))
 
     with pytest.raises(SystemExit) as exc_info:
         hermes_main._restore_stashed_changes(
@@ -982,6 +992,7 @@ def test_restore_rejects_probe_termination(monkeypatch, tmp_path, capsys):
     """A stash cannot bypass import validation by terminating the probe."""
     import subprocess
     from hermes_cli import update_cmd
+    import hermes_cli.update_cmd_deps as update_cmd_deps
 
     def git(*args, check=True):
         return subprocess.run(
@@ -1004,6 +1015,7 @@ def test_restore_rejects_probe_termination(monkeypatch, tmp_path, capsys):
     stash_ref = hermes_main._stash_local_changes_if_needed(["git"], tmp_path)
     assert stash_ref
     monkeypatch.setattr(update_cmd, "_UPDATE_CRITICAL_MODULES", ("consumer",))
+    monkeypatch.setattr(update_cmd_deps, "_UPDATE_CRITICAL_MODULES", ("consumer",))
 
     with pytest.raises(SystemExit) as exc_info:
         hermes_main._restore_stashed_changes(
@@ -1025,8 +1037,10 @@ def test_restore_stays_parked_when_untracked_baseline_is_unknown(
 ):
     """Unknown cleanup scope must not turn into a destructive empty baseline."""
     from hermes_cli import update_cmd
+    import hermes_cli.update_cmd_stash as update_cmd_stash
 
     monkeypatch.setattr(update_cmd, "_git_untracked_paths", lambda *_args: None)
+    monkeypatch.setattr(update_cmd_stash, "_git_untracked_paths", lambda *_args: None)
 
     restored = hermes_main._restore_stashed_changes(
         ["git"], tmp_path, "stash@{0}", prompt_user=False
@@ -1043,8 +1057,10 @@ def test_reject_does_not_claim_cleanup_when_git_state_is_unknown(
 ):
     """Cleanup failures must not be reported as a restored clean tree."""
     from hermes_cli import update_cmd
+    import hermes_cli.update_cmd_stash as update_cmd_stash
 
     monkeypatch.setattr(update_cmd, "_git_untracked_paths", lambda *_args: None)
+    monkeypatch.setattr(update_cmd_stash, "_git_untracked_paths", lambda *_args: None)
 
     with pytest.raises(SystemExit):
         update_cmd._reject_unsafe_stash_restore(
@@ -1062,6 +1078,8 @@ def test_restore_rejects_unknown_restored_python_paths(
     """A failed post-apply path query cannot skip restored syntax validation."""
     import subprocess
     from hermes_cli import update_cmd
+    import hermes_cli.update_cmd_stash as update_cmd_stash
+    import hermes_cli.update_cmd_deps as update_cmd_deps
 
     def git(*args, check=True):
         return subprocess.run(
@@ -1083,7 +1101,9 @@ def test_restore_rejects_unknown_restored_python_paths(
     stash_ref = hermes_main._stash_local_changes_if_needed(["git"], tmp_path)
     assert stash_ref
     monkeypatch.setattr(update_cmd, "_UPDATE_CRITICAL_MODULES", ())
+    monkeypatch.setattr(update_cmd_deps, "_UPDATE_CRITICAL_MODULES", ())
     monkeypatch.setattr(update_cmd, "_restored_python_paths", lambda *_args: None)
+    monkeypatch.setattr(update_cmd_stash, "_restored_python_paths", lambda *_args: None)
 
     with pytest.raises(SystemExit) as exc_info:
         hermes_main._restore_stashed_changes(

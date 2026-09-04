@@ -310,7 +310,10 @@ class TestDevGate:
         )
         # patch the lazily-imported symbol used inside resolve_identity
         import hermes_cli.auth as auth_mod
+        import hermes_cli.auth_nous as auth_nous
         monkeypatch.setattr(auth_mod, "resolve_nous_runtime_credentials",
+                            lambda **kw: {"api_key": token, "base_url": "https://x"})
+        monkeypatch.setattr(auth_nous, "resolve_nous_runtime_credentials",
                             lambda **kw: {"api_key": token, "base_url": "https://x"})
         ident = ssc.resolve_identity()
         assert ident["nous_admin"] is True
@@ -319,7 +322,10 @@ class TestDevGate:
     def test_gate_closed_without_claim(self, monkeypatch):
         token = _jwt({"sub": "user1"})  # no tool_gateway_admin
         import hermes_cli.auth as auth_mod
+        import hermes_cli.auth_nous as auth_nous
         monkeypatch.setattr(auth_mod, "resolve_nous_runtime_credentials",
+                            lambda **kw: {"api_key": token, "base_url": "https://x"})
+        monkeypatch.setattr(auth_nous, "resolve_nous_runtime_credentials",
                             lambda **kw: {"api_key": token, "base_url": "https://x"})
         ident = ssc.resolve_identity()
         assert ident["nous_admin"] is False
@@ -327,14 +333,20 @@ class TestDevGate:
     def test_gate_closed_when_claim_false(self, monkeypatch):
         token = _jwt({"sub": "u", "tool_gateway_admin": False})
         import hermes_cli.auth as auth_mod
+        import hermes_cli.auth_nous as auth_nous
         monkeypatch.setattr(auth_mod, "resolve_nous_runtime_credentials",
+                            lambda **kw: {"api_key": token, "base_url": "https://x"})
+        monkeypatch.setattr(auth_nous, "resolve_nous_runtime_credentials",
                             lambda **kw: {"api_key": token, "base_url": "https://x"})
         assert ssc.resolve_identity()["nous_admin"] is False
 
     def test_maybe_push_inert_when_gate_closed(self, monkeypatch):
         token = _jwt({"sub": "u"})
         import hermes_cli.auth as auth_mod
+        import hermes_cli.auth_nous as auth_nous
         monkeypatch.setattr(auth_mod, "resolve_nous_runtime_credentials",
+                            lambda **kw: {"api_key": token})
+        monkeypatch.setattr(auth_nous, "resolve_nous_runtime_credentials",
                             lambda **kw: {"api_key": token})
         monkeypatch.setattr(ssc, "resolve_sync_base_url", lambda: "http://x")
         # gate closed -> None (inert), never attempts a push
@@ -342,11 +354,13 @@ class TestDevGate:
 
     def test_maybe_pull_inert_when_not_logged_in(self, monkeypatch):
         import hermes_cli.auth as auth_mod
+        import hermes_cli.auth_nous as auth_nous
 
         def _raise(**kw):
             raise RuntimeError("not logged in")
 
         monkeypatch.setattr(auth_mod, "resolve_nous_runtime_credentials", _raise)
+        monkeypatch.setattr(auth_nous, "resolve_nous_runtime_credentials", _raise)
         assert ssc.maybe_pull_skills() is None
 
 
@@ -880,7 +894,10 @@ class TestOrgIdentityGate:
         # Personal org: NAS stamps NO org_role -> inert, not an error path.
         token = _jwt({"sub": "u", "org_id": "org-1"})
         import hermes_cli.auth as auth_mod
+        import hermes_cli.auth_nous as auth_nous
         monkeypatch.setattr(auth_mod, "resolve_nous_runtime_credentials",
+                            lambda **kw: {"api_key": token, "base_url": "https://x"})
+        monkeypatch.setattr(auth_nous, "resolve_nous_runtime_credentials",
                             lambda **kw: {"api_key": token, "base_url": "https://x"})
         with pytest.raises(ssc.SyncInertError):
             ssc.resolve_org_identity()
@@ -888,7 +905,10 @@ class TestOrgIdentityGate:
     def test_org_identity_with_role(self, monkeypatch):
         token = _jwt({"sub": "u", "org_id": "org-9", "org_role": "MEMBER"})
         import hermes_cli.auth as auth_mod
+        import hermes_cli.auth_nous as auth_nous
         monkeypatch.setattr(auth_mod, "resolve_nous_runtime_credentials",
+                            lambda **kw: {"api_key": token, "base_url": "https://x"})
+        monkeypatch.setattr(auth_nous, "resolve_nous_runtime_credentials",
                             lambda **kw: {"api_key": token, "base_url": "https://x"})
         ident = ssc.resolve_org_identity()
         assert ident["org_id"] == "org-9"
@@ -1006,7 +1026,10 @@ class TestOrgEndToEnd:
         # Personal org: no org_role claim -> None, never raises.
         token = _jwt({"sub": "u", "org_id": "org-1"})
         import hermes_cli.auth as auth_mod
+        import hermes_cli.auth_nous as auth_nous
         monkeypatch.setattr(auth_mod, "resolve_nous_runtime_credentials",
+                            lambda **kw: {"api_key": token})
+        monkeypatch.setattr(auth_nous, "resolve_nous_runtime_credentials",
                             lambda **kw: {"api_key": token})
         assert org.maybe_pull_org_skills() is None
 

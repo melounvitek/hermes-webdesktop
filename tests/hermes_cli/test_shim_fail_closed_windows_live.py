@@ -75,11 +75,17 @@ def test_locked_shim_really_cannot_be_renamed(held_shim):
 
 def test_strict_quarantine_refuses_against_real_lock(held_shim, monkeypatch):
     import hermes_cli.main as cli_main
+    import hermes_cli.main_install_repair as hermes_cli_main_install_repair
 
     scripts, _shim = held_shim
     install_ran: list = []
     monkeypatch.setattr(
         cli_main,
+        "_run_install_with_heartbeat",
+        lambda cmd, env=None: install_ran.append(cmd),
+    )
+    monkeypatch.setattr(
+        hermes_cli_main_install_repair,
         "_run_install_with_heartbeat",
         lambda cmd, env=None: install_ran.append(cmd),
     )
@@ -114,6 +120,7 @@ def test_recovery_installer_refuses_against_real_lock(held_shim, monkeypatch):
 def test_release_then_strict_quarantine_succeeds(tmp_path, monkeypatch):
     """After the holder exits, the same strict path proceeds normally."""
     import hermes_cli.main as cli_main
+    import hermes_cli.main_install_repair as hermes_cli_main_install_repair
 
     scripts = tmp_path / "venv" / "Scripts"
     scripts.mkdir(parents=True)
@@ -132,6 +139,11 @@ def test_release_then_strict_quarantine_succeeds(tmp_path, monkeypatch):
     install_ran: list = []
     monkeypatch.setattr(
         cli_main,
+        "_run_install_with_heartbeat",
+        lambda cmd, env=None: install_ran.append(cmd),
+    )
+    monkeypatch.setattr(
+        hermes_cli_main_install_repair,
         "_run_install_with_heartbeat",
         lambda cmd, env=None: install_ran.append(cmd),
     )

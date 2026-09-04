@@ -8,6 +8,7 @@ import pytest
 
 from hermes_cli.auth import AuthError
 from hermes_cli import main as hermes_main
+import hermes_cli.main_provider_setup as hermes_cli_main_provider_setup
 from hermes_cli import model_setup_flows
 
 
@@ -561,6 +562,7 @@ def test_cmd_model_forwards_nous_login_tls_options(monkeypatch):
     monkeypatch.setattr("hermes_cli.auth.resolve_provider", lambda requested, **kwargs: "nous")
     monkeypatch.setattr("hermes_cli.auth.get_provider_auth_state", lambda provider_id: None)
     monkeypatch.setattr(hermes_main, "_prompt_provider_choice", lambda choices, **kwargs: 0)
+    monkeypatch.setattr(hermes_cli_main_provider_setup, "_prompt_provider_choice", lambda choices, **kwargs: 0)
 
     captured = {}
 

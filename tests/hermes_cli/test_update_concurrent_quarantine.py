@@ -278,6 +278,7 @@ def test_pause_and_resume_windows_gateway_service(
     afterward instead of spawning a competing detached gateway."""
     import hermes_cli.gateway as gateway_mod
     import hermes_cli.update_cmd as update_cmd
+    import hermes_cli.update_cmd_windows as update_cmd_windows
 
     profile_home = tmp_path / "profiles" / "default"
     profile_home.mkdir(parents=True)
@@ -313,7 +314,19 @@ def test_pause_and_resume_windows_gateway_service(
         raising=False,
     )
     monkeypatch.setattr(
+        update_cmd_windows,
+        "_stop_windows_gateway_service",
+        lambda name, **_kwargs: stopped.append(name),
+        raising=False,
+    )
+    monkeypatch.setattr(
         update_cmd,
+        "_start_windows_gateway_service",
+        lambda name: started.append(name),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        update_cmd_windows,
         "_start_windows_gateway_service",
         lambda name: started.append(name),
         raising=False,
@@ -350,6 +363,7 @@ def test_pause_windows_gateway_service_failure_restores_every_attempted_service(
     """A service that times out after accepting stop is restarted too."""
     import hermes_cli.gateway as gateway_mod
     import hermes_cli.update_cmd as update_cmd
+    import hermes_cli.update_cmd_windows as update_cmd_windows
 
     services = [
         SimpleNamespace(name="HermesGateway", service_pid=11, service_create_time=11.0, gateway_pid=101, gateway_create_time=101.0, descendant_identities=()),
@@ -366,8 +380,15 @@ def test_pause_windows_gateway_service_failure_restores_every_attempted_service(
 
     restarted = []
     monkeypatch.setattr(update_cmd, "_stop_windows_gateway_service", fake_stop)
+    monkeypatch.setattr(update_cmd_windows, "_stop_windows_gateway_service", fake_stop)
     monkeypatch.setattr(
         update_cmd,
+        "_restore_windows_gateway_service",
+        lambda name: restarted.append(name),
+        raising=False,
+    )
+    monkeypatch.setattr(
+        update_cmd_windows,
         "_restore_windows_gateway_service",
         lambda name: restarted.append(name),
         raising=False,
@@ -386,6 +407,7 @@ def test_pause_windows_gateway_service_surfaces_rollback_start_failure(
 ):
     import hermes_cli.gateway as gateway_mod
     import hermes_cli.update_cmd as update_cmd
+    import hermes_cli.update_cmd_windows as update_cmd_windows
 
     services = [
         SimpleNamespace(name="HermesGateway", service_pid=11, service_create_time=11.0, gateway_pid=101, gateway_create_time=101.0, descendant_identities=()),
@@ -405,8 +427,15 @@ def test_pause_windows_gateway_service_surfaces_rollback_start_failure(
             raise RuntimeError("simulated rollback start failure")
 
     monkeypatch.setattr(update_cmd, "_stop_windows_gateway_service", fake_stop)
+    monkeypatch.setattr(update_cmd_windows, "_stop_windows_gateway_service", fake_stop)
     monkeypatch.setattr(
         update_cmd,
+        "_restore_windows_gateway_service",
+        fake_start,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        update_cmd_windows,
         "_restore_windows_gateway_service",
         fake_start,
         raising=False,
@@ -418,6 +447,7 @@ def test_pause_windows_gateway_service_surfaces_rollback_start_failure(
 
 def test_restore_windows_gateway_service_waits_out_stop_pending(monkeypatch):
     import hermes_cli.update_cmd as update_cmd
+    import hermes_cli.update_cmd_windows as update_cmd_windows
 
     statuses = iter(["stop_pending", "stopped"])
     service = SimpleNamespace(status=lambda: next(statuses))
@@ -427,6 +457,11 @@ def test_restore_windows_gateway_service_waits_out_stop_pending(monkeypatch):
     monkeypatch.setattr(update_cmd._time, "sleep", lambda _seconds: None)
     monkeypatch.setattr(
         update_cmd,
+        "_start_windows_gateway_service",
+        lambda name: restarted.append(name),
+    )
+    monkeypatch.setattr(
+        update_cmd_windows,
         "_start_windows_gateway_service",
         lambda name: restarted.append(name),
     )
@@ -509,6 +544,7 @@ def test_resume_windows_gateway_service_failure_stays_retryable(
     monkeypatch,
 ):
     import hermes_cli.update_cmd as update_cmd
+    import hermes_cli.update_cmd_windows as update_cmd_windows
 
     token = {
         "resume_needed": True,
@@ -519,6 +555,11 @@ def test_resume_windows_gateway_service_failure_stays_retryable(
     monkeypatch.setattr(cli_main, "_refresh_windows_gateway_launchers", lambda: None)
     monkeypatch.setattr(
         update_cmd,
+        "_start_windows_gateway_service",
+        lambda _name: (_ for _ in ()).throw(RuntimeError("simulated start failure")),
+    )
+    monkeypatch.setattr(
+        update_cmd_windows,
         "_start_windows_gateway_service",
         lambda _name: (_ for _ in ()).throw(RuntimeError("simulated start failure")),
     )

@@ -26,6 +26,7 @@ import pytest
 import hermes_cli.gateway as gateway
 import hermes_cli.gateway_windows as gateway_windows
 import hermes_cli.main as hm
+import hermes_cli.main_install_repair as main_install_repair
 from hermes_cli.update_cmd import _resume_windows_gateways_after_update
 from hermes_cli.update_inventory import (
     RuntimeRecord,
@@ -61,6 +62,7 @@ def _stub_post_relaunch_liveness(monkeypatch):
 
 def test_resume_records_successfully_relaunched_profiles_on_the_token(monkeypatch):
     monkeypatch.setattr(hm, "_is_windows", lambda: True)
+    monkeypatch.setattr(main_install_repair, "_is_windows", lambda: True)
     monkeypatch.setattr(hm, "_refresh_windows_gateway_launchers", lambda: None)
     monkeypatch.setattr(
         gateway, "launch_detached_profile_gateway_restart", lambda *_a: True
@@ -81,6 +83,7 @@ def test_resume_omits_profiles_whose_relaunch_failed(monkeypatch):
     'relaunched' — it needs to keep surfacing as unaccounted so the user is
     told to restart it manually (Windows has no watcher to recover it)."""
     monkeypatch.setattr(hm, "_is_windows", lambda: True)
+    monkeypatch.setattr(main_install_repair, "_is_windows", lambda: True)
     monkeypatch.setattr(hm, "_refresh_windows_gateway_launchers", lambda: None)
 
     def _relaunch(profile, _old_pid):
@@ -110,6 +113,7 @@ def test_merged_windows_relaunch_resolves_as_restarted_not_unaccounted(monkeypat
     match_runtime_outcomes, must turn a Windows gateway's plan row from
     'unaccounted' (loud warning + exit 1) into 'restarted' (clean)."""
     monkeypatch.setattr(hm, "_is_windows", lambda: True)
+    monkeypatch.setattr(main_install_repair, "_is_windows", lambda: True)
     monkeypatch.setattr(hm, "_refresh_windows_gateway_launchers", lambda: None)
     monkeypatch.setattr(
         gateway, "launch_detached_profile_gateway_restart", lambda *_a: True

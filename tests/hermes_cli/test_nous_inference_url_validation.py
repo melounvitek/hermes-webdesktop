@@ -173,6 +173,7 @@ class TestHealsPoisonedStoredValue:
 
     def test_refresh_resets_rejected_url_to_default(self, monkeypatch):
         import hermes_cli.auth as auth
+        import hermes_cli.auth_nous as hermes_cli_auth_nous
 
         poisoned = "https://stg-inference-api.nousresearch.com/v1"
         state = {
@@ -186,6 +187,7 @@ class TestHealsPoisonedStoredValue:
         # Force the refresh branch and return another rejected (staging) URL,
         # exercising the validator-returns-None heal path.
         monkeypatch.setattr(auth, "_nous_invoke_jwt_status", lambda *a, **k: "needs_refresh")
+        monkeypatch.setattr(hermes_cli_auth_nous, "_nous_invoke_jwt_status", lambda *a, **k: "needs_refresh")
         monkeypatch.setattr(
             auth,
             "_refresh_access_token",
@@ -196,9 +198,21 @@ class TestHealsPoisonedStoredValue:
                 "inference_base_url": poisoned,  # Portal still hands back staging
             },
         )
+        monkeypatch.setattr(
+            hermes_cli_auth_nous,
+            "_refresh_access_token",
+            lambda **k: {
+                "access_token": "newtok",
+                "refresh_token": "newrtok",
+                "expires_in": 3600,
+                "inference_base_url": poisoned,  # Portal still hands back staging
+            },
+        )
         # Skip the JWT usability assertions (orthogonal to URL healing).
         monkeypatch.setattr(auth, "_assert_nous_inference_jwt_usable", lambda *a, **k: None)
+        monkeypatch.setattr(hermes_cli_auth_nous, "_assert_nous_inference_jwt_usable", lambda *a, **k: None)
         monkeypatch.setattr(auth, "_select_nous_invoke_jwt", lambda *a, **k: None)
+        monkeypatch.setattr(hermes_cli_auth_nous, "_select_nous_invoke_jwt", lambda *a, **k: None)
 
         result = auth.refresh_nous_oauth_from_state(state, force_refresh=True)
 
@@ -226,10 +240,12 @@ class TestEnvOverrideWins:
     STAGING = "https://stg-inference-api.nousresearch.com/v1"
 
     def _patch_no_refresh(self, monkeypatch, auth, state):
+        import hermes_cli.auth_nous as hermes_cli_auth_nous
         import contextlib
 
         # No refresh fires: the stored access token is a usable invoke JWT.
         monkeypatch.setattr(auth, "_nous_invoke_jwt_status", lambda *a, **k: None)
+        monkeypatch.setattr(hermes_cli_auth_nous, "_nous_invoke_jwt_status", lambda *a, **k: None)
         monkeypatch.setattr(
             auth, "_auth_store_lock", lambda *a, **k: contextlib.nullcontext()
         )
@@ -244,10 +260,14 @@ class TestEnvOverrideWins:
         monkeypatch.setattr(auth, "_save_provider_state_to_source", lambda *a, **k: None)
         monkeypatch.setattr(auth, "_save_auth_store", lambda *a, **k: None)
         monkeypatch.setattr(auth, "_write_shared_nous_state", lambda *a, **k: None)
+        monkeypatch.setattr(hermes_cli_auth_nous, "_write_shared_nous_state", lambda *a, **k: None)
         monkeypatch.setattr(auth, "_sync_nous_pool_from_auth_store", lambda *a, **k: None)
+        monkeypatch.setattr(hermes_cli_auth_nous, "_sync_nous_pool_from_auth_store", lambda *a, **k: None)
         monkeypatch.setattr(auth, "_resolve_verify", lambda *a, **k: True)
         monkeypatch.setattr(auth, "_assert_nous_inference_jwt_usable", lambda *a, **k: None)
+        monkeypatch.setattr(hermes_cli_auth_nous, "_assert_nous_inference_jwt_usable", lambda *a, **k: None)
         monkeypatch.setattr(auth, "_select_nous_invoke_jwt", lambda *a, **k: None)
+        monkeypatch.setattr(hermes_cli_auth_nous, "_select_nous_invoke_jwt", lambda *a, **k: None)
 
     def _base_state(self, auth, stored):
         return {

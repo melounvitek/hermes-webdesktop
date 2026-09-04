@@ -80,6 +80,7 @@ def test_image_and_video_selectors_share_the_selection_contract(monkeypatch):
 def _quiet_reconfigure(monkeypatch):
     """Silence prints + model pickers for _reconfigure_provider paths."""
     import hermes_cli.tools_config as tc
+    import hermes_cli.tools_config_post_setup as tools_config_post_setup
     import hermes_cli.tools_config_providers as tcp
 
     monkeypatch.setattr(tcp, "_print_success", lambda *a, **k: None)
@@ -88,6 +89,7 @@ def _quiet_reconfigure(monkeypatch):
     monkeypatch.setattr(tcp, "_configure_imagegen_model", lambda *a, **k: None)
     # _configure_provider resolves the post-setup hook lazily from tools_config.
     monkeypatch.setattr(tc, "_run_post_setup", lambda *a, **k: None, raising=False)
+    monkeypatch.setattr(tools_config_post_setup, "_run_post_setup", lambda *a, **k: None, raising=False)
     # Managed rows gate on live Portal auth — stub it green.
     import hermes_cli.nous_subscription as ns
 

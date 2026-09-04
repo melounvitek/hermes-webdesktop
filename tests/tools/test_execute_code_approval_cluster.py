@@ -23,6 +23,7 @@ import threading
 import pytest
 
 from tools import approval as A
+import tools.approval_detection as approval_detection
 from tools import approval_context
 from tools import approval_context
 from tools import approval_smart
@@ -295,6 +296,11 @@ def test_terminal_smart_deny_owner_override_is_one_operation(gw_session, monkeyp
         lambda command: (True, "owner-override-test-danger", f"risk:{command}"),
     )
     monkeypatch.setattr(
+        approval_detection,
+        "detect_dangerous_command",
+        lambda command: (True, "owner-override-test-danger", f"risk:{command}"),
+    )
+    monkeypatch.setattr(
         "tools.tirith_security.check_command_security",
         lambda _command: {"action": "allow", "findings": [], "summary": ""},
         raising=False,
@@ -350,6 +356,10 @@ def test_smart_escalate_still_persists_session_choice(gw_session, monkeypatch):
         lambda command: (True, key, f"risk:{command}"),
     )
     monkeypatch.setattr(
+        approval_detection, "detect_dangerous_command",
+        lambda command: (True, key, f"risk:{command}"),
+    )
+    monkeypatch.setattr(
         "tools.tirith_security.check_command_security",
         lambda _command: {"action": "allow", "findings": [], "summary": ""},
         raising=False,
@@ -369,6 +379,10 @@ def test_terminal_smart_deny_pending_payload_is_one_operation(gw_session, monkey
     monkeypatch.setattr(approval_smart, "_smart_approve", lambda _command, _description: "deny")
     monkeypatch.setattr(
         A, "detect_dangerous_command",
+        lambda command: (True, "pending-smart-deny", f"risk:{command}"),
+    )
+    monkeypatch.setattr(
+        approval_detection, "detect_dangerous_command",
         lambda command: (True, "pending-smart-deny", f"risk:{command}"),
     )
     monkeypatch.setattr(
