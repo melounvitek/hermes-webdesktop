@@ -11,14 +11,19 @@ import shlex
 from pathlib import Path
 from typing import Dict, Any, Optional, Set
 
-from agent.prompt_builder import _read_text_with_timeout, _scan_context_content
+from agent.prompt_builder import _read_text_with_timeout, _scan_context_content, _truncate_content
 from agent.search_policy import SEARCH_PRUNE_DIR_NAMES
 
 logger = logging.getLogger(__name__)
 
 # Same filenames as prompt_builder.py, in priority order (first match wins per dir).
 _HINT_FILENAMES = ["AGENTS.override.md", "AGENTS.md", "agents.md", "CLAUDE.md", "claude.md", ".cursorrules"]
-_MAX_HINT_CHARS = 8_000
+# Per-file ceiling for on-demand subdirectory hints. 32 KiB matches Codex's `project_doc_max_bytes` default
+# (Claude Code and Cursor apply none); it is a guard against a stray huge CLAUDE.md in a vendored tree, not a
+# target — keep area AGENTS.md files well under it (~8k) because this text lands in a tool result on the first
+# touch of that directory. Over the ceiling: head+tail kept, marker with the path so the agent can read_file it,
+# and a WARNING in the log (the old 8k silent tail-chop cut apps/desktop/AGENTS.md for months unnoticed).
+_MAX_HINT_CHARS = 32_000
 _PATH_ARG_KEYS = {"path", "file_path", "workdir"}
 _COMMAND_TOOLS = {"terminal"}
 _MAX_ANCESTOR_WALK = 5  # ancestor levels walked per path — bounds deep-path scans
@@ -171,9 +176,8 @@ class SubdirectoryHintTracker:
                 self._loaded_digests.add(digest)
                 # Same security scan as startup context loading.
                 content = _scan_context_content(content, filename)
-                if len(content) > _MAX_HINT_CHARS:
-                    content = content[:_MAX_HINT_CHARS] + f"\n\n[...truncated {filename}: {len(content):,} chars total]"
                 rel_path = self._display_path(hint_path)
+                content = _truncate_content(content, filename, max_chars=_MAX_HINT_CHARS, read_path=rel_path)
                 logger.debug("Loaded subdirectory hints from %s: %s", directory, [rel_path])
                 return f"[Subdirectory context discovered: {rel_path}]\n{content}"  # first match wins per directory
             except Exception as exc:
