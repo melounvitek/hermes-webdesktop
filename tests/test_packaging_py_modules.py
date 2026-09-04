@@ -41,7 +41,7 @@ def _imported_root_names(paths) -> dict[str, set[str]]:
     for path in paths:
         try:
             tree = ast.parse(path.read_text(encoding="utf-8", errors="ignore"))
-        except SyntaxError:
+        except (SyntaxError, OSError):  # sibling tests drop scratch root modules mid-run
             continue
         for node in ast.walk(tree):
             names = []
@@ -64,8 +64,9 @@ def test_pyproject_has_no_static_py_modules_list():
 
 
 def test_every_root_module_imported_by_packaged_code_is_shipped():
-    shipped = _root_py_modules()
-    paths = [REPO_ROOT / f"{n}.py" for n in shipped]
+    # Scratch modules other tests write at the repo root (``_test_*.py``) are not packaged.
+    shipped = {n for n in _root_py_modules() if not n.startswith("_test_")}
+    paths = [p for n in shipped if (p := REPO_ROOT / f"{n}.py").is_file()]
     for pkg in PACKAGES:
         paths.extend((REPO_ROOT / pkg).rglob("*.py"))
     missing = {f: sorted(n for n in names if n not in shipped) for f, names in _imported_root_names(paths).items()}

@@ -73,6 +73,15 @@ def main() -> int:
                 fac = aliases.get(node.value.id)
                 if fac and node.attr in compat[fac]:
                     hits.append(f"{rel}:{node.lineno}: {node.value.id}.{node.attr} (via {fac})")
+            elif isinstance(node, ast.Call):
+                # monkeypatch.setattr(<facade alias>, "<name>", ...) / patch.object(<facade alias>, "<name>")
+                fn = node.func
+                is_setattr = (isinstance(fn, ast.Attribute) and fn.attr in ("setattr", "delattr", "object")) or (
+                    isinstance(fn, ast.Name) and fn.id in ("setattr", "delattr", "getattr", "hasattr"))
+                if is_setattr and len(node.args) >= 2 and isinstance(node.args[0], ast.Name) and isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str):
+                    fac = aliases.get(node.args[0].id)
+                    if fac and node.args[1].value in compat[fac]:
+                        hits.append(f"{rel}:{node.lineno}: setattr/patch({node.args[0].id}, \"{node.args[1].value}\") (via {fac})")
             elif isinstance(node, ast.Constant) and isinstance(node.value, str):
                 m = str_pat.fullmatch(node.value.strip())
                 if m:
