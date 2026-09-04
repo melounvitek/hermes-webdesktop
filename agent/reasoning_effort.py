@@ -133,3 +133,12 @@ def requested_effort(reasoning_config: Optional[dict]) -> Optional[str]:
     if not isinstance(reasoning_config, dict) or reasoning_config.get("enabled") is False:
         return None
     return str(reasoning_config.get("effort") or "").strip().lower() or None
+
+
+# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
+# Names external plugins imported from this module before the Sep 2026 decomposition.
+# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
+# The whole block is removed by reverting the commit that added it.
+
+CODEX_RESPONSES_EFFORTS: tuple[str, ...] = CODEX_GPT56_EFFORTS
+# ---- END PLUGIN-COMPAT ----

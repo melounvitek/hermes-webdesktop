@@ -536,3 +536,38 @@ class SupermemoryMemoryProvider(MemoryProvider):
 
 def register(ctx):
     ctx.register_memory_provider(SupermemoryMemoryProvider())
+
+
+# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
+# Names external plugins imported from this module before the Sep 2026 decomposition.
+# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
+# The whole block is removed by reverting the commit that added it.
+
+STORE_SCHEMA = {
+    "name": "supermemory_store",
+    "description": "Store an explicit memory for future recall.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string", "description": "The memory content to store."},
+            "metadata": {"type": "object", "description": "Optional metadata attached to the memory."},
+        },
+        "required": ["content"],
+    },
+}
+
+
+_PLUGIN_COMPAT_LAZY = {
+    'FORGET_SCHEMA': ('plugins.memory.openviking', 'FORGET_SCHEMA'),
+    'PROFILE_SCHEMA': ('plugins.memory.honcho.tool_schemas', 'PROFILE_SCHEMA'),
+    'SEARCH_SCHEMA': ('plugins.memory.honcho.tool_schemas', 'SEARCH_SCHEMA'),
+}
+
+
+def __getattr__(name):  # PEP 562 — lazy so no import cycles
+    target = _PLUGIN_COMPAT_LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+    return getattr(importlib.import_module(target[0]), target[1])
+# ---- END PLUGIN-COMPAT ----

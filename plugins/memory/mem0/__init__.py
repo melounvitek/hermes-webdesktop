@@ -348,3 +348,74 @@ class Mem0MemoryProvider(MemoryProvider):
 def register(ctx) -> None:
     """Register Mem0 as a memory provider plugin."""
     ctx.register_memory_provider(Mem0MemoryProvider())
+
+
+# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
+# Names external plugins imported from this module before the Sep 2026 decomposition.
+# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
+# The whole block is removed by reverting the commit that added it.
+
+ADD_SCHEMA = {
+    "name": "mem0_add",
+    "description": (
+        "Store a durable fact about the user, verbatim (no LLM extraction). "
+        "Call this the moment the user states a lasting preference, correction, "
+        "decision, or personal detail worth recalling on future turns — don't "
+        "wait to be asked to remember. Skip transient chit-chat and facts you've "
+        "already stored."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "content": {"type": "string", "description": "The fact to store."},
+        },
+        "required": ["content"],
+    },
+}
+
+DELETE_SCHEMA = {
+    "name": "mem0_delete",
+    "description": (
+        "Delete a memory by its ID (take the ID from a mem0_search "
+        "result). Use when a stored fact is obsolete or the user asks you to "
+        "forget it; prefer mem0_update if the fact merely changed."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "memory_id": {"type": "string", "description": "Memory UUID to delete."},
+        },
+        "required": ["memory_id"],
+    },
+}
+
+UPDATE_SCHEMA = {
+    "name": "mem0_update",
+    "description": (
+        "Replace the text of an existing memory by its ID (take the ID from a "
+        "mem0_search result). Use when a stored fact has changed "
+        "or was wrong — correct it in place instead of adding a duplicate."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "memory_id": {"type": "string", "description": "Memory UUID to update."},
+            "text": {"type": "string", "description": "New text content."},
+        },
+        "required": ["memory_id", "text"],
+    },
+}
+
+
+_PLUGIN_COMPAT_LAZY = {
+    'SEARCH_SCHEMA': ('plugins.memory.honcho.tool_schemas', 'SEARCH_SCHEMA'),
+}
+
+
+def __getattr__(name):  # PEP 562 — lazy so no import cycles
+    target = _PLUGIN_COMPAT_LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+    return getattr(importlib.import_module(target[0]), target[1])
+# ---- END PLUGIN-COMPAT ----

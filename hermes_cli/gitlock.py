@@ -96,3 +96,33 @@ def clear_stale_tmp_packs(repo_root: Path, *, min_age_seconds: Optional[int] = N
         skip_msg="git process running; skipping tmp-pack sweep",
         log_removed=lambda p, size: logger.info("Removed aborted-fetch pack debris %s (%d bytes)", p, size),
     )
+
+
+# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
+# Names external plugins imported from this module before the Sep 2026 decomposition.
+# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
+# The whole block is removed by reverting the commit that added it.
+
+def is_ancestor_of_head(repo_root: Path, rev: str) -> bool:
+    """True when ``rev`` is an ancestor of (or equal to) HEAD.
+
+    Wraps ``git merge-base --is-ancestor <rev> HEAD``. This is the correct
+    question for update checks: a local cherry-pick on top of the remote tip
+    makes HEAD *different* from ``origin/main`` but still *contains* it, so
+    the answer to "is there an update?" is no.
+
+    Returns False on any probe failure (missing rev, shallow boundary, git
+    error) — callers treat that as "can't prove contained", which is the
+    conservative direction for an update check.
+    """
+    try:
+        result = subprocess.run(
+            ["git", "merge-base", "--is-ancestor", rev, "HEAD"],
+            cwd=str(repo_root),
+            capture_output=True, text=True, timeout=10,
+        )
+        return result.returncode == 0
+    except Exception:
+        logger.debug("merge-base --is-ancestor probe failed for %s", rev, exc_info=True)
+        return False
+# ---- END PLUGIN-COMPAT ----

@@ -3010,3 +3010,43 @@ def register(ctx) -> None:
         allow_all_env="MATRIX_ALLOW_ALL_USERS", cron_deliver_env_var="MATRIX_HOME_ROOM",
         standalone_sender_fn=_standalone_send, max_message_length=DEFAULT_MAX_MESSAGE_LENGTH, emoji="🔐",
         allow_update_command=True)
+
+
+# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
+# Names external plugins imported from this module before the Sep 2026 decomposition.
+# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
+# The whole block is removed by reverting the commit that added it.
+
+_MATRIX_CAPABILITIES: Dict[str, str] = {
+    "text": "yes",
+    "threads": "yes",
+    "reactions": "yes",
+    "approvals": "yes",
+    "model picker": "yes",
+    "thinking panes": "yes",
+    "images": "yes",
+    "multiple images": "yes",
+    "files": "yes",
+    "voice/audio": "yes",
+    "video": "yes",
+    "E2EE": "off / optional / required",
+    "diagnostics": "yes",
+}
+
+def get_matrix_capabilities() -> Dict[str, str]:
+    """Return Matrix gateway capabilities for docs and release checks."""
+    return dict(_MATRIX_CAPABILITIES)
+
+
+_PLUGIN_COMPAT_LAZY = {
+    'MAX_MESSAGE_LENGTH': ('gateway.platforms.signal', 'MAX_MESSAGE_LENGTH'),
+}
+
+
+def __getattr__(name):  # PEP 562 — lazy so no import cycles
+    target = _PLUGIN_COMPAT_LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+    return getattr(importlib.import_module(target[0]), target[1])
+# ---- END PLUGIN-COMPAT ----

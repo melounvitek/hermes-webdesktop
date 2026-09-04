@@ -522,3 +522,31 @@ class BaseEnvironment(ABC):
         """Transform sudo commands if SUDO_PASSWORD is available."""
         from tools.terminal_tool_sudo import _transform_sudo_command
         return _transform_sudo_command(command)
+
+
+# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
+# Names external plugins imported from this module before the Sep 2026 decomposition.
+# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
+# The whole block is removed by reverting the commit that added it.
+from typing import IO  # noqa: F401,E402
+from typing import Protocol  # noqa: F401,E402
+import codecs  # noqa: F401,E402
+from collections import deque  # noqa: F401,E402
+import re  # noqa: F401,E402
+import select  # noqa: F401,E402
+import subprocess  # noqa: F401,E402
+
+
+_PLUGIN_COMPAT_LAZY = {
+    'sanitize_task_id_for_path': ('tools.environments.path_utils', 'sanitize_task_id_for_path'),
+    'windows_hide_flags': ('hermes_cli._subprocess_compat', 'windows_hide_flags'),
+}
+
+
+def __getattr__(name):  # PEP 562 — lazy so no import cycles
+    target = _PLUGIN_COMPAT_LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+    return getattr(importlib.import_module(target[0]), target[1])
+# ---- END PLUGIN-COMPAT ----

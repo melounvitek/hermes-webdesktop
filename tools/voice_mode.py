@@ -1512,3 +1512,30 @@ def cleanup_temp_recordings(max_age_seconds: int = 3600) -> int:
     if deleted:
         logger.debug("Cleaned up %d old voice recordings", deleted)
     return deleted
+
+
+# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
+# Names external plugins imported from this module before the Sep 2026 decomposition.
+# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
+# The whole block is removed by reverting the commit that added it.
+import difflib  # noqa: F401,E402
+import re  # noqa: F401,E402
+
+
+_PLUGIN_COMPAT_LAZY = {
+    'DEFAULT_TTS_ECHO_SIMILARITY_THRESHOLD': ('tools.voice_mode_transcript', 'DEFAULT_TTS_ECHO_SIMILARITY_THRESHOLD'),
+    'DEFAULT_VOICE_STOP_PHRASES': ('tools.voice_mode_transcript', 'DEFAULT_VOICE_STOP_PHRASES'),
+    'MIN_FRAGMENT_LENGTH_FOR_ECHO': ('tools.voice_mode_transcript', 'MIN_FRAGMENT_LENGTH_FOR_ECHO'),
+    'WHISPER_HALLUCINATIONS': ('tools.voice_mode_transcript', 'WHISPER_HALLUCINATIONS'),
+    'is_tts_echo': ('tools.voice_mode_transcript', 'is_tts_echo'),
+    'voice_stop_hint': ('tools.voice_mode_transcript', 'voice_stop_hint'),
+}
+
+
+def __getattr__(name):  # PEP 562 — lazy so no import cycles
+    target = _PLUGIN_COMPAT_LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+    return getattr(importlib.import_module(target[0]), target[1])
+# ---- END PLUGIN-COMPAT ----

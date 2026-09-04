@@ -735,3 +735,29 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     sys.exit(main())
+
+
+# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
+# Names external plugins imported from this module before the Sep 2026 decomposition.
+# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
+# The whole block is removed by reverting the commit that added it.
+
+def find_shell_configs() -> list:
+    """Find shell configuration files that might have PATH entries."""
+    home = Path.home()
+    configs = []
+
+    candidates = [
+        home / ".bashrc",
+        home / ".bash_profile",
+        home / ".profile",
+        home / ".zshrc",
+        home / ".zprofile",
+    ]
+
+    for config in candidates:
+        if config.exists():
+            configs.append(config)
+
+    return configs
+# ---- END PLUGIN-COMPAT ----

@@ -4013,3 +4013,13 @@ __all__ = [
     "check_compression_model_feasibility", "replay_compression_warning", "compress_context",
     "try_shrink_image_parts_in_messages",
 ]
+
+
+# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
+# Names external plugins imported from this module before the Sep 2026 decomposition.
+# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
+# The whole block is removed by reverting the commit that added it.
+
+class CompressionExecutorSaturatedError(RuntimeError):
+    """All compression pool slots are occupied; submission was refused."""
+# ---- END PLUGIN-COMPAT ----

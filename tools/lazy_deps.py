@@ -726,3 +726,16 @@ def ensure_and_bind(feature: str, importer: Callable[[], dict[str, Any]], target
         logger.warning("Failed to import feature %r after install: %s", feature, exc)
         return False
     return True
+
+
+# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
+# Names external plugins imported from this module before the Sep 2026 decomposition.
+# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
+# The whole block is removed by reverting the commit that added it.
+
+def feature_specs(feature: str) -> tuple[str, ...]:
+    """Return the registered specs for a feature, or raise KeyError."""
+    if feature not in LAZY_DEPS:
+        raise KeyError(f"Unknown lazy feature: {feature!r}")
+    return LAZY_DEPS[feature]
+# ---- END PLUGIN-COMPAT ----

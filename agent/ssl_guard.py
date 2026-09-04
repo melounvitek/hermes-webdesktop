@@ -60,3 +60,19 @@ def verify_ca_bundle() -> None:
     except Exception as exc:
         raise _ssl_err(f"certifi is not importable: {exc}") from exc
     _validate_bundle_path("certifi", str(certifi.where()), require_substantial=True)
+
+
+# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
+# Names external plugins imported from this module before the Sep 2026 decomposition.
+# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
+# The whole block is removed by reverting the commit that added it.
+
+def verify_ca_bundle_with_fallback() -> None:
+    """Backward-compatible wrapper for older call sites.
+
+    The old PR name mentioned a platform fallback, but allowing startup with a
+    broken certifi bundle still leaves httpx/OpenAI and requests call sites
+    failing later. Keep the wrapper name but enforce the same check.
+    """
+    verify_ca_bundle()
+# ---- END PLUGIN-COMPAT ----

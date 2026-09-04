@@ -4574,3 +4574,69 @@ if __name__ == "__main__":
     import fire
 
     fire.Fire(main)
+
+
+# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
+# Names external plugins imported from this module before the Sep 2026 decomposition.
+# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
+# The whole block is removed by reverting the commit that added it.
+from prompt_toolkit.layout.menus import CompletionsMenu  # noqa: F401,E402
+from prompt_toolkit.filters import Condition  # noqa: F401,E402
+from prompt_toolkit.layout import ConditionalContainer  # noqa: F401,E402
+from prompt_toolkit.layout.processors import ConditionalProcessor  # noqa: F401,E402
+from prompt_toolkit.layout.dimension import Dimension  # noqa: F401,E402
+from prompt_toolkit.history import FileHistory  # noqa: F401,E402
+from prompt_toolkit.layout import FormattedTextControl  # noqa: F401,E402
+from prompt_toolkit.layout import HSplit  # noqa: F401,E402
+from prompt_toolkit.key_binding import KeyBindings  # noqa: F401,E402
+from prompt_toolkit.layout import Layout  # noqa: F401,E402
+from prompt_toolkit.styles import Style as PTStyle  # noqa: F401,E402
+from rich.panel import Panel  # noqa: F401,E402
+from prompt_toolkit.layout.processors import PasswordProcessor  # noqa: F401,E402
+from prompt_toolkit.layout.processors import Processor  # noqa: F401,E402
+from prompt_toolkit.widgets import TextArea  # noqa: F401,E402
+from prompt_toolkit.layout.processors import Transformation  # noqa: F401,E402
+from prompt_toolkit.layout import Window  # noqa: F401,E402
+from prompt_toolkit.layout import WindowAlign  # noqa: F401,E402
+import base64  # noqa: F401,E402
+import concurrent.futures  # noqa: F401,E402
+import copy  # noqa: F401,E402
+from rich import box as rich_box  # noqa: F401,E402
+import tempfile  # noqa: F401,E402
+
+
+_PLUGIN_COMPAT_LAZY = {
+    'AIAgent': ('run_agent', 'AIAgent'),
+    'CanonicalUsage': ('agent.usage_pricing', 'CanonicalUsage'),
+    'DEFAULT_BROWSER_CDP_URL': ('hermes_cli.browser_connect', 'DEFAULT_BROWSER_CDP_URL'),
+    'HERMES_AGENT_LOGO': ('hermes_cli.banner', 'HERMES_AGENT_LOGO'),
+    'HERMES_CADUCEUS': ('hermes_cli.banner', 'HERMES_CADUCEUS'),
+    'SlashCommandAutoSuggest': ('hermes_cli.commands_completion', 'SlashCommandAutoSuggest'),
+    'SlashCommandCompleter': ('hermes_cli.commands_completion', 'SlashCommandCompleter'),
+    'build_welcome_banner': ('hermes_cli.banner', 'build_welcome_banner'),
+    'display_hermes_home': ('hermes_constants', 'display_hermes_home'),
+    'estimate_usage_cost': ('agent.usage_pricing', 'estimate_usage_cost'),
+    'get_all_toolsets': ('toolsets', 'get_all_toolsets'),
+    'get_job': ('cron.jobs', 'get_job'),
+    'get_toolset_for_tool': ('model_tools', 'get_toolset_for_tool'),
+    'get_toolset_info': ('toolsets', 'get_toolset_info'),
+    'init_skin_from_config': ('hermes_cli.skin_engine', 'init_skin_from_config'),
+    'is_browser_debug_ready': ('hermes_cli.browser_connect', 'is_browser_debug_ready'),
+    'is_table_divider': ('agent.markdown_tables', 'is_table_divider'),
+    'looks_like_table_row': ('agent.markdown_tables', 'looks_like_table_row'),
+    'manual_chrome_debug_command': ('hermes_cli.browser_connect', 'manual_chrome_debug_command'),
+    'print_config_warnings': ('hermes_cli.config', 'print_config_warnings'),
+    'prompt_for_secret': ('hermes_cli.callbacks', 'prompt_for_secret'),
+    'set_friendly_tool_labels': ('agent.display', 'set_friendly_tool_labels'),
+    'set_tool_preview_max_len': ('agent.display', 'set_tool_preview_max_len'),
+    'setup_logging': ('hermes_logging', 'setup_logging'),
+}
+
+
+def __getattr__(name):  # PEP 562 — lazy so no import cycles
+    target = _PLUGIN_COMPAT_LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+    return getattr(importlib.import_module(target[0]), target[1])
+# ---- END PLUGIN-COMPAT ----

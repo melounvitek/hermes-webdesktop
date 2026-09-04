@@ -803,3 +803,28 @@ def register(ctx) -> None:
     from plugins.memory.query_rewrite import rewrite_memory_query
 
     ctx.register_memory_provider(HonchoMemoryProvider(query_rewriter=rewrite_memory_query))
+
+
+# ---- BEGIN PLUGIN-COMPAT (revert-scheduled; see COMPAT_MANIFEST.md) ----
+# Names external plugins imported from this module before the Sep 2026 decomposition.
+# Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
+# The whole block is removed by reverting the commit that added it.
+
+
+_PLUGIN_COMPAT_LAZY = {
+    'CONCLUDE_SCHEMA': ('plugins.memory.honcho.tool_schemas', 'CONCLUDE_SCHEMA'),
+    'CONTEXT_SCHEMA': ('plugins.memory.honcho.tool_schemas', 'CONTEXT_SCHEMA'),
+    'PROFILE_SCHEMA': ('plugins.memory.honcho.tool_schemas', 'PROFILE_SCHEMA'),
+    'REASONING_SCHEMA': ('plugins.memory.honcho.tool_schemas', 'REASONING_SCHEMA'),
+    'SEARCH_SCHEMA': ('plugins.memory.honcho.tool_schemas', 'SEARCH_SCHEMA'),
+    'TRIVIAL_PROMPT_RE': ('agent.memory_provider', 'TRIVIAL_PROMPT_RE'),
+}
+
+
+def __getattr__(name):  # PEP 562 — lazy so no import cycles
+    target = _PLUGIN_COMPAT_LAZY.get(name)
+    if target is None:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    import importlib
+    return getattr(importlib.import_module(target[0]), target[1])
+# ---- END PLUGIN-COMPAT ----
