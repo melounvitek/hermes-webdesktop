@@ -4604,10 +4604,18 @@ import copy  # noqa: F401,E402
 from rich import box as rich_box  # noqa: F401,E402
 import tempfile  # noqa: F401,E402
 
+def AIAgent(*args, **kwargs):
+    from run_agent import AIAgent as _AIAgent
+
+    return _AIAgent(*args, **kwargs)
+
+def CanonicalUsage(*args, **kwargs):
+    from agent.usage_pricing import CanonicalUsage as _CanonicalUsage
+
+    return _CanonicalUsage(*args, **kwargs)
+
 
 _PLUGIN_COMPAT_LAZY = {
-    'AIAgent': ('run_agent', 'AIAgent'),
-    'CanonicalUsage': ('agent.usage_pricing', 'CanonicalUsage'),
     'DEFAULT_BROWSER_CDP_URL': ('hermes_cli.browser_connect', 'DEFAULT_BROWSER_CDP_URL'),
     'HERMES_AGENT_LOGO': ('hermes_cli.banner', 'HERMES_AGENT_LOGO'),
     'HERMES_CADUCEUS': ('hermes_cli.banner', 'HERMES_CADUCEUS'),

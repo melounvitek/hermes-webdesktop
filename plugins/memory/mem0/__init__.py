@@ -389,6 +389,27 @@ DELETE_SCHEMA = {
     },
 }
 
+SEARCH_SCHEMA = {
+    "name": "mem0_search",
+    "description": (
+        "Search the user's memories by meaning; returns facts ranked by "
+        "relevance. Use this before answering any question that may depend on "
+        "what you know about the user (preferences, facts, history, people, "
+        "projects, past decisions). For multi-part or multi-hop questions, "
+        "call it several times — vary the wording and run follow-up searches "
+        "on what earlier results reveal; one search is rarely enough."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "What to search for."},
+            "top_k": {"type": "integer", "description": "Max results (default: 10, max: 50)."},
+            "rerank": {"type": "boolean", "description": "Rerank results for relevance (default: false, platform mode only)."},
+        },
+        "required": ["query"],
+    },
+}
+
 UPDATE_SCHEMA = {
     "name": "mem0_update",
     "description": (
@@ -405,17 +426,4 @@ UPDATE_SCHEMA = {
         "required": ["memory_id", "text"],
     },
 }
-
-
-_PLUGIN_COMPAT_LAZY = {
-    'SEARCH_SCHEMA': ('plugins.memory.honcho.tool_schemas', 'SEARCH_SCHEMA'),
-}
-
-
-def __getattr__(name):  # PEP 562 — lazy so no import cycles
-    target = _PLUGIN_COMPAT_LAZY.get(name)
-    if target is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    import importlib
-    return getattr(importlib.import_module(target[0]), target[1])
 # ---- END PLUGIN-COMPAT ----

@@ -426,16 +426,5 @@ def render_frames(payload: dict[str, Any], *, cols: int = 80, rows: int = 16, fr
 
 Grid = list  # list[Row]
 
-
-_PLUGIN_COMPAT_LAZY = {
-    'Run': ('hermes_cli.kanban_db', 'Run'),
-}
-
-
-def __getattr__(name):  # PEP 562 — lazy so no import cycles
-    target = _PLUGIN_COMPAT_LAZY.get(name)
-    if target is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    import importlib
-    return getattr(importlib.import_module(target[0]), target[1])
+Run = list  # [text, style, alpha, hex?]
 # ---- END PLUGIN-COMPAT ----

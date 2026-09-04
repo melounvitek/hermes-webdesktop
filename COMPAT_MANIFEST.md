@@ -10,14 +10,19 @@ date, by reverting that commit. Update your plugin to import from the `new locat
 Nothing inside this repository is allowed to use these pointers (`scripts/check_compat_pointers.py`
 fails CI if it does).
 
+**Scope.** Only PUBLIC names (no leading underscore) that were defined or imported at module top level
+before the decomposition are covered. Private names (`_foo`, `_TG_NAME_LIMIT`, `_clamp_telegram_names`,
+...) were never part of any surface and are NOT restored; a plugin that patched or imported one must move
+to the public equivalent or the new module. Test monkeypatch seams are likewise not preserved.
+
 | kind | count | meaning |
 |---|---|---|
 | moved | 0 | name now defined in `new location`; re-exported from the old module |
-| moved-lazy | 1172 | same, resolved lazily via `__getattr__` to avoid an import cycle |
+| moved-lazy | 1148 | same, resolved lazily via `__getattr__` to avoid an import cycle |
 | import | 592 | a third-party/stdlib name the old module used to expose; original import restored |
-| restored-def | 266 | public name that was deleted as unused; its pre-decomposition definition is restored verbatim |
-| restored-helper | 40 | private helper restored only because a restored-def above depends on it |
-| restored-import | 16 | import re-added only because a restored-def above depends on it |
+| restored-def | 290 | public name that was deleted as unused; its pre-decomposition definition is restored verbatim |
+| restored-helper | 41 | private helper restored only because a restored-def above depends on it |
+| restored-import | 17 | import re-added only because a restored-def above depends on it |
 | module-stub | 3 | whole module deleted; stub re-exports from its replacement |
 | unrestorable | 34 | not restorable (e.g. leaked loop variables); listed for completeness |
 
@@ -258,7 +263,7 @@ fails CI if it does).
 
 | name | kind | new location |
 |---|---|---|
-| `register` | moved-lazy | `tools.slash_confirm` |
+| `register` | restored-def | `(deleted; BASE body restored)` |
 
 ### `agent.display`
 
@@ -308,7 +313,7 @@ fails CI if it does).
 | name | kind | new location |
 |---|---|---|
 | `Grid` | restored-def | `(deleted; BASE body restored)` |
-| `Run` | moved-lazy | `hermes_cli.kanban_db` |
+| `Run` | restored-def | `(deleted; BASE body restored)` |
 
 ### `agent.lsp.eventlog`
 
@@ -615,8 +620,8 @@ fails CI if it does).
 
 | name | kind | new location |
 |---|---|---|
-| `AIAgent` | moved-lazy | `run_agent` |
-| `CanonicalUsage` | moved-lazy | `agent.usage_pricing` |
+| `AIAgent` | restored-def | `(deleted; BASE body restored)` |
+| `CanonicalUsage` | restored-def | `(deleted; BASE body restored)` |
 | `CompletionsMenu` | import | `prompt_toolkit.layout.menus` |
 | `Condition` | import | `prompt_toolkit.filters` |
 | `ConditionalContainer` | import | `prompt_toolkit.layout` |
@@ -1297,8 +1302,8 @@ fails CI if it does).
 | `check_respawn_guard` | moved-lazy | `hermes_cli.kanban_db_dispatch` |
 | `claim_unseen_events_for_sub` | moved-lazy | `hermes_cli.kanban_db_notify` |
 | `configured_max_in_progress` | moved-lazy | `hermes_cli.kanban_db_dispatch` |
-| `connect` | moved-lazy | `hermes_cli.projects_db` |
-| `connect_closing` | moved-lazy | `hermes_cli.projects_db` |
+| `connect` | moved-lazy | `hermes_cli.kanban_db_connect` |
+| `connect_closing` | moved-lazy | `hermes_cli.kanban_db_connect` |
 | `count_notify_subs` | moved-lazy | `hermes_cli.kanban_db_notify` |
 | `count_running_tasks` | moved-lazy | `hermes_cli.kanban_db_dispatch` |
 | `count_running_tasks_other_boards` | moved-lazy | `hermes_cli.kanban_db_dispatch` |
@@ -1655,7 +1660,7 @@ fails CI if it does).
 | `generate_pairing_nonce` | restored-def | `(deleted; BASE body restored)` |
 | `generate_username_slug` | restored-helper | `(deleted; restored as a dependency of generate_bot_username)` |
 | `generate_username_slug` | restored-def | `(deleted; BASE body restored)` |
-| `poll_for_token` | moved-lazy | `plugins.platforms.photon.auth` |
+| `poll_for_token` | restored-def | `(deleted; BASE body restored)` |
 | `poll_pairing_once` | restored-def | `(deleted; BASE body restored)` |
 | `secrets` | restored-import | `secrets` |
 | `secrets` | import | `secrets` |
@@ -2070,13 +2075,13 @@ fails CI if it does).
 | `resume_cron_job` | moved-lazy | `hermes_cli.web_routers.cron` |
 | `reveal_env_var` | moved-lazy | `hermes_cli.web_routers.config_env` |
 | `revoke_pairing` | moved-lazy | `hermes_cli.web_routers.ops` |
-| `run_backup` | moved-lazy | `hermes_cli.backup` |
+| `run_backup` | moved-lazy | `hermes_cli.web_routers.ops` |
 | `run_config_migrate` | moved-lazy | `hermes_cli.web_routers.status` |
 | `run_curator` | moved-lazy | `hermes_cli.web_routers.status` |
 | `run_debug_share_endpoint` | moved-lazy | `hermes_cli.web_routers.status` |
 | `run_doctor` | moved-lazy | `hermes_cli.doctor` |
 | `run_dump` | moved-lazy | `hermes_cli.dump` |
-| `run_import` | moved-lazy | `hermes_cli.backup` |
+| `run_import` | moved-lazy | `hermes_cli.web_routers.ops` |
 | `run_import_upload` | moved-lazy | `hermes_cli.web_routers.ops` |
 | `run_in_threadpool` | unrestorable | `no top-level definition on BASE` |
 | `run_prompt_size` | moved-lazy | `hermes_cli.web_routers.status` |
@@ -2106,7 +2111,7 @@ fails CI if it does).
 | `shlex` | import | `shlex` |
 | `shutil` | import | `shutil` |
 | `speak_stream_ws` | moved-lazy | `hermes_cli.web_routers.audio` |
-| `speak_text` | moved-lazy | `hermes_cli.voice` |
+| `speak_text` | moved-lazy | `hermes_cli.web_routers.audio` |
 | `start_gateway` | moved-lazy | `hermes_cli.web_routers.ops` |
 | `start_oauth_login` | moved-lazy | `hermes_cli.web_routers.oauth` |
 | `start_telegram_onboarding` | moved-lazy | `hermes_cli.web_routers.messaging` |
@@ -2416,11 +2421,11 @@ fails CI if it does).
 
 | name | kind | new location |
 |---|---|---|
-| `CONCLUDE_SCHEMA` | moved-lazy | `plugins.memory.honcho.tool_schemas` |
-| `CONTEXT_SCHEMA` | moved-lazy | `plugins.memory.honcho.tool_schemas` |
-| `PROFILE_SCHEMA` | moved-lazy | `plugins.memory.honcho.tool_schemas` |
-| `REASONING_SCHEMA` | moved-lazy | `plugins.memory.honcho.tool_schemas` |
-| `SEARCH_SCHEMA` | moved-lazy | `plugins.memory.honcho.tool_schemas` |
+| `CONCLUDE_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
+| `CONTEXT_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
+| `PROFILE_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
+| `REASONING_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
+| `SEARCH_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
 | `TRIVIAL_PROMPT_RE` | moved-lazy | `agent.memory_provider` |
 
 ### `plugins.memory.honcho.client`
@@ -2450,7 +2455,7 @@ fails CI if it does).
 |---|---|---|
 | `ADD_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
 | `DELETE_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
-| `SEARCH_SCHEMA` | moved-lazy | `plugins.memory.honcho.tool_schemas` |
+| `SEARCH_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
 | `UPDATE_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
 
 ### `plugins.memory.mem0._setup`
@@ -2463,26 +2468,26 @@ fails CI if it does).
 
 | name | kind | new location |
 |---|---|---|
-| `CONTEXT_SCHEMA` | moved-lazy | `plugins.memory.honcho.tool_schemas` |
+| `CONTEXT_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
 | `Dict` | import | `typing` |
 | `FILE_DELETE_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
 | `FILE_INGEST_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
 | `FILE_LIST_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
 | `FILE_READ_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
 | `FILE_UPLOAD_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
-| `FORGET_SCHEMA` | moved-lazy | `plugins.memory.openviking` |
+| `FORGET_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
 | `List` | import | `typing` |
-| `PROFILE_SCHEMA` | moved-lazy | `plugins.memory.honcho.tool_schemas` |
-| `REMEMBER_SCHEMA` | moved-lazy | `plugins.memory.openviking` |
-| `SEARCH_SCHEMA` | moved-lazy | `plugins.memory.honcho.tool_schemas` |
+| `PROFILE_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
+| `REMEMBER_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
+| `SEARCH_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
 
 ### `plugins.memory.supermemory`
 
 | name | kind | new location |
 |---|---|---|
-| `FORGET_SCHEMA` | moved-lazy | `plugins.memory.openviking` |
-| `PROFILE_SCHEMA` | moved-lazy | `plugins.memory.honcho.tool_schemas` |
-| `SEARCH_SCHEMA` | moved-lazy | `plugins.memory.honcho.tool_schemas` |
+| `FORGET_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
+| `PROFILE_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
+| `SEARCH_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
 | `STORE_SCHEMA` | restored-def | `(deleted; BASE body restored)` |
 
 ### `plugins.platforms.a2a.protocol`
@@ -2522,7 +2527,7 @@ fails CI if it does).
 | name | kind | new location |
 |---|---|---|
 | `DINGTALK_TYPE_MAPPING` | moved-lazy | `plugins.platforms.dingtalk.inbound` |
-| `EXT_MAP` | moved-lazy | `plugins.platforms.dingtalk.inbound` |
+| `EXT_MAP` | restored-def | `(deleted; BASE body restored)` |
 | `MessageType` | moved-lazy | `gateway.platforms.base` |
 
 ### `plugins.platforms.discord.adapter`
@@ -2562,7 +2567,7 @@ fails CI if it does).
 
 | name | kind | new location |
 |---|---|---|
-| `MAX_MESSAGE_LENGTH` | moved-lazy | `gateway.platforms.signal` |
+| `MAX_MESSAGE_LENGTH` | restored-def | `(deleted; BASE body restored)` |
 | `PaginationDirection` | unrestorable | `no top-level definition on BASE` |
 | `SyncToken` | unrestorable | `no top-level definition on BASE` |
 | `_MATRIX_CAPABILITIES` | restored-helper | `(deleted; restored as a dependency of get_matrix_capabilities)` |
@@ -2672,7 +2677,8 @@ fails CI if it does).
 
 | name | kind | new location |
 |---|---|---|
-| `compact_json` | moved-lazy | `gateway.hosted_rooms_common` |
+| `compact_json` | restored-def | `(deleted; BASE body restored)` |
+| `json` | restored-import | `json` |
 | `json` | import | `json` |
 
 ### `plugins.spotify.tools`
@@ -3658,7 +3664,7 @@ fails CI if it does).
 | `DEFAULT_OPENAI_VOICE` | moved-lazy | `tools.tts_tool_openai` |
 | `DEFAULT_PIPER_VOICE` | moved-lazy | `tools.tts_tool_local` |
 | `DEFAULT_XAI_AUTO_SPEECH_TAGS` | moved-lazy | `tools.tts_tool_providers` |
-| `DEFAULT_XAI_BASE_URL` | moved-lazy | `tools.xai_http` |
+| `DEFAULT_XAI_BASE_URL` | moved-lazy | `tools.tts_tool_providers` |
 | `DEFAULT_XAI_BIT_RATE` | moved-lazy | `tools.tts_tool_providers` |
 | `DEFAULT_XAI_LANGUAGE` | moved-lazy | `tools.tts_tool_providers` |
 | `DEFAULT_XAI_OPTIMIZE_STREAMING_LATENCY_DEFAULT` | moved-lazy | `tools.tts_tool_providers` |
@@ -3670,6 +3676,7 @@ fails CI if it does).
 | `DEFAULT_XAI_VOICE_ID` | moved-lazy | `tools.tts_tool_providers` |
 | `ELEVENLABS_MODEL_MAX_TEXT_LENGTH` | moved-lazy | `tools.tts_tool_delivery` |
 | `FALLBACK_MAX_TEXT_LENGTH` | moved-lazy | `tools.tts_tool_delivery` |
+| `FALLBACK_MAX_TEXT_LENGTH` | restored-helper | `(deleted; restored as a dependency of MAX_TEXT_LENGTH)` |
 | `Future` | import | `concurrent.futures` |
 | `GEMINI_AUDIO_TAG_REWRITE_TASK` | moved-lazy | `tools.tts_tool_providers` |
 | `GEMINI_TTS_CHANNELS` | restored-def | `(deleted; BASE body restored)` |
@@ -3677,7 +3684,7 @@ fails CI if it does).
 | `GEMINI_TTS_SAMPLE_WIDTH` | restored-def | `(deleted; BASE body restored)` |
 | `Iterator` | import | `typing` |
 | `MANAGED_OPENAI_TTS_MODELS` | moved-lazy | `tools.tts_tool_openai` |
-| `MAX_TEXT_LENGTH` | moved-lazy | `gateway.platforms.bluebubbles` |
+| `MAX_TEXT_LENGTH` | restored-def | `(deleted; BASE body restored)` |
 | `PROVIDER_MAX_TEXT_LENGTH` | moved-lazy | `tools.tts_tool_delivery` |
 | `TTS_RESPONSE_BODY_CHUNK_BYTES` | moved-lazy | `tools.tts_tool_providers` |
 | `TTS_RESPONSE_BODY_LIMIT_BYTES` | moved-lazy | `tools.tts_tool_providers` |
@@ -3735,7 +3742,7 @@ fails CI if it does).
 | `DEFAULT_TTS_ECHO_SIMILARITY_THRESHOLD` | moved-lazy | `tools.voice_mode_transcript` |
 | `DEFAULT_VOICE_STOP_PHRASES` | moved-lazy | `tools.voice_mode_transcript` |
 | `MIN_FRAGMENT_LENGTH_FOR_ECHO` | moved-lazy | `tools.voice_mode_transcript` |
-| `WHISPER_HALLUCINATIONS` | moved-lazy | `tools.voice_mode_transcript` |
+| `WHISPER_HALLUCINATIONS` | restored-def | `(deleted; BASE body restored)` |
 | `difflib` | import | `difflib` |
 | `is_tts_echo` | moved-lazy | `tools.voice_mode_transcript` |
 | `re` | import | `re` |

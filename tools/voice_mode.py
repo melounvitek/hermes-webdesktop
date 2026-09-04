@@ -1521,12 +1521,41 @@ def cleanup_temp_recordings(max_age_seconds: int = 3600) -> int:
 import difflib  # noqa: F401,E402
 import re  # noqa: F401,E402
 
+WHISPER_HALLUCINATIONS = {
+    "thank you.",
+    "thank you",
+    "thanks for watching.",
+    "thanks for watching",
+    "subscribe to my channel.",
+    "subscribe to my channel",
+    "like and subscribe.",
+    "like and subscribe",
+    "please subscribe.",
+    "please subscribe",
+    "thank you for watching.",
+    "thank you for watching",
+    "bye.",
+    "bye",
+    "you",
+    "the end.",
+    "the end",
+    # Non-English hallucinations (common on silence)
+    "продолжение следует",
+    "продолжение следует...",
+    "sous-titres",
+    "sous-titres réalisés par la communauté d'amara.org",
+    "sottotitoli creati dalla comunità amara.org",
+    "untertitel von stephanie geiges",
+    "amara.org",
+    "www.mooji.org",
+    "ご視聴ありがとうございました",
+}
+
 
 _PLUGIN_COMPAT_LAZY = {
     'DEFAULT_TTS_ECHO_SIMILARITY_THRESHOLD': ('tools.voice_mode_transcript', 'DEFAULT_TTS_ECHO_SIMILARITY_THRESHOLD'),
     'DEFAULT_VOICE_STOP_PHRASES': ('tools.voice_mode_transcript', 'DEFAULT_VOICE_STOP_PHRASES'),
     'MIN_FRAGMENT_LENGTH_FOR_ECHO': ('tools.voice_mode_transcript', 'MIN_FRAGMENT_LENGTH_FOR_ECHO'),
-    'WHISPER_HALLUCINATIONS': ('tools.voice_mode_transcript', 'WHISPER_HALLUCINATIONS'),
     'is_tts_echo': ('tools.voice_mode_transcript', 'is_tts_echo'),
     'voice_stop_hint': ('tools.voice_mode_transcript', 'voice_stop_hint'),
 }

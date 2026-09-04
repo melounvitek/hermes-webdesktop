@@ -604,6 +604,10 @@ GEMINI_TTS_SAMPLE_RATE = 24000
 
 GEMINI_TTS_SAMPLE_WIDTH = 2  # 16-bit PCM (L16)
 
+FALLBACK_MAX_TEXT_LENGTH = 4000
+
+MAX_TEXT_LENGTH = FALLBACK_MAX_TEXT_LENGTH
+
 
 _PLUGIN_COMPAT_LAZY = {
     'AudioDeliveryProfile': ('tools.tts_tool_delivery', 'AudioDeliveryProfile'),
@@ -633,7 +637,7 @@ _PLUGIN_COMPAT_LAZY = {
     'DEFAULT_OPENAI_VOICE': ('tools.tts_tool_openai', 'DEFAULT_OPENAI_VOICE'),
     'DEFAULT_PIPER_VOICE': ('tools.tts_tool_local', 'DEFAULT_PIPER_VOICE'),
     'DEFAULT_XAI_AUTO_SPEECH_TAGS': ('tools.tts_tool_providers', 'DEFAULT_XAI_AUTO_SPEECH_TAGS'),
-    'DEFAULT_XAI_BASE_URL': ('tools.xai_http', 'DEFAULT_XAI_BASE_URL'),
+    'DEFAULT_XAI_BASE_URL': ('tools.tts_tool_providers', 'DEFAULT_XAI_BASE_URL'),
     'DEFAULT_XAI_BIT_RATE': ('tools.tts_tool_providers', 'DEFAULT_XAI_BIT_RATE'),
     'DEFAULT_XAI_LANGUAGE': ('tools.tts_tool_providers', 'DEFAULT_XAI_LANGUAGE'),
     'DEFAULT_XAI_OPTIMIZE_STREAMING_LATENCY_DEFAULT': ('tools.tts_tool_providers', 'DEFAULT_XAI_OPTIMIZE_STREAMING_LATENCY_DEFAULT'),
@@ -647,7 +651,6 @@ _PLUGIN_COMPAT_LAZY = {
     'FALLBACK_MAX_TEXT_LENGTH': ('tools.tts_tool_delivery', 'FALLBACK_MAX_TEXT_LENGTH'),
     'GEMINI_AUDIO_TAG_REWRITE_TASK': ('tools.tts_tool_providers', 'GEMINI_AUDIO_TAG_REWRITE_TASK'),
     'MANAGED_OPENAI_TTS_MODELS': ('tools.tts_tool_openai', 'MANAGED_OPENAI_TTS_MODELS'),
-    'MAX_TEXT_LENGTH': ('gateway.platforms.bluebubbles', 'MAX_TEXT_LENGTH'),
     'PROVIDER_MAX_TEXT_LENGTH': ('tools.tts_tool_delivery', 'PROVIDER_MAX_TEXT_LENGTH'),
     'TTS_RESPONSE_BODY_CHUNK_BYTES': ('tools.tts_tool_providers', 'TTS_RESPONSE_BODY_CHUNK_BYTES'),
     'TTS_RESPONSE_BODY_LIMIT_BYTES': ('tools.tts_tool_providers', 'TTS_RESPONSE_BODY_LIMIT_BYTES'),

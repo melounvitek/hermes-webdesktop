@@ -719,8 +719,8 @@
   {
    "facade": "agent.credential_sources",
    "name": "register",
-   "kind": "moved-lazy",
-   "target": "tools.slash_confirm"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "agent.display",
@@ -809,8 +809,8 @@
   {
    "facade": "agent.learning_graph_render",
    "name": "Run",
-   "kind": "moved-lazy",
-   "target": "hermes_cli.kanban_db"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "agent.lsp.eventlog",
@@ -1391,14 +1391,14 @@
   {
    "facade": "cli",
    "name": "AIAgent",
-   "kind": "moved-lazy",
-   "target": "run_agent"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "cli",
    "name": "CanonicalUsage",
-   "kind": "moved-lazy",
-   "target": "agent.usage_pricing"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "cli",
@@ -2008,13 +2008,13 @@
   },
   {
    "facade": "gateway.platforms.qqbot.keyboards",
-   "name": "Awaitable",
+   "name": "Callable",
    "kind": "restored-import",
    "target": "typing"
   },
   {
    "facade": "gateway.platforms.qqbot.keyboards",
-   "name": "Callable",
+   "name": "Awaitable",
    "kind": "restored-import",
    "target": "typing"
   },
@@ -3510,13 +3510,13 @@
    "facade": "hermes_cli.kanban_db",
    "name": "connect",
    "kind": "moved-lazy",
-   "target": "hermes_cli.projects_db"
+   "target": "hermes_cli.kanban_db_connect"
   },
   {
    "facade": "hermes_cli.kanban_db",
    "name": "connect_closing",
    "kind": "moved-lazy",
-   "target": "hermes_cli.projects_db"
+   "target": "hermes_cli.kanban_db_connect"
   },
   {
    "facade": "hermes_cli.kanban_db",
@@ -4667,8 +4667,8 @@
   {
    "facade": "hermes_cli.telegram_managed_bot",
    "name": "poll_for_token",
-   "kind": "moved-lazy",
-   "target": "plugins.platforms.photon.auth"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "hermes_cli.telegram_managed_bot",
@@ -6738,7 +6738,7 @@
    "facade": "hermes_cli.web_server",
    "name": "run_backup",
    "kind": "moved-lazy",
-   "target": "hermes_cli.backup"
+   "target": "hermes_cli.web_routers.ops"
   },
   {
    "facade": "hermes_cli.web_server",
@@ -6774,7 +6774,7 @@
    "facade": "hermes_cli.web_server",
    "name": "run_import",
    "kind": "moved-lazy",
-   "target": "hermes_cli.backup"
+   "target": "hermes_cli.web_routers.ops"
   },
   {
    "facade": "hermes_cli.web_server",
@@ -6948,7 +6948,7 @@
    "facade": "hermes_cli.web_server",
    "name": "speak_text",
    "kind": "moved-lazy",
-   "target": "hermes_cli.voice"
+   "target": "hermes_cli.web_routers.audio"
   },
   {
    "facade": "hermes_cli.web_server",
@@ -7949,32 +7949,32 @@
   {
    "facade": "plugins.memory.honcho",
    "name": "CONCLUDE_SCHEMA",
-   "kind": "moved-lazy",
-   "target": "plugins.memory.honcho.tool_schemas"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "plugins.memory.honcho",
    "name": "CONTEXT_SCHEMA",
-   "kind": "moved-lazy",
-   "target": "plugins.memory.honcho.tool_schemas"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "plugins.memory.honcho",
    "name": "PROFILE_SCHEMA",
-   "kind": "moved-lazy",
-   "target": "plugins.memory.honcho.tool_schemas"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "plugins.memory.honcho",
    "name": "REASONING_SCHEMA",
-   "kind": "moved-lazy",
-   "target": "plugins.memory.honcho.tool_schemas"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "plugins.memory.honcho",
    "name": "SEARCH_SCHEMA",
-   "kind": "moved-lazy",
-   "target": "plugins.memory.honcho.tool_schemas"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "plugins.memory.honcho",
@@ -8033,8 +8033,8 @@
   {
    "facade": "plugins.memory.mem0",
    "name": "SEARCH_SCHEMA",
-   "kind": "moved-lazy",
-   "target": "plugins.memory.honcho.tool_schemas"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "plugins.memory.mem0",
@@ -8051,8 +8051,8 @@
   {
    "facade": "plugins.memory.retaindb",
    "name": "CONTEXT_SCHEMA",
-   "kind": "moved-lazy",
-   "target": "plugins.memory.honcho.tool_schemas"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "plugins.memory.retaindb",
@@ -8093,8 +8093,8 @@
   {
    "facade": "plugins.memory.retaindb",
    "name": "FORGET_SCHEMA",
-   "kind": "moved-lazy",
-   "target": "plugins.memory.openviking"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "plugins.memory.retaindb",
@@ -8105,38 +8105,38 @@
   {
    "facade": "plugins.memory.retaindb",
    "name": "PROFILE_SCHEMA",
-   "kind": "moved-lazy",
-   "target": "plugins.memory.honcho.tool_schemas"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "plugins.memory.retaindb",
    "name": "REMEMBER_SCHEMA",
-   "kind": "moved-lazy",
-   "target": "plugins.memory.openviking"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "plugins.memory.retaindb",
    "name": "SEARCH_SCHEMA",
-   "kind": "moved-lazy",
-   "target": "plugins.memory.honcho.tool_schemas"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "plugins.memory.supermemory",
    "name": "FORGET_SCHEMA",
-   "kind": "moved-lazy",
-   "target": "plugins.memory.openviking"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "plugins.memory.supermemory",
    "name": "PROFILE_SCHEMA",
-   "kind": "moved-lazy",
-   "target": "plugins.memory.honcho.tool_schemas"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "plugins.memory.supermemory",
    "name": "SEARCH_SCHEMA",
-   "kind": "moved-lazy",
-   "target": "plugins.memory.honcho.tool_schemas"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "plugins.memory.supermemory",
@@ -8255,8 +8255,8 @@
   {
    "facade": "plugins.platforms.dingtalk.adapter",
    "name": "EXT_MAP",
-   "kind": "moved-lazy",
-   "target": "plugins.platforms.dingtalk.inbound"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "plugins.platforms.dingtalk.adapter",
@@ -8315,8 +8315,8 @@
   {
    "facade": "plugins.platforms.matrix.adapter",
    "name": "MAX_MESSAGE_LENGTH",
-   "kind": "moved-lazy",
-   "target": "gateway.platforms.signal"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "plugins.platforms.matrix.adapter",
@@ -8632,9 +8632,15 @@
   },
   {
    "facade": "plugins.spotify.client",
+   "name": "json",
+   "kind": "restored-import",
+   "target": "json"
+  },
+  {
+   "facade": "plugins.spotify.client",
    "name": "compact_json",
-   "kind": "moved-lazy",
-   "target": "gateway.hosted_rooms_common"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "plugins.spotify.client",
@@ -10726,15 +10732,15 @@
   },
   {
    "facade": "tools.skill_usage",
-   "name": "tempfile",
-   "kind": "restored-import",
-   "target": "tempfile"
-  },
-  {
-   "facade": "tools.skill_usage",
    "name": "os",
    "kind": "restored-import",
    "target": "os"
+  },
+  {
+   "facade": "tools.skill_usage",
+   "name": "tempfile",
+   "kind": "restored-import",
+   "target": "tempfile"
   },
   {
    "facade": "tools.skill_usage",
@@ -11874,7 +11880,7 @@
    "facade": "tools.tts_tool",
    "name": "DEFAULT_XAI_BASE_URL",
    "kind": "moved-lazy",
-   "target": "tools.xai_http"
+   "target": "tools.tts_tool_providers"
   },
   {
    "facade": "tools.tts_tool",
@@ -11986,9 +11992,15 @@
   },
   {
    "facade": "tools.tts_tool",
+   "name": "FALLBACK_MAX_TEXT_LENGTH",
+   "kind": "restored-helper",
+   "target": "(deleted; restored as a dependency of MAX_TEXT_LENGTH)"
+  },
+  {
+   "facade": "tools.tts_tool",
    "name": "MAX_TEXT_LENGTH",
-   "kind": "moved-lazy",
-   "target": "gateway.platforms.bluebubbles"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "tools.tts_tool",
@@ -12245,8 +12257,8 @@
   {
    "facade": "tools.voice_mode",
    "name": "WHISPER_HALLUCINATIONS",
-   "kind": "moved-lazy",
-   "target": "tools.voice_mode_transcript"
+   "kind": "restored-def",
+   "target": "(deleted; BASE body restored)"
   },
   {
    "facade": "tools.voice_mode",
@@ -12412,13 +12424,13 @@
   },
   {
    "facade": "tui_gateway.compute_host",
-   "name": "field",
+   "name": "dataclass",
    "kind": "restored-import",
    "target": "dataclasses"
   },
   {
    "facade": "tui_gateway.compute_host",
-   "name": "dataclass",
+   "name": "field",
    "kind": "restored-import",
    "target": "dataclasses"
   },

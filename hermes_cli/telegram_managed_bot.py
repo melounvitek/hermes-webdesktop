@@ -258,6 +258,16 @@ def generate_pairing_nonce() -> str:
     """
     return secrets.token_hex(16)
 
+def poll_for_token(
+    api_url: str | None,
+    pairing: TelegramPairing,
+    timeout: float = DEFAULT_POLL_TIMEOUT,
+    interval: float = POLL_INTERVAL,
+) -> Optional[str]:
+    """Poll the pairing API until the bot token is available or timeout."""
+    result = poll_for_setup_result(api_url, pairing, timeout=timeout, interval=interval)
+    return result.token if result else None
+
 def poll_pairing_once(
     api_url: str | None,
     pairing: TelegramPairing,
@@ -266,17 +276,4 @@ def poll_pairing_once(
     """Poll the onboarding service once. Returns the token when ready."""
     result = poll_pairing_result_once(api_url, pairing, timeout=timeout)
     return result.token if result else None
-
-
-_PLUGIN_COMPAT_LAZY = {
-    'poll_for_token': ('plugins.platforms.photon.auth', 'poll_for_token'),
-}
-
-
-def __getattr__(name):  # PEP 562 — lazy so no import cycles
-    target = _PLUGIN_COMPAT_LAZY.get(name)
-    if target is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    import importlib
-    return getattr(importlib.import_module(target[0]), target[1])
 # ---- END PLUGIN-COMPAT ----

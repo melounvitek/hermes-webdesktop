@@ -543,6 +543,42 @@ def register(ctx):
 # Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
 # The whole block is removed by reverting the commit that added it.
 
+FORGET_SCHEMA = {
+    "name": "supermemory_forget",
+    "description": "Forget a memory by exact id or by best-match query.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "id": {"type": "string", "description": "Exact memory id to delete."},
+            "query": {"type": "string", "description": "Query used to find the memory to forget."},
+        },
+    },
+}
+
+PROFILE_SCHEMA = {
+    "name": "supermemory_profile",
+    "description": "Retrieve persistent profile facts and recent memory context.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "Optional query to focus the profile response."},
+        },
+    },
+}
+
+SEARCH_SCHEMA = {
+    "name": "supermemory_search",
+    "description": "Search long-term memory by semantic similarity.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "query": {"type": "string", "description": "What to search for."},
+            "limit": {"type": "integer", "description": "Maximum results to return, 1 to 20."},
+        },
+        "required": ["query"],
+    },
+}
+
 STORE_SCHEMA = {
     "name": "supermemory_store",
     "description": "Store an explicit memory for future recall.",
@@ -555,19 +591,4 @@ STORE_SCHEMA = {
         "required": ["content"],
     },
 }
-
-
-_PLUGIN_COMPAT_LAZY = {
-    'FORGET_SCHEMA': ('plugins.memory.openviking', 'FORGET_SCHEMA'),
-    'PROFILE_SCHEMA': ('plugins.memory.honcho.tool_schemas', 'PROFILE_SCHEMA'),
-    'SEARCH_SCHEMA': ('plugins.memory.honcho.tool_schemas', 'SEARCH_SCHEMA'),
-}
-
-
-def __getattr__(name):  # PEP 562 — lazy so no import cycles
-    target = _PLUGIN_COMPAT_LAZY.get(name)
-    if target is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    import importlib
-    return getattr(importlib.import_module(target[0]), target[1])
 # ---- END PLUGIN-COMPAT ----

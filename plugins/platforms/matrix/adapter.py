@@ -3017,6 +3017,8 @@ def register(ctx) -> None:
 # Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
 # The whole block is removed by reverting the commit that added it.
 
+MAX_MESSAGE_LENGTH = DEFAULT_MAX_MESSAGE_LENGTH
+
 _MATRIX_CAPABILITIES: Dict[str, str] = {
     "text": "yes",
     "threads": "yes",
@@ -3036,17 +3038,4 @@ _MATRIX_CAPABILITIES: Dict[str, str] = {
 def get_matrix_capabilities() -> Dict[str, str]:
     """Return Matrix gateway capabilities for docs and release checks."""
     return dict(_MATRIX_CAPABILITIES)
-
-
-_PLUGIN_COMPAT_LAZY = {
-    'MAX_MESSAGE_LENGTH': ('gateway.platforms.signal', 'MAX_MESSAGE_LENGTH'),
-}
-
-
-def __getattr__(name):  # PEP 562 — lazy so no import cycles
-    target = _PLUGIN_COMPAT_LAZY.get(name)
-    if target is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    import importlib
-    return getattr(importlib.import_module(target[0]), target[1])
 # ---- END PLUGIN-COMPAT ----

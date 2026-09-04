@@ -266,16 +266,7 @@ _REGISTRY: List[RemovalStep] = [
 # Internal code MUST NOT use these (scripts/check_compat_pointers.py fails CI if it does).
 # The whole block is removed by reverting the commit that added it.
 
-
-_PLUGIN_COMPAT_LAZY = {
-    'register': ('tools.slash_confirm', 'register'),
-}
-
-
-def __getattr__(name):  # PEP 562 — lazy so no import cycles
-    target = _PLUGIN_COMPAT_LAZY.get(name)
-    if target is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
-    import importlib
-    return getattr(importlib.import_module(target[0]), target[1])
+def register(step: RemovalStep) -> RemovalStep:
+    _REGISTRY.append(step)
+    return step
 # ---- END PLUGIN-COMPAT ----

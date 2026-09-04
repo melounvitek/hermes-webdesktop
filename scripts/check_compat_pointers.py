@@ -31,6 +31,9 @@ def _py_files():
         parts = p.relative_to(ROOT).parts
         if parts[0] in SKIP_DIRS or p.name == "check_compat_pointers.py":
             continue
+        # The compat layer's own contract test uses the pointers on purpose; it is deleted with them.
+        if p.name == "test_compat_manifest_targets.py":
+            continue
         yield p
 
 

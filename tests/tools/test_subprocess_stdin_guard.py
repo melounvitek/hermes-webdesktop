@@ -104,7 +104,16 @@ def test_splatted_kwargs_helper_counts_only_when_it_sets_stdin():
         "subprocess.run(['ls'], **_KW)\n"
     )
     undefined = "import subprocess\nsubprocess.run(['ls'], **_KW)\n"
+    # A later unrelated call passing stdin= must NOT vouch for the splat (reviewer-found false negative
+    # in the 30-line text-window version).
+    unrelated_later = (
+        "import subprocess\n"
+        "kwargs = {'capture_output': True}\n"
+        "subprocess.run(['child'], **kwargs)\n"
+        "subprocess.run(['other'], stdin=subprocess.DEVNULL)\n"
+    )
     assert guard.find_subprocess_calls(safe_const, "x.py") == []
     assert guard.find_subprocess_calls(safe_fn, "x.py") == []
     assert len(guard.find_subprocess_calls(unsafe_const, "x.py")) == 1
     assert len(guard.find_subprocess_calls(undefined, "x.py")) == 1
+    assert [v["line"] for v in guard.find_subprocess_calls(unrelated_later, "x.py")] == [3]

@@ -24,6 +24,7 @@ violation (does not modify files).
 
 from __future__ import annotations
 
+import ast
 import os
 import re
 import sys
@@ -89,26 +90,41 @@ _SPLAT_RE = re.compile(r"\*\*\s*([A-Za-z_][A-Za-z0-9_]*)")
 
 def _splat_carries_stdin(call_text: str, content: str) -> bool:
     """True when the call splats ``**name`` / ``**name(...)`` and ``name`` is defined in
-    the same file (assignment or ``def``) with an explicit ``stdin=`` in its body.
+    the same file (assignment or ``def``) whose OWN expression/body sets ``stdin=``.
 
     Shared kwargs helpers (``_RUN_KW = dict(..., stdin=DEVNULL)``, ``def _run_kwargs(): return
     dict(..., stdin=DEVNULL)``) legitimately carry the guard; we only accept them when the
-    definition provably sets stdin= — never on the helper's name alone.
+    definition provably sets stdin= — never on the helper's name alone, and never because an
+    unrelated later call in the file happens to pass ``stdin=``.
     """
     names = set(_SPLAT_RE.findall(call_text))
     if not names:
         return False
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return False
     for name in names:
-        defn = re.compile(
-            rf"^[ \t]*(?:def[ \t]+{re.escape(name)}[ \t]*\(|{re.escape(name)}[ \t]*(?::[^=\n]*)?=(?!=))",
-            re.MULTILINE,
-        )
-        m = defn.search(content)
-        if m is None:
+        node = None
+        for n in ast.walk(tree):
+            if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name == name:
+                node = n
+                break
+            if isinstance(n, (ast.Assign, ast.AnnAssign)):
+                targets = n.targets if isinstance(n, ast.Assign) else [n.target]
+                if any(isinstance(t, ast.Name) and t.id == name for t in targets):
+                    node = n.value if n.value is not None else n
+                    break
+        if node is None:
             return False
-        body = content[m.start():]
-        body = "\n".join(body.split("\n")[:30])
-        if "stdin=" not in body:
+        # stdin appears as a keyword (dict(stdin=...)) or as a dict-literal key ({"stdin": ...})
+        # somewhere INSIDE this definition — not merely nearby in the file.
+        has = any(
+            (isinstance(sub, ast.keyword) and sub.arg == "stdin")
+            or (isinstance(sub, ast.Constant) and sub.value == "stdin")
+            for sub in ast.walk(node)
+        )
+        if not has:
             return False
     return True
 
