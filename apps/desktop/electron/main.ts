@@ -205,10 +205,6 @@ import { registerGitIpc } from './git-ipc'
 import { clearStaleGitLocks } from './gitlock'
 import { readAndConsumeHandoffResult } from './handoff-result'
 import {
-  pendingNotice as pendingPluginCompatNotice,
-  recordDismissed as recordPluginCompatDismissed
-} from './plugin-compat-notice'
-import {
   ATTACHMENT_UPLOAD_DEFAULT_MAX_BYTES,
   clampDataUrlReadMaxMb,
   DATA_URL_READ_DEFAULT_MAX_MB,
@@ -278,6 +274,10 @@ import { serializeJsonBody, setJsonRequestHeaders } from './oauth-net-request'
 import { LEGACY_OAUTH_PARTITION, resolveOauthPartition } from './oauth-partition'
 import { createParentStartMarkerResolver, parentWatchdogEnv } from './parent-process-identity'
 import { registerPetOverlayIpc } from './pet-overlay-ipc'
+import {
+  pendingNotice as pendingPluginCompatNotice,
+  recordDismissed as recordPluginCompatDismissed
+} from './plugin-compat-notice'
 import {
   buildRegistryProfileRoutes,
   isLocalEnumerationFailure,
@@ -6726,18 +6726,29 @@ function getAppIconPath() {
 let pluginCompatNoticeShown = false
 
 async function showPluginCompatNoticeOnce() {
-  if (pluginCompatNoticeShown) return
-  if (!mainWindow || mainWindow.isDestroyed()) return
+  if (pluginCompatNoticeShown) {
+    return
+  }
+
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    return
+  }
   let notice
+
   try {
     notice = pendingPluginCompatNotice(HERMES_HOME, app.getPath('userData'))
   } catch (err) {
     rememberLog(`[plugins] compat notice check failed: ${err.message}`)
+
     return
   }
-  if (!notice) return
+
+  if (!notice) {
+    return
+  }
   pluginCompatNoticeShown = true
   rememberLog(`[plugins] compat notice shown (${notice.key})`)
+
   try {
     await dialog.showMessageBox(mainWindow, {
       type: 'warning',
