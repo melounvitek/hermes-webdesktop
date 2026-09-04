@@ -640,7 +640,7 @@ The registry handles schema collection, dispatch, availability checking, and err
 
 **State files**: If a tool stores persistent state (caches, logs, checkpoints), use `get_hermes_home()` for the base directory — never `Path.home() / ".hermes"`. This ensures each profile gets its own state.
 
-**Agent-level tools** (todo, memory): intercepted by `run_agent.py` before `handle_function_call()`. See `tools/todo_tool.py` for the pattern.
+**Agent-level tools** (todo, memory): intercepted by `agent/tool_executor.py` (via the `INLINE_TOOL_EXECUTORS` table in `agent/inline_tool_executors.py`) before `handle_function_call()`. See `tools/todo_tool.py` for the pattern.
 
 ---
 
@@ -687,7 +687,7 @@ Reference: #2810 (bounds pass), #9801 (SHA pinning + audit CI).
 `auxiliary` holds per-task overrides for side-LLM work (curator, vision,
 embedding, title generation, session_search, etc.) — each task can pin
 its own provider/model/base_url/max_tokens/reasoning_effort. See
-`agent/auxiliary_client.py::_resolve_auto` for resolution order.
+`agent/auxiliary_client.py::_resolve_auto_route` for resolution order.
 
 `curator` holds the background skill-maintenance config —
 `enabled`, `interval_hours`, `min_idle_hours`, `stale_after_days`,
@@ -1046,7 +1046,7 @@ Two parallel surfaces:
 - **`optional-skills/`** — heavier or niche skills shipped with the repo but
   NOT active by default. Installed explicitly via
   `hermes skills install official/<category>/<skill>`. Adapter lives in
-  `tools/skills_hub.py` (`OptionalSkillSource`). Categories include
+  `tools/skills_hub_official.py` (`OptionalSkillSource`). Categories include
   `autonomous-ai-agents`, `blockchain`, `communication`, `creative`,
   `devops`, `email`, `health`, `mcp`, `migration`, `mlops`, `productivity`,
   `research`, `security`, `web-development`.
