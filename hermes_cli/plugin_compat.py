@@ -282,17 +282,28 @@ def summary_lines(report: Dict[str, List[Hit]], *, today: Optional[_dt.date] = N
 # ---------------------------------------------------------------------------------------------- runtime warn
 
 _seen: set = set()
+_log = __import__("logging").getLogger(__name__)
 
 
 def warn_once(facade: str, name: str, target_module: str, target_name: str) -> None:
+    """Per-name record that a moved name was resolved through its old path: a ``HermesPluginCompatWarning``
+    (so ``-W error`` catches it in tests and plugin authors' CI) plus a WARNING log line (agent.log /
+    gateway.log). The interactive CLI hides the warning category from stderr (:func:`quiet_for_interactive`)
+    because its banner carries the user-facing message with the plugin NAME, which this call site cannot know."""
     key = (facade, name)
     if key in _seen:
         return
     _seen.add(key)
     new = f"{target_module}.{target_name}" if target_name != name else f"{target_module}.{name}"
-    warnings.warn(
-        f"hermes plugin compat: `{facade}.{name}` moved to `{new}`. The old path is kept only for external "
-        f"plugins and is removed on {COMPAT_REMOVAL}; update your import.",
-        HermesPluginCompatWarning,
-        stacklevel=3,
-    )
+    msg = (f"hermes plugin compat: `{facade}.{name}` moved to `{new}`. The old path is kept only for external "
+           f"plugins and is removed on {COMPAT_REMOVAL}; update your import.")
+    _log.warning(msg)
+    warnings.warn(msg, HermesPluginCompatWarning, stacklevel=3)
+
+
+def quiet_for_interactive() -> None:
+    """Called by the interactive CLI before plugin discovery: the banner notice replaces raw stderr warnings.
+    Appends (does not override) so an explicit ``-W error::...HermesPluginCompatWarning`` still wins."""
+    if not any(a == "error" and c is not None and issubclass(HermesPluginCompatWarning, c)
+               for a, _m, c, _mod, _l in warnings.filters):
+        warnings.filterwarnings("ignore", category=HermesPluginCompatWarning, append=True)

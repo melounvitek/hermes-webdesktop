@@ -4529,6 +4529,10 @@ def main(
         configure_windows_stdio()
 
     os.environ["HERMES_INTERACTIVE"] = "1"  # terminal_tool: interactive sudo prompts with timeout
+    # The banner names affected plugins; the raw per-name compat warnings would only duplicate it on stderr.
+    with suppress(Exception):
+        from hermes_cli.plugin_compat import quiet_for_interactive
+        quiet_for_interactive()
 
     if gateway:
         _run_legacy_gateway()
