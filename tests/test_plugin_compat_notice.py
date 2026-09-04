@@ -136,3 +136,30 @@ def test_discovery_refreshes_report_file(tmp_path, monkeypatch):
     (plugin / "__init__.py").write_text("from tools.tool_backend_helpers import prefers_gateway\ndef register(ctx):\n    pass\n")
     mgr._refresh_plugin_compat_report([real])
     assert not (tmp_path / "r.json").exists()
+
+
+def test_scan_root_never_falls_back_to_cwd(tmp_path, monkeypatch):
+    """Windows dir paths and ``module:attr`` entry points used to collapse to ``.`` and scan the
+    launch directory; an entry point must resolve to its installed package, everything else to None."""
+    monkeypatch.setattr(pc, "load_manifest", lambda: MANIFEST)
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "stray.py").write_text("from tools.web_tools import prefers_gateway\n")
+    assert pc.plugin_hits(SimpleNamespace(source="directory", path=r"C:\Users\alice\plugin", name="w")) == []
+    assert pc.plugin_hits(SimpleNamespace(source="entrypoint", path="no_such_pkg_xyz:register", name="e")) == []
+    pkg = tmp_path / "site" / "vendor_plugin"; pkg.mkdir(parents=True)
+    (pkg / "__init__.py").write_text("from tools.web_tools import prefers_gateway\n")
+    monkeypatch.syspath_prepend(str(tmp_path / "site"))
+    hits = pc.plugin_hits(SimpleNamespace(source="entrypoint", path="vendor_plugin:register", name="v"))
+    assert [h.file for h in hits] == ["__init__.py"]
+
+
+def test_allow_override_requires_literal_true_and_notice_reports_it(monkeypatch):
+    assert pc.allow_deprecated_imports({"plugins": {pc.ALLOW_KEY: "false"}}) is False
+    assert pc.allow_deprecated_imports({"plugins": {pc.ALLOW_KEY: 1}}) is False
+    assert pc.allow_deprecated_imports({"plugins": {pc.ALLOW_KEY: True}}) is True
+    report = {"bad": [pc.Hit("x.py", 1, "tools.web_tools.prefers_gateway", "tools.tool_backend_helpers.prefers_gateway")]}
+    after = pc.COMPAT_REMOVAL_DATE
+    monkeypatch.setattr(pc, "allow_deprecated_imports", lambda config=None: True)
+    assert "force-loaded" in pc.summary_lines(report, today=after)[0]
+    monkeypatch.setattr(pc, "allow_deprecated_imports", lambda config=None: False)
+    assert "DISABLED" in pc.summary_lines(report, today=after)[0]

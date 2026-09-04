@@ -148,7 +148,7 @@ def scan_source(src: str, rel: str, manifest: Dict[str, Dict[str, str]]) -> List
     return sorted(set(hits), key=lambda h: (h.file, h.line, h.old))
 
 
-def scan_plugin(plugin_dir: Path, manifest: Optional[Dict[str, Dict[str, str]]] = None) -> List[Hit]:
+def scan_plugin(plugin_dir: Optional[Path], manifest: Optional[Dict[str, Dict[str, str]]] = None) -> List[Hit]:
     manifest = load_manifest() if manifest is None else manifest
     if not manifest or not plugin_dir or not Path(plugin_dir).is_dir():
         return []
@@ -166,6 +166,31 @@ def scan_plugin(plugin_dir: Path, manifest: Optional[Dict[str, Dict[str, str]]] 
 
 _report_lock = threading.Lock()
 _report_cache: Dict[Tuple[str, ...], Dict[str, List[Hit]]] = {}
+
+
+def _scan_root(manifest) -> Optional[Path]:
+    """Directory to scan for ONE manifest, or None when there is nothing safe to scan.
+
+    Directory plugins carry their own dir. Entry points carry ``module:attr``: resolve the module
+    through import metadata to its installed package dir. Never fall back to a relative path — that
+    made ``C:\\...`` and ``pkg:attr`` scan the CWD and attribute stray files to the plugin.
+    """
+    if getattr(manifest, "source", "") == "bundled" or not getattr(manifest, "path", None):
+        return None
+    raw = str(manifest.path)
+    if getattr(manifest, "source", "") == "entrypoint":
+        import importlib.util
+        try:
+            spec = importlib.util.find_spec(raw.partition(":")[0])
+        except (ImportError, ValueError):
+            spec = None
+        origin = getattr(spec, "origin", None)
+        if not origin or origin in ("built-in", "frozen"):
+            return None
+        p = Path(origin)
+        return p.parent if p.name == "__init__.py" else None
+    p = Path(raw)
+    return p if p.is_dir() else None
 
 
 def compat_report(manifests=None, *, force: bool = False) -> Dict[str, List[Hit]]:
@@ -189,9 +214,7 @@ def compat_report(manifests=None, *, force: bool = False) -> Dict[str, List[Hit]
     manifest = load_manifest()
     out: Dict[str, List[Hit]] = {}
     for m in external:
-        d = Path(str(m.path).partition(":")[0])
-        d = d if d.is_dir() else d.parent
-        hits = scan_plugin(d, manifest)
+        hits = scan_plugin(_scan_root(m), manifest)
         if hits:
             out[m.name] = hits
     with _report_lock:
@@ -234,10 +257,7 @@ def _write_report_file(report: Dict[str, List[Hit]]) -> None:
 
 def plugin_hits(manifest) -> List[Hit]:
     """Hits for ONE manifest (used by the loader before importing it)."""
-    if getattr(manifest, "source", "") == "bundled" or not getattr(manifest, "path", None):
-        return []
-    d = Path(str(manifest.path).partition(":")[0])
-    return scan_plugin(d if d.is_dir() else d.parent)
+    return scan_plugin(_scan_root(manifest))
 
 
 def allow_deprecated_imports(config: Optional[dict] = None) -> bool:
@@ -246,7 +266,8 @@ def allow_deprecated_imports(config: Optional[dict] = None) -> bool:
         if config is None:
             from hermes_cli.config import load_config_readonly
             config = load_config_readonly()
-        return bool(((config or {}).get("plugins") or {}).get(ALLOW_KEY, False))
+        # Literal boolean only: YAML `"false"` / `"no"` must not open the post-removal bypass.
+        return ((config or {}).get("plugins") or {}).get(ALLOW_KEY, False) is True
     except Exception:
         return False
 
@@ -268,7 +289,11 @@ def summary_lines(report: Dict[str, List[Hit]], *, today: Optional[_dt.date] = N
         return []
     n = len(report)
     names = ", ".join(f"{k} ({len(v)})" for k, v in sorted(report.items()))
-    if removal_in_effect(today):
+    if removal_in_effect(today) and allow_deprecated_imports():
+        head = (f"{n} plugin{'s' if n != 1 else ''} force-loaded via plugins.{ALLOW_KEY}: they import paths "
+                f"removed on {COMPAT_REMOVAL}: {names}")
+        tail = "Update the plugin(s); the old paths no longer exist. Details: hermes plugins compat"
+    elif removal_in_effect(today):
         head = (f"{n} plugin{'s' if n != 1 else ''} DISABLED: they import paths removed on {COMPAT_REMOVAL}: {names}")
         tail = f"Update the plugin(s) or set plugins.{ALLOW_KEY}: true to force-load. Details: hermes plugins compat"
     else:
