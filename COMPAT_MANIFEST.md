@@ -10,6 +10,11 @@ date, by reverting that commit. Update your plugin to import from the `new locat
 Nothing inside this repository is allowed to use these pointers (`scripts/check_compat_pointers.py`
 fails CI if it does).
 
+**You will see a warning.** The first time a process resolves a name through one of these blocks, Hermes emits a
+`HermesPluginCompatWarning` (a `FutureWarning`) naming the old path, the new path, and the removal target — once per
+name per process. Fix the import and it goes away. To silence during migration:
+`python -W ignore::hermes_cli.plugin_compat.HermesPluginCompatWarning` or `warnings.filterwarnings("ignore", category=HermesPluginCompatWarning)`.
+
 **Scope.** Only PUBLIC names (no leading underscore) that were defined or imported at module top level
 before the decomposition are covered. Private names (`_foo`, `_TG_NAME_LIMIT`, `_clamp_telegram_names`,
 ...) were never part of any surface and are NOT restored; a plugin that patched or imported one must move

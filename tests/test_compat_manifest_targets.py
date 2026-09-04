@@ -19,7 +19,11 @@ import pytest
 ROOT = Path(__file__).resolve().parent.parent
 MANIFEST = ROOT / "compat_manifest.json"
 
-pytestmark = pytest.mark.skipif(not MANIFEST.exists(), reason="compat layer removed (scheduled revert)")
+# This file resolves every pointer on purpose; the once-per-name plugin warning is expected here.
+pytestmark = [
+    pytest.mark.skipif(not MANIFEST.exists(), reason="compat layer removed (scheduled revert)"),
+    pytest.mark.filterwarnings("ignore::FutureWarning"),
+]
 
 
 def _entries():
