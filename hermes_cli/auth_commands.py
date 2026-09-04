@@ -187,8 +187,10 @@ def _anthropic_oauth_login(args) -> dict:
 
 
 def _qwen_oauth_login(args) -> dict:
+    from hermes_cli.auth_qwen import _mark_qwen_oauth_active
+
     creds = auth_mod.resolve_qwen_runtime_credentials(refresh_if_expiring=False)
-    auth_mod._mark_qwen_oauth_active(creds)
+    _mark_qwen_oauth_active(creds)
     return creds
 
 
