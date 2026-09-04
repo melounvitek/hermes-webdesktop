@@ -310,16 +310,16 @@ def test_build_only_fails_when_pack_produces_corrupt_exe(tmp_path, monkeypatch, 
         make_pe(staging / "win-unpacked" / "Hermes.exe", PE_AMD64, truncate_to=0x300)
         return subprocess.CompletedProcess(list(cmd), 0)
 
-    with patch("hermes_cli.main.shutil.which", return_value="/usr/bin/npm"), \
-         patch("hermes_cli.main._resolve_node_runtime_npm", return_value="npm.cmd"), \
-         patch("hermes_cli.main._run_npm_install_deterministic", return_value=install_ok), \
-         patch("hermes_cli.main._desktop_build_needed", return_value=True), \
+    with patch("hermes_cli.main_desktop.shutil.which", return_value="/usr/bin/npm"), \
+         patch("hermes_cli.main_install_repair._resolve_node_runtime_npm", return_value="npm.cmd"), \
+         patch("hermes_cli.main_web_build._run_npm_install_deterministic", return_value=install_ok), \
+         patch("hermes_cli.main_desktop._desktop_build_needed", return_value=True), \
          patch("hermes_cli.main_desktop._stop_desktop_processes_locking_build", return_value=[]), \
          patch("hermes_cli.main_desktop._purge_electron_build_cache", return_value=[]), \
          patch("hermes_cli.main_desktop._desktop_stamp_path", return_value=tmp_path / "stamp.json"), \
          patch("hermes_cli.main_desktop._write_desktop_build_stamp") as mock_stamp, \
          patch("hermes_cli.main_desktop._windows_native_machine", return_value="AMD64"), \
-         patch("hermes_cli.main.subprocess.run", side_effect=pack_into_staging), \
+         patch("hermes_cli.main_desktop.subprocess.run", side_effect=pack_into_staging), \
          pytest.raises(SystemExit) as exc:
         cli_main.cmd_gui(_ns())
 

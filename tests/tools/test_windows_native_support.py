@@ -764,7 +764,7 @@ class TestGitBashPathNormalization:
         ``windows_only``: the function's whole job is producing native
         Windows paths, which is only meaningful where ``os.sep`` is ``\\``.
         """
-        import cli as cli_mod
+        from hermes_cli import worktree_ops as cli_mod
         assert cli_mod._normalize_git_bash_path("/c/Users/foo") == r"C:\Users\foo"
         assert cli_mod._normalize_git_bash_path("/C/Users/foo") == r"C:\Users\foo"
         assert cli_mod._normalize_git_bash_path("/cygdrive/d/data") == r"D:\data"
