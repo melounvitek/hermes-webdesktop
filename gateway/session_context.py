@@ -52,17 +52,9 @@ _SESSION_VARS = (
 # adapters (API server, Kanban workers) opt OUT via ``supports_async_delivery = False`` at bind.
 _SESSION_ASYNC_DELIVERY = ContextVar("HERMES_SESSION_ASYNC_DELIVERY", default=_UNSET)
 
-# Whether the bound api_server chat id is one its CLIENT can address again — the precondition for
-# gateway.wake's /v1/chat/completions self-post to deliver a background delegation anywhere the
-# requester will read (#98619).  "1" = wake-capable, declared by an audited producer whose client
-# holds or can resume the id (explicit X-Hermes-Session-Id, a native /api/sessions/{id} id, a
-# /v1/runs id); "" = declared NOT wake-capable (a fingerprint-derived id from a header-less
-# OpenAI-compatible client, which that client never reloads).  _UNSET = the binding never declared
-# it.  Unlike async delivery above, _UNSET FAILS CLOSED (see ``wake_capable_session``): wake
-# authority is proof-carrying, so a binder that omits it must not silently acquire it.  Deliberately
-# NOT in ``_VAR_MAP``: no ``os.environ`` fallback (a leaked env var must not grant wake authority)
-# and no subprocess-env-bridge export (children re-derive provenance from their own binding).
-_SESSION_WAKE_CAPABLE = ContextVar("HERMES_SESSION_WAKE_CAPABLE", default=_UNSET)
+# Request-local proof that the client resumes SessionDB history. No env fallback
+# or child-process export: a bound id alone cannot authorize detached delivery.
+_SESSION_HISTORY_DELIVERY = ContextVar("HERMES_SESSION_HISTORY_DELIVERY", default=_UNSET)
 
 # Cron auto-delivery vars, set per-job in run_job() so concurrent jobs don't clobber.
 _CRON_AUTO_DELIVER_PLATFORM = ContextVar("HERMES_CRON_AUTO_DELIVER_PLATFORM", default=_UNSET)
@@ -127,16 +119,16 @@ def set_session_vars(
     message_id: str = "", profile: str = "", browser_control_principal: str = "",
     browser_control_transport_family: str = "", cwd: str = "", async_delivery: bool = True,
     ui_session_id: str = "", cron_session: Any = _UNSET, parent_chat_id: str = "",
-    wake_capable: str | None = None,
+    session_history_delivery: str | None = None,
 ) -> list:
     """Set all session context variables and return reset tokens.  Call
     ``clear_session_vars(tokens)`` in a ``finally``; not nestable, clearing resets every var
     to ``""`` rather than restoring prior values (tokens are accepted only for API compat).
 
-    ``wake_capable`` declares whether the bound chat id is one the client can address again:
+    ``session_history_delivery`` declares whether the bound chat id is one the client can address again:
     ``"1"`` (audited producers — explicit session-id header, native API sessions, /v1/runs) or
     ``""`` / omitted (default-deny, #98619).  ``None`` leaves the var at ``_UNSET`` ("never
-    declared"), which ``wake_capable_session()`` treats as NOT capable — an omitted declaration
+    declared"), which ``session_history_delivery_supported()`` treats as NOT capable — an omitted declaration
     cannot grant wake authority."""
     global _session_context_engaged
     _session_context_engaged = True
@@ -147,7 +139,7 @@ def set_session_vars(
     )
     tokens = [var.set(value) for var, value in zip(_SESSION_VARS, values)]
     tokens.append(_SESSION_ASYNC_DELIVERY.set(bool(async_delivery)))
-    tokens.append(_SESSION_WAKE_CAPABLE.set(_UNSET if wake_capable is None else wake_capable))
+    tokens.append(_SESSION_HISTORY_DELIVERY.set(_UNSET if session_history_delivery is None else session_history_delivery))
     _runtime_cwd("set_session_cwd", cwd)
     return tokens
 
@@ -161,7 +153,7 @@ def clear_session_vars(tokens: list) -> None:
     for var in _SESSION_VARS:
         var.set("")
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
-    _SESSION_WAKE_CAPABLE.set(_UNSET)
+    _SESSION_HISTORY_DELIVERY.set(_UNSET)
     _runtime_cwd("clear_session_cwd")
 
 
@@ -169,12 +161,12 @@ def reset_session_vars() -> None:
     """Reset every session var to ``_UNSET`` ("never bound here") for THIS context.  Call at
     the top of a fresh task *before* it binds: ``create_task`` snapshots the context, so B's
     task inherits A's already-set vars and a subprocess spawned before B binds would read A's
-    identity.  ``_SESSION_ASYNC_DELIVERY`` and ``_SESSION_WAKE_CAPABLE`` (outside ``_VAR_MAP``)
+    identity.  ``_SESSION_ASYNC_DELIVERY`` and ``_SESSION_HISTORY_DELIVERY`` (outside ``_VAR_MAP``)
     are reset explicitly too."""
     for var in _VAR_MAP.values():
         var.set(_UNSET)
     _SESSION_ASYNC_DELIVERY.set(_UNSET)
-    _SESSION_WAKE_CAPABLE.set(_UNSET)
+    _SESSION_HISTORY_DELIVERY.set(_UNSET)
     _runtime_cwd("clear_session_cwd")
 
 
@@ -225,10 +217,8 @@ def async_delivery_supported() -> bool:
     return True if value is _UNSET else bool(value)
 
 
-def wake_capable_session() -> bool:
-    """Whether the current session's bound api_server chat id was explicitly declared resumable
-    by its client (#98619) — True only for the literal ``"1"``.  Default-deny: ``_UNSET`` (the
-    binding never declared it) and ``""`` (declared not capable) both count as NOT wake-capable.
-    Never falls back to ``os.environ`` — wake authority is proof-carrying and cannot leak in
-    from the environment."""
-    return _SESSION_WAKE_CAPABLE.get() == "1"
+def session_history_delivery_supported() -> bool:
+    """Whether this request declares a server-history consumer for detached results.
+
+    Fail closed on omitted bindings; never borrow authority from the environment."""
+    return _SESSION_HISTORY_DELIVERY.get() == "1"

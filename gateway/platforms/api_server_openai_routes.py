@@ -507,7 +507,7 @@ class OpenAICompatRoutesMixin:
             # and the client can resume the session by sending it again). A fingerprint-derived
             # id from a header-less client is NOT: delegate_task keeps its forced-sync fallback
             # there — the wake would hard-fail or land in history that client never reloads.
-            wake_capable=("1" if provided_session_id else ""))
+            session_history_delivery=("1" if provided_session_id else ""))
         if stream:
             _stream_q = ThreadSafeAsyncQueue()
             # tool_call_ids with an emitted "running": a "completed" without one (internal/

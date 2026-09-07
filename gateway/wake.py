@@ -81,6 +81,8 @@ def _delegation_display_metadata(evt: dict) -> dict:
     metadata = {"delegation_id": str(evt.get("delegation_id") or ""), "task_count": task_count,
                 "completed_count": completed_count or task_count - failed_count,
                 "failed_count": failed_count}
+    if evt.get("task_failure_notice"):
+        metadata["delivery_notice"] = f"task_failure:{results[0].get('task_index', '') if results else ''}"
     duration = evt.get("total_duration_seconds") or evt.get("duration_seconds")
     if isinstance(duration, (int, float)):
         metadata["duration_seconds"] = duration
@@ -123,8 +125,7 @@ async def persist_delegation_delivery(adapter: Any, *, text: str, session_id: st
         except Exception:
             logger.debug("delegation delivery continuation resolve failed for %s", session_id, exc_info=True)
     await asyncio.to_thread(
-        db.append_message, session_id, "user", content=text,
-        display_kind="async_delegation_complete", display_metadata=_delegation_display_metadata(evt or {}),
+        db.append_delegation_delivery, session_id, text, _delegation_display_metadata(evt or {}),
     )
     logger.info(
         "async delegation completion persisted as delivery row for api_server session %s (no wake turn)", session_id

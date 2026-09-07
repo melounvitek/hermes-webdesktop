@@ -3028,7 +3028,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
             # #98619: the client addresses this session by construction — the id is in the
             # request path (/api/sessions/{session_id}/chat) — so a wake self-post lands where
             # the client will read it. The audited native-session opt-in.
-            wake_capable="1", **agent_overrides)
+            session_history_delivery="1", **agent_overrides)
         return {
             "gateway_session_key": gateway_session_key, "session_id": session_id, "body": body,
             "user_message": user_message, "runtime_request": runtime_request,
@@ -3541,27 +3541,17 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
     def _bind_api_server_session(
         *, chat_id: str = "", session_key: str = "", session_id: str = "",
         browser_control_principal: str = "", browser_control_transport_family: str = "",
-        wake_capable: str = "") -> list:
-        """Bind session contextvars for an API-server agent run — the SINGLE chokepoint for every
-        agent-entry path. Hardwires ``platform="api_server"`` + ``async_delivery=False`` (HTTP
-        can never wake the agent after the turn) so no route reintroduces the silent no-op bug.
-        Returns reset tokens for ``clear_session_vars`` in a ``finally`` (request-scoped).
+        session_history_delivery: str = "") -> list:
+        """Bind an API turn with push disabled and history delivery default-denied.
 
-        ``wake_capable`` is the separate #98619 gate and DEFAULT-DENIES here: only an audited
-        producer whose client can address the bound id again (explicit X-Hermes-Session-Id —
-        403-gated on API_SERVER_KEY — a native /api/sessions/{id} route, /v1/runs) passes "1";
-        a fingerprint-derived id (header-less OpenAI-compatible client) stays "" and keeps
-        delegate_task's forced-sync fallback — the wake self-post could never deliver where
-        that client reads. A route that says nothing grants no wake authority.
-
-        See #10760.
-        """
+        Only routes whose continuation reads SessionDB may pass "1". An omitted
+        declaration or fingerprint-derived identity keeps delegation synchronous."""
         from gateway.session_context import set_session_vars
         return set_session_vars(
             platform="api_server", chat_id=chat_id, session_key=session_key, session_id=session_id,
             browser_control_principal=browser_control_principal,
             browser_control_transport_family=browser_control_transport_family,
-            async_delivery=False, cron_session="", wake_capable=wake_capable)
+            async_delivery=False, cron_session="", session_history_delivery=session_history_delivery)
 
     def _turn_runtime_metadata(
         self, agent: Any, *, route: Optional[Dict[str, Any]], requested_runtime: Optional[Dict[str, Any]],
@@ -3636,12 +3626,12 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
         route: Optional[Dict[str, Any]] = None, session_model: Optional[str] = None,
         requested_runtime: Optional[Dict[str, Any]] = None, route_source: str = "global",
         confirmed_runtime_lock: bool = False, bind_declared_conversation: bool = False,
-        wake_capable: str = "") -> tuple:
+        session_history_delivery: str = "") -> tuple:
         """Create an agent and run one turn in a thread executor -> ``(result, usage)``.
         ``agent_ref[0]`` receives the agent so SSE writers can interrupt it; ``active_run_id``
         registers it in ``_active_run_agents``. Under a confirmed model lock the actual
         provider/model must match or the turn fails; ``runtime`` metadata is attached.
-        ``wake_capable`` declares #98619 session-id provenance and default-denies: only audited
+        ``session_history_delivery`` declares #98619 session-id provenance and default-denies: only audited
         producers whose client can address the id again pass "1" (see
         ``_bind_api_server_session``)."""
         loop = asyncio.get_running_loop()
@@ -3658,7 +3648,7 @@ class APIServerAdapter(OpenAICompatRoutesMixin, BasePlatformAdapter):
                     session_id=session_id or "",
                     browser_control_principal=request_browser_control_principal,
                     browser_control_transport_family=request_browser_control_transport_family,
-                    wake_capable=wake_capable)
+                    session_history_delivery=session_history_delivery)
                 agent = None
                 try:
                     agent = self._create_agent(

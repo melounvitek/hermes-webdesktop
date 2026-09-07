@@ -21,8 +21,8 @@ async def probe():
     decisions = {}
     for name, capable in (("headerless", ""), ("explicit", "1")):
         kw = dict(chat_id="api-parent", session_id="api-parent")
-        if "wake_capable" in inspect.signature(APIServerAdapter._bind_api_server_session).parameters:
-            kw["wake_capable"] = capable
+        if "session_history_delivery" in inspect.signature(APIServerAdapter._bind_api_server_session).parameters:
+            kw["session_history_delivery"] = capable
         tokens = APIServerAdapter._bind_api_server_session(**kw)
         try:
             args = ["api-parent"]
@@ -46,6 +46,17 @@ async def probe():
     except Exception as exc:
         decisions["rotation"] = type(exc).__name__
     decisions["child_rows"] = len(db.get_messages("api-child"))
+    db.acquire_session_turn_lease("api-child", "fixture-client-turn", wait_seconds=0)
+    busy_evt = {**evt, "delegation_id": "busy-unit"}
+    try:
+        await persist_delegation_delivery(adapter, text="BUSY_RESULT", session_id="api-child", evt=busy_evt)
+        decisions["busy_delivery"] = "inserted"
+    except Exception as exc:
+        decisions["busy_delivery"] = type(exc).__name__
+    finally:
+        db.release_session_turn_lease("api-child", "fixture-client-turn")
+    await persist_delegation_delivery(adapter, text="BUSY_RESULT", session_id="api-child", evt=busy_evt)
+    decisions["after_release_rows"] = len(db.get_messages("api-child"))
     decisions["stranger_rows"] = len(db.get_messages("stranger"))
     db.close()
     return decisions
