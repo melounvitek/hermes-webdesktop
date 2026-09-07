@@ -51,7 +51,9 @@ async def probe():
     adapter._create_agent = create_agent
     app = web.Application()
     app.router.add_post("/v1/chat/completions", adapter._handle_chat_completions)
+    app.router.add_post("/v1/runs", adapter._handle_runs)
     records = []
+    runs = []
     async with TestClient(TestServer(app)) as client:
         for stream in (False, True):
             for explicit in (False, True):
@@ -71,7 +73,27 @@ async def probe():
         calls_after = len(captured)
         response = await client.post("/v1/chat/completions", headers={"Authorization": "Bearer fixture-api-key", "X-Hermes-Session-Id": "parent"}, json={"messages": [{"role": "user", "content": "read result"}]})
         await response.read()
-    result = {"requests": records, "delivery_error": delivery_error, "unsolicited_calls": calls_after-calls_before, "resumed_history": captured[-1]["history"], "durable_child_rows": len(db.get_messages("child"))}
+        resumed_history = captured[-1]["history"]
+        snapshot = [{"role": "user", "content": "caller snapshot"}]
+        adapter._response_store.put("resp-seed", {"conversation_history": snapshot, "session_id": "parent"})
+        db.create_session("declared", source="api_server", session_key="fixture-key")
+        db.append_message("declared", "assistant", "DECLARED_HISTORY")
+        for name, body, extra_headers in (
+            ("session", {"session_id": "parent"}, {}),
+            ("caller_history", {"session_id": "parent", "conversation_history": snapshot}, {}),
+            ("response_chain", {"previous_response_id": "resp-seed"}, {}),
+            ("declared_key", {}, {"X-Hermes-Session-Key": "fixture-key"}),
+        ):
+            count = len(captured)
+            response = await client.post("/v1/runs", headers={"Authorization": "Bearer fixture-api-key", **extra_headers}, json={"input": "continue", **body})
+            await response.read()
+            async def wait_for_run():
+                while len(captured) == count:
+                    await asyncio.sleep(0.01)
+            if response.status == 202:
+                await asyncio.wait_for(wait_for_run(), 10)
+            runs.append({"name": name, "status": response.status, "runtime": captured[-1] if len(captured) > count else None})
+    result = {"requests": records, "runs": runs, "delivery_error": delivery_error, "unsolicited_calls": calls_after-calls_before, "resumed_history": resumed_history, "durable_child_rows": len(db.get_messages("child"))}
     db.close()
     return result
 

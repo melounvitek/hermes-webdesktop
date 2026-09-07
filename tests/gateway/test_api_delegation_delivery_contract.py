@@ -41,6 +41,15 @@ async def test_detached_dispatch_requires_a_declared_consumer(monkeypatch):
     assert result["unsolicited_calls"] == 0
     assert result["durable_child_rows"] == 1
     assert sum(m["content"] == "DELIVERY_RESULT" for m in result["resumed_history"]) == 1
+    runs = {r["name"]: r for r in result["runs"]}
+    assert all(r["status"] == 202 for r in runs.values())
+    for name in ("caller_history", "response_chain"):
+        assert runs[name]["runtime"]["target"] is None
+        assert runs[name]["runtime"]["history"] == [{"role": "user", "content": "caller snapshot"}]
+    assert runs["session"]["runtime"]["target"] == "child"
+    assert runs["session"]["runtime"]["history"] == result["resumed_history"]
+    assert runs["declared_key"]["runtime"]["target"] == "declared"
+    assert runs["declared_key"]["runtime"]["history"][0]["content"] == "DECLARED_HISTORY"
 
 
 @pytest.mark.asyncio
