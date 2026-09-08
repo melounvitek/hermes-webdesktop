@@ -1,15 +1,17 @@
 import { host, useI18n, useValue } from '@hermes/plugin-sdk'
 import { useEffect, useRef, useState } from 'react'
 
-import { BotRow, GroupRow } from './bot-row'
+import { BotRow } from './bot-row'
 import {
   $botChatFocused,
   $botsPaneVisible,
+  $focusedBotOwner,
   $openBotChat,
   $rosterHydrated,
   $selectedRosterHydrated,
   $selectedRosterKey,
   clearSelectedRosterKey,
+  focusedRosterOwner,
   parseRosterKey,
   saveSelectedRosterBot
 } from './bot-state'
@@ -34,19 +36,19 @@ import { $groupChats, $groupChatWorkspace, $groupClarify, $groupNeedsYou } from 
 import { GroupChatWorkspace, openGroupChat } from './group-chat-view'
 import { groupChatMemberBots } from './group-membership'
 import { $groupMainTabsRev, shouldRenderGroupChatInPane } from './group-panes'
-import { groupHasPendingClarify } from './group-turns'
 import { $showHiddenBots, isBotHidden } from './hidden-bots'
 import { useBots } from './i18n'
 import { $activityToasts } from './roster-actions'
 import { renderRosterContent } from './roster-pane-content'
 import { deriveRosterPresentation, deriveRosterRows, sortRosterBots } from './roster-pane-derivation'
 import { renderRosterDialogs } from './roster-pane-dialogs'
+import { RosterGroupRowView } from './roster-pane-groups'
 import { $lastSources, usePublishRosterSnapshot } from './roster-pane-lifecycle'
 import { rosterSectionRenderers } from './roster-pane-sections'
 import { renderRosterToolbar } from './roster-pane-toolbar'
 import { botNeedsHandleLabel, rosterGatewayOptions } from './roster-sections'
 import { botWorkspaceOwnerKey, setBotsWorkspaceOwner } from './routing'
-import { activeBots } from './row-helpers'
+import { activeBots, useTurnBusy } from './row-helpers'
 import type { BotMeta, GatewaySource, GroupMember, RosterActivityFilter, RosterKindFilter, RosterRow } from './types'
 import { $botSections, $draggingBot } from './user-sections'
 import { useEscapeCancelsBotDrag } from './user-sections-ui'
@@ -225,7 +227,10 @@ export function BotsPane() {
   const { data, error, isLoading, refetch } = useRoster()
   const gatewayState = useValue(host.state.gateway)
   const gatewayUp = gatewayState === 'open'
-  const activeProfile = (useValue(host.state.profile) || 'default').trim() || 'default'
+
+  const turnBusy = useTurnBusy()
+  const workingOwner = focusedRosterOwner(useValue($focusedBotOwner))
+  const activeConnectionId = host.state.connectionId?.get?.() || 'local'
   const [createOpen, setCreateOpen] = useState(false)
   const [groupCreateOpen, setGroupCreateOpen] = useState(false)
   const [editing, setEditing] = useState<null | RosterRow>(null)
@@ -291,7 +296,7 @@ export function BotsPane() {
   // and the persisted connection registry hydrate. Keep that transition in a
   // neutral loading state instead of flashing the first-run "No bots" copy.
   const initialRosterLoading = !data && !error && roster.length === 0
-  const activeRosterKeys = new Set(activeBots(roster, activeProfile, gatewayState).map(botRosterKey))
+  const activeRosterKeys = new Set(activeBots(roster, workingOwner, turnBusy, Date.now(), activeConnectionId).map(botRosterKey))
   const gatewayOptions = rosterGatewayOptions(sourceSnapshot, roster)
   const selectedGateway = gatewayOptions.find(option => option.connectionId === gatewayFilter)
   const gatewayFilterExists = gatewayFilter === 'all' || Boolean(selectedGateway)
@@ -409,14 +414,18 @@ export function BotsPane() {
   )
 
   const renderGroupRow = (row: { members: GroupMember[]; name: string }) => (
-    <GroupRow
+    <RosterGroupRowView
       active={groupChatName === row.name}
+      b={b}
       group={row.name}
+      groupClarify={groupClarify}
+      groupNeedsYou={groupNeedsYou}
+      groupRooms={groupRooms}
       key={`group:${row.name}`}
       members={row.members}
-      needsYou={Boolean(groupNeedsYou[row.name]) || groupHasPendingClarify(groupClarify, row.name)}
       onDisband={setDeletingGroup}
       onOpen={openGroupChat}
+      sortedGroupRows={sortedGroupRows}
     />
   )
 

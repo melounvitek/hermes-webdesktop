@@ -2,6 +2,7 @@ import { botActivitySession } from './data'
 import { botRosterKey, filterBots, preferReachableSameNameRows } from './data'
 import type { $groupChats } from './group-chat'
 import { groupChatMemberBots, groupChatNames, groupLastActivity } from './group-membership'
+import { sortGroupRosterRows } from './group-order'
 import { isBotPinned } from './hidden-bots'
 import { isBotHidden } from './hidden-bots'
 import { filterBotsByGateway, groupMatchesRosterFilters, rosterGatewaySections } from './roster-sections'
@@ -115,20 +116,8 @@ export function deriveRosterRows({
           active: activeRosterKeys.has(botRosterKey(bot))
         }))
 
-  const sortRosterRows = <T extends { activity: number; pinned: boolean }>(rows: T[]): T[] =>
-    rows.slice().sort((a, b) => {
-      const pa = a.pinned ? 1 : 0
-      const pb = b.pinned ? 1 : 0
-
-      if (pa !== pb) {
-        return pb - pa
-      }
-
-      return b.activity - a.activity
-    })
-
-  const rosterRows = sortRosterRows([...botRows, ...groupRows])
-  const sortedGroupRows = sortRosterRows(groupRows)
+  const rosterRows = sortGroupRosterRows([...botRows, ...groupRows], groupRooms)
+  const sortedGroupRows = sortGroupRosterRows(groupRows, groupRooms)
   const gatewaySections = rosterGatewaySections(botRows, gatewayOptions, gatewayFilter)
   const showGatewaySections = gatewaySections.sectioned && botRows.length > 0
 
