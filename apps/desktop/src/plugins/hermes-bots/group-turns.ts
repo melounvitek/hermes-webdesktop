@@ -123,7 +123,9 @@ interface GroupMemberSessionHandle {
  *  it after restarts. Cross-connection members route to their OWN source
  *  via requestForBot; the window's gateway never switches. */
 export async function ensureGroupChatSession(group: string, member: GroupMember): Promise<GroupMemberSessionHandle> {
-  const binding = followGroupChat(group, name => { group = name })
+  const binding = followGroupChat(group, name => {
+    group = name
+  })
 
   try {
     const room = $groupChats.get()[group] || {}
@@ -195,7 +197,9 @@ export async function ensureGroupChatSession(group: string, member: GroupMember)
       } catch (error: any) {
         if (error?.code !== 4007) {
           const detail = error instanceof Error && error.message ? ` (${error.message})` : ''
-          throw new Error(`Could not check ${member?.name || 'member'}'s group session${detail} — not starting a new one`)
+          throw new Error(
+            `Could not check ${member?.name || 'member'}'s group session${detail} — not starting a new one`
+          )
         }
         /* genuinely doesn't exist (4007) — try the next target / fall through to create */
       }
@@ -597,7 +601,10 @@ export async function answerGroupClarify(
   answers: Record<string, string> | string | undefined
 ) {
   let group = entry.group
-  const binding = followGroupChat(group, name => { group = name })
+
+  const binding = followGroupChat(group, name => {
+    group = name
+  })
 
   try {
     if (entry.kind === 'approval') {
@@ -662,7 +669,10 @@ export async function runGroupChatMemberTurn(
   // lease, every RPC below rides its own request-scoped socket lease; the
   // socket that minted `runtime` can close between RPCs, the gateway reaps
   // the runtime session, and prompt.submit dies 4001 — the bot goes silent.
-  const binding = followGroupChat(group, name => { group = name })
+  const binding = followGroupChat(group, name => {
+    group = name
+  })
+
   let releaseTurnLease: (() => void) | undefined
 
   try {
@@ -675,6 +685,215 @@ export async function runGroupChatMemberTurn(
   }
 }
 
+async function stageGroupTurnAttachments(member: GroupMember, runtime: string, images?: Attachment[]) {
+  // Stage this delta's attachments into the member's session so the model
+  // receives the actual payload with the prompt — the same attach RPCs the
+  // 1:1 chat uses (they also work cross-connection, where the member's
+  // gateway can't see this machine's files). Images queue as vision tiles,
+  // PDFs render per-page via pdf.attach, and other files materialize in the
+  // session workspace (their @file: refs are appended to the prompt so the
+  // member's file tools can read them). A failed attach degrades that
+  // member to text-only; the transcript line still names the attachment so
+  // the member knows something was shared.
+  const fileRefs: string[] = []
+
+  for (const img of Array.isArray(images) ? images : []) {
+    if (!img || typeof img.data !== 'string' || !img.data) {
+      continue
+    }
+
+    try {
+      if (img.kind === 'pdf') {
+        await requestForBot(member, 'pdf.attach', {
+          session_id: runtime,
+          content_base64: img.data,
+          filename: img.name || 'attachment.pdf'
+        })
+      } else if (img.kind === 'file') {
+        const res = (await requestForBot(member, 'file.attach', {
+          session_id: runtime,
+          data_url: img.data,
+          name: img.name || 'attachment'
+        })) as { ref_text?: string }
+
+        if (res?.ref_text) {
+          fileRefs.push(`${img.name || 'attachment'} → ${res.ref_text}`)
+        }
+      } else {
+        await requestForBot(member, 'image.attach_bytes', {
+          session_id: runtime,
+          content_base64: img.data,
+          filename: img.name || 'attachment.png'
+        })
+      }
+    } catch {
+      /* text-only fallback for this member */
+    }
+  }
+
+  return fileRefs
+}
+
+interface GroupTurnPollContext {
+  group: string
+  member: GroupMember
+  thread: string
+  dispatchEpoch: number
+  stored: GroupMemberSessionHandle['stored']
+  liveRuntime: string
+  runtimeIds: Set<string>
+  before: number
+  binding: { isLive(): boolean }
+}
+
+async function pollGroupMemberTurn(context: GroupTurnPollContext): Promise<null | string> {
+  const { member, thread, dispatchEpoch, stored, liveRuntime, runtimeIds, before, binding } = context
+  const memberKey = groupMemberKey(member)
+  const started = Date.now()
+  let deadline = started + GROUP_TURN_TIMEOUT_MS
+  // After the terminal frame fires, the gateway still has to flip
+  // session.running off in its turn `finally` — re-check quickly for a few
+  // beats instead of falling back to the slow backstop cadence.
+  let quickRechecks = 0
+
+  while (Date.now() < deadline) {
+    const signalled = quickRechecks
+      ? await waitForTurnSignal([], GROUP_TURN_SETTLE_RECHECK_MS)
+      : await waitForTurnSignal([...runtimeIds], GROUP_TURN_POLL_MS)
+
+    quickRechecks = signalled ? GROUP_TURN_SETTLE_RECHECKS : Math.max(0, quickRechecks - 1)
+
+    // #91868/#94569: an explicit stop (stopGroupThread) bumped the epoch AND
+    // held this member — the member's session was interrupted, so nothing is
+    // coming; abandon the poll instead of grinding until the deadline. Both
+    // conditions on purpose: an ordinary newer send bumps the epoch WITHOUT
+    // a hold, and that turn must keep polling so finished work can still be
+    // delivered (the #93127 commit check decides its fate, not this loop).
+    if (!binding.isLive()) {
+      return null
+    }
+
+    const roomDuringPoll = $groupChats.get()[context.group] || {}
+
+    if ((roomDuringPoll.epoch || 0) !== dispatchEpoch && (roomDuringPoll.holds || {})[memberKey]) {
+      return null
+    }
+
+    let state: GroupSessionSnapshot | null = null
+
+    try {
+      state = (await requestForBot(member, 'session.resume', {
+        session_id: stored || liveRuntime,
+        profile: member.name
+      })) as GroupSessionSnapshot
+    } catch {
+      continue
+    }
+
+    if (!binding.isLive()) {
+      return null
+    }
+
+    if (state?.session_id) {
+      runtimeIds.add(state.session_id)
+    }
+
+    const messages = Array.isArray(state?.messages) ? state.messages : []
+    const busy = Boolean(state?.inflight || state?.running)
+    // A clarify blocking inside the member's session is a question for the
+    // HUMAN (#90694) — mirror it into the room store so a card renders, and
+    // hold the turn open: the member isn't stalling, it's waiting on us.
+    const awaitingUser = syncGroupClarify(context.group, member, state)
+    const done = !busy && !awaitingUser
+
+    if (messages.length > before && done) {
+      const replyText = pickGroupTurnReply(messages, before)
+
+      if (replyText !== null) {
+        recordGroupActivity(context.group, {
+          kind: isGroupPassText(replyText) ? 'passed' : 'replied',
+          member: member.name,
+          thread
+        })
+
+        return replyText
+      }
+
+      recordGroupActivity(context.group, {
+        kind: 'passed',
+        member: member.name,
+        thread
+      })
+
+      return null
+    }
+
+    // Still visibly working — or waiting on the user's answer to a clarify:
+    // extend the deadline (never past the hard cap). A pending question must
+    // outlive the base turn timeout or it dies unanswered at 3 minutes.
+    if (busy || awaitingUser) {
+      deadline = Math.min(started + GROUP_TURN_HARD_CAP_MS, Math.max(deadline, Date.now() + GROUP_TURN_TIMEOUT_MS))
+    }
+  }
+
+  if (!binding.isLive()) {
+    return null
+  }
+
+  // Timeout — clear any still-mirrored question card (the server-side
+  // clarify timeout runs its own course) and read as a pass, but remember the baseline + thread
+  // (runtime-only) so the finished reply can be posted late into the RIGHT
+  // thread instead of vanishing.
+  recordGroupActivity(context.group, {
+    kind: 'timed-out',
+    member: member.name,
+    thread
+  })
+  syncGroupClarify(context.group, member, null)
+  updateGroupChat(context.group, (r: GroupChatRoom) => {
+    r.stranded = {
+      ...(r.stranded || {}),
+      [groupMemberKey(member)]: {
+        before,
+        thread
+      }
+    }
+
+    return r
+  })
+
+  return null
+}
+
+async function prepareGroupTurnBaseline(
+  member: GroupMember,
+  runtime: string,
+  stored: GroupMemberSessionHandle['stored']
+) {
+  // Baseline: how many messages exist before our submit.
+  let before = 0
+  // Every runtime id this turn has seen for the member's session. Terminal
+  // frames are keyed by runtime id, and a resume can hand back a fresh one.
+  const runtimeIds = new Set<string>([runtime])
+
+  try {
+    const pre = (await requestForBot(member, 'session.resume', {
+      session_id: stored || runtime,
+      profile: member.name
+    })) as GroupSessionSnapshot
+
+    before = Array.isArray(pre?.messages) ? pre.messages.length : pre?.message_count || 0
+
+    if (pre?.session_id) {
+      runtimeIds.add(pre.session_id)
+    }
+  } catch {
+    /* lazy session — zero messages */
+  }
+
+  return { before, runtimeIds }
+}
+
 async function runGroupChatMemberTurnLeased(
   group: string,
   member: GroupMember,
@@ -682,7 +901,9 @@ async function runGroupChatMemberTurnLeased(
   thread: string,
   images?: Attachment[]
 ): Promise<null | string> {
-  const binding = followGroupChat(group, name => { group = name })
+  const binding = followGroupChat(group, name => {
+    group = name
+  })
 
   try {
     const { runtime, stored } = await ensureGroupChatSession(group, member)
@@ -694,78 +915,15 @@ async function runGroupChatMemberTurnLeased(
     // #91868/#94569: remember the epoch this turn was dispatched under so the
     // poll loop below can tell an explicit stop from ordinary room churn.
     const dispatchEpoch = ($groupChats.get()[group] || {}).epoch || 0
-    const memberKey = groupMemberKey(member)
     recordGroupActivity(group, {
       kind: 'working',
       member: member.name,
       thread
     })
 
-    // Baseline: how many messages exist before our submit.
-    let before = 0
-    // Every runtime id this turn has seen for the member's session. Terminal
-    // frames are keyed by runtime id, and a resume can hand back a fresh one.
-    const runtimeIds = new Set<string>([runtime])
+    const { before, runtimeIds } = await prepareGroupTurnBaseline(member, runtime, stored)
 
-    try {
-      const pre = (await requestForBot(member, 'session.resume', {
-        session_id: stored || runtime,
-        profile: member.name
-      })) as GroupSessionSnapshot
-
-      before = Array.isArray(pre?.messages) ? pre.messages.length : pre?.message_count || 0
-
-      if (pre?.session_id) {
-        runtimeIds.add(pre.session_id)
-      }
-    } catch {
-      /* lazy session — zero messages */
-    }
-
-    // Stage this delta's attachments into the member's session so the model
-    // receives the actual payload with the prompt — the same attach RPCs the
-    // 1:1 chat uses (they also work cross-connection, where the member's
-    // gateway can't see this machine's files). Images queue as vision tiles,
-    // PDFs render per-page via pdf.attach, and other files materialize in the
-    // session workspace (their @file: refs are appended to the prompt so the
-    // member's file tools can read them). A failed attach degrades that
-    // member to text-only; the transcript line still names the attachment so
-    // the member knows something was shared.
-    const fileRefs: string[] = []
-
-    for (const img of Array.isArray(images) ? images : []) {
-      if (!img || typeof img.data !== 'string' || !img.data) {
-        continue
-      }
-
-      try {
-        if (img.kind === 'pdf') {
-          await requestForBot(member, 'pdf.attach', {
-            session_id: runtime,
-            content_base64: img.data,
-            filename: img.name || 'attachment.pdf'
-          })
-        } else if (img.kind === 'file') {
-          const res = (await requestForBot(member, 'file.attach', {
-            session_id: runtime,
-            data_url: img.data,
-            name: img.name || 'attachment'
-          })) as { ref_text?: string }
-
-          if (res?.ref_text) {
-            fileRefs.push(`${img.name || 'attachment'} → ${res.ref_text}`)
-          }
-        } else {
-          await requestForBot(member, 'image.attach_bytes', {
-            session_id: runtime,
-            content_base64: img.data,
-            filename: img.name || 'attachment.png'
-          })
-        }
-      } catch {
-        /* text-only fallback for this member */
-      }
-    }
+    const fileRefs = await stageGroupTurnAttachments(member, runtime, images)
 
     if (!binding.isLive()) {
       return null
@@ -785,120 +943,20 @@ async function runGroupChatMemberTurnLeased(
     }
 
     runtimeIds.add(liveRuntime)
-    const started = Date.now()
-    let deadline = started + GROUP_TURN_TIMEOUT_MS
-    // After the terminal frame fires, the gateway still has to flip
-    // session.running off in its turn `finally` — re-check quickly for a few
-    // beats instead of falling back to the slow backstop cadence.
-    let quickRechecks = 0
 
-    while (Date.now() < deadline) {
-      const signalled = quickRechecks
-        ? await waitForTurnSignal([], GROUP_TURN_SETTLE_RECHECK_MS)
-        : await waitForTurnSignal([...runtimeIds], GROUP_TURN_POLL_MS)
-
-      quickRechecks = signalled ? GROUP_TURN_SETTLE_RECHECKS : Math.max(0, quickRechecks - 1)
-
-      // #91868/#94569: an explicit stop (stopGroupThread) bumped the epoch AND
-      // held this member — the member's session was interrupted, so nothing is
-      // coming; abandon the poll instead of grinding until the deadline. Both
-      // conditions on purpose: an ordinary newer send bumps the epoch WITHOUT
-      // a hold, and that turn must keep polling so finished work can still be
-      // delivered (the #93127 commit check decides its fate, not this loop).
-      if (!binding.isLive()) {
-        return null
-      }
-
-      const roomDuringPoll = $groupChats.get()[group] || {}
-
-      if ((roomDuringPoll.epoch || 0) !== dispatchEpoch && (roomDuringPoll.holds || {})[memberKey]) {
-        return null
-      }
-
-      let state: GroupSessionSnapshot | null = null
-
-      try {
-        state = (await requestForBot(member, 'session.resume', {
-          session_id: stored || liveRuntime,
-          profile: member.name
-        })) as GroupSessionSnapshot
-      } catch {
-        continue
-      }
-
-      if (!binding.isLive()) {
-        return null
-      }
-
-      if (state?.session_id) {
-        runtimeIds.add(state.session_id)
-      }
-
-      const messages = Array.isArray(state?.messages) ? state.messages : []
-      const busy = Boolean(state?.inflight || state?.running)
-      // A clarify blocking inside the member's session is a question for the
-      // HUMAN (#90694) — mirror it into the room store so a card renders, and
-      // hold the turn open: the member isn't stalling, it's waiting on us.
-      const awaitingUser = syncGroupClarify(group, member, state)
-      const done = !busy && !awaitingUser
-
-      if (messages.length > before && done) {
-        const replyText = pickGroupTurnReply(messages, before)
-
-        if (replyText !== null) {
-          recordGroupActivity(group, {
-            kind: isGroupPassText(replyText) ? 'passed' : 'replied',
-            member: member.name,
-            thread
-          })
-
-          return replyText
-        }
-
-        recordGroupActivity(group, {
-          kind: 'passed',
-          member: member.name,
-          thread
-        })
-
-        return null
-      }
-
-      // Still visibly working — or waiting on the user's answer to a clarify:
-      // extend the deadline (never past the hard cap). A pending question must
-      // outlive the base turn timeout or it dies unanswered at 3 minutes.
-      if (busy || awaitingUser) {
-        deadline = Math.min(started + GROUP_TURN_HARD_CAP_MS, Math.max(deadline, Date.now() + GROUP_TURN_TIMEOUT_MS))
-      }
-    }
-
-    if (!binding.isLive()) {
-      return null
-    }
-
-    // Timeout — clear any still-mirrored question card (the server-side
-    // clarify timeout runs its own course) and read as a pass, but remember the baseline + thread
-    // (runtime-only) so the finished reply can be posted late into the RIGHT
-    // thread instead of vanishing.
-    recordGroupActivity(group, {
-      kind: 'timed-out',
-      member: member.name,
-      thread
+    return await pollGroupMemberTurn({
+      get group() {
+        return group
+      },
+      member,
+      thread,
+      dispatchEpoch,
+      stored,
+      liveRuntime,
+      runtimeIds,
+      before,
+      binding
     })
-    syncGroupClarify(group, member, null)
-    updateGroupChat(group, (r: GroupChatRoom) => {
-      r.stranded = {
-        ...(r.stranded || {}),
-        [groupMemberKey(member)]: {
-          before,
-          thread
-        }
-      }
-
-      return r
-    })
-
-    return null
   } finally {
     binding.dispose()
   }
@@ -908,7 +966,9 @@ async function runGroupChatMemberTurnLeased(
  *  after we stopped waiting. Called at the member's next turn boundary and
  *  on user sends, so long-running work is delivered late rather than lost. */
 export async function harvestStrandedGroupReply(group: string, member: GroupMember) {
-  const binding = followGroupChat(group, name => { group = name })
+  const binding = followGroupChat(group, name => {
+    group = name
+  })
 
   try {
     const memberKey = groupMemberKey(member)
