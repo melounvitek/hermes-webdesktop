@@ -572,6 +572,47 @@ describe('clarify and approvals (#90694)', () => {
       }
     }
 
+    // Rejected member setup/submit must not publish failure cues into a new room.
+    for (const continuation of [false, true]) {
+      for (const rejectedMethod of ['session.resume', 'prompt.submit']) {
+        const room = await loadRoom()
+        const view = await import('./group-chat-view')
+        const activity = await import('./group-activity')
+        const data = await import('./data')
+        const members = [{ name: 'research' }, { name: 'ops' }]
+        room.chat.updateGroupChat('Core', current => ({
+          ...current, roomId: 'old-rejection-room', running: true,
+          log: continuation
+            ? [{ id: 'handoff', at: 1, from: { kind: 'member', name: 'research' }, text: '@ops check', thread: 'thread' },
+                { id: 'input', at: 2, from: { kind: 'user', name: 'You' }, text: '@research check', thread: 'thread' }]
+            : [{ id: 'input', at: 1, from: { kind: 'user', name: 'You' }, text: 'check', thread: 'thread' }],
+          watermarks: { 'thread::research': continuation ? 2 : 0 }
+        }))
+        // The normal responder has no delta; the earlier unanswered @ops
+        // handoff is driven by the continuation phase.
+        let phaseEntered!: () => void
+        let release!: () => void
+        const entered = new Promise<void>(resolve => { phaseEntered = resolve })
+        const held = new Promise<void>(resolve => { release = resolve })
+        const original = host.request as (method: string, params: Record<string, unknown>) => Promise<any>
+        host.request = async (method: string, params: Record<string, unknown>) => {
+          if (method === rejectedMethod) { phaseEntered(); await held; throw new Error('401 unauthorized late rejection') }
+
+          return original(method, params)
+        }
+        const drive = room.rounds.runGroupChatRounds('Core', members, 'thread')
+        await entered
+        await view.disbandGroupChat('Core', [])
+        room.chat.updateGroupChat('Core', current => ({ ...current, roomId: 'replacement-rejection-room', tombstone: false }))
+        room.chat.appendGroupChatEntry('Core', { kind: 'member', name: 'research' }, '@user replacement needs you')
+        const before = structuredClone({ rooms: room.chat.$groupChats.get(), activity: activity.$groupActivity.get(), attention: data.$botAttention.get(), needsYou: room.chat.$groupNeedsYou.get() })
+        release()
+        await drive
+        expect({ rooms: room.chat.$groupChats.get(), activity: activity.$groupActivity.get(), attention: data.$botAttention.get(), needsYou: room.chat.$groupNeedsYou.get() }).toEqual(before)
+        expect(room.gateway.rpcFor('prompt.submit')).toHaveLength(0)
+      }
+    }
+
     const clock = vi.spyOn(Date, 'now').mockReturnValue(0)
     onTestFinished(() => clock.mockRestore())
 

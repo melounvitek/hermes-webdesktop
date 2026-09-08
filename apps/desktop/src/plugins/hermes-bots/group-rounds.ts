@@ -655,6 +655,10 @@ export async function runGroupChatRounds(group: string, members: GroupMember[], 
             clearBotAttention(groupMemberKey(member))
           }
         } catch (error: any) {
+          if (!binding.isLive()) {
+            return
+          }
+
           const reason = String(error?.data?.reason || '').trim()
           recordGroupActivity(group, {
             kind: 'failed',
@@ -822,6 +826,10 @@ export async function runGroupChatRounds(group: string, members: GroupMember[], 
                   clearBotAttention(memberKey)
                 }
               } catch (error: any) {
+                if (!binding.isLive()) {
+                  return
+                }
+
                 recordGroupActivity(group, {
                   kind: 'failed',
                   member: member.name,
