@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 
-@pytest.mark.parametrize("case", ["native", "url-only", "disabled", "managed", "scoped", "scoped-json"])
+@pytest.mark.parametrize("case", ["native", "url-only", "disabled", "managed", "managed-only", "scoped", "scoped-json"])
 def test_cold_fronted_platforms_is_read_only(tmp_path, case):
     home = tmp_path / "primary"
     home.mkdir()
@@ -21,9 +21,9 @@ def test_cold_fronted_platforms_is_read_only(tmp_path, case):
     config = {"platforms": {"relay": {"enabled": True}}}
     if case == "disabled":
         config["platforms"]["relay"]["enabled"] = False
-    if case not in {"native", "url-only"}:
+    if case not in {"native", "url-only", "managed-only"}:
         (home / "config.yaml").write_text(yaml.safe_dump(config))
-    if case == "managed":
+    if case in {"managed", "managed-only"}:
         (managed / "config.yaml").write_text("platforms:\n  relay:\n    enabled: false\n")
     if case == "scoped":
         (scoped / "config.yaml").write_text("platforms:\n  relay:\n    enabled: false\n")

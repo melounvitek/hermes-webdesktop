@@ -51,6 +51,20 @@ def configure(home, state, source, monkeypatch):
            "slack": {"require_mention": False}}
     if state is not None:
         cfg["platforms"]["relay"] = {"enabled": state, "extra": {"relay_url": URL}}
+    if source == "managed-only":
+        # No user YAML: the managed overlay must still own relay intent before
+        # the injected URL can exclusively suppress this legacy native Slack.
+        (home / "gateway.json").write_text(json.dumps({"platforms": {"slack": cfg["platforms"]["slack"]}}))
+        managed = home / "managed"
+        managed.mkdir()
+        managed_cfg: dict = {"gateway": {"relay_url": URL}, "slack": {"require_mention": False}}
+        if state is not None:
+            managed_cfg["platforms"] = {"relay": {"enabled": state}}
+        (managed / "config.yaml").write_text(yaml.safe_dump(managed_cfg))
+        monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed))
+        monkeypatch.setenv("GATEWAY_RELAY_URL", URL)
+        assert not (home / "config.yaml").exists()
+        return
     if source == "legacy-json":
         (home / "gateway.json").write_text(json.dumps({"platforms": cfg.pop("platforms")}))
         monkeypatch.setenv("GATEWAY_RELAY_URL", URL)
@@ -75,11 +89,11 @@ def descriptor():
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("state", [False, True, None], ids=["disabled", "enabled", "legacy"])
-@pytest.mark.parametrize("source", ["yaml", "env", "managed"])
+@pytest.mark.parametrize("source", ["yaml", "env", "managed", "managed-only"])
 @pytest.mark.parametrize("pinned", [False, True], ids=["unprovisioned", "inherited-secret"])
 async def test_production_startup_respects_profile_opt_out(profile, monkeypatch, state, source, pinned):
     configure(profile, state, source, monkeypatch)
-    if state is True:
+    if state is True and source != "managed-only":
         # The winning top-level enable must override a lower-priority disable.
         path = profile / "config.yaml"
         cfg = yaml.safe_load(path.read_text())
@@ -172,12 +186,12 @@ async def test_production_startup_respects_profile_opt_out(profile, monkeypatch,
         assert token.call_count == provision.call_count
         policy.assert_called_once()
         # Existing env-exclusive behavior is unchanged. YAML activation is additive.
-        assert native.connect.await_count == (0 if source == "env" else 1)
+        assert native.connect.await_count == (0 if source in {"env", "managed-only"} else 1)
         # The env path already auto-enables relay in the platform loader.
-        if source == "env" or state is True:
+        if source in {"env", "managed-only"} or state is True:
             relay_connect.assert_awaited_once()
             assert Platform.RELAY in runner.adapters
-        if source == "env":
+        if source in {"env", "managed-only"}:
             from cron.scheduler_delivery import _resolve_target_transport
 
             resolved, error = _resolve_target_transport(
@@ -219,6 +233,59 @@ def test_legacy_json_disable_agrees_with_normalized_config(profile, monkeypatch,
     assert config.platforms[Platform.RELAY].enabled is (yaml_state == "enabled")
     assert config.platforms[Platform.SLACK].enabled
     assert config.platforms[Platform.TELEGRAM].enabled
+
+
+@pytest.mark.parametrize("user_yaml", ["no-files", "absent", "empty", "null", "list", "malformed", "unreadable", "sibling", "enabled", "disabled"])
+@pytest.mark.parametrize("managed_state", ["absent", "url-only", "enabled", "disabled"])
+def test_managed_layer_agrees_with_native_config(profile, monkeypatch, user_yaml, managed_state):
+    """Managed leaves override user leaves, not CLI defaults or a second merge policy."""
+    path = profile / "config.yaml"
+    user_docs = {
+        "empty": "", "null": "null\n", "list": "- not-a-config\n",
+        "malformed": "platforms: [\n",
+        "sibling": "platforms:\n  relay:\n    extra:\n      user_sibling: kept\n",
+        "enabled": "platforms:\n  relay:\n    enabled: true\n",
+        "disabled": "platforms:\n  relay:\n    enabled: false\n",
+    }
+    if user_yaml == "unreadable":
+        path.mkdir()  # A directory fails open even when tests run as root.
+    elif user_yaml not in {"absent", "no-files"}:
+        path.write_text(user_docs[user_yaml])
+    managed = profile / "managed"
+    managed.mkdir()
+    monkeypatch.setenv("HERMES_MANAGED_DIR", str(managed))
+    if managed_state != "absent":
+        block: dict = {"extra": {"relay_url": "${GATEWAY_RELAY_URL}", "managed_sibling": "pinned"}}
+        if managed_state != "url-only":
+            block["enabled"] = managed_state == "enabled"
+        (managed / "config.yaml").write_text(yaml.safe_dump({
+            "platforms": {"relay": block},
+            "gateway": {"max_concurrent_sessions": 7},
+        }))
+    if user_yaml == "no-files":
+        monkeypatch.setenv("SLACK_BOT_TOKEN", "native-test-token")
+    else:
+        (profile / "gateway.json").write_text(json.dumps({"platforms": {
+            "slack": {"enabled": True, "token": "native-test-token"},
+            "telegram": {"enabled": False},
+        }}))
+    monkeypatch.setenv("GATEWAY_RELAY_URL", URL)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "native-telegram-test-token")
+    # An absent managed enabled leaf must not introduce DEFAULT_CONFIG's false.
+    disabled = managed_state == "disabled" or (
+        managed_state in {"absent", "url-only"} and user_yaml == "disabled"
+    )
+    config = load_gateway_config()
+    assert relay.relay_explicitly_disabled() is disabled
+    assert config.platforms[Platform.RELAY].enabled is not disabled
+    assert config.platforms[Platform.SLACK].enabled is disabled
+    assert config.platforms[Platform.TELEGRAM].enabled is disabled
+    if managed_state != "absent":
+        assert config.max_concurrent_sessions == 7
+        assert config.platforms[Platform.RELAY].extra["managed_sibling"] == "pinned"
+        assert config.platforms[Platform.RELAY].extra["relay_url"] == URL
+    if user_yaml == "sibling":
+        assert config.platforms[Platform.RELAY].extra["user_sibling"] == "kept"
 
 
 @pytest.mark.asyncio
