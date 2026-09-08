@@ -82,8 +82,14 @@ def relay_explicitly_disabled() -> bool:
         bridge_platform_shared_keys, load_legacy_gateway_json, merge_platform_sections,
     )
     from hermes_constants import get_hermes_home
+    from hermes_cli.config import read_raw_config
+    from hermes_cli.managed_scope import apply_managed_overlay
 
-    cfg = _load_cfg()
+    # Do not import gateway.run here: standalone routing must not bootstrap
+    # runtime flags, config-to-env bridges or dotenv. The shared cached reader
+    # resolves the context-local home; the same managed overlay is used by the
+    # runtime loader, without introducing CLI defaults into platform precedence.
+    cfg = apply_managed_overlay(read_raw_config())
     data = load_legacy_gateway_json(get_hermes_home())
     platforms = merge_platform_sections(cfg, cfg.get("gateway"), data)
     gateway = cfg.get("gateway") or {}

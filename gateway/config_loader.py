@@ -27,6 +27,14 @@ def load_legacy_gateway_json(home: Path) -> Any:
     try:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f) or {}
+        # Relay accepts a legacy opt-out as authoritative, just like YAML.
+        # Preserve that intent through credential activation and the exclusive
+        # native-adapter sweep, even when config.yaml is missing. Other legacy
+        # platforms retain their existing env-driven enablement semantics.
+        platforms = data.get("platforms") if isinstance(data, dict) else None
+        relay = platforms.get("relay") if isinstance(platforms, dict) else None
+        if isinstance(relay, dict) and "enabled" in relay:
+            _dict_slot(relay, "extra")["_enabled_explicit"] = True
         logger.info("Loaded legacy %s — consider moving settings to config.yaml", path)
         return data
     except Exception as e:

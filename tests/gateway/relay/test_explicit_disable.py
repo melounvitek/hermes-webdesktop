@@ -51,7 +51,10 @@ def configure(home, state, source, monkeypatch):
            "slack": {"require_mention": False}}
     if state is not None:
         cfg["platforms"]["relay"] = {"enabled": state, "extra": {"relay_url": URL}}
-    if source == "env":
+    if source == "legacy-json":
+        (home / "gateway.json").write_text(json.dumps({"platforms": cfg.pop("platforms")}))
+        monkeypatch.setenv("GATEWAY_RELAY_URL", URL)
+    elif source == "env":
         monkeypatch.setenv("GATEWAY_RELAY_URL", URL)
     elif source == "managed":
         managed = home / "managed"
@@ -96,7 +99,8 @@ async def test_production_startup_respects_profile_opt_out(profile, monkeypatch,
     monkeypatch.setattr(WebSocketRelayTransport, "connect", relay_connect)
     monkeypatch.setattr(WebSocketRelayTransport, "handshake", AsyncMock(return_value=descriptor()))
     monkeypatch.setattr(RelayAdapter, "_start_revocation_monitor", lambda self: None)
-    native = SimpleNamespace(connect=AsyncMock(return_value=True), send_path_degraded=False)
+    native = SimpleNamespace(connect=AsyncMock(return_value=True), send_path_degraded=False,
+                             send=AsyncMock(return_value={"success": True}))
 
     # Execute start(), including real relay bootstrap, prefilter, connect and
     # aggregation. Suppress only unrelated recovery/watchers/status services.
@@ -152,6 +156,16 @@ async def test_production_startup_respects_profile_opt_out(profile, monkeypatch,
         )
         assert error is None
         assert resolved[1] is runner.config.platforms[Platform.SLACK]
+        # Deliver through the native adapter published by real startup, not just
+        # a helper predicate. Standalone routing above must also remain enabled.
+        resolved, error = _resolve_target_transport(
+            {"id": "native-job"}, Platform.SLACK, "slack", {"chat_id": "channel"},
+            runner.adapters, runner.config,
+        )
+        assert error is None
+        assert not resolved[0].is_relay
+        assert await resolved[0].send(Platform.SLACK, "channel", "native receipt", {}) == {"success": True}
+        native.send.assert_awaited_once_with("channel", "native receipt", metadata={})
     else:
         assert platform_registry.is_registered("relay")
         assert provision.call_count == (0 if pinned else 1)
@@ -171,6 +185,40 @@ async def test_production_startup_respects_profile_opt_out(profile, monkeypatch,
             )
             assert resolved is None
             assert "relay-fronted" in error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pinned", [False, True], ids=["unprovisioned", "inherited-secret"])
+async def test_legacy_json_disable_preserves_startup_and_native_delivery(profile, monkeypatch, pinned):
+    await test_production_startup_respects_profile_opt_out(
+        profile, monkeypatch, False, "legacy-json", pinned,
+    )
+
+
+@pytest.mark.parametrize("yaml_state", ["absent", "empty", "sibling", "enabled"])
+@pytest.mark.parametrize("disabled", [False, "false"])
+def test_legacy_json_disable_agrees_with_normalized_config(profile, monkeypatch, yaml_state, disabled):
+    (profile / "gateway.json").write_text(json.dumps({"platforms": {
+        "relay": {"enabled": disabled},
+        "slack": {"enabled": True, "token": "native-test-token"},
+        "telegram": {"enabled": False},
+    }}))
+    cfg = {}
+    if yaml_state == "sibling":
+        cfg = {"platforms": {"relay": {"extra": {"relay_url": URL}}}}
+    elif yaml_state == "enabled":
+        cfg = {"platforms": {"relay": {"enabled": True}}}
+    if yaml_state != "absent":
+        (profile / "config.yaml").write_text(yaml.safe_dump(cfg))
+    monkeypatch.setenv("GATEWAY_RELAY_URL", URL)
+    monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "native-telegram-test-token")
+    # Other legacy platforms keep their existing credential-driven enablement.
+    monkeypatch.setenv("GATEWAY_RELAY_ALLOW_DIRECT_PLATFORMS", "true")
+    config = load_gateway_config()
+    assert relay.relay_explicitly_disabled() is (yaml_state != "enabled")
+    assert config.platforms[Platform.RELAY].enabled is (yaml_state == "enabled")
+    assert config.platforms[Platform.SLACK].enabled
+    assert config.platforms[Platform.TELEGRAM].enabled
 
 
 @pytest.mark.asyncio
