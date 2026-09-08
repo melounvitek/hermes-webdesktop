@@ -21,7 +21,7 @@ import {
   updateGroupChat
 } from './group-chat'
 import type { GroupChatRoom, GroupHoldStamp } from './group-chat'
-import { durableGroupChatMembers, groupMemberKey } from './group-membership'
+import { durableGroupChatMembers, followGroupChat, groupMemberKey } from './group-membership'
 import { harvestStrandedGroupReply, isGroupPassText, runGroupChatMemberTurn } from './group-turns'
 import { requestForBot } from './routing'
 import type { Attachment, GroupMember, GroupMessage } from './types'
@@ -493,8 +493,9 @@ export async function stopGroupThread(group: string, thread: null | string, memb
  *  Watermarks are per thread+member (`${thread}::${memberKey}`), so parallel
  *  topics never eat each other's deltas. */
 export async function runGroupChatRounds(group: string, members: GroupMember[], thread: string) {
+  const binding = followGroupChat(group, name => { group = name })
   const startEpoch = ($groupChats.get()[group] || {}).epoch || 0
-  const isCurrent = () => (($groupChats.get()[group] || {}).epoch || 0) === startEpoch
+  const isCurrent = () => binding.isLive() && (($groupChats.get()[group] || {}).epoch || 0) === startEpoch
   let posted = 0
   let continuations = 0
   // #94478: how this drive ended. 'settled' means quiet consensus (everyone
@@ -519,6 +520,10 @@ export async function runGroupChatRounds(group: string, members: GroupMember[], 
         }
 
         await harvestStrandedGroupReply(group, member)
+
+        if (!binding.isLive()) {
+          return
+        }
       }
 
       const roomLog = (($groupChats.get()[group] || {}).log || []).filter(
@@ -676,6 +681,10 @@ export async function runGroupChatRounds(group: string, members: GroupMember[], 
         // during-turn tail is anchored by entry id, not index — the history
         // trim drops entries from the FRONT, so an index slice could
         // overshoot after a mid-turn trim and silently commit a stale turn.
+        if (!binding.isLive()) {
+          return
+        }
+
         const roomNow = $groupChats.get()[group] || {
           log: []
         }
@@ -911,6 +920,8 @@ export async function runGroupChatRounds(group: string, members: GroupMember[], 
         void harvestStrandedUntilSettled(group, members, thread)
       }
     }
+
+    binding.dispose()
   }
 }
 
@@ -919,39 +930,53 @@ export async function runGroupChatRounds(group: string, members: GroupMember[], 
  *  stranded, a new loop takes the room over (it harvests on its own), or the
  *  room record disappears (disband). */
 async function harvestStrandedUntilSettled(group: string, members: GroupMember[], thread: string) {
-  const HARVEST_INTERVAL_MS = 5000
-  const HARVEST_MAX_TRIES = 60
+  const binding = followGroupChat(group, name => { group = name })
 
-  for (let attempt = 0; attempt < HARVEST_MAX_TRIES; attempt++) {
-    await new Promise(resolve => window.setTimeout(resolve, HARVEST_INTERVAL_MS))
-    const room = $groupChats.get()[group]
+  try {
+    const HARVEST_INTERVAL_MS = 5000
+    const HARVEST_MAX_TRIES = 60
 
-    if (!room || room.running) {
-      return
-    }
+    for (let attempt = 0; attempt < HARVEST_MAX_TRIES; attempt++) {
+      await new Promise(resolve => window.setTimeout(resolve, HARVEST_INTERVAL_MS))
+      const room = $groupChats.get()[group]
 
-    const stranded = room.stranded || {}
+      if (!binding.isLive() || !room || room.running) {
+        return
+      }
 
-    if (!Object.keys(stranded).length) {
-      return
-    }
+      const stranded = room.stranded || {}
 
-    for (const member of members) {
-      if (Object.prototype.hasOwnProperty.call(stranded, groupMemberKey(member))) {
-        try {
-          await harvestStrandedGroupReply(group, member)
-        } catch {
-          // Best-effort: the next tick retries; the bound stops runaways.
+      if (!Object.keys(stranded).length) {
+        return
+      }
+
+      for (const member of members) {
+        if (!binding.isLive()) {
+          return
+        }
+
+        if (Object.prototype.hasOwnProperty.call(stranded, groupMemberKey(member))) {
+          try {
+            await harvestStrandedGroupReply(group, member)
+          } catch {
+            // Best-effort: the next tick retries; the bound stops runaways.
+          }
         }
       }
     }
-  }
 
-  recordGroupActivity(group, {
-    kind: 'failed',
-    member: null,
-    thread
-  })
+    if (!binding.isLive()) {
+      return
+    }
+
+    recordGroupActivity(group, {
+      kind: 'failed',
+      member: null,
+      thread
+    })
+  } finally {
+    binding.dispose()
+  }
 }
 
 /** User send into a group room. `thread` continues that thread (its reply
@@ -1026,26 +1051,31 @@ export function sendToGroupChat(
     thread: target
   })
 
-  if (!wasRunning) {
-    void runGroupChatRounds(group, members, target).catch(() => {
-      updateGroupChat(group, (r: GroupChatRoom) => {
-        r.running = false
+  const binding = followGroupChat(group, name => { group = name })
 
-        return r
-      })
-    })
-  } else {
-    // A loop is live; it bails at its next boundary. Chain the fresh loop
-    // after a short settle so exactly one drive owns the room.
-    setTimeout(() => {
-      void runGroupChatRounds(group, members, target).catch(() => {
+  const drive = () => {
+    if (!binding.isLive()) {
+      binding.dispose()
+
+      return
+    }
+
+    void runGroupChatRounds(group, members, target).catch(() => {
+      if (binding.isLive()) {
         updateGroupChat(group, (r: GroupChatRoom) => {
           r.running = false
 
           return r
         })
-      })
-    }, 250)
+      }
+    }).finally(binding.dispose)
+  }
+
+  if (!wasRunning) {
+    drive()
+  } else {
+    // Preserve the existing newer-send handoff delay, without pinning its name.
+    setTimeout(drive, 250)
   }
 
   return target
