@@ -60,7 +60,9 @@ class RelayMediaClient:
     @property
     def enabled(self) -> bool:
         """True when the client can authenticate (per-gateway creds present)."""
-        return bool(self._base_url and self._gateway_id and self._secret)
+        from gateway.relay import relay_explicitly_disabled
+
+        return bool(self._base_url and self._gateway_id and self._secret) and not relay_explicitly_disabled()
 
     def _bearer(self) -> str:
         return make_upgrade_token(self._gateway_id, self._secret)
@@ -115,7 +117,9 @@ class RelayMediaClient:
         The bearer is presented only for connector re-host URLs; public URLs
         (e.g. a Discord CDN pass-through) are fetched without it.
         """
-        if not url:
+        from gateway.relay import relay_explicitly_disabled
+
+        if not url or relay_explicitly_disabled():
             return None
         needs_auth = self.is_relay_media_url(url)
         if needs_auth and not self.enabled:

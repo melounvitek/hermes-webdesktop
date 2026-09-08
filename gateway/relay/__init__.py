@@ -6,7 +6,8 @@ hands it at handshake, and the production ``WebSocketRelayTransport``. The publi
 API MAY CHANGE without a deprecation cycle until >=2 real Class-1 platforms have
 shaken out the schema (``docs/relay-connector-contract.md``). Activation is
 config-driven: the relay platform is registered when a connector relay URL is set
-(``GATEWAY_RELAY_URL`` env or ``gateway.relay_url``), like ``gateway.proxy_url``.
+(``GATEWAY_RELAY_URL`` env or ``gateway.relay_url``), like ``gateway.proxy_url``,
+unless the effective relay platform configuration explicitly disables it.
 """
 
 from __future__ import annotations
@@ -69,8 +70,39 @@ def _env_or_cfg_url(env_var: str, cfg_key: str) -> Optional[str]:
     return _env_or_cfg(env_var, cfg_key).rstrip("/") or None
 
 
+def relay_explicitly_disabled() -> bool:
+    """The profile's normalized opt-out, before any URL/credential activation.
+
+    Reuse the gateway's platform merge and boolean normalization without running
+    its env/plugin side effects. Absence is not a disable: URL-only deployments
+    predate the platform flag. The raw loader includes managed configuration.
+    """
+    from gateway.config import Platform, PlatformConfig
+    from gateway.config_loader import (
+        bridge_platform_shared_keys, load_legacy_gateway_json, merge_platform_sections,
+    )
+    from hermes_constants import get_hermes_home
+
+    cfg = _load_cfg()
+    data = load_legacy_gateway_json(get_hermes_home())
+    platforms = merge_platform_sections(cfg, cfg.get("gateway"), data)
+    gateway = cfg.get("gateway") or {}
+    bridge_platform_shared_keys(
+        cfg, gateway.get("platforms") if isinstance(gateway, dict) else None,
+        data, platforms, [Platform.RELAY],
+    )
+    block = platforms.get("relay")
+    return (
+        isinstance(block, dict)
+        and "enabled" in block
+        and not PlatformConfig.from_dict(block).enabled
+    )
+
+
 def relay_url() -> Optional[str]:
-    """The connector relay endpoint URL, or None. A non-empty value activates the relay platform."""
+    """Effective connector URL; an explicit platform disable vetoes even an env URL."""
+    if relay_explicitly_disabled():
+        return None
     return _env_or_cfg_url("GATEWAY_RELAY_URL", "relay_url")
 
 
@@ -97,6 +129,8 @@ def relay_fronted_platforms() -> set[str]:
     Same env source the live adapter's identity set comes from, so config-time
     validation (cron delivery preflight) and fire-time routing can never disagree —
     and it needs no live adapter, so a standalone scheduler can use it."""
+    if relay_explicitly_disabled():
+        return set()
     return {p for p, _ in relay_platform_identities() if p != "relay"}
 
 
@@ -591,9 +625,12 @@ def send_relay_policy() -> bool:
 
 def register_relay_adapter(force: bool = False, url: Optional[str] = None) -> bool:
     """Register the generic ``relay`` platform when a relay URL is configured (or
-    ``force=True`` for tests: transport-less adapter). Returns True if registered.
+    ``force=True`` for tests: transport-less adapter). Neither overrides an
+    explicit profile disable. Returns True if registered.
     With a URL the factory builds a live ``WebSocketRelayTransport``; the adapter
     negotiates the real ``CapabilityDescriptor`` at ``connect()``."""
+    if relay_explicitly_disabled():
+        return False
     resolved_url = url if url is not None else relay_url()
     if not (force or resolved_url):
         return False
