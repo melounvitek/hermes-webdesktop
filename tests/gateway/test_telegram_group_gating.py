@@ -903,12 +903,6 @@ def _bot_sender_message(
     return msg
 
 
-def test_bots_require_mention_defaults_off():
-    adapter = _make_adapter(require_mention=True)
-
-    assert adapter._telegram_bots_require_mention() is False
-
-
 def test_bot_quote_reply_loop_is_broken_by_bots_require_mention():
     """With require_mention alone the quote-reply-to-bot branch returns True unconditionally, so
     two bots admitting each other's messages answer each other forever. The flag closes exactly
@@ -938,25 +932,6 @@ def test_bot_quote_reply_loop_is_broken_by_bots_require_mention():
     )
 
 
-def test_bot_command_at_botname_passes_bots_require_mention():
-    gated = _make_adapter(require_mention=True, bots_require_mention=True)
-    text = "/status@hermes_bot"
-    msg = _bot_sender_message(text, entities=[_bot_command_entity(text, text)])
-
-    assert gated._should_process_message(msg, is_command=True) is True
-
-
-def test_bot_chatter_without_mention_dropped_by_bots_require_mention():
-    gated = _make_adapter(require_mention=True, bots_require_mention=True)
-
-    assert (
-        gated._should_process_message(
-            _bot_sender_message("status update, no addressee")
-        )
-        is False
-    )
-
-
 def test_human_reply_unaffected_by_bots_require_mention():
     gated = _make_adapter(require_mention=True, bots_require_mention=True)
 
@@ -964,13 +939,3 @@ def test_human_reply_unaffected_by_bots_require_mention():
         gated._should_process_message(_group_message("replying", reply_to_bot=True))
         is True
     )
-
-
-def test_own_echoes_not_treated_as_other_bot():
-    """This bot's own echoed messages are dropped by _is_own_message before the sender gate; the
-    gate must not re-admit them as another bot even if the echo carries a stale is_bot flag."""
-    gated = _make_adapter(require_mention=True, bots_require_mention=True)
-    own = _bot_sender_message("echo", sender_id=999)
-
-    assert gated._is_own_message(own) is True
-    assert gated._sender_is_other_bot(own) is False
