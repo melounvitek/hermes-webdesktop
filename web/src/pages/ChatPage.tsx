@@ -205,16 +205,6 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
   useEffect(() => {
     setHasActivated((prev) => latchChatActivation(prev, isActive));
   }, [isActive]);
-
-  // Clear mobile-input tracking refs when the tab is hidden so stale state
-  // from a previous /chat visit doesn't cause the mobile-replacement logic
-  // to misfire on the next activation (#106403: repeated last character).
-  useEffect(() => {
-    if (!isActive) {
-      ptyInputLineRef.current = "";
-      mobileReplacementInputUntilRef.current = 0;
-    }
-  }, [isActive]);
   const [searchParams, setSearchParams] = useSearchParams();
   // Lazy-init: the missing-token check happens at construction so the effect
   // body doesn't have to setState (React 19's set-state-in-effect rule).
@@ -307,6 +297,15 @@ export default function ChatPage({ isActive = true }: { isActive?: boolean }) {
     setPtyState("connecting");
     setReconnectNonce((n) => n + 1);
   }, [clearReconnectTimer, searchParams, setSearchParams]);
+  // Clear mobile-input tracking refs when the tab is hidden so stale state
+  // from a previous /chat visit doesn't cause the mobile-replacement logic
+  // to misfire on the next activation (#106403: repeated last character).
+  useEffect(() => {
+    if (!isActive) {
+      ptyInputLineRef.current = "";
+      mobileReplacementInputUntilRef.current = 0;
+    }
+  }, [isActive]);
   // Raw state for the mobile side-sheet + a derived value that force-
   // closes whenever the chat tab isn't active.  The *derived* value is
   // what side-effects (body-scroll lock, keydown listener, portal render)
