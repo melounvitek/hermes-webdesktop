@@ -2924,9 +2924,11 @@ async def _standalone_send(pconfig, chat_id, message, *, thread_id=None, media_f
         payload = {"msgtype": "m.text", "body": message}
         with suppress(ImportError):
             import markdown as _md
-            html = _md.markdown(message, extensions=["fenced_code", "tables"])
+            tokenized, tex_store = _latex_to_tokens(message)
+            html = _md.markdown(tokenized, extensions=["fenced_code", "tables"])
             payload["format"] = "org.matrix.custom.html"
-            payload["formatted_body"] = re.sub(r"<h[1-6]>(.*?)</h[1-6]>", r"<strong>\1</strong>", html)
+            payload["formatted_body"] = _tokens_to_mx_maths(
+                re.sub(r"<h[1-6]>(.*?)</h[1-6]>", r"<strong>\1</strong>", html), tex_store)
         # asyncio.wait_for, not aiohttp.ClientTimeout: cron invokes this via
         # run_coroutine_threadsafe ("Timeout context manager should be used inside a task").
         async with aiohttp.ClientSession() as session:
