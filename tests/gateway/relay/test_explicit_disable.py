@@ -5,7 +5,9 @@ I/O and unrelated gateway services are replaced. No connector is contacted.
 """
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock
+import asyncio
 import json
+import logging
 import os
 
 import pytest
@@ -294,7 +296,7 @@ def test_managed_layer_agrees_with_native_config(profile, monkeypatch, user_yaml
                                    "transport-connect", "transport-reconnect", "fresh-token", "media-hook",
                                    "cached-media-hook", "upload", "download", "public-download"])
 @pytest.mark.parametrize("spelling", ["top", "nested", "normalized", "legacy-json", "yaml-wins", "gateway-relay", "top-relay", "managed-disable", "sibling-keeps-disable"])
-async def test_disabled_standalone_paths_have_no_relay_side_effects(profile, monkeypatch, entry, spelling):
+async def test_disabled_standalone_paths_have_no_relay_side_effects(profile, monkeypatch, caplog, entry, spelling):
     block = {"enabled": "false" if spelling == "normalized" else False}
     cfg = {"gateway": {"relay_url": URL}}
     if spelling == "nested":
@@ -355,18 +357,27 @@ async def test_disabled_standalone_paths_have_no_relay_side_effects(profile, mon
         transport.connect.assert_not_awaited()
         transport.set_inbound_handler.assert_not_called()
     elif entry in {"transport-connect", "transport-reconnect", "fresh-token"}:
-        ws = WebSocketRelayTransport(URL, "slack", "bot", reconnect_backoff_s=0)
+        caplog.set_level(logging.INFO, logger="gateway.relay.ws_transport")
+        ws = WebSocketRelayTransport(URL, "slack", "bot", reconnect_backoff_s=0,
+                                     gateway_id="shared-gateway", upgrade_secret="a" * 64)
         dial = AsyncMock()
+        mint = Mock(side_effect=AssertionError("disabled relay minted a token"))
+        monkeypatch.setattr("gateway.relay.auth.make_upgrade_token", mint)
         monkeypatch.setattr("gateway.relay.ws_transport.websockets.connect", dial)
         if entry == "transport-connect":
             assert await ws.connect() is False
         elif entry == "fresh-token":
-            await ws._redial_with_fresh_token()
+            await asyncio.wait_for(ws._redial_with_fresh_token(), timeout=2)
         else:
-            await ws._reconnect_loop()
+            await asyncio.wait_for(ws._reconnect_loop(), timeout=2)
         dial.assert_not_awaited()
+        mint.assert_not_called()
         assert ws._reader is None
         assert ws._supervisor is None
+        assert ws._dial_generation == 0
+        assert [(r.levelno, r.message) for r in caplog.records
+                if r.name == "gateway.relay.ws_transport"] == [
+            (logging.INFO, "relay ws disabled by config; not connecting or retrying")]
     elif entry in {"media-hook", "cached-media-hook"}:
         if entry == "cached-media-hook":
             adapter._media_client = media

@@ -424,6 +424,7 @@ class WebSocketRelayTransport:
         from gateway.relay import relay_explicitly_disabled
 
         if relay_explicitly_disabled():
+            logger.info("relay ws disabled by config; not connecting or retrying")
             raise _RelayDisabled("Relay explicitly disabled in config")
         self._descriptor_ready = asyncio.get_running_loop().create_future()
         self._dial_generation += 1
