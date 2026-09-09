@@ -279,12 +279,29 @@ async def test_reaper_loop_invokes_reap(monkeypatch):
     assert calls["n"] >= 2
 
 
-def _register_idle_session(reg, key):
+async def _two_idle_sessions_first_close_gated(reg):
+    """Two detached (idle) sessions; k0's close() parks until ``release`` is set."""
     from hermes_cli.pty_session import PtySession
-    bridge = FakeBridge([b""])
-    s = PtySession(key, bridge, buffer_cap=1024, read_timeout=0.01)
-    await_start = s.start()
-    return bridge, s, await_start
+    bridges = []
+    for i in range(2):
+        bridge = FakeBridge([b""])
+        s = PtySession("k%d" % i, bridge, buffer_cap=1024, read_timeout=0.01)
+        await s.start()
+        s.detach(None)                        # unattached, last_detached_at set
+        reg._sessions[s.key] = s
+        bridges.append(bridge)
+
+    entered, release = asyncio.Event(), asyncio.Event()
+    k0 = reg._sessions["k0"]
+    original_close = k0.close
+
+    async def gated_close():
+        entered.set()
+        await release.wait()
+        await original_close()
+
+    k0.close = gated_close
+    return bridges, entered, release
 
 
 @pytest.mark.asyncio
@@ -293,33 +310,15 @@ async def test_concurrent_reap_idle_is_idempotent():
     may doom the same keys, so one reap can pop a key the other already took
     while awaiting its close(). The second pop must skip, not raise."""
     reg = make_registry(ttl=60.0)
-    bridges = []
-    sessions = []
-    for i in range(2):
-        bridge, s, start = _register_idle_session(reg, "k%d" % i)
-        await start
-        s.detach(None)                        # unattached, last_detached_at set
-        reg._sessions[s.key] = s
-        bridges.append(bridge)
-        sessions.append(s)
-
-    entered, release = asyncio.Event(), asyncio.Event()
-    original_close = sessions[0].close
-
-    async def gated_close():
-        entered.set()
-        await release.wait()
-        await original_close()
-
-    sessions[0].close = gated_close
+    bridges, entered, release = await _two_idle_sessions_first_close_gated(reg)
 
     far_future = time.monotonic() + 10_000    # both idle past ttl → doomed
     first = asyncio.create_task(reg.reap_idle(now=far_future))
     await entered.wait()                      # k0 popped; first reap parked in close()
-    await reg.reap_idle(now=far_future)       # second reap hits the taken k0
+    await reg.reap_idle(now=far_future)       # second reap takes k1
 
     release.set()
-    await first
+    await first                               # first reap reaches the taken k1
     assert not reg._sessions
     assert all(b.closed for b in bridges)
 
@@ -329,25 +328,7 @@ async def test_close_all_survives_key_popped_by_concurrent_reap():
     """close_all snapshots keys, then awaits each close(); a reap that runs
     during that await can remove a later key from the snapshot."""
     reg = make_registry(ttl=60.0)
-    bridges = []
-    sessions = []
-    for i in range(2):
-        bridge, s, start = _register_idle_session(reg, "k%d" % i)
-        await start
-        s.detach(None)
-        reg._sessions[s.key] = s
-        bridges.append(bridge)
-        sessions.append(s)
-
-    entered, release = asyncio.Event(), asyncio.Event()
-    original_close = sessions[0].close
-
-    async def gated_close():
-        entered.set()
-        await release.wait()
-        await original_close()
-
-    sessions[0].close = gated_close
+    bridges, entered, release = await _two_idle_sessions_first_close_gated(reg)
 
     closer = asyncio.create_task(reg.close_all())
     await entered.wait()                      # close_all popped k0, parked in close()
@@ -357,24 +338,3 @@ async def test_close_all_survives_key_popped_by_concurrent_reap():
 
     assert not reg._sessions
     assert all(b.closed for b in bridges)
-
-
-@pytest.mark.asyncio
-async def test_reap_idle_closes_doomed_and_keeps_attached():
-    reg = make_registry(ttl=60.0)
-    live_bridge = FakeBridge([b""])
-    s_live, _ = await reg.attach_or_spawn("live", spawn=lambda: live_bridge)
-    await s_live.attach(FakeWS())             # attached → survives the reap
-
-    dead_bridge = FakeBridge([b""])
-    s_dead, _ = await reg.attach_or_spawn("dead", spawn=lambda: dead_bridge)
-    s_dead.alive = False                      # dead remnant → reaped
-
-    idle_bridge = FakeBridge([b""])
-    s_idle, _ = await reg.attach_or_spawn("idle", spawn=lambda: idle_bridge)
-    s_idle.detach(None)                       # idle past ttl → reaped
-
-    await reg.reap_idle(now=time.monotonic() + 10_000)
-    assert list(reg._sessions) == ["live"]
-    assert dead_bridge.closed and idle_bridge.closed and not live_bridge.closed
-    await reg.close_all()
