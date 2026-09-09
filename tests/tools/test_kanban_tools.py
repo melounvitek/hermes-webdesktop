@@ -469,15 +469,15 @@ def test_create_happy_path(worker_env):
         conn.close()
 
 
-@pytest.mark.parametrize("explicit", [
-    {"workspace_kind": "scratch"},
-    {"project": ""},
-])
+@pytest.mark.parametrize("explicit", [{"workspace_kind": "scratch"}, {"project": ""}])
+@pytest.mark.parametrize("target_scoped", [False, True])
 def test_create_explicit_scratch_ignores_ambient_board_project(
-    worker_env, tmp_path, explicit,
+    worker_env, tmp_path, explicit, target_scoped,
 ):
+    """#106342: an explicit scratch / empty project wins over the project the
+    session's current board (and, when scoped, the target board itself) carries.
+    Omitting both still inherits the target board's project."""
     from hermes_cli import kanban_db as kb
-    from hermes_cli import kanban_db_connect as kbc
     from hermes_cli import projects_db as pdb
     from tools import kanban_tools as kt
 
@@ -485,25 +485,17 @@ def test_create_explicit_scratch_ignores_ambient_board_project(
     repo.mkdir()
     with pdb.connect_closing() as pconn:
         project_id = pdb.create_project(pconn, name="Ambient", primary_path=str(repo))
-
     kb.write_board_metadata("default", project_id=project_id)
-    kb.create_board("target", name="Target", project_id="")
+    kb.create_board("target", name="Target", project_id=project_id if target_scoped else "")
 
-    result = json.loads(kt._handle_create({
-        "board": "target",
-        "title": "stay scratch",
-        "assignee": "peer",
-        **explicit,
-    }))
+    def create(**extra):
+        result = json.loads(kt._handle_create(
+            {"board": "target", "title": "card", "assignee": "peer", **extra}))
+        assert result["ok"] is True
+        return result["workspace_kind"], result["project_id"]
 
-    assert result["ok"] is True
-    assert result["project_id"] is None
-    assert result["workspace_kind"] == "scratch"
-
-    with kbc.connect_closing(board="target") as conn:
-        control = kb.create_task(
-            conn, title="direct scratch", board="target", workspace_kind="scratch")
-        assert kb.get_task(conn, control).project_id is None
+    assert create(**explicit) == ("scratch", None)
+    assert create() == (("worktree", project_id) if target_scoped else ("scratch", None))
 
 
 def test_link_happy_path(worker_env):
