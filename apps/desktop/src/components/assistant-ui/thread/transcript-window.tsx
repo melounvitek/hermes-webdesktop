@@ -33,7 +33,11 @@ export function resolveShowEarlierAction(hiddenCount: number, olderAvailable: bo
   return olderAvailable ? 'window' : null
 }
 
-/** Slack (px) treated as "already at the top edge" for auto Show-earlier. */
+/**
+ * Slack (px) within which a reader counts as "at the top edge". Wide enough
+ * that a wheel notch landing a few pixels short of 0 still pages; well under
+ * the RUN_START_SNAP-style thresholds so a mid-transcript reader never does.
+ */
 export const TOP_EDGE_PX = 48
 
 export interface ShouldAutoShowEarlierInput {
@@ -42,16 +46,16 @@ export interface ShouldAutoShowEarlierInput {
   loadSettled: boolean
   restorePending: boolean
   scrollTop: number
-  topEdgePx?: number
   /** Present only for `wheel` events; omitted for `scroll`. */
   wheelDeltaY?: number
 }
 
 /**
- * Auto Show-earlier is the button's `showEarlier()` path, triggered when the
- * reader is at the viewport top and older content exists. Fail-open: missing
- * action, an unsettled load, a pending prepend restore, following the bottom,
- * or a mid-transcript scroll must not page.
+ * Whether reading at the viewport top should page older turns through the
+ * same `showEarlier()` path as the button. An unsettled load, a prepend
+ * restore still pending, a reader following the bottom, or a mid-transcript
+ * scroll must never page on its own — each of those has scrollTop near 0 or
+ * changing for reasons that are not "I want to read earlier".
  */
 export function shouldAutoShowEarlier({
   action,
@@ -59,20 +63,12 @@ export function shouldAutoShowEarlier({
   loadSettled,
   restorePending,
   scrollTop,
-  topEdgePx = TOP_EDGE_PX,
   wheelDeltaY
 }: ShouldAutoShowEarlierInput): boolean {
-  if (action == null || !loadSettled || restorePending || isAtBottom) {
+  if (action == null || !loadSettled || restorePending || isAtBottom || scrollTop > TOP_EDGE_PX) {
     return false
   }
 
-  if (scrollTop > topEdgePx) {
-    return false
-  }
-
-  if (wheelDeltaY !== undefined && !(wheelDeltaY < 0)) {
-    return false
-  }
-
-  return true
+  // A wheel at the clamped top is intent only when it points up.
+  return wheelDeltaY === undefined || wheelDeltaY < 0
 }

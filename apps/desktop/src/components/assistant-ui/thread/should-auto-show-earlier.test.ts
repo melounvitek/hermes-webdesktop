@@ -7,67 +7,24 @@ const settledTop = {
   isAtBottom: false,
   loadSettled: true,
   restorePending: false,
-  scrollTop: 0,
-  topEdgePx: TOP_EDGE_PX
+  scrollTop: 0
 }
 
-describe('TOP_EDGE_PX', () => {
-  it('is a small top-edge slack, not a mid-scroll threshold', () => {
-    expect(TOP_EDGE_PX).toBeGreaterThanOrEqual(48)
-    expect(TOP_EDGE_PX).toBeLessThanOrEqual(64)
-  })
-})
-
 describe('shouldAutoShowEarlier', () => {
-  it('loads earlier when the reader is at the top edge with a DOM page to spend', () => {
-    expect(shouldAutoShowEarlier({ ...settledTop, action: 'dom' })).toBe(true)
-  })
-
-  it('loads earlier when the reader is at the top edge with a store window to expand', () => {
-    expect(
-      shouldAutoShowEarlier({
-        ...settledTop,
-        action: resolveShowEarlierAction(0, true)
-      })
-    ).toBe(true)
-  })
-
-  it('treats scrollTop at the edge pixel as top-edge reading intent', () => {
+  it('pages only for a settled reader at the top edge with older content to show', () => {
+    // Reading intent: a scroll into the top edge, or an upward wheel while
+    // already clamped there (browsers emit no scroll event at scrollTop 0).
+    expect(shouldAutoShowEarlier(settledTop)).toBe(true)
     expect(shouldAutoShowEarlier({ ...settledTop, scrollTop: TOP_EDGE_PX })).toBe(true)
-  })
-
-  it('loads earlier on an upward wheel while already at the top edge', () => {
     expect(shouldAutoShowEarlier({ ...settledTop, wheelDeltaY: -40 })).toBe(true)
-  })
+    expect(shouldAutoShowEarlier({ ...settledTop, action: resolveShowEarlierAction(0, true) })).toBe(true)
 
-  it('does not fire when resolveShowEarlierAction is a no-op', () => {
-    expect(shouldAutoShowEarlier({ ...settledTop, action: null })).toBe(false)
-    expect(
-      shouldAutoShowEarlier({
-        ...settledTop,
-        action: resolveShowEarlierAction(0, false)
-      })
-    ).toBe(false)
-  })
-
-  it('does not fire until the session load has settled', () => {
+    // Every gate that must keep a page from loading on its own.
+    expect(shouldAutoShowEarlier({ ...settledTop, action: resolveShowEarlierAction(0, false) })).toBe(false)
     expect(shouldAutoShowEarlier({ ...settledTop, loadSettled: false })).toBe(false)
-  })
-
-  it('does not fire while a prepend restore is still pending', () => {
     expect(shouldAutoShowEarlier({ ...settledTop, restorePending: true })).toBe(false)
-  })
-
-  it('does not fire while the reader is following the bottom', () => {
     expect(shouldAutoShowEarlier({ ...settledTop, isAtBottom: true })).toBe(false)
-  })
-
-  it('does not fire in the middle of the transcript', () => {
     expect(shouldAutoShowEarlier({ ...settledTop, scrollTop: TOP_EDGE_PX + 1 })).toBe(false)
-    expect(shouldAutoShowEarlier({ ...settledTop, scrollTop: 400 })).toBe(false)
-  })
-
-  it('does not treat a downward or zero wheel at the top as earlier-reading intent', () => {
     expect(shouldAutoShowEarlier({ ...settledTop, wheelDeltaY: 40 })).toBe(false)
     expect(shouldAutoShowEarlier({ ...settledTop, wheelDeltaY: 0 })).toBe(false)
   })

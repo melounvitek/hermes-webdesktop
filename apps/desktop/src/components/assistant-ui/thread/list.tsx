@@ -40,7 +40,7 @@ import { isSecondaryWindow } from '@/store/windows'
 
 import { MessageRenderBoundary } from '../message-render-boundary'
 
-import { resolveShowEarlierAction, shouldAutoShowEarlier, TOP_EDGE_PX, useTranscriptWindow } from './transcript-window'
+import { resolveShowEarlierAction, shouldAutoShowEarlier, useTranscriptWindow } from './transcript-window'
 import { useMessagesBelow } from './use-messages-below'
 
 type ThreadMessageComponents = ComponentProps<typeof ThreadPrimitive.MessageByIndex>['components']
@@ -957,8 +957,8 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
   }, [anchorBeforePrepend, expandWindow, hiddenCount, olderAvailable, paneBudget])
 
   // Scroll/wheel at the top edge pages older turns through the same showEarlier
-  // path as the button. Wheel is required because browsers often omit `scroll`
-  // once scrollTop is already 0. Fail-open gates live in shouldAutoShowEarlier.
+  // path as the button. Wheel is required because browsers emit no `scroll`
+  // once scrollTop is already 0 — exactly where the reader who wants more is.
   useEffect(() => {
     const el = scrollRef.current
 
@@ -968,26 +968,21 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
 
     const tryShowEarlier = (wheelDeltaY?: number) => {
       if (
-        !shouldAutoShowEarlier({
+        shouldAutoShowEarlier({
           action: resolveShowEarlierAction(hiddenCount, olderAvailable),
           isAtBottom,
           loadSettled: loadSettledRef.current,
           restorePending: restoreFromBottomRef.current != null,
           scrollTop: el.scrollTop,
-          topEdgePx: TOP_EDGE_PX,
           wheelDeltaY
         })
       ) {
-        return
+        showEarlier()
       }
-
-      showEarlier()
     }
 
     const onScroll = () => tryShowEarlier()
-    const onWheel = (event: WheelEvent) => {
-      tryShowEarlier(event.deltaY)
-    }
+    const onWheel = (event: WheelEvent) => tryShowEarlier(event.deltaY)
 
     el.addEventListener('scroll', onScroll, { passive: true })
     el.addEventListener('wheel', onWheel, { passive: true })
