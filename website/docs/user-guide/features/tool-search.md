@@ -179,10 +179,13 @@ to any progressive-disclosure design, not specific to this implementation:
   finds that server's tools even when a tool's own name doesn't carry
   the service), description, and parameter names, with Snowball
   stemming (English) applied to both the index and the query so
-  morphological variants match ("issues" finds `create_issue`). Falls
-  back to a literal substring match on the tool name when no query
-  token matches any document (e.g. searching `"hub"` where the token is
-  `github`).
+  morphological variants match ("issues" finds `create_issue`). A tool is
+  a result only if it contains the query's rarest token (the one in the
+  fewest tool documents, so the word that names the intent: `gmail`,
+  `github`, `incident`, not `send` or `create`). A query whose rarest
+  token appears in no tool returns an empty group with the connected
+  sources and a retry hint, instead of `limit` tools that share one
+  common word.
 - **Parallel execution unwraps the bridge.** The batch planner decides
   concurrency on the *underlying* tool of a `tool_call`, not on the
   literal bridge name — so an MCP server opted in via
