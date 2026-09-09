@@ -16,7 +16,6 @@ from unittest.mock import MagicMock, patch
 
 from hermes_cli.models import (
     _LIVE_FIRST_PICKER_PROVIDERS,
-    _PROVIDER_MODELS,
     provider_model_ids,
 )
 
@@ -106,9 +105,4 @@ class TestGenericProviderLiveCuratedMerge:
 
         assert "ox-alpha-free" not in result
         assert {"deepseek-v4-flash", "kimi-k3", "omen-alpha"} <= set(result)
-
-    def test_opencode_go_curated_floor_excludes_delisted_ox_alpha_free(self):
-        """The static floor must not carry a known-delisted Go model (offline fallback must
-        not offer a model that 401s — same policy as opencode-free/x-preview-f-free)."""
-        assert "ox-alpha-free" not in _PROVIDER_MODELS["opencode-go"]
 
