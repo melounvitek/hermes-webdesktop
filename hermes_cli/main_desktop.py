@@ -1403,29 +1403,35 @@ def _build_desktop_app(desktop_dir: Path, *, source_mode: bool, npm: str, env: d
     return packaged_executable
 
 
-def _prefer_wsl_d3d12(env: dict, *, available: bool) -> None:
-    """Select Mesa before exec: setting this inside Electron can miss GPU initialization."""
-    overrides = ("GALLIUM_DRIVER", "MESA_LOADER_DRIVER_OVERRIDE", "LIBGL_ALWAYS_SOFTWARE", "LIBGL_DRIVERS_PATH")
-    if available and not any(key in env for key in overrides):
+_WSL_DXG_DEVICE = Path("/dev/dxg")
+_WSL_D3D12_DRIVERS = (
+    Path("/usr/lib/x86_64-linux-gnu/dri/d3d12_dri.so"),
+    Path("/usr/lib/aarch64-linux-gnu/dri/d3d12_dri.so"),
+    Path("/usr/lib64/dri/d3d12_dri.so"),
+    Path("/usr/lib/dri/d3d12_dri.so"),
+)
+_MESA_DRIVER_OVERRIDES = ("GALLIUM_DRIVER", "MESA_LOADER_DRIVER_OVERRIDE", "LIBGL_ALWAYS_SOFTWARE", "LIBGL_DRIVERS_PATH")
+
+
+def _prefer_wsl_d3d12(env: dict) -> None:
+    """Under WSLg, /dev/dxg alone does not make Mesa pick the GPU: Chromium still lands on
+    llvmpipe unless GALLIUM_DRIVER selects d3d12, and it must be set before Electron spawns
+    its GPU process (setting it from JS is too late). Explicit Mesa choices win; hosts without
+    the driver are left alone."""
+    from hermes_constants import is_wsl
+    if any(key in env for key in _MESA_DRIVER_OVERRIDES):
+        return
+    if is_wsl() and _WSL_DXG_DEVICE.exists() and any(driver.is_file() for driver in _WSL_D3D12_DRIVERS):
         env["GALLIUM_DRIVER"] = "d3d12"
 
 
 def _desktop_launch_env(args: argparse.Namespace) -> tuple[dict, list[str]]:
     """Electron child env + config-supplied extra flags. ``desktop.*`` config is bridged to env vars
     Electron already reads; an explicit env var wins over config (and over keychain detection)."""
-    from hermes_constants import is_wsl, with_hermes_node_path
+    from hermes_constants import with_hermes_node_path
     # with_hermes_node_path() copies os.environ when called with no arg.
     env = with_hermes_node_path()
-    # /dev/dxg alone does not select hardware Mesa: Chromium may still get
-    # llvmpipe. Keep custom Mesa choices and systems without D3D12 unchanged.
-    _prefer_wsl_d3d12(env, available=is_wsl() and Path("/dev/dxg").exists() and any(
-        Path(driver).is_file() for driver in (
-            "/usr/lib/x86_64-linux-gnu/dri/d3d12_dri.so",
-            "/usr/lib/aarch64-linux-gnu/dri/d3d12_dri.so",
-            "/usr/lib64/dri/d3d12_dri.so",
-            "/usr/lib/dri/d3d12_dri.so",
-        )
-    ))
+    _prefer_wsl_d3d12(env)
     for attr, key in (
         ("fake_boot", "HERMES_DESKTOP_BOOT_FAKE"), ("ignore_existing", "HERMES_DESKTOP_IGNORE_EXISTING")):
         if getattr(args, attr, False):
