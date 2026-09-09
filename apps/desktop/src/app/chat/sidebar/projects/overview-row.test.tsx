@@ -94,25 +94,17 @@ describe('ProjectOverviewRow', () => {
     expect(container.querySelector('[data-sessions-project="p1"]')).toBeTruthy()
   })
 
-  it('renders the folder-library lead glyph for explicit projects', () => {
-    const explicit = { id: 'p1', label: 'Explicit', isAuto: false } as unknown as SidebarProjectTree
-
-    const { container } = render(<ProjectOverviewRow project={explicit} />)
-
-    expect(container.querySelector('.codicon-folder-library')).toBeTruthy()
-    expect(container.querySelector('.codicon-repo')).toBeNull()
-  })
-
-  it('defaults to the folder-library lead glyph when isAuto is absent (explicit nodes omit it)', () => {
+  it('explicit projects keep the folder-library glyph and a plain accessible name', () => {
     const explicit = { id: 'p1', label: 'Explicit' } as unknown as SidebarProjectTree
 
     const { container } = render(<ProjectOverviewRow project={explicit} />)
 
     expect(container.querySelector('.codicon-folder-library')).toBeTruthy()
     expect(container.querySelector('.codicon-repo')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Enter Explicit' })).toBeTruthy()
   })
 
-  it('renders the repo lead glyph and an "Auto-discovered" tooltip for auto projects', () => {
+  it('auto-discovered repos get the repo glyph, an "Auto-discovered" tooltip, and an accessible name that says so', () => {
     const auto = { id: '/Users/dev/my-repo', label: 'my-repo', isAuto: true } as unknown as SidebarProjectTree
 
     const { container } = render(<ProjectOverviewRow project={auto} />)
@@ -120,7 +112,7 @@ describe('ProjectOverviewRow', () => {
     expect(container.querySelector('.codicon-repo')).toBeTruthy()
     expect(container.querySelector('.codicon-folder-library')).toBeNull()
 
-    const link = screen.getByRole('button', { name: 'Enter my-repo' })
+    const link = screen.getByRole('button', { name: 'Enter my-repo (Auto-discovered)' })
     expect(tipTrigger(link)).toBeTruthy()
   })
 })
