@@ -781,56 +781,34 @@ def test_make_tui_argv_omits_workspace_and_scrubs_esbuild_override(
 
 
 class TestPersistentNpmUserconfig:
-    """$HERMES_HOME/npmrc must reach every npm lifecycle child process."""
+    """$HERMES_HOME/npmrc must reach every npm lifecycle child process (#106373)."""
 
     def test_hermes_home_npmrc_sets_userconfig(self, tmp_path, monkeypatch):
         home = tmp_path / "home"
         home.mkdir()
         (home / "npmrc").write_text(
-            "node_get_windows_binary_host_mirror=https://ghproxy.net/https://github.com/sindresorhus/get-windows/releases/download/\n",
+            "node_get_windows_binary_host_mirror=https://mirror.example/get-windows/\n",
             encoding="utf-8",
         )
         monkeypatch.setenv("HERMES_HOME", str(home))
         monkeypatch.delenv("NPM_CONFIG_USERCONFIG", raising=False)
-        monkeypatch.delenv("ESBUILD_BINARY_PATH", raising=False)
 
         env = main_tui_launch._npm_lifecycle_env()
 
-        assert env["NPM_CONFIG_USERCONFIG"] == str(home / "npmrc")
+        assert env["NPM_CONFIG_USERCONFIG"] == os.fspath(home / "npmrc")
 
-    def test_missing_npmrc_leaves_env_untouched(self, tmp_path, monkeypatch):
+    def test_explicit_userconfig_wins_and_missing_file_sets_nothing(self, tmp_path, monkeypatch):
         home = tmp_path / "home"
         home.mkdir()
         monkeypatch.setenv("HERMES_HOME", str(home))
         monkeypatch.delenv("NPM_CONFIG_USERCONFIG", raising=False)
 
-        env = main_tui_launch._npm_lifecycle_env()
+        assert "NPM_CONFIG_USERCONFIG" not in main_tui_launch._npm_lifecycle_env()
 
-        assert "NPM_CONFIG_USERCONFIG" not in env
-
-    def test_explicit_userconfig_wins(self, tmp_path, monkeypatch):
-        home = tmp_path / "home"
-        home.mkdir()
-        (home / "npmrc").write_text(
-            "registry=https://example.invalid\n", encoding="utf-8"
-        )
-        monkeypatch.setenv("HERMES_HOME", str(home))
+        (home / "npmrc").write_text("registry=https://example.invalid\n", encoding="utf-8")
         monkeypatch.setenv("NPM_CONFIG_USERCONFIG", str(tmp_path / "custom-npmrc"))
+        assert main_tui_launch._npm_lifecycle_env()["NPM_CONFIG_USERCONFIG"] == str(tmp_path / "custom-npmrc")
 
-        env = main_tui_launch._npm_lifecycle_env()
-
-        assert env["NPM_CONFIG_USERCONFIG"] == str(tmp_path / "custom-npmrc")
-
-    def test_caller_env_does_not_override_userconfig(self, tmp_path, monkeypatch):
-        env_in = {"NPM_CONFIG_USERCONFIG": "/from-caller/npmrc"}
-        home = tmp_path / "home"
-        home.mkdir()
-        (home / "npmrc").write_text(
-            "registry=https://example.invalid\n", encoding="utf-8"
-        )
-        monkeypatch.setenv("HERMES_HOME", str(home))
-        monkeypatch.delenv("NPM_CONFIG_USERCONFIG", raising=False)
-
-        env = main_tui_launch._npm_lifecycle_env(env_in)
-
+        monkeypatch.delenv("NPM_CONFIG_USERCONFIG")
+        env = main_tui_launch._npm_lifecycle_env({"NPM_CONFIG_USERCONFIG": "/from-caller/npmrc"})
         assert env["NPM_CONFIG_USERCONFIG"] == "/from-caller/npmrc"
