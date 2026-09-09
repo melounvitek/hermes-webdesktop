@@ -4071,9 +4071,10 @@ def launchd_stop():
     _mark_planned_stop()
     # bootout unloads the definition so KeepAlive doesn't respawn; `hermes gateway start` re-bootstraps.
     try:
-        subprocess.run(["launchctl", "bootout", target], check=True, timeout=90)
+        # Captured: an already-unloaded job (3/113/125) is handled below, so launchctl's own
+        # "Boot-out failed: 3" must not print around the ✓ line; e.stderr stays on the raised error.
+        subprocess.run(["launchctl", "bootout", target], check=True, timeout=90, **_CAPTURE_TEXT)
     except subprocess.CalledProcessError as e:
-        # Job already unloaded (3/113/125) or domain unmanageable (5/125): fall through to the PID-based kill.
         # Job already unloaded (3/113/125), or the domain can't be managed at all (5/125, macOS 26+
         # detached-fallback process, issue #23387) — in both cases just fall through to the PID-based kill
         # below.
