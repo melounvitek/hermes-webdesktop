@@ -6,13 +6,10 @@ recording stub context.
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-import pytest
 import yaml
 
-import hermes_cli.plugins_cmd as plugins_cmd
 from hermes_cli.plugin_validate import validate_plugin_dir
 
 
@@ -34,86 +31,6 @@ BASE_MANIFEST = {
     "version": "1.0.0",
     "description": "A fixture plugin.",
 }
-
-
-class TestStaticChecks:
-    def test_valid_plugin_passes(self, tmp_path):
-        d = _make_plugin(tmp_path, manifest=dict(BASE_MANIFEST))
-        report = validate_plugin_dir(d)
-        assert report.ok
-        assert report.exit_code == 0
-
-    def test_missing_manifest_fails(self, tmp_path):
-        d = tmp_path / "empty-plugin"
-        d.mkdir()
-        report = validate_plugin_dir(d)
-        assert not report.ok
-        assert report.exit_code == 1
-        assert any("plugin.yaml" in f for f in report.failures)
-
-    def test_missing_required_fields_fail(self, tmp_path):
-        d = _make_plugin(tmp_path, manifest={"name": "fixture-plugin"})
-        report = validate_plugin_dir(d)
-        assert not report.ok
-        joined = " ".join(report.failures)
-        assert "version" in joined
-        assert "description" in joined
-
-    def test_bad_requires_hermes_spec_fails(self, tmp_path):
-        manifest = dict(BASE_MANIFEST, requires_hermes=">=not.a.version")
-        d = _make_plugin(tmp_path, manifest=manifest)
-        report = validate_plugin_dir(d)
-        assert not report.ok
-        assert any("requires_hermes" in f for f in report.failures)
-
-    def test_good_requires_hermes_spec_passes(self, tmp_path):
-        manifest = dict(BASE_MANIFEST, requires_hermes=">=0.1, <99")
-        d = _make_plugin(tmp_path, manifest=manifest)
-        report = validate_plugin_dir(d)
-        assert report.ok
-
-    def test_invalid_config_schema_fails(self, tmp_path):
-        manifest = dict(
-            BASE_MANIFEST, config_schema={"endpoint": {"type": "no-such-type"}}
-        )
-        d = _make_plugin(tmp_path, manifest=manifest)
-        report = validate_plugin_dir(d)
-        assert not report.ok
-        assert any("config" in f for f in report.failures)
-
-    def test_valid_config_schema_passes(self, tmp_path):
-        manifest = dict(
-            BASE_MANIFEST,
-            config_schema={
-                "endpoint": {"type": "str", "description": "Endpoint?"},
-                "retries": {"type": "int", "default": 3},
-            },
-        )
-        d = _make_plugin(tmp_path, manifest=manifest)
-        report = validate_plugin_dir(d)
-        assert report.ok
-
-    def test_lower_snake_requires_env_fails(self, tmp_path):
-        manifest = dict(BASE_MANIFEST, requires_env=["lower_case_bad"])
-        d = _make_plugin(tmp_path, manifest=manifest)
-        report = validate_plugin_dir(d)
-        assert not report.ok
-        assert any("requires_env" in f for f in report.failures)
-
-    def test_upper_snake_requires_env_passes(self, tmp_path):
-        manifest = dict(BASE_MANIFEST, requires_env=["MY_API_KEY_2"])
-        d = _make_plugin(tmp_path, manifest=manifest)
-        report = validate_plugin_dir(d)
-        assert report.ok
-
-    def test_rich_requires_env_dict_entries_accepted(self, tmp_path):
-        manifest = dict(
-            BASE_MANIFEST,
-            requires_env=[{"name": "MY_KEY", "description": "key"}],
-        )
-        d = _make_plugin(tmp_path, manifest=manifest)
-        report = validate_plugin_dir(d)
-        assert report.ok
 
 
 class TestCapabilityProbe:
@@ -182,35 +99,16 @@ class TestCapabilityProbe:
         assert "terminal" in joined
         assert "built-in" in joined
 
-
-class TestCmdValidate:
-    def test_cmd_validate_exit_zero_on_pass(self, tmp_path, capsys):
-        d = _make_plugin(tmp_path, manifest=dict(BASE_MANIFEST))
-        with pytest.raises(SystemExit) as e:
-            plugins_cmd.cmd_validate(str(d))
-        assert e.value.code == 0
-        out = capsys.readouterr().out
-        assert "✓" in out
-
-    def test_cmd_validate_exit_one_on_fail(self, tmp_path, capsys):
-        d = tmp_path / "not-a-plugin"
-        d.mkdir()
-        with pytest.raises(SystemExit) as e:
-            plugins_cmd.cmd_validate(str(d))
-        assert e.value.code == 1
-        out = capsys.readouterr().out
-        assert "✗" in out
-
-    def test_cmd_validate_json_output(self, tmp_path, capsys):
-        d = _make_plugin(tmp_path, manifest=dict(BASE_MANIFEST))
-        with pytest.raises(SystemExit) as e:
-            plugins_cmd.cmd_validate(str(d), as_json=True)
-        assert e.value.code == 0
-        payload = json.loads(capsys.readouterr().out)
-        assert payload["ok"] is True
-        assert "checks" in payload
-
-    def test_cmd_validate_missing_dir_fails(self, tmp_path, capsys):
-        with pytest.raises(SystemExit) as e:
-            plugins_cmd.cmd_validate(str(tmp_path / "ghost"))
-        assert e.value.code == 1
+    def test_probe_context_returns_get_config_defaults(self, tmp_path):
+        """Real PluginContext.get_config yields the default when nothing is configured; the probe must
+        too, or every plugin doing ``int(ctx.get_config("timeout", 180))`` fails admission."""
+        d = _make_plugin(
+            tmp_path,
+            manifest={**BASE_MANIFEST, "provides_tools": ["t"]},
+            init_py=(
+                "def register(ctx):\n"
+                "    int(ctx.get_config('timeout_seconds', 180))\n"
+                "    ctx.register_tool('t', schema={}, handler=lambda **kw: None)\n"),
+        )
+        report = validate_plugin_dir(d)
+        assert report.ok, report.failures

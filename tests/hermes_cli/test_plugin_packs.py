@@ -186,17 +186,10 @@ def test_load_pack_missing_file_errors():
 # ---------------------------------------------------------------------------
 
 def _fake_catalog_entry(name):
-    return SimpleNamespace(
-        name=name,
-        repo="https://github.com/idx-owner/idx-repo",
-        subdir="",
-        capabilities=SimpleNamespace(
-            provides_tools=["tools"],
-            provides_hooks=[],
-            provides_middleware=[],
-            requires_env=[],
-        ),
-    )
+    from hermes_cli.plugin_catalog import CatalogCapabilities, PluginCatalogEntry
+    return PluginCatalogEntry(
+        name=name, repo="https://github.com/idx-owner/idx-repo", sha=SHA_B, description="d", maintainer="idx-owner",
+        capabilities=CatalogCapabilities(provides_tools=["tools"]))
 
 
 def test_resolve_pack_plugins_uses_catalog_for_bare_names():
