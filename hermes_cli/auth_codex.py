@@ -212,7 +212,7 @@ def _refresh_payload_access_token(
     return payload, access
 
 
-_SSL_TROUBLE_MARKERS = ("[SSL:", "_ssl.c")
+_SSL_TROUBLE_MARKERS = ("[SSL:", "_ssl.c", "UNEXPECTED_EOF")
 
 
 def _ssl_interop_hint(exc: BaseException) -> str:
@@ -221,14 +221,23 @@ def _ssl_interop_hint(exc: BaseException) -> str:
     OpenSSL 3.5+ advertises post-quantum hybrid groups (e.g. X25519MLKEM768) by default, and some
     intercepting middleboxes reject the resulting larger TLS 1.3 ClientHello — while curl, using a
     different TLS stack, still works, so the failure masquerades as a Codex outage (#106384).
+    httpx wraps the ``ssl.SSLError`` in a ``ConnectError``/``ConnectTimeout`` whose text usually
+    repeats the OpenSSL message; the cause chain is checked too in case it doesn't.
     """
-    if not any(marker in str(exc) for marker in _SSL_TROUBLE_MARKERS):
+    import ssl
+
+    chain = (exc, exc.__cause__, exc.__context__)
+    if not any(
+        isinstance(err, ssl.SSLError) or any(marker in str(err) for marker in _SSL_TROUBLE_MARKERS)
+        for err in chain if err is not None
+    ):
         return ""
     return (
         " This looks like a TLS handshake failure rather than a Codex outage: some networks reject"
         " the larger TLS 1.3 ClientHello that OpenSSL 3.5+ sends by default (post-quantum hybrid"
-        " groups). As a workaround, point OPENSSL_CONF at a config restricting Groups to classic"
-        " curves (x25519:secp256r1:secp384r1:x448) — see #106384 for details."
+        " groups). Workaround: point OPENSSL_CONF at a config restricting Groups to classic curves"
+        " (x25519:secp256r1:secp384r1:x448), or test with TLS 1.2 — see the Codex note in"
+        " https://hermes-agent.nousresearch.com/docs/integrations/providers"
     )
 
 
