@@ -2962,7 +2962,6 @@ export const ar = defineLocale({
     resumeStrandedBody:
       'فشل الاتصال بهذه الجلسة وتوقفت إعادة المحاولة التلقائية. تأكد من تشغيل البوابة، ثم حاول مجددا.',
     resumeRetry: 'إعادة المحاولة',
-    resumeStartNewSession: 'بدء جلسة جديدة',
     nothingToBranch: 'لا يوجد ما يمكن تفريعه',
     branchNeedsChat: 'يحتاج التفريع إلى محادثة',
     sessionBusy: 'الجلسة مشغولة',

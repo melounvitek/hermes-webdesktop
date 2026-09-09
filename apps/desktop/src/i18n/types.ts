@@ -3287,8 +3287,6 @@ export interface Translations {
     resumeStrandedTitle: string
     resumeStrandedBody: string
     resumeRetry: string
-    /** Same escape as errorStartNewSession for the full-window stranded overlay (#106217). */
-    resumeStartNewSession: string
     nothingToBranch: string
     branchNeedsChat: string
     sessionBusy: string

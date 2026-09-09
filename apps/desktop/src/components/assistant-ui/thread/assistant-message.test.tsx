@@ -18,14 +18,10 @@ import { Thread } from '.'
 
 const requestFreshSession = vi.hoisted(() => vi.fn())
 
-vi.mock('@/store/profile', async importOriginal => {
-  const actual = await importOriginal<typeof import('@/store/profile')>()
-
-  return {
-    ...actual,
-    requestFreshSession: () => requestFreshSession()
-  }
-})
+vi.mock('@/store/profile', async importOriginal => ({
+  ...(await importOriginal<Record<string, unknown>>()),
+  requestFreshSession: () => requestFreshSession()
+}))
 
 // Timeline timestamps render only when `display.timestamps` is enabled.
 $displayTimestamps.set(true)
@@ -98,7 +94,8 @@ function ownershipRefusalMessage(): ThreadMessage {
       unstable_annotations: [],
       unstable_data: [],
       steps: [],
-      custom: {}
+      // What submit.ts stamps on a 4090 / SESSION_NOT_OWNED refusal.
+      custom: { errorSurface: { layer: 'gateway', code: 'SESSION_NOT_OWNED', retryable: false } }
     }
   } as unknown as ThreadMessage
 }

@@ -3919,7 +3919,6 @@ export const zh: Translations = {
     resumeStrandedTitle: '无法加载此会话',
     resumeStrandedBody: '与此会话的连接失败，自动重试已停止。请确认网关正在运行，然后重试。',
     resumeRetry: '重试',
-    resumeStartNewSession: '开始新会话',
     nothingToBranch: '没有可分支的内容',
     branchNeedsChat: '分支前请先开始或恢复一个对话。',
     sessionBusy: '会话忙碌中',

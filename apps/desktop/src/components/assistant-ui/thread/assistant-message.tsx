@@ -43,7 +43,6 @@ import {
   XIcon
 } from '@/lib/icons'
 import { extractPreviewTargets } from '@/lib/preview-targets'
-import { isSessionOwnershipRefusal } from '@/lib/session-ownership-refusal'
 import { markAssistantIdSpoken } from '@/lib/spoken-reply'
 import { useEnterAnimation } from '@/lib/use-enter-animation'
 import { cn } from '@/lib/utils'
@@ -513,11 +512,12 @@ const ErrorRecoveryActions: FC = () => {
 
   // Retry = assistant-ui reload (same wiring as the footer's refresh action):
   // re-runs the failed turn's prompt in place. Suppressed when the classifier
-  // says the failure is deterministic (retrying reproduces it), and when the
-  // error is a live-owner exclusivity refusal (#106217) — Retry just hits the
-  // same 4090 again.
-  const ownershipRefusal = isSessionOwnershipRefusal(errorText)
-  const retryable = (!surface || surface.retryable) && !ownershipRefusal
+  // says the failure is deterministic (retrying reproduces it).
+  const retryable = !surface || surface.retryable
+
+  // Another surface holds this session's lease (#106217): Retry would hit the
+  // same refusal, so the way out is a fresh session on this surface.
+  const ownershipRefusal = surface?.code === 'SESSION_NOT_OWNED'
 
   // Switch Provider deep-links Settings → Models for the layers where the fix
   // is provider/endpoint/auth config, not a retry.

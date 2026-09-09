@@ -3222,7 +3222,6 @@ export const zhHant = defineLocale({
     resumeStrandedTitle: '無法載入此工作階段',
     resumeStrandedBody: '與此工作階段的連線失敗，自動重試已停止。請確認閘道正在執行，然後重試。',
     resumeRetry: '重試',
-    resumeStartNewSession: '開始新工作階段',
     nothingToBranch: '沒有可分支的內容',
     branchNeedsChat: '分支前請先開始或繼續一個聊天。',
     sessionBusy: '工作階段忙碌中',
