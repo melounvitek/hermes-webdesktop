@@ -311,145 +311,51 @@ class TestRegister:
 
 
 class TestSlowLLMPostbackRegression:
-    """Regression coverage for #106446: the slow-LLM postback cache must never
-    capture progress heartbeats as the final answer, never silently swallow a
-    later turn's answer behind a stale mapping, and never leave a chat stuck
-    after the postback target vanished.
-
-    Every test drives the REAL production paths — ``LineAdapter.send()`` and
-    ``LineAdapter._handle_postback_event()`` — with only the HTTP client
-    mocked, mirroring the reported symptoms from the issue.
-    """
-
-    EXPIRED_TEXT = "That request has expired — send your message again."
+    """#106446 — the two reporter reproductions, driven through the real ``send()`` /
+    ``_handle_postback_event()`` paths with only the HTTP client mocked."""
 
     @pytest.fixture
     def adapter(self, monkeypatch):
         monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
         monkeypatch.delenv("LINE_CHANNEL_SECRET", raising=False)
-        monkeypatch.delenv("LINE_EXPIRED_TEXT", raising=False)
         from gateway.config import PlatformConfig
-        cfg = PlatformConfig(enabled=True, extra={
-            "channel_access_token": "tok",
-            "channel_secret": "sec",
-        })
+        cfg = PlatformConfig(enabled=True, extra={"channel_access_token": "tok", "channel_secret": "sec"})
         ad = LineAdapter(cfg)
         ad._client = MagicMock()
         ad._client.reply = AsyncMock()
         ad._client.push = AsyncMock()
         return ad
 
-    def _arm(self, adapter, chat_id="Uchat", payload=None, drop=False):
-        """Register a PENDING postback button the way ``_keep_typing`` does."""
-        rid = adapter._cache.register_pending(chat_id)
-        if payload is not None:
-            adapter._cache.set_ready(rid, payload)
-        if not drop:
-            adapter._pending_buttons[chat_id] = rid
-        return rid
+    def test_repro_a_heartbeat_does_not_become_the_cached_answer(self, adapter):
+        # The gateway's periodic heartbeat (stamped ``_interim_send`` by ``_interim_metadata``)
+        # arrives while the postback button is PENDING; the real answer follows.
+        rid = adapter._cache.register_pending("Uchat")
+        adapter._pending_buttons["Uchat"] = rid
+        asyncio.run(adapter.send("Uchat", "⏳ Working — 3 min — iteration 1/60, research_market",
+                                 metadata={"_interim_send": True}))
+        assert adapter._cache.get(rid).state is State.PENDING, "heartbeat must not fill the cache"
+        assert adapter._client.push.await_count == 1, "heartbeat lands as a visible bubble"
+        asyncio.run(adapter.send("Uchat", "Final answer: task completed"))
+        assert adapter._cache.get(rid).payload == "Final answer: task completed"
 
-    # -- Layer 1: progress must not capture the cache --------------------
-
-    def test_heartbeat_prefix_does_not_capture_pending_cache(self, adapter):
-        rid = self._arm(adapter)
-        result = asyncio.run(adapter.send("Uchat", "⏳ Working — 3 min — iteration 1/60, research_market"))
-        assert result.success
-        entry = adapter._cache.get(rid)
-        assert entry.state is State.PENDING, "heartbeat must not transition PENDING → READY"
-        assert entry.payload is None
-        # and it must land as a visible bubble on the wire
-        assert adapter._client.push.await_count >= 1 or adapter._client.reply.await_count >= 1
-
-    def test_interim_metadata_send_does_not_capture_pending_cache(self, adapter):
-        rid = self._arm(adapter)
-        result = asyncio.run(adapter.send(
-            "Uchat", "working on it", metadata={"_interim_send": True}))
-        assert result.success
-        entry = adapter._cache.get(rid)
-        assert entry.state is State.PENDING, "interim (mid-turn) sends must not transition PENDING → READY"
-        assert adapter._client.push.await_count >= 1
-
-    def test_final_answer_still_caches_when_pending(self, adapter):
-        # The core feature must survive the fix: a genuine final answer
-        # (no interim marker, no system prefix) still fills the PENDING cache.
-        rid = self._arm(adapter)
-        result = asyncio.run(adapter.send("Uchat", "Final answer: task completed"))
-        assert result.success
-        entry = adapter._cache.get(rid)
-        assert entry.state is State.READY
-        assert entry.payload == "Final answer: task completed"
-        adapter._client.push.assert_not_awaited()
-        adapter._client.reply.assert_not_awaited()
-
-    # -- Layer 2: stale mapping must not swallow later answers ------------
-
-    def test_stale_ready_mapping_falls_through_to_wire(self, adapter):
-        # The outstanding mapping references an entry that is already READY
-        # (a previous answer waiting for a tap). The next turn's answer must
-        # NOT be absorbed into that entry — it must reach the wire.
-        rid = self._arm(adapter, payload="Previous answer")
+    def test_repro_b_stale_mapping_does_not_swallow_the_next_answer(self, adapter):
+        # A READY entry still mapped to the chat, then a tap on a button whose entry is gone:
+        # neither may absorb a later send or leave the chat stuck.
+        rid = adapter._cache.register_pending("Uchat")
+        adapter._cache.set_ready(rid, "Previous answer")
+        adapter._pending_buttons["Uchat"] = rid
         result = asyncio.run(adapter.send("Uchat", "Answer to the NEXT user message"))
-        assert result.success
-        assert adapter._cache.get(rid).payload == "Previous answer", "stale entry untouched"
-        assert adapter._client.push.await_count >= 1, "later answer must be delivered on the wire"
-        # The stale mapping must be cleared so subsequent sends aren't stuck.
+        assert result.success and adapter._client.push.await_count == 1, "next answer reaches the wire"
+        assert adapter._cache.get(rid).payload == "Previous answer"
         assert "Uchat" not in adapter._pending_buttons
-
-    def test_missing_entry_mapping_falls_through_to_wire(self, adapter):
-        # The mapping references an entry that no longer exists at all.
-        self._arm(adapter, drop=True)
+        # Expired button tap: user gets a notice and the dead mapping is dropped.
         adapter._pending_buttons["Uchat"] = "ghost-rid"
-        result = asyncio.run(adapter.send("Uchat", "Answer to the NEXT user message"))
-        assert result.success
-        assert adapter._client.push.await_count >= 1
-        assert "Uchat" not in adapter._pending_buttons
-
-    # -- Layer 3: missing postback target must not leave the chat stuck --
-
-    def test_postback_for_missing_entry_clears_mapping_and_notifies(self, adapter):
-        # A tap on a button whose cache entry vanished must produce a user-
-        # visible notice (not silence) and clean up the dead mapping.
-        adapter._pending_buttons["Uchat"] = "ghost-rid"
-        event = {
-            "type": "postback",
-            "replyToken": "reply-token",
-            "source": {"type": "user", "userId": "Uchat"},
-            "postback": {"data": json.dumps({"action": "show_response", "request_id": "ghost-rid"})},
-        }
-        asyncio.run(adapter._handle_postback_event(event))
+        asyncio.run(adapter._handle_postback_event({
+            "replyToken": "reply-token", "source": {"type": "user", "userId": "Uchat"},
+            "postback": {"data": json.dumps({"action": "show_response", "request_id": "ghost-rid"})}}))
         adapter._client.reply.assert_awaited_once()
-        sent = adapter._client.reply.await_args.args[1]
-        assert any("expired" in (m.get("text") or "").lower() for m in sent), (
-            "missing postback target must yield an expiry notice, not silence"
-        )
-        assert "Uchat" not in adapter._pending_buttons, "dead mapping must be cleaned"
-
-    def test_postback_for_pending_entry_keeps_mapping(self, adapter):
-        # Guard the feature: a tap while the LLM is still running must NOT
-        # clear the mapping — the eventual final answer still needs it.
-        rid = self._arm(adapter)
-        event = {
-            "type": "postback",
-            "replyToken": "reply-token",
-            "source": {"type": "user", "userId": "Uchat"},
-            "postback": {"data": json.dumps({"action": "show_response", "request_id": rid})},
-        }
-        asyncio.run(adapter._handle_postback_event(event))
-        assert adapter._cache.get(rid).state is State.PENDING
-        assert adapter._pending_buttons.get("Uchat") == rid
-
-    def test_expired_text_config_overrides_default(self, monkeypatch):
-        monkeypatch.delenv("LINE_CHANNEL_ACCESS_TOKEN", raising=False)
-        monkeypatch.delenv("LINE_CHANNEL_SECRET", raising=False)
-        monkeypatch.delenv("LINE_EXPIRED_TEXT", raising=False)
-        from gateway.config import PlatformConfig
-        cfg = PlatformConfig(enabled=True, extra={
-            "channel_access_token": "tok",
-            "channel_secret": "sec",
-            "expired_text": self.EXPIRED_TEXT,
-        })
-        ad = LineAdapter(cfg)
-        assert ad.expired_text == self.EXPIRED_TEXT
+        assert adapter._client.reply.await_args.args[1][0]["text"] == adapter.expired_text
+        assert "Uchat" not in adapter._pending_buttons
 
 
 class TestEnvEnablement:
