@@ -180,6 +180,17 @@ class TestSyncTurnTruncation:
         assert len(sent[1]["content"]) <= mem0_plugin._SYNC_MSG_MAX_CHARS and sent[1]["content"].endswith(".")
         assert provider._consecutive_failures == 0
 
+    def test_sync_max_chars_config_raises_cap(self, monkeypatch, tmp_path):
+        """8k-token embedders should not be stuck at the 512-token default (#106235)."""
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        monkeypatch.setenv("MEM0_API_KEY", "test-key")
+        (tmp_path / "mem0.json").write_text('{"sync_max_chars": 3000}')
+        backend = FakeBackend()
+        provider = self._make_provider(monkeypatch, backend)
+        provider.sync_turn("hi", "Long answer. " * 200, session_id="s1")  # 2600 chars
+        provider._sync_thread.join(timeout=2)
+        assert backend.captured[0][1][1]["content"] == "Long answer. " * 200
+
 
 class TestMem0Prefetch:
     """prefetch() must recall on the CURRENT question, synchronously.
