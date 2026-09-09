@@ -334,7 +334,19 @@ async def _call_tool_racing_stdio_death(server, server_name: str, tool_name: str
                 f"MCP stdio subprocess for '{server_name}' exited mid-call",
                 in_flight=True,
             )
-        return await rpc_task
+        try:
+            return await rpc_task
+        except Exception as exc:
+            # The SDK usually sees the closed pipe before the 250 ms watcher poll does. On a stdio
+            # server a transport-closure error after dispatch is the same ambiguous mid-call death;
+            # it must not fall through to the session-expired recoverer, which replays the call.
+            _is_http = getattr(server, "_is_http", None)
+            if callable(_is_http) and _is_http() is False and _is_session_expired_error(exc):
+                raise _StdioChildExited(
+                    f"MCP stdio subprocess for '{server_name}' closed its transport mid-call",
+                    in_flight=True,
+                ) from exc
+            raise
     finally:
         watch_task.cancel()
         if not rpc_task.done():

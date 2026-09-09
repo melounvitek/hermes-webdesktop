@@ -182,51 +182,51 @@ def test_midcall_child_exit_reconnects_without_replay(monkeypatch, tmp_path):
         _cleanup(mcp_tool, "srv-midcall")
 
 
-def test_precall_respawn_retry_dying_midcall_is_uncertain_without_replay(monkeypatch, tmp_path):
-    """A safe pre-call retry becomes uncertain if its replacement dies after dispatch."""
+def test_sdk_first_transport_close_midcall_is_uncertain_without_replay(monkeypatch, tmp_path):
+    """The SDK usually notices the closed pipe before the 250 ms child watcher does and raises a
+    transport-closure error. On a stdio server that is the same ambiguous mid-call death: it must
+    surface as uncertain, never reach the session-expired recoverer, which would replay the call."""
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    anyio = pytest.importorskip("anyio")
     from tools import mcp_tool
     from tools.mcp_tool_handlers import _make_tool_handler
 
-    alive = {"v": False}
     effects = {"n": 0}
 
-    async def _never_dispatched(*a, **kw):
-        raise AssertionError("the original dead child must not receive the call")
-
-    async def _effect_then_die(*a, **kw):
+    async def _effect_then_pipe_closes(*a, **kw):
         effects["n"] += 1
-        alive["v"] = False
-        await asyncio.sleep(30)
+        raise anyio.ClosedResourceError
+
+    async def _good_call(*a, **kw):
+        effects["n"] += 1
+        return _success_result()
 
     async def _watch_children():
-        while alive["v"]:
-            await asyncio.sleep(0.05)
+        await asyncio.sleep(30)  # the watcher loses the race
 
     def _respawn(server):
-        alive["v"] = True
         new_session = MagicMock()
-        new_session.call_tool = _effect_then_die
+        new_session.call_tool = _good_call
         server.session = new_session
         server._ready.set()
 
     server = _install_stub_server(
-        mcp_tool, "srv-retry-midcall", _never_dispatched,
-        children_dead=lambda: not alive["v"],
+        mcp_tool, "srv-sdk-first", _effect_then_pipe_closes,
+        children_dead=lambda: False,
         on_reconnect=_respawn,
     )
     server._watch_stdio_children = _watch_children
+    server._is_http = lambda: False
     _mcp_loop._ensure_mcp_loop()
     try:
-        handler = _make_tool_handler("srv-retry-midcall", "tool1", 10.0)
+        handler = _make_tool_handler("srv-sdk-first", "tool1", 10.0)
         parsed = json.loads(handler({}))
         assert parsed["outcome_uncertain"] is True, parsed
-        assert "may have completed" in parsed["error"], parsed
         assert "did not replay" in parsed["error"], parsed
         assert server._reconnect_event.set_calls == 1
-        assert effects["n"] == 1, "the uncertain retry must not be invoked a third time"
+        assert effects["n"] == 1, "the session-expired recoverer must not replay an in-flight stdio call"
     finally:
-        _cleanup(mcp_tool, "srv-retry-midcall")
+        _cleanup(mcp_tool, "srv-sdk-first")
 
 
 def test_dead_child_never_returning_is_not_reported_as_a_timeout(
