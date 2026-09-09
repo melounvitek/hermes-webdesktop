@@ -31,7 +31,7 @@ import {
   testMcpServer
 } from '@/hermes'
 import { type Translations, useI18n } from '@/i18n'
-import { createSerialTask, startCompletionPoll } from '@/lib/completion-poll'
+import { startCompletionPoll } from '@/lib/completion-poll'
 import { compactNumber } from '@/lib/format'
 import { brandFor } from '@/lib/mcp-brands'
 import { estimateServerTokens, serverUsageCount } from '@/lib/mcp-cost'
@@ -1726,31 +1726,26 @@ function McpLogs({
 }) {
   const [lines, setLines] = useState<null | string[]>(null)
   // A profile switch reroutes getLogs to the new backend; keying the effect on
-  // the active profile tears down the old poll (its `cancelled` flag blocks a
-  // late setLines) so profile A's logs never flash in B.
+  // the active profile tears down the old poll (stop suppresses a late
+  // publish) so profile A's logs never flash in B.
   const activeProfile = useStore($activeGatewayProfile)
-  const readLogs = useMemo(() => createSerialTask(getLogs), [])
 
   useEffect(() => {
     setLines(null)
 
     return startCompletionPoll({
       delayMs: LOG_POLL_MS,
-      poll: async signal => {
+      poll: async () => {
         const response =
           source === 'stdio'
-            ? await readLogs({ file: 'mcp', lines: 500 }, signal)
-            : await readLogs({ file: 'agent', lines: 300, search: server ?? 'mcp' }, signal)
-
-        if (signal.aborted) {
-          throw new DOMException('Polling stopped', 'AbortError')
-        }
+            ? await getLogs({ file: 'mcp', lines: 500 })
+            : await getLogs({ file: 'agent', lines: 300, search: server ?? 'mcp' })
 
         return source === 'stdio' && server ? filterStdioSections(response.lines, server) : response.lines
       },
       publish: setLines
     })
-  }, [server, source, activeProfile, readLogs])
+  }, [server, source, activeProfile])
 
   return <LogTail emptyLabel={emptyLabel} lines={lines} />
 }

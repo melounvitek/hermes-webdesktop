@@ -1,50 +1,33 @@
 interface CompletionPollOptions<T> {
   delayMs: number
-  poll: (signal: AbortSignal) => Promise<T>
+  poll: () => Promise<T>
   publish: (value: T) => void
 }
 
-/** Serialize a producer across effect lifecycles without publishing stale work. */
-export function createSerialTask<Args, Result>(
-  task: (args: Args) => Promise<Result>
-): (args: Args, signal: AbortSignal) => Promise<Result> {
-  let tail = Promise.resolve()
-
-  return (args, signal) => {
-    const result = tail.then(() => {
-      if (signal.aborted) {
-        throw new DOMException('Task stopped', 'AbortError')
-      }
-
-      return task(args)
-    })
-
-    tail = result.then(
-      () => undefined,
-      () => undefined
-    )
-
-    return result
-  }
-}
-
-/** Poll immediately, then wait one full cadence after each request settles. */
+/**
+ * Poll immediately, then wait one full cadence AFTER each request settles.
+ *
+ * `setInterval` fires on the wall clock, so a request slower than the cadence
+ * overlaps the next one and a stalled backend piles up concurrent requests.
+ * Rescheduling from settlement keeps the poll single-flight. The returned stop
+ * function drops the pending timer and suppresses a late publish.
+ */
 export function startCompletionPoll<T>({ delayMs, poll, publish }: CompletionPollOptions<T>): () => void {
-  const controller = new AbortController()
+  let stopped = false
   let timer: number | undefined
 
   const run = async () => {
     try {
-      const value = await poll(controller.signal)
+      const value = await poll()
 
-      if (!controller.signal.aborted) {
+      if (!stopped) {
         publish(value)
       }
     } catch {
       // A transient producer failure keeps the previous value visible.
     }
 
-    if (!controller.signal.aborted) {
+    if (!stopped) {
       timer = window.setTimeout(() => void run(), delayMs)
     }
   }
@@ -52,10 +35,7 @@ export function startCompletionPoll<T>({ delayMs, poll, publish }: CompletionPol
   void run()
 
   return () => {
-    controller.abort()
-
-    if (timer !== undefined) {
-      window.clearTimeout(timer)
-    }
+    stopped = true
+    window.clearTimeout(timer)
   }
 }
