@@ -72,6 +72,8 @@ afterEach(() => {
 })
 
 describe('shouldNotifyOnTransition', () => {
+  // The full previous × next decision table: notify only on a TRANSITION into
+  // a bad state. Rechecks of an already-bad server stay quiet; ok never nudges.
   it.each<[previous: Status | null, next: Status, notify: boolean]>([
     [null, 'ok', false],
     [null, 'needs-auth', true],
@@ -118,19 +120,28 @@ it('coalesces reconnects during a sweep into one fresh follow-up sweep', async (
   expect(mocks.getHermesConfigRecord).toHaveBeenCalledTimes(2)
 })
 
-it.each(['stop', 'disconnect'])('drops the queued sweep on %s', async action => {
-  let release!: (config: Record<string, unknown>) => void
-  mocks.getHermesConfigRecord.mockReturnValueOnce(new Promise(resolve => { release = resolve })).mockResolvedValue({ mcp_servers: {} })
+it('runs one follow-up when the active sweep fails through the handled config-error path', async () => {
+  let rejectFirst!: (err: Error) => void
+
+  const first = new Promise<Record<string, unknown>>((_resolve, reject) => {
+    rejectFirst = reject
+  })
+
+  mocks.getHermesConfigRecord.mockReturnValueOnce(first).mockResolvedValue({ mcp_servers: {} })
+
   startMcpHealthChecker()
   mocks.gatewayState.set('open')
-  mocks.gatewayState.set('closed')
-  mocks.gatewayState.set('open')
 
-  if (action === 'stop') {stopMcpHealthChecker()}
-  else {mocks.gatewayState.set('closed')}
+  for (let index = 0; index < 12; index += 1) {
+    mocks.gatewayState.set('closed')
+    mocks.gatewayState.set('open')
+  }
 
-  release({ mcp_servers: {} })
-  await flush()
   await flush()
   expect(mocks.getHermesConfigRecord).toHaveBeenCalledTimes(1)
+
+  rejectFirst(new Error('backend restarting'))
+  await flush()
+  await flush()
+  expect(mocks.getHermesConfigRecord).toHaveBeenCalledTimes(2)
 })

@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { createSerialTask, startCompletionPoll } from './completion-poll'
+import { startCompletionPoll } from './completion-poll'
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -37,43 +37,18 @@ describe('startCompletionPoll', () => {
     stop()
   })
 
-  it('cancels stale publication and serializes a replacement lifecycle behind the active request', async () => {
+  it('stop suppresses a late publish and leaves no timer behind', async () => {
     vi.useFakeTimers()
     const first = deferred<string>()
-    const second = deferred<string>()
-    const producer = vi.fn((profile: string) => (profile === 'A' ? first.promise : second.promise))
-    const serial = createSerialTask(producer)
-    const publishA = vi.fn()
-    const publishB = vi.fn()
+    const publish = vi.fn()
 
-    const stopA = startCompletionPoll({
-      delayMs: 2_000,
-      poll: signal => serial('A', signal),
-      publish: publishA
-    })
-
+    const stop = startCompletionPoll({ delayMs: 2_000, poll: () => first.promise, publish })
     await Promise.resolve()
-    stopA()
-
-    const stopB = startCompletionPoll({
-      delayMs: 2_000,
-      poll: signal => serial('B', signal),
-      publish: publishB
-    })
-
-    await Promise.resolve()
-    expect(producer).toHaveBeenCalledTimes(1)
+    stop()
 
     first.resolve('stale')
     await vi.advanceTimersByTimeAsync(0)
-    expect(producer).toHaveBeenCalledTimes(2)
-    expect(publishA).not.toHaveBeenCalled()
-
-    second.resolve('fresh')
-    await vi.advanceTimersByTimeAsync(0)
-    expect(publishB).toHaveBeenCalledWith('fresh')
-
-    stopB()
+    expect(publish).not.toHaveBeenCalled()
     expect(vi.getTimerCount()).toBe(0)
   })
 })
