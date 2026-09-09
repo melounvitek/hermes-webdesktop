@@ -232,6 +232,11 @@ export function PluginsSettings() {
 
   return (
     <SettingsContent>
+      <div className="mb-4">
+        <Button onClick={() => openPluginInstallRequest({ repo: '' })} size="sm" type="button" variant="secondary">
+          {p.installModal.installFromGit}
+        </Button>
+      </div>
       <SettingsSection icon={Monitor} meta={p.count(rows.length)} title={p.title}>
         <p className="mb-2 text-[length:var(--conversation-caption-font-size)] text-(--ui-text-tertiary)">{p.blurb}</p>
 
