@@ -134,11 +134,7 @@ class _ManagedFalSyncClient:
         if has_idempotency_key:
             response = self._http_client.request("POST", url, **request_kwargs)
         else:
-            retry_request = self._maybe_retry_request
-            if retry_request is None:  # guarded in __init__; keeps static analysis honest
-                raise RuntimeError("fal_client.client request helpers are required")
-            response = retry_request(
-                self._http_client, "POST", url, **request_kwargs)
+            response = self._maybe_retry_request(self._http_client, "POST", url, **request_kwargs)
         self._raise_for_status(response)
         data = response.json()
         return self._request_handle_class(

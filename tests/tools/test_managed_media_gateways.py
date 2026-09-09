@@ -74,9 +74,6 @@ def _install_fake_tools_package():
             get_session_info=lambda: {},
         )
     )
-    lazy_deps_module = types.ModuleType("tools.lazy_deps")
-    setattr(lazy_deps_module, "ensure", lambda *args, **kwargs: None)
-    sys.modules["tools.lazy_deps"] = lazy_deps_module
     sys.modules["tools.managed_tool_gateway"] = _load_tool_module(
         "tools.managed_tool_gateway",
         "managed_tool_gateway.py",

@@ -350,6 +350,12 @@ class TestManagedFalSyncClientSubmit:
         )
         client._maybe_retry_request.assert_not_called()
 
+        # Negative arm: an unkeyed submit keeps the SDK's retry ladder (transport errors, 429, ingress 5xx).
+        client._maybe_retry_request = MagicMock(return_value=response)
+        client.submit("my-app", {"prompt": "hello"})
+        client._maybe_retry_request.assert_called_once()
+        assert http_client.request.call_count == 1
+
     def test_submit_with_path(self):
         client, _, _ = self._make_client()
         response = MagicMock()
