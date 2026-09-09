@@ -46,8 +46,12 @@ def _extract_http_status(exc: BaseException) -> Optional[int]:
     return status if isinstance(status, int) else None
 
 
-def _managed_fal_billing_error(exc: BaseException) -> Optional[Dict[str, str]]:
-    """Return normalized Nous billing details from a managed-gateway error."""
+def _managed_fal_billing_error(exc: BaseException, what: str) -> Optional[str]:
+    """Human-readable tail for a Nous managed-gateway ``BILLING_ERROR`` response, else None.
+
+    ``what`` names the rejected thing ("model", "endpoint"); the wording is shared by the image
+    and video callers so the two surfaces never drift.
+    """
     response = getattr(exc, "response", None)
     if response is None:
         return None
@@ -58,16 +62,16 @@ def _managed_fal_billing_error(exc: BaseException) -> Optional[Dict[str, str]]:
     error = payload.get("error") if isinstance(payload, dict) else None
     if not isinstance(error, dict) or error.get("code") != "BILLING_ERROR":
         return None
-    raw_details = error.get("details")
-    details = raw_details if isinstance(raw_details, dict) else {}
-    raw_upstream = details.get("upstreamPayload")
-    upstream = raw_upstream if isinstance(raw_upstream, dict) else {}
-    return {
-        "message": str(error.get("message") or "Charge authorization failed"),
-        "error_code": str(error.get("code") or "BILLING_ERROR"),
-        "code": str(upstream.get("code") or details.get("chargeIntentErrorCode") or "billing_error"),
-        "detail": str(upstream.get("error") or "Nous Portal rejected the charge authorization"),
-    }
+    details = error.get("details") if isinstance(error.get("details"), dict) else {}
+    upstream = details.get("upstreamPayload") if isinstance(details.get("upstreamPayload"), dict) else {}
+    code = upstream.get("code") or details.get("chargeIntentErrorCode") or "billing_error"
+    detail = upstream.get("error") or "Nous Portal rejected the charge authorization"
+    return (
+        f"{error.get('message') or 'Charge authorization failed'} (BILLING_ERROR; {code}: {detail}). "
+        "This is a Nous Portal billing configuration issue, not a missing local API key. "
+        f"The managed route cannot run this {what} until Nous enables its billing meter; "
+        "a direct FAL_KEY is an optional bypass."
+    )
 
 
 def _require(value: Any, what: str) -> Any:
