@@ -236,6 +236,12 @@ def _handle_stdio_child_exited_and_retry(server_name: str, exc: Exception, retry
         # Died again right after respawn: broken server; run()'s budget takes it to the park.
         logger.warning("MCP server '%s': %s stdio subprocess exited again right after respawn (%s); not retrying "
                        "further.", server_name, op_description, retry_exc)
+        if retry_exc.in_flight:
+            return _strike(
+                server_name,
+                _STDIO_OUTCOME_UNCERTAIN_MSG.format(s=server_name),
+                outcome_uncertain=True,
+            )
         return _strike(server_name, _STDIO_DIED_AGAIN_MSG.format(s=server_name))
     except Exception as retry_exc:
         logger.warning("MCP %s/%s retry after stdio respawn failed: %s", server_name, op_description, retry_exc)

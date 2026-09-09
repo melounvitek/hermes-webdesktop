@@ -182,6 +182,53 @@ def test_midcall_child_exit_reconnects_without_replay(monkeypatch, tmp_path):
         _cleanup(mcp_tool, "srv-midcall")
 
 
+def test_precall_respawn_retry_dying_midcall_is_uncertain_without_replay(monkeypatch, tmp_path):
+    """A safe pre-call retry becomes uncertain if its replacement dies after dispatch."""
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    from tools import mcp_tool
+    from tools.mcp_tool_handlers import _make_tool_handler
+
+    alive = {"v": False}
+    effects = {"n": 0}
+
+    async def _never_dispatched(*a, **kw):
+        raise AssertionError("the original dead child must not receive the call")
+
+    async def _effect_then_die(*a, **kw):
+        effects["n"] += 1
+        alive["v"] = False
+        await asyncio.sleep(30)
+
+    async def _watch_children():
+        while alive["v"]:
+            await asyncio.sleep(0.05)
+
+    def _respawn(server):
+        alive["v"] = True
+        new_session = MagicMock()
+        new_session.call_tool = _effect_then_die
+        server.session = new_session
+        server._ready.set()
+
+    server = _install_stub_server(
+        mcp_tool, "srv-retry-midcall", _never_dispatched,
+        children_dead=lambda: not alive["v"],
+        on_reconnect=_respawn,
+    )
+    server._watch_stdio_children = _watch_children
+    _mcp_loop._ensure_mcp_loop()
+    try:
+        handler = _make_tool_handler("srv-retry-midcall", "tool1", 10.0)
+        parsed = json.loads(handler({}))
+        assert parsed["outcome_uncertain"] is True, parsed
+        assert "may have completed" in parsed["error"], parsed
+        assert "did not replay" in parsed["error"], parsed
+        assert server._reconnect_event.set_calls == 1
+        assert effects["n"] == 1, "the uncertain retry must not be invoked a third time"
+    finally:
+        _cleanup(mcp_tool, "srv-retry-midcall")
+
+
 def test_dead_child_never_returning_is_not_reported_as_a_timeout(
     monkeypatch, tmp_path,
 ):
