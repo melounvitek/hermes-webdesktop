@@ -15,8 +15,12 @@ meta counts and exit 0 so the docs build stays green. The page renders a
 
 Outputs (both under website/static/api/, CDN-served at /docs/api/):
 
-- ``plugins.json``       — list of catalog entries for the page
-- ``plugins-meta.json``  — counts by tier + generatedAt + removedCount
+- ``plugins.json``        — list of catalog entries for the page (camelCase)
+- ``plugins-meta.json``   — counts by tier + generatedAt + removedCount
+- ``plugin-catalog.json`` — ``{"entries": [raw YAML mappings], "removed": [...]}`` in the loader's own
+  schema; installed Hermes clients fetch this for live catalog refresh
+  (``hermes_cli.plugin_catalog.LIVE_CATALOG_URL``) so new entries and removals reach them without
+  updating. Emitting it here means the docs deploy IS the publish step — no second pipeline.
 """
 
 from __future__ import annotations
@@ -123,20 +127,39 @@ def load_catalog_entries(catalog_dir: Path) -> list[dict]:
     return entries
 
 
-def count_removed(catalog_dir: Path) -> int:
-    """Number of entries in plugin-catalog/removed.yaml (``removed:`` list)."""
+def load_removed(catalog_dir: Path) -> list[dict]:
+    """``removed:`` list from plugin-catalog/removed.yaml (mappings only)."""
     removed_path = catalog_dir / "removed.yaml"
     if not removed_path.is_file():
-        return 0
+        return []
     try:
         raw = yaml.safe_load(removed_path.read_text(encoding="utf-8"))
     except (yaml.YAMLError, OSError) as e:
         _log(f"could not read removed.yaml: {e}")
-        return 0
-    if not isinstance(raw, dict):
-        return 0
-    removed = raw.get("removed")
-    return len(removed) if isinstance(removed, list) else 0
+        return []
+    removed = raw.get("removed") if isinstance(raw, dict) else None
+    return [r for r in removed if isinstance(r, dict)] if isinstance(removed, list) else []
+
+
+def count_removed(catalog_dir: Path) -> int:
+    return len(load_removed(catalog_dir))
+
+
+def load_raw_entries(catalog_dir: Path) -> list[dict]:
+    """Raw entry mappings (loader schema, snake_case) for ``plugin-catalog.json``; the client re-validates."""
+    entries: list[dict] = []
+    if not catalog_dir.is_dir():
+        return entries
+    for path in sorted(catalog_dir.glob("*.yaml")):
+        if path.name == "removed.yaml":
+            continue
+        try:
+            raw = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (yaml.YAMLError, OSError):
+            continue
+        if isinstance(raw, dict) and raw.get("name") and raw.get("repo") and raw.get("sha"):
+            entries.append(raw)
+    return entries
 
 
 def main(catalog_dir: Path = DEFAULT_CATALOG_DIR, output_dir: Path = DEFAULT_OUTPUT_DIR) -> int:
@@ -162,6 +185,9 @@ def main(catalog_dir: Path = DEFAULT_CATALOG_DIR, output_dir: Path = DEFAULT_OUT
         json.dump(entries, f, separators=(",", ":"), ensure_ascii=False)
     with open(output_dir / "plugins-meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, separators=(",", ":"), ensure_ascii=False)
+    with open(output_dir / "plugin-catalog.json", "w", encoding="utf-8") as f:
+        json.dump({"generated_at": meta["generatedAt"], "entries": load_raw_entries(catalog_dir),
+                   "removed": load_removed(catalog_dir)}, f, separators=(",", ":"), ensure_ascii=False)
 
     print(
         f"Extracted {len(entries)} plugin catalog entries "

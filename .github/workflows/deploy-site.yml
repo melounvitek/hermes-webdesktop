@@ -9,6 +9,9 @@ on:
       - 'website/**'
       - 'skills/**'
       - 'optional-skills/**'
+      # Catalog entry/removal merges must republish /docs/api/plugin-catalog.json —
+      # installed clients fetch it for live catalog refresh.
+      - 'plugin-catalog/**'
       - '.github/workflows/deploy-site.yml'
   workflow_dispatch:
     inputs:

@@ -215,6 +215,11 @@ class RecordingContext:
     def register_cli_command(self, name, *args, **kwargs):
         recorded["commands"].append(str(name))
 
+    def get_config(self, key, default=None):
+        # Mirrors PluginContext.get_config with no config on disk: the DEFAULT, never None —
+        # plugins do `int(ctx.get_config("timeout", 180))` in register().
+        return default
+
     def __getattr__(self, _name):
         # Any other registration surface (platforms, providers, skills,
         # context engines, ...) is accepted as a no-op — the probe only

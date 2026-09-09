@@ -91,9 +91,18 @@ installs as `catalog:<tier>@<sha>` so you can see provenance at a glance.
 
 ### Names not in the catalog
 
-A bare name that isn't a catalog entry falls back to the
-[community plugin index](plugins.md) with a warning — those entries are
-indexed, not reviewed. Catalog names always win when both exist.
+A bare name that isn't a catalog entry is an error: there is no second,
+unreviewed name index. Install such plugins by `owner/repo` or Git URL instead
+(custom source, see below), or submit them to the catalog.
+
+### Live refresh
+
+The docs build publishes the catalog as one JSON document
+(`https://hermes-agent.nousresearch.com/docs/api/plugin-catalog.json`).
+`search`/`install`/`update` fetch it at most every six hours and cache it under
+`~/.hermes/cache/`, so new entries and removals reach installed clients without
+updating Hermes. Offline, the copy shipped with your checkout is used. Removals
+from the in-tree list and the live list are always both enforced.
 
 ### Custom git URLs are different
 

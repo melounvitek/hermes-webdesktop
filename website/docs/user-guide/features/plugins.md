@@ -341,7 +341,7 @@ Declarative plugins are symlinked with a `nix-managed-` prefix — they coexist 
 hermes plugins                               # unified interactive UI
 hermes plugins list                          # table: enabled / disabled / not enabled
 hermes plugins search <term>                 # search the Hermes plugin catalog
-hermes plugins install <name>                # install by index name (resolved to repo @ pinned ref)
+hermes plugins install <name>                # install a catalog entry (repo @ reviewed pinned SHA)
 hermes plugins install user/repo             # install from Git, then prompt Enable? [y/N]
 hermes plugins install user/repo --enable    # install AND enable (no prompt)
 hermes plugins install user/repo --no-enable # install but leave disabled (no prompt)
@@ -542,8 +542,8 @@ description: STT + streaming TTS + approval relay
 author: hyper
 version: 1.0.0
 plugins:
-  - name: hermes-media-studio            # bare community-index name…
-    ref: e8d59971d2b7901405b39dac7b03bdd616272d0d
+  - name: hermes-telegram-business       # bare plugin-catalog name…
+    ref: e905f3bc5eeaa5a9dab9bc5155601b3ebec75757
   - repo: owner/approval-relay           # …or explicit owner/repo (or git URL)
     ref: 8f3c2d1a9b4e5f6071829304a5b6c7d8e9f00112
     subdir: plugins/relay                # optional monorepo path

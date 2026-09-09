@@ -1,44 +1,39 @@
 """Plugin catalog — curated, Nous-approved Hermes plugins shipped with the repo.
 
-Mirrors the ``optional-mcps/`` MCP-catalog pattern (see
-:mod:`hermes_cli.mcp_catalog`): each catalog entry is a single YAML file under
-the in-tree ``plugin-catalog/`` directory, pinned to an exact 40-character
-commit SHA. Users discover entries via ``hermes plugins catalog`` /
-``hermes plugins search`` and install them with
-``hermes plugins install <name>``, which clones the pinned commit.
+Mirrors the ``optional-mcps/`` MCP-catalog pattern: one YAML file per entry under the in-tree
+``plugin-catalog/`` directory, pinned to an exact 40-character commit SHA. Presence in the directory IS
+the human-merged approval gate; SHA bumps are new, re-reviewed PRs; ``removed.yaml`` is the kill list
+(installs of a removed name/repo are refused with the recorded reason). Full policy:
+``plugin-catalog/README.md``.
 
-Catalog policy (see plugin-catalog/README.md for the full admission policy):
-- Entries are added only by merging a PR into hermes-agent — presence in the
-  ``plugin-catalog/`` directory is the human-merged approval gate.
-- Every entry pins an exact 40-hex commit SHA. SHA bumps are new PRs,
-  re-reviewed as diffs. The pinned release should be at least 2 weeks old at
-  pin time, mirroring the optional-mcps supply-chain rules.
-- ``plugin-catalog/removed.yaml`` is the blocklist: entries pulled from the
-  catalog for security or policy reasons are recorded there so installs of
-  the same name/repo are refused with the recorded reason.
+Live refresh: the docs build publishes the same data as ONE JSON document
+(``website/scripts/extract-plugins.py`` → ``/docs/api/plugin-catalog.json``, like the skills index), so
+an installed Hermes sees new entries and removals without updating. Any fetch failure falls back to the
+in-tree copy silently.
 """
 
 from __future__ import annotations
 
+import json
 import logging
-import os
 import re
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 import yaml
 
 logger = logging.getLogger(__name__)
 
 CATALOG_TIERS = ("official", "community")
+LIVE_CATALOG_URL = "https://hermes-agent.nousresearch.com/docs/api/plugin-catalog.json"
+LIVE_CATALOG_TTL_SECONDS = 6 * 60 * 60
+_REQUEST_TIMEOUT = 5.0
+_MAX_LIVE_BYTES = 2 * 1024 * 1024
 
 _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 _NAME_RE = re.compile(r"^[a-z0-9_-]{1,64}$")
-
-
-# ─── Data classes ────────────────────────────────────────────────────────────
 
 
 @dataclass
@@ -46,7 +41,7 @@ class RemovedEntry:
     name: str
     repo: str = ""
     reason: str = ""
-    date: str = ""            # ISO date string
+    date: str = ""
 
 
 @dataclass
@@ -61,354 +56,230 @@ class CatalogCapabilities:
 class PluginCatalogEntry:
     name: str                 # catalog key, [a-z0-9_-]{1,64}
     repo: str                 # https:// git URL
-    sha: str                  # 40-hex pinned commit — MANDATORY, validated
+    sha: str                  # 40-hex pinned commit — mandatory
     description: str
     maintainer: str
-    tier: str = "community"   # one of CATALOG_TIERS
-    requires_hermes: str = "" # e.g. ">=0.19" (optional)
-    subdir: str = ""          # optional path within the repo
+    tier: str = "community"
+    requires_hermes: str = ""
+    subdir: str = ""
     docs_url: str = ""
     platforms: List[str] = field(default_factory=list)  # empty = all OSes
     capabilities: CatalogCapabilities = field(default_factory=CatalogCapabilities)
 
+    @property
+    def install_identifier(self) -> str:
+        """``_install_plugin_core`` identifier (``repo#subdir`` for monorepo entries)."""
+        return f"{self.repo}#{self.subdir}" if self.subdir else self.repo
 
-# ─── Directory resolution ────────────────────────────────────────────────────
+    def to_dict(self) -> Dict[str, Any]:
+        caps = self.capabilities
+        return {
+            "name": self.name, "repo": self.repo, "sha": self.sha, "description": self.description,
+            "maintainer": self.maintainer, "tier": self.tier, "requires_hermes": self.requires_hermes,
+            "subdir": self.subdir, "docs_url": self.docs_url, "platforms": list(self.platforms),
+            "capabilities": {
+                "provides_tools": list(caps.provides_tools), "provides_hooks": list(caps.provides_hooks),
+                "provides_middleware": list(caps.provides_middleware), "requires_env": list(caps.requires_env),
+            },
+        }
 
 
 def get_catalog_dir() -> Path:
-    """Return the ``plugin-catalog/`` directory shipped with this checkout.
-
-    ``HERMES_PLUGIN_CATALOG_DIR`` overrides the location for tests only —
-    read via ``os.getenv`` at call time so monkeypatched values take effect.
-    """
-    override = os.getenv("HERMES_PLUGIN_CATALOG_DIR", "").strip()
-    if override:
-        return Path(override)
+    """The ``plugin-catalog/`` directory shipped with this checkout."""
     return Path(__file__).resolve().parent.parent / "plugin-catalog"
 
 
-# ─── Loading / validation ────────────────────────────────────────────────────
-
+# ── Parsing ──────────────────────────────────────────────────────────────────
 
 def _str_list(raw: Any) -> List[str]:
-    """Coerce a YAML value into a list of strings (drop non-strings)."""
-    if not isinstance(raw, list):
-        return []
-    return [str(item) for item in raw if isinstance(item, (str, int, float))]
+    return [str(x) for x in raw if isinstance(x, (str, int, float))] if isinstance(raw, list) else []
 
 
-def _parse_entry(path: Path) -> Optional[PluginCatalogEntry]:
-    """Parse and validate one catalog YAML file.
+def entry_from_mapping(data: Any, label: str) -> Optional[PluginCatalogEntry]:
+    """Validate one entry mapping (YAML file or live-JSON element); ``None`` + warning on any failure."""
+    if not isinstance(data, dict):
+        logger.warning("Plugin catalog: %s: entry must be a mapping", label)
+        return None
+    name = str(data.get("name") or "")
+    repo = str(data.get("repo") or "")
+    sha = str(data.get("sha") or "").strip().lower()
+    tier = str(data.get("tier") or "community")
+    problem = (
+        f"invalid name {name!r} (must match [a-z0-9_-]{{1,64}})" if not _NAME_RE.match(name)
+        else f"repo must be an https:// URL (got {repo!r})" if not repo.startswith("https://")
+        else f"sha must be a full 40-character hex commit SHA (got {data.get('sha')!r})" if not _SHA_RE.match(sha)
+        else f"tier must be one of {'/'.join(CATALOG_TIERS)} (got {tier!r})" if tier not in CATALOG_TIERS
+        else None)
+    if problem:
+        logger.warning("Plugin catalog: %s: %s", label, problem)
+        return None
+    caps_raw = data.get("capabilities")
+    caps: Dict[str, Any] = caps_raw if isinstance(caps_raw, dict) else {}
+    return PluginCatalogEntry(
+        name=name, repo=repo, sha=sha,
+        description=str(data.get("description") or "").strip(),
+        maintainer=str(data.get("maintainer") or "").strip(), tier=tier,
+        requires_hermes=str(data.get("requires_hermes") or "").strip(),
+        subdir=str(data.get("subdir") or "").strip(), docs_url=str(data.get("docs_url") or "").strip(),
+        platforms=_str_list(data.get("platforms")),
+        capabilities=CatalogCapabilities(
+            provides_tools=_str_list(caps.get("provides_tools")), provides_hooks=_str_list(caps.get("provides_hooks")),
+            provides_middleware=_str_list(caps.get("provides_middleware")),
+            requires_env=_str_list(caps.get("requires_env"))),
+    )
 
-    Returns ``None`` (after logging a warning) on any validation failure —
-    the loader never raises for a bad entry.
-    """
+
+def _read_yaml(path: Path) -> Any:
     try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        return yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except Exception as exc:
         logger.warning("Plugin catalog: failed to read %s: %s", path, exc)
         return None
 
-    if not isinstance(data, dict):
-        logger.warning("Plugin catalog: %s: entry must be a mapping", path)
-        return None
 
-    name = str(data.get("name") or "")
-    if not _NAME_RE.match(name):
-        logger.warning(
-            "Plugin catalog: %s: invalid name %r (must match [a-z0-9_-]{1,64})",
-            path, name,
-        )
-        return None
-
-    repo = str(data.get("repo") or "")
-    if not repo.startswith("https://"):
-        logger.warning(
-            "Plugin catalog: %s: repo must be an https:// URL (got %r)",
-            path, repo,
-        )
-        return None
-
-    sha = str(data.get("sha") or "").strip().lower()
-    if not _SHA_RE.match(sha):
-        logger.warning(
-            "Plugin catalog: %s: sha must be a full 40-character hex commit "
-            "SHA (got %r)", path, data.get("sha"),
-        )
-        return None
-
-    tier = str(data.get("tier") or "community")
-    if tier not in CATALOG_TIERS:
-        logger.warning(
-            "Plugin catalog: %s: tier must be one of %s (got %r)",
-            path, "/".join(CATALOG_TIERS), tier,
-        )
-        return None
-
-    caps_raw = data.get("capabilities") or {}
-    if not isinstance(caps_raw, dict):
-        caps_raw = {}
-    capabilities = CatalogCapabilities(
-        provides_tools=_str_list(caps_raw.get("provides_tools")),
-        provides_hooks=_str_list(caps_raw.get("provides_hooks")),
-        provides_middleware=_str_list(caps_raw.get("provides_middleware")),
-        requires_env=_str_list(caps_raw.get("requires_env")),
-    )
-
-    return PluginCatalogEntry(
-        name=name,
-        repo=repo,
-        sha=sha,
-        description=str(data.get("description") or "").strip(),
-        maintainer=str(data.get("maintainer") or "").strip(),
-        tier=tier,
-        requires_hermes=str(data.get("requires_hermes") or "").strip(),
-        subdir=str(data.get("subdir") or "").strip(),
-        docs_url=str(data.get("docs_url") or "").strip(),
-        platforms=_str_list(data.get("platforms")),
-        capabilities=capabilities,
-    )
+def _removed_from_list(raw_list: Any) -> List[RemovedEntry]:
+    if not isinstance(raw_list, list):
+        return []
+    return [
+        RemovedEntry(name=str(r["name"]), repo=str(r.get("repo") or ""), reason=str(r.get("reason") or ""),
+                     date=str(r.get("date") or ""))
+        for r in raw_list if isinstance(r, dict) and r.get("name")]
 
 
-def load_catalog() -> List[PluginCatalogEntry]:
-    """Return all valid catalog entries, sorted by name.
+# ── In-tree catalog ──────────────────────────────────────────────────────────
 
-    Parses every ``*.yaml`` in the catalog dir except ``removed.yaml``.
-    Invalid entries are skipped with a logged warning; this function never
-    raises for a malformed entry.
-    """
-    return _load_entries_from_dir(get_catalog_dir())
-
-
-def _load_entries_from_dir(root: Path) -> List[PluginCatalogEntry]:
-    """Parse all catalog entry files in *root* (skipping ``removed.yaml``)."""
+def load_catalog(catalog_dir: Optional[Path] = None) -> List[PluginCatalogEntry]:
+    """Every valid ``*.yaml`` entry in the catalog dir (``removed.yaml`` excluded), sorted by file name.
+    Malformed entries are skipped with a warning — never raises."""
+    root = catalog_dir or get_catalog_dir()
     if not root.is_dir():
         return []
-    entries: List[PluginCatalogEntry] = []
+    entries = []
     for path in sorted(root.glob("*.yaml")):
         if path.name == "removed.yaml":
             continue
-        entry = _parse_entry(path)
+        data = _read_yaml(path)
+        entry = entry_from_mapping(data, str(path)) if data is not None else None
         if entry is not None:
             entries.append(entry)
     return entries
 
 
-def get_catalog_entry(name: str) -> Optional[PluginCatalogEntry]:
-    """Look up a single catalog entry by name."""
-    for entry in load_catalog():
-        if entry.name == name:
-            return entry
-    return None
+def load_removed_list(catalog_dir: Optional[Path] = None) -> List[RemovedEntry]:
+    """``removed.yaml``'s ``removed:`` list; missing/malformed → empty."""
+    path = (catalog_dir or get_catalog_dir()) / "removed.yaml"
+    data = _read_yaml(path) if path.is_file() else None
+    return _removed_from_list(data.get("removed")) if isinstance(data, dict) else []
 
 
-def search_catalog(query: str) -> List[PluginCatalogEntry]:
-    """Case-insensitive substring search over name, description, and
-    declared tools. An empty query returns the whole catalog."""
-    return filter_entries(load_catalog(), query)
+def get_catalog_entry(name: str, catalog_dir: Optional[Path] = None) -> Optional[PluginCatalogEntry]:
+    return next((e for e in load_catalog(catalog_dir) if e.name == name), None)
 
 
-def filter_entries(
-    entries: List[PluginCatalogEntry], query: str
-) -> List[PluginCatalogEntry]:
-    """Filter *entries* with :func:`search_catalog` semantics.
-
-    Lets callers that already hold a (possibly live-fetched) entry list
-    apply the same matching rules without re-loading the catalog.
-    """
+def filter_entries(entries: List[PluginCatalogEntry], query: str) -> List[PluginCatalogEntry]:
+    """Case-insensitive substring match over name, description and declared tools; empty query = all."""
     q = (query or "").strip().lower()
     if not q:
         return entries
-    results: List[PluginCatalogEntry] = []
-    for entry in entries:
-        haystacks = [entry.name, entry.description]
-        haystacks.extend(entry.capabilities.provides_tools)
-        if any(q in h.lower() for h in haystacks):
-            results.append(entry)
-    return results
+    return [e for e in entries
+            if any(q in h.lower() for h in (e.name, e.description, *e.capabilities.provides_tools))]
 
 
-# ─── Removed / blocklist ─────────────────────────────────────────────────────
+def search_catalog(query: str) -> List[PluginCatalogEntry]:
+    return filter_entries(load_catalog(), query)
 
+
+# ── Removed / blocklist ──────────────────────────────────────────────────────
 
 def _normalize_repo(url: str) -> str:
-    """Normalize a repo URL for comparison (.git suffix and trailing slash
-    stripped, lowercased)."""
     return url.strip().rstrip("/").removesuffix(".git").lower()
 
 
-def load_removed_list() -> List[RemovedEntry]:
-    """Load ``plugin-catalog/removed.yaml`` (the ``removed:`` list).
+def find_removed(name_or_repo: str, catalog_dir: Optional[Path] = None) -> Optional[RemovedEntry]:
+    """Match a catalog name or repo URL (``.git``/trailing-slash insensitive) against the kill list.
 
-    Missing or malformed files yield an empty list — never raises.
-    """
-    path = get_catalog_dir() / "removed.yaml"
-    if not path.is_file():
-        return []
-    try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    except Exception as exc:
-        logger.warning("Plugin catalog: failed to read %s: %s", path, exc)
-        return []
-    raw_list = data.get("removed") if isinstance(data, dict) else None
-    if not isinstance(raw_list, list):
-        return []
-    removed: List[RemovedEntry] = []
-    for raw in raw_list:
-        if not isinstance(raw, dict):
-            continue
-        name = str(raw.get("name") or "")
-        if not name:
-            continue
-        removed.append(
-            RemovedEntry(
-                name=name,
-                repo=str(raw.get("repo") or ""),
-                reason=str(raw.get("reason") or ""),
-                date=str(raw.get("date") or ""),
-            )
-        )
-    return removed
-
-
-def find_removed(name_or_repo: str) -> Optional[RemovedEntry]:
-    """Match *name_or_repo* against the removed blocklist.
-
-    Matches by exact catalog name OR by repo URL (normalized — ``.git``
-    suffix and trailing slashes are ignored).
+    The in-tree list and the live-fetched list are UNIONED: a removal published after this checkout
+    shipped must still block, and a stale live cache must not un-block an in-tree removal.
     """
     if not name_or_repo:
         return None
     candidate = name_or_repo.strip()
     candidate_repo = _normalize_repo(candidate)
-    for entry in load_removed_list():
-        if candidate == entry.name:
-            return entry
-        if entry.repo and candidate_repo == _normalize_repo(entry.repo):
+    for entry in load_removed_list(catalog_dir) + (live_removed_list() if catalog_dir is None else []):
+        if candidate == entry.name or (entry.repo and candidate_repo == _normalize_repo(entry.repo)):
             return entry
     return None
 
 
-# ─── Live index ──────────────────────────────────────────────────────────────
+# ── Live catalog ─────────────────────────────────────────────────────────────
 
-# GitHub contents API for the in-repo catalog dir. Unauthenticated (60 req/hr
-# rate limit) — fine for interactive use, and any failure falls back to the
-# in-tree catalog silently.
-_LIVE_INDEX_URL = (
-    "https://api.github.com/repos/NousResearch/hermes-agent/contents/"
-    "plugin-catalog?ref=main"
-)
-_LIVE_TTL_SECONDS = 6 * 60 * 60  # 6h
-_REQUEST_TIMEOUT = 5.0
-
-
-def _live_cache_dir() -> Path:
+def _live_cache_path() -> Path:
     from hermes_constants import get_hermes_home
+    return get_hermes_home() / "cache" / "plugin-catalog.json"
 
-    return get_hermes_home() / "cache" / "plugin-catalog"
 
-
-def fetch_live_catalog(*, force: bool = False) -> Optional[Path]:
-    """Refresh the catalog cache from the GitHub repo; return the cache dir.
-
-    Lists ``plugin-catalog/*.yaml`` via the GitHub contents API, raw-fetches
-    each file, and stores them under ``<hermes_home>/cache/plugin-catalog/``
-    with a 6-hour TTL (repeat searches don't re-hit the API). Returns the
-    cache directory on success (or fresh cache), or ``None`` on ANY network
-    or parse failure — callers then fall back to the in-tree catalog.
-    """
-    cache = _live_cache_dir()
-    marker = cache / ".fetched"
-    if not force and marker.is_file():
-        try:
-            age = time.time() - marker.stat().st_mtime
-        except OSError:
-            age = _LIVE_TTL_SECONDS + 1
-        if age < _LIVE_TTL_SECONDS:
-            return cache
-
+def fetch_live_catalog(*, force: bool = False) -> Optional[Dict[str, Any]]:
+    """The published ``plugin-catalog.json`` (``{"entries": [...], "removed": [...]}``), cached under
+    ``HERMES_HOME/cache`` for :data:`LIVE_CATALOG_TTL_SECONDS`. ``None`` on ANY failure — callers fall
+    back to the in-tree catalog."""
+    cache = _live_cache_path()
+    try:
+        if not force and cache.is_file() and time.time() - cache.stat().st_mtime < LIVE_CATALOG_TTL_SECONDS:
+            return json.loads(cache.read_text(encoding="utf-8"))
+    except Exception as exc:
+        logger.debug("Plugin catalog: unreadable live cache %s: %s", cache, exc)
     try:
         import httpx
-
-        resp = httpx.get(
-            _LIVE_INDEX_URL,
-            timeout=_REQUEST_TIMEOUT,
-            follow_redirects=True,
-            headers={"Accept": "application/vnd.github+json"},
-        )
+        resp = httpx.get(LIVE_CATALOG_URL, timeout=_REQUEST_TIMEOUT, follow_redirects=True)
         resp.raise_for_status()
-        listing = resp.json()
-        if not isinstance(listing, list):
-            raise ValueError("unexpected contents-API payload")
-
-        fetched: dict[str, str] = {}
-        for item in listing:
-            if not isinstance(item, dict):
-                continue
-            fname = str(item.get("name") or "")
-            url = str(item.get("download_url") or "")
-            if not fname.endswith(".yaml") or not url:
-                continue
-            file_resp = httpx.get(
-                url, timeout=_REQUEST_TIMEOUT, follow_redirects=True
-            )
-            file_resp.raise_for_status()
-            fetched[fname] = file_resp.text
-
-        cache.mkdir(parents=True, exist_ok=True)
-        # Replace stale cached entries wholesale so removed files disappear.
-        for old in cache.glob("*.yaml"):
-            if old.name not in fetched:
-                old.unlink(missing_ok=True)
-        for fname, text in fetched.items():
-            (cache / fname).write_text(text, encoding="utf-8")
-        marker.touch()
-        return cache
+        if len(resp.content) > _MAX_LIVE_BYTES:
+            raise ValueError("live catalog payload too large")
+        data = resp.json()
+        if not isinstance(data, dict) or not isinstance(data.get("entries"), list):
+            raise ValueError("unexpected live catalog payload")
+        cache.parent.mkdir(parents=True, exist_ok=True)
+        cache.write_text(json.dumps(data), encoding="utf-8")
+        return data
     except Exception as exc:
-        logger.debug("Plugin catalog: live index fetch failed: %s", exc)
-        return None
+        logger.debug("Plugin catalog: live fetch failed: %s", exc)
+        try:  # stale cache still beats the in-tree copy when the network is down
+            return json.loads(cache.read_text(encoding="utf-8")) if cache.is_file() else None
+        except Exception:
+            return None
 
 
 def load_catalog_live() -> List[PluginCatalogEntry]:
-    """Return catalog entries, preferring a live-fetched (or cached) index.
-
-    Falls back silently to the in-tree catalog when the network is
-    unavailable or the fetch fails.
-    """
-    cache = fetch_live_catalog()
-    if cache is not None and any(
-        p.name != "removed.yaml" for p in cache.glob("*.yaml")
-    ):
-        return _load_entries_from_dir(cache)
+    """Entries from the live (or cached) catalog, else the in-tree catalog."""
+    data = fetch_live_catalog()
+    if data is not None:
+        entries = [e for i, raw in enumerate(data["entries"])
+                   if (e := entry_from_mapping(raw, f"{LIVE_CATALOG_URL}#{i}")) is not None]
+        if entries:
+            return entries
     return load_catalog()
 
 
-# ─── Human summaries ─────────────────────────────────────────────────────────
+def live_removed_list() -> List[RemovedEntry]:
+    data = fetch_live_catalog()
+    return _removed_from_list(data.get("removed")) if data else []
 
+
+def get_live_catalog_entry(name: str) -> Optional[PluginCatalogEntry]:
+    return next((e for e in load_catalog_live() if e.name == name), None)
+
+
+# ── Human summaries ──────────────────────────────────────────────────────────
 
 def entry_capability_summary(entry: PluginCatalogEntry) -> str:
-    """One-paragraph human summary of what an entry declares, shown at
-    install prompts so the user knows what they're granting."""
+    """One paragraph shown at install/enable prompts: what the user is granting."""
     caps = entry.capabilities
-    parts: List[str] = []
-    if caps.provides_tools:
-        parts.append(f"registers tool(s): {', '.join(caps.provides_tools)}")
-    if caps.provides_hooks:
-        parts.append(f"hook(s): {', '.join(caps.provides_hooks)}")
-    if caps.provides_middleware:
-        parts.append(f"middleware: {', '.join(caps.provides_middleware)}")
-    if caps.requires_env:
-        parts.append(f"requires env var(s): {', '.join(caps.requires_env)}")
-    if not parts:
-        capability_text = "declares no tools, hooks, middleware, or env vars"
-    else:
-        capability_text = "; ".join(parts)
-    bits = [
-        f"{entry.name} ({entry.tier}, maintained by {entry.maintainer})",
-    ]
+    parts = [f"{label} {', '.join(items)}" for label, items in (
+        ("registers tool(s):", caps.provides_tools), ("hook(s):", caps.provides_hooks),
+        ("middleware:", caps.provides_middleware), ("requires env var(s):", caps.requires_env)) if items]
+    bits = [f"{entry.name} ({entry.tier}, maintained by {entry.maintainer})"]
     if entry.description:
         bits.append(entry.description)
-    bits.append(f"This plugin {capability_text}.")
+    bits.append(f"This plugin {'; '.join(parts) if parts else 'declares no tools, hooks, middleware, or env vars'}.")
     if entry.platforms:
         bits.append(f"Platforms: {', '.join(entry.platforms)}.")
     if entry.requires_hermes:
