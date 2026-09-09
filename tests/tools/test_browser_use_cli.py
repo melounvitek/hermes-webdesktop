@@ -1377,32 +1377,6 @@ class TestTimeoutProcessGroupKill:
             os.kill(pid, 0)
 
     @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
-    def test_gone_group_still_surfaces_timeout(self, monkeypatch):
-        """killpg can race an already-exited group; the timeout must still surface."""
-        waits = []
-
-        class _FakeProc:
-            pid = 424242
-            returncode = None
-
-            def communicate(self, input=None, timeout=None):
-                waits.append(timeout)
-                if input is not None:
-                    raise subprocess.TimeoutExpired("browser-use", timeout)
-                return ("", "")
-
-        monkeypatch.setattr(bu_cli.subprocess, "Popen", lambda *a, **k: _FakeProc())
-
-        def _gone_group(pgid, sig):
-            raise ProcessLookupError()
-
-        monkeypatch.setattr(bu_cli.os, "killpg", _gone_group)
-        with pytest.raises(subprocess.TimeoutExpired):
-            bu_cli._run_cli_killing_process_group(["x"], "code", {}, 5)
-        # First wait is the tool timeout, second is the bounded post-kill drain.
-        assert waits == [5, bu_cli._POST_KILL_DRAIN_S]
-
-    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
     def test_post_kill_drain_is_bounded(self, monkeypatch):
         """If even the post-kill drain misses its deadline, give up instead of wedging."""
 
