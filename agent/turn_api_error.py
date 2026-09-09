@@ -284,7 +284,7 @@ def settle_unrecovered_error(
     if is_client_error:
         # A Codex ChatGPT-account entitlement 400 names the model: with nothing to rotate the
         # slug is dead for this account, so record it before the fallback walk runs (#106475).
-        from agent.chat_completion_helpers import _mark_entitlement_rejected_model
+        from agent.fallback_cooldown import _mark_entitlement_rejected_model
         _mark_entitlement_rejected_model(agent, api_error)
         # Copilot self-heal BEFORE fallback: a stale credential yields a 400
         # ``model_not_available_for_integrator`` / ``model_not_supported``, not a 401.
