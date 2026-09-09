@@ -581,7 +581,6 @@ def _scoped_recovery_key() -> str:
     return _startup_env_secret("MATRIX_RECOVERY_KEY")
 
 
-
 # --- LaTeX math ($...$, $$...$$) -> Element data-mx-maths markup ---
 # Element (feature_latex_maths) typesets <div|span data-mx-maths="TEX"> at display time.
 # Our sanitizer allowlists tags/attrs, so data-mx-maths cannot pass through HTML
@@ -2808,8 +2807,7 @@ class MatrixAdapter(BasePlatformAdapter):
     def _markdown_to_html(self, text: str) -> str:
         """Markdown → org.matrix.custom.html via ``markdown`` when installed, else the regex fallback."""
         text = _pre_sanitize_matrix_markdown(text)
-        _tex_store = []
-        text, _tex_store = _latex_to_tokens(text)
+        text, tex_store = _latex_to_tokens(text)
         with suppress(ImportError):
             import markdown as _md
             md = _md.Markdown(extensions=["fenced_code", "tables", "nl2br", "sane_lists"])
@@ -2819,10 +2817,8 @@ class MatrixAdapter(BasePlatformAdapter):
             md.reset()
             if html.count("<p>") == 1:
                 html = html.replace("<p>", "").replace("</p>", "")
-            html = _tokens_to_mx_maths(_sanitize_matrix_html(html), _tex_store)
-            return html
-        _fb = _sanitize_matrix_html(self._markdown_to_html_fallback(text))
-        return _tokens_to_mx_maths(_fb, _tex_store)
+            return _tokens_to_mx_maths(_sanitize_matrix_html(html), tex_store)
+        return _tokens_to_mx_maths(_sanitize_matrix_html(self._markdown_to_html_fallback(text)), tex_store)
 
     @staticmethod
     def _sanitize_link_url(url: str) -> str:
