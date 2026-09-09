@@ -1376,7 +1376,6 @@ class TestTimeoutProcessGroupKill:
         with pytest.raises(OSError):
             os.kill(pid, 0)
 
-    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX process groups")
     def test_post_kill_drain_is_bounded(self, monkeypatch):
         """If even the post-kill drain misses its deadline, give up instead of wedging."""
 
@@ -1388,6 +1387,6 @@ class TestTimeoutProcessGroupKill:
                 raise subprocess.TimeoutExpired("browser-use", timeout)
 
         monkeypatch.setattr(bu_cli.subprocess, "Popen", lambda *a, **k: _StuckProc())
-        monkeypatch.setattr(bu_cli.os, "killpg", lambda pgid, sig: None)
+        monkeypatch.setattr(bu_cli, "_kill_cli_process_group", lambda proc: None)
         with pytest.raises(subprocess.TimeoutExpired):
             bu_cli._run_cli_killing_process_group(["x"], "code", {}, 5)
