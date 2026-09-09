@@ -27,7 +27,7 @@ import subprocess
 import urllib.parse
 from typing import Mapping, Optional
 
-from hermes_cli._subprocess_compat import windows_hide_flags
+from hermes_cli._subprocess_compat import noninteractive_git_env, windows_hide_flags
 
 logger = logging.getLogger(__name__)
 
@@ -54,9 +54,11 @@ def _github_token() -> Optional[str]:
     if not gh:
         return None
     try:
+        env = noninteractive_git_env()
+        env["GH_PROMPT_DISABLED"] = "1"
         result = subprocess.run(
             [gh, "auth", "token"], capture_output=True, text=True, encoding="utf-8", errors="replace",
-            timeout=10, stdin=subprocess.DEVNULL, creationflags=windows_hide_flags())
+            timeout=10, stdin=subprocess.DEVNULL, env=env, creationflags=windows_hide_flags())
     except (OSError, subprocess.TimeoutExpired) as exc:
         logger.debug("gh auth token lookup failed: %s", exc)
         return None
