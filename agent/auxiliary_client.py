@@ -1449,6 +1449,15 @@ class _CodexCompletionsAdapter:
         return resp_kwargs, model, timeout
 
     def create(self, **kwargs) -> Any:
+        from hermes_cli.providers import is_actual_route
+
+        if is_actual_route(
+            getattr(self._client, "_hermes_aux_effective_provider", ""),
+            str(getattr(self._client, "base_url", "") or ""),
+        ):
+            raise ValueError(
+                "Actual requests require Chat Completions; refusing to call /responses."
+            )
         # Low-level ``responses.create(stream=True)`` and assemble the final response ourselves
         # from ``response.output_item.done``: the high-level ``responses.stream()`` rebuilds from
         # ``response.completed.response.output``, which Codex returns as ``null`` (SDK crash).
@@ -4497,11 +4506,22 @@ def _wrap_transport(req: _ResolveRequest, client_obj: Any, final_model_str: str,
     explicit api_mode — api.openai.com + codex model. Anthropic (Messages): ``api_mode=anthropic_messages``,
     any ``/anthropic`` suffix, ``api.kimi.com/coding``, or ``api.anthropic.com``."""
     if _is_actual_auxiliary_route(req, base_url_str):
-        return client_obj._real_client if isinstance(client_obj, CodexAuxiliaryClient) else client_obj
-    needs_codex = not (isinstance(client_obj, CodexAuxiliaryClient) or req.raw_codex) and (
+        client = (
+            client_obj._real_client
+            if isinstance(client_obj, CodexAuxiliaryClient)
+            else client_obj
+        )
+        client._hermes_aux_effective_provider = "actual"
+        return client
+    needs_codex = not (
+        isinstance(client_obj, CodexAuxiliaryClient) or req.raw_codex
+    ) and (
         req.api_mode == "codex_responses"
-        or (not req.api_mode and base_url_hostname(base_url_str) == "api.openai.com"
-            and "codex" in (final_model_str or "").lower())
+        or (
+            not req.api_mode
+            and base_url_hostname(base_url_str) == "api.openai.com"
+            and "codex" in (final_model_str or "").lower()
+        )
     )
     if needs_codex:
         logger.debug("resolve_provider_client: wrapping client in CodexAuxiliaryClient "

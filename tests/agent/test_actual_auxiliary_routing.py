@@ -348,6 +348,87 @@ def test_actual_runtime_transitions_reach_chat_completions(
         agent.client.close()
 
 
+@pytest.mark.parametrize(
+    "provider,hosted",
+    [
+        ("actual", False),
+        ("aci", False),
+        ("actual-computer", False),
+        ("actualcomputer", False),
+        ("custom", True),
+        ("custom:actual-relay", True),
+    ],
+)
+@pytest.mark.parametrize("send_site", ["main", "auxiliary", "async_auxiliary"])
+def test_actual_rejects_forced_responses_before_http(
+    tmp_path, monkeypatch, actual_endpoint, provider, hosted, send_site
+):
+    from agent.auxiliary_client import (
+        AsyncCodexAuxiliaryClient,
+        CodexAuxiliaryClient,
+        resolve_provider_client,
+    )
+    from run_agent import AIAgent
+
+    base_url, requests = actual_endpoint
+    if hosted:
+        base_url = base_url.replace("127.0.0.1", "api.actual.inc")
+    base_url += "/v1"
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config = {
+        "model": {"provider": provider, "base_url": base_url, "default": "test-model"},
+        "providers": {
+            "actual-relay": {"base_url": base_url, "transport": "codex_responses"}
+        },
+    }
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    if send_site == "main":
+        agent = AIAgent(
+            provider=provider,
+            base_url=base_url,
+            api_key="actual-test-key",
+            model="test-model",
+            enabled_toolsets=[],
+            quiet_mode=True,
+            skip_context_files=True,
+            skip_memory=True,
+            save_trajectories=False,
+        )
+        client = agent.client
+        agent.api_mode = "codex_responses"
+
+        def force_responses():
+            return agent._run_codex_stream(
+                {"model": "test-model", "input": "Reply briefly."}, client=client
+            )
+
+    else:
+        client, model = resolve_provider_client(
+            provider,
+            model="test-model",
+            explicit_base_url=base_url,
+            explicit_api_key="actual-test-key",
+            api_mode="codex_responses",
+        )
+        wrapper = CodexAuxiliaryClient(client, model)
+        if send_site == "async_auxiliary":
+            wrapper = AsyncCodexAuxiliaryClient(wrapper)
+
+        def force_responses():
+            result = wrapper.chat.completions.create(
+                model=model, messages=[{"role": "user", "content": "Reply briefly."}]
+            )
+            return asyncio.run(result) if send_site == "async_auxiliary" else result
+
+    try:
+        initial_requests = list(requests)
+        with pytest.raises(ValueError, match="Actual.*Chat Completions"):
+            force_responses()
+        assert requests == initial_requests
+    finally:
+        client.close()
+
+
 @pytest.mark.parametrize("provider", ["actual", "aci", "custom:actual-relay"])
 @pytest.mark.parametrize("async_mode", [False, True])
 def test_actual_auxiliary_fallback_reaches_chat_completions(
