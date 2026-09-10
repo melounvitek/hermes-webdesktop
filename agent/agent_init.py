@@ -373,7 +373,9 @@ _EXPLICIT_API_MODES = {
 def _resolve_api_mode(agent, api_mode, provider_name, base_url):
     """Set ``agent.api_mode`` (and provider rewrites) — ordered ladder, first match wins."""
     host, url = agent._base_url_hostname, agent._base_url_lower
-    if api_mode in _EXPLICIT_API_MODES:
+    if agent.provider == "actual":
+        agent.api_mode = "chat_completions"
+    elif api_mode in _EXPLICIT_API_MODES:
         agent.api_mode = api_mode
     elif agent.provider in {"openai-codex", "xai", "xai-oauth"}:
         agent.api_mode = "codex_responses"

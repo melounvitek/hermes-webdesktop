@@ -206,6 +206,11 @@ def _configured_or_fallback_api_mode(provider: str, model_cfg: Dict[str, Any], b
     """Persisted ``model.api_mode`` when it belongs to this provider, else URL/transport fallback.
     OpenCode Zen/Go serve both anthropic_messages and chat_completions models, so (when
     ``opencode_by_model``) their mode is always re-derived from the effective model."""
+    if provider == "actual":
+        configured_mode = _configured_api_mode(provider, model_cfg)
+        if configured_mode and configured_mode != "chat_completions":
+            logger.info("Routing built-in Actual through chat_completions instead of persisted api_mode=%s", configured_mode)
+        return "chat_completions"
     if opencode_by_model and _models.opencode_provider_family(provider) is not None:
         return _models.opencode_model_api_mode(provider, effective_model)
     return _configured_api_mode(provider, model_cfg) or _fallback_api_mode(provider, base_url, effective_model)
@@ -216,7 +221,7 @@ def _api_key_provider_api_mode(provider: str, model_cfg: Dict[str, Any], api_key
     """api_mode for a registry ``api_key`` provider (explicit and env/config paths)."""
     if provider == "copilot":
         return _copilot_runtime_api_mode(model_cfg, api_key, target_model=effective_model)
-    if provider in ("xai", "actual"):
+    if provider == "xai":
         # Ramp Router: Responses-native host — /v1/chat/completions is only a minimal compatibility shim,
         # while reasoning and caching support live on /v1/responses (docs.router.com/api/endpoint). Mirrors
         # the host_mandated_api_mode clause in hermes_cli/providers.py so the runtime resolver stays in
@@ -252,7 +257,10 @@ def _cfg_provider(model_cfg: Dict[str, Any]) -> str:
 def _config_base_url_for_provider(model_cfg: Dict[str, Any], provider: str) -> str:
     """``model.base_url`` (stripped, no trailing slash) only when ``model.provider`` is
     ``provider`` — a stale base_url must not leak into another provider."""
-    return str(model_cfg.get("base_url") or "").strip().rstrip("/") if _cfg_provider(model_cfg) == provider else ""
+    configured_provider = _cfg_provider(model_cfg)
+    if provider == "actual":
+        configured_provider = _models.normalize_provider(configured_provider)
+    return str(model_cfg.get("base_url") or "").strip().rstrip("/") if configured_provider == provider else ""
 
 
 def _anthropic_base_url_override_ok(base_url: str) -> bool:
@@ -337,6 +345,8 @@ def _finalize_base_url(provider: str, api_mode: str, base_url: str) -> str:
         base_url = _models.normalize_opencode_base_url(provider, api_mode, base_url)
     if provider == "lmstudio":
         base_url = auth_mod._normalize_lmstudio_runtime_base_url(base_url)
+    if provider == "actual":
+        base_url = normalize_actual_base_url(base_url)
     return base_url
 
 
@@ -431,6 +441,8 @@ _POOL_ENTRY_SIMPLE_MODES: Dict[str, tuple] = {
 
 def _pool_entry_mode_and_url(provider, entry, model_cfg, effective_model, base_url) -> tuple:
     """(api_mode, base_url) for a pool entry of ``provider``."""
+    if provider == "actual" and str(getattr(entry, "source", "")).startswith("env:"):
+        base_url = _config_base_url_for_provider(model_cfg, provider) or base_url
     if provider in _POOL_ENTRY_SIMPLE_MODES:
         api_mode, default_url = _POOL_ENTRY_SIMPLE_MODES[provider]
         return api_mode, base_url or (default_url() if callable(default_url) else default_url)
@@ -570,7 +582,10 @@ def _actual_url(provider: str, base_url: str) -> str:
 
 def _explicit_api_key_provider(provider, pconfig, requested_provider, model_cfg, api_key, base_url, target_model):
     if not base_url:
-        if provider in {"kimi-coding", "kimi-coding-cn"}:
+        if provider == "actual":
+            base_url = (_config_base_url_for_provider(model_cfg, provider)
+                        or resolve_api_key_provider_credentials(provider).get("base_url", ""))
+        elif provider in {"kimi-coding", "kimi-coding-cn"}:
             base_url = resolve_api_key_provider_credentials(provider).get("base_url", "").rstrip("/")
         else:
             env_url = _getenv(pconfig.base_url_env_var, "").strip().rstrip("/") if pconfig.base_url_env_var else ""

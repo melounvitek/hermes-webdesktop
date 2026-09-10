@@ -639,7 +639,7 @@ class AIAgent(
         normalized_provider = (provider or "").strip().lower()
         # Nous serves GPT-5.x via chat completions (its /v1/responses returns 404); generic custom endpoints
         # may relay GPT-5 without full Responses semantics — only direct OpenAI/xAI URLs auto-upgrade.
-        if normalized_provider in ("nous", "custom"):
+        if normalized_provider in ("nous", "custom", "actual"):
             return False
         if normalized_provider == "copilot":
             try:

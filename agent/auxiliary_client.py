@@ -4472,11 +4472,11 @@ def _log_once_debug(seen: set, key: Any, msg: str, *args: Any) -> None:
 def _wrap_transport(req: _ResolveRequest, client_obj: Any, final_model_str: str,
                     base_url_str: str = "", api_key_str: str = ""):
     """Wrap a plain OpenAI client in the right transport adapter; specialized wrappers pass through.
-    Codex (Responses API): explicit ``api_mode=codex_responses`` (or provider ``actual``), else — with no
+    Codex (Responses API): explicit ``api_mode=codex_responses``, else — with no
     explicit api_mode — api.openai.com + codex model. Anthropic (Messages): ``api_mode=anthropic_messages``,
     any ``/anthropic`` suffix, ``api.kimi.com/coding``, or ``api.anthropic.com``."""
     needs_codex = not (isinstance(client_obj, CodexAuxiliaryClient) or req.raw_codex) and (
-        req.provider == "actual" or req.api_mode == "codex_responses"
+        req.api_mode == "codex_responses"
         or (not req.api_mode and base_url_hostname(base_url_str) == "api.openai.com"
             and "codex" in (final_model_str or "").lower())
     )
