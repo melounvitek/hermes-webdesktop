@@ -2086,6 +2086,7 @@ export const ja = defineLocale({
     noSessions: 'セッションはまだありません',
     noFilterMatches: 'このフィルターに一致するセッションはありません',
     projects: {
+      showAllSessions: 'すべてのセッションを表示',
       sectionLabel: 'プロジェクト',
       home: 'ホーム',
       autoDiscovered: '自動検出',
