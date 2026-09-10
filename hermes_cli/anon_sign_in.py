@@ -11,7 +11,7 @@ from typing import Any, Callable, ClassVar, ContextManager, Dict, Iterator, Opti
 from hermes_cli.auth_constants import httpx
 
 
-UPGRADE_START = "Sign in to keep your connectors and unlock more."
+UPGRADE_START = "Sign in with a Nous account to unlock more models and tools."
 UPGRADE_ALREADY_SIGNED_IN = "Already signed in."
 UPGRADE_DO_NOT_SHARE = "Do not share this code."
 UPGRADE_TIMED_OUT = "Sign-in timed out; run the command again."
@@ -20,8 +20,8 @@ UPGRADE_UNAVAILABLE = "The free tier is not available right now; run `hermes aut
 UPGRADE_REASON_COPY = {
     "user_declined": "Sign-in was rejected in the browser.",
     "superseded": "A newer sign-in code replaced this one.",
-    "account_retired": "This free-tier identity was already used or expired; a new one is set up on next use.",
-    "account_not_anonymous": "This free-tier identity was already used or expired; a new one is set up on next use.",
+    "account_retired": "This free-tier identity was already used or expired; a new one is set up on the next start.",
+    "account_not_anonymous": "This free-tier identity was already used or expired; a new one is set up on the next start.",
     "account_busy": "The transfer could not run; run the command again.",
 }
 _RETIRED_REASONS = frozenset({"account_retired", "account_not_anonymous"})
@@ -116,8 +116,7 @@ class Completed(SignInState):
     ok: ClassVar[bool] = True
 
     def _lines(self, no_default: str) -> str:
-        lines = [f"Signed in as {self.email}. Your connectors are kept." if self.email
-                 else "Signed in. Your connectors are kept."]
+        lines = [f"Signed in as {self.email}." if self.email else "Signed in."]
         if self.model_changed:
             lines.append(f"Default model is now {self.model}." if self.model else no_default)
         return "\n".join(lines)
@@ -288,8 +287,10 @@ def run_sign_in(
     post_promotion_cancelled = is_cancelled if cancel_wins_after_promotion else (lambda: False)
     open_scope = scope or contextlib.nullcontext
 
-    # Preconditions and the mint run inside the scope; the state they produce is yielded outside
-    # it, because a scope must never be held across a ``yield``.
+    # Preconditions run inside the scope; the state they produce is yielded outside it, because a
+    # scope must never be held across a ``yield``. A sign-in never creates the identity it signs in
+    # from: with none on disk there is nothing to promote and the answer is ``Unavailable`` (the boot
+    # bootstrap is the only creator, NS-845 Q1.2).
     precondition_state: Optional[SignInState] = None
     state: Optional[Dict[str, Any]] = None
     try:
@@ -297,20 +298,12 @@ def run_sign_in(
             state = _core.current_nous_state()
             if state and not _core.is_guest_state(state):
                 precondition_state = AlreadySignedIn()
-            elif not state:
-                if not _core.guest_enabled():
-                    precondition_state = Unavailable()
-                else:
-                    state = _core.ensure_portal_identity(blocking=True, timeout_seconds=timeout_seconds)
-                    if not _core.is_guest_state(state):
-                        # The free tier is off, or an account appeared mid-flight.
-                        precondition_state = Unavailable()
+            elif not state or not _core.guest_enabled():
+                precondition_state = Unavailable()
     except Exception as exc:
-        # An AuthError (gate closed, rate limited) and an ordinary failure -- a cold install whose
-        # mint cannot reach the portal, an unreadable auth store -- mean the same thing here: there
-        # is no free tier to sign in from. Both become the one precondition state, so nothing
-        # escapes ``next()``. KeyboardInterrupt and GeneratorExit are not Exceptions: they still
-        # propagate.
+        # An unreadable auth store means the same thing here: there is no free tier to sign in from.
+        # It becomes the one precondition state, so nothing escapes ``next()``. KeyboardInterrupt
+        # and GeneratorExit are not Exceptions: they still propagate.
         precondition_state = Unavailable(detail=str(exc))
     if precondition_state is not None:
         yield precondition_state

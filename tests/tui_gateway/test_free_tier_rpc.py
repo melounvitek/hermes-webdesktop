@@ -29,7 +29,7 @@ def _call(method: str, params: dict | None = None) -> dict:
 @pytest.fixture
 def guest(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_SHARED_AUTH_DIR", str(tmp_path / "shared-store"))
-    monkeypatch.delenv("HERMES_FORCE_GUEST", raising=False)
+    monkeypatch.setenv("HERMES_GUEST_ONBOARDING", "1")
     with _auth_store_lock():
         store = _load_auth_store()
         store.setdefault("providers", {})["nous"] = {
@@ -76,10 +76,48 @@ def test_billing_state_answers_the_free_tier_locally(guest, monkeypatch):
     assert res["free_tier"] is False and res["free_tier_model"] is None
 
 
-def test_status_without_an_identity_starts_the_background_setup_once(tmp_path, monkeypatch):
+def test_status_without_an_identity_is_a_pure_read(tmp_path, monkeypatch):
+    """The desktop polls ``free_tier.status`` every status round; a poll must never create the identity
+    (that is the boot bootstrap's job)."""
     monkeypatch.setenv("HERMES_SHARED_AUTH_DIR", str(tmp_path / "shared-store"))
-    calls = []
-    monkeypatch.setattr(anon_auth, "ensure_portal_identity", lambda **kw: calls.append(kw) or None)
+    monkeypatch.setenv("HERMES_GUEST_ONBOARDING", "1")
+    monkeypatch.setattr(anon_auth, "ensure_portal_identity",
+                        lambda **kw: (_ for _ in ()).throw(AssertionError("free_tier.status must not mint")))
     status = _call("free_tier.status")
-    assert status["has_guest"] is False and status["available"] is False
-    assert calls == [{"blocking": False}]
+    assert status["has_guest"] is False and status["available"] is False and status["enabled"] is True
+
+
+def test_provision_sets_the_free_tier_up_through_the_lifecycle_primitive(tmp_path, monkeypatch):
+    """``free_tier.provision`` is the desktop's explicit retry: it calls the one creator
+    (``ensure_portal_identity(explicit=True)``) only when no identity exists, and reports the outcome."""
+    monkeypatch.setenv("HERMES_SHARED_AUTH_DIR", str(tmp_path / "shared-store"))
+    monkeypatch.setenv("HERMES_GUEST_ONBOARDING", "1")
+    calls = []
+
+    def fake_provision(**kw):
+        calls.append(kw)
+        with _auth_store_lock():
+            store = _load_auth_store()
+            store.setdefault("providers", {})["nous"] = {
+                "auth_method": anon_auth.ANON_AUTH_METHOD, "account_tier": "anonymous", "anon_token": "anon_0002"}
+            _save_auth_store(store)
+        return store["providers"]["nous"]
+
+    monkeypatch.setattr(anon_auth, "ensure_portal_identity", fake_provision)
+    assert _call("free_tier.provision") == {"has_guest": True, "enabled": True}
+    assert calls == [{"explicit": True}]
+    assert _call("free_tier.provision") == {"has_guest": True, "enabled": True}
+    assert len(calls) == 1                       # idempotent: an identity exists, nothing is minted
+
+    def refused(**kw):
+        raise anon_auth.AuthError("Nous free tier is not open on this portal.", code="anon_gate_closed")
+
+    with _auth_store_lock():
+        store = _load_auth_store(); store["providers"].pop("nous"); _save_auth_store(store)
+    monkeypatch.setattr(anon_auth, "ensure_portal_identity", refused)
+    result = _call("free_tier.provision")
+    assert result["has_guest"] is False and "not open" in result["error"]
+
+    _set_guest_off(monkeypatch)
+    monkeypatch.setattr(anon_auth, "ensure_portal_identity", lambda **kw: (_ for _ in ()).throw(AssertionError("must not run")))
+    assert _call("free_tier.provision") == {"has_guest": False, "enabled": False}
