@@ -138,11 +138,16 @@ test('ensureLoginShellPath is single-flight — concurrent callers share one she
   assert.equal(env.PATH, '/opt/homebrew/bin:/usr/bin')
 })
 
-test('applyLoginShellPath force-settles when a hung grandchild keeps the execFile callback from firing', async () => {
+test('applyLoginShellPath kills the probe child and force-settles when its callback does not fire', async () => {
   const env: any = { SHELL: '/bin/zsh', PATH: '/usr/bin' }
-  // Simulates a probe whose shell spawns a daemon (e.g. gitstatusd) that
-  // keeps stdout open: execFile's callback never fires.
-  const execFileFn = () => ({ pid: 424242, stdin: { end() {} } })
+  const kills: string[] = []
+  const execFileFn = () => ({
+    stdin: { end() {} },
+    kill(signal) {
+      kills.push(signal)
+      return true
+    }
+  })
 
   const start = Date.now()
   const result = await applyLoginShellPath({ env, platform: 'linux', execFileFn, timeoutMs: 20 })
@@ -150,6 +155,7 @@ test('applyLoginShellPath force-settles when a hung grandchild keeps the execFil
 
   assert.equal(result.applied, false)
   assert.equal(result.reason, 'unresolved')
+  assert.deepEqual(kills, ['SIGKILL', 'SIGKILL'])
   assert.ok(elapsed < 4000, `expected the probe to force-settle well under the test timeout, took ${elapsed}ms`)
 })
 
