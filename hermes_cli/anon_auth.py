@@ -13,8 +13,8 @@ token acquisition (re-exchange the ``anon_`` credential; there is no refresh tok
 (the welcome inference host, single model ``nous/welcome``).
 
 Users are never shown the words guest / anonymous / account for this state: surfaces say
-"Nous · free tier". The one user-facing verb is ``hermes auth upgrade`` (sign in, keeping the
-identity's connectors).
+"Nous · free tier". Two user-facing verbs reach the same flow, both keeping the identity's
+connectors: ``hermes auth upgrade`` in a terminal and ``/login`` inside a chat.
 
 Lifecycle lives in ONE primitive, :func:`ensure_portal_identity`: adopt what the shared store already
 holds, else mint under the shared-store lock. It is the only minter; nothing else calls
@@ -28,7 +28,7 @@ import os
 import threading
 import time
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from hermes_cli.auth_constants import (
     AuthError, DEFAULT_NOUS_PORTAL_URL, _decode_jwt_claims, httpx)
@@ -49,7 +49,7 @@ FORCE_GUEST_ENV = "HERMES_FORCE_GUEST"
 GUEST_MINT_TIMEOUT_SECONDS = 5.0
 # Copy shared by every surface that names the free tier (R-USR-1): never guest / anonymous / account.
 FREE_TIER_LABEL = "Nous · free tier"
-UPGRADE_HINT = "Run `hermes auth upgrade` to sign in with a Nous account."
+UPGRADE_HINT = "Run `hermes auth upgrade` to sign in with a Nous account, or /login inside a chat."
 FREE_TIER_NOT_SIGNED_IN = (
     "You're not signed in. Free inference and connectors are always on. "
     "Run `hermes auth` to sign in with a Nous account.")
@@ -431,7 +431,7 @@ def clear_dead_guest(reason: str, *, dead_token: Optional[str] = None) -> None:
 GUEST_NOTICE_FLAG = "guest_notice_shown"
 FREE_TIER_AVAILABLE_NOTICE = (
     "Free Nous inference and connectors are now available. "
-    "`hermes model` to try them, `hermes auth upgrade` to sign in.")
+    "/model to try them, /login to sign in.")
 
 
 def guest_notice_pending() -> bool:
@@ -474,20 +474,6 @@ def mark_guest_notice_shown() -> bool:
 # over the guest singleton and the shared store. The server never reports expiry: our own
 # ``expires_in`` clock ends the wait. User-facing copy never says guest / anonymous / claim.
 
-UPGRADE_START = "Sign in to keep your connectors and unlock more."
-UPGRADE_ALREADY_SIGNED_IN = "Already signed in."
-UPGRADE_DO_NOT_SHARE = "Do not share this code."
-UPGRADE_TIMED_OUT = "Sign-in timed out; run the command again."
-UPGRADE_NOT_COMPLETED = "Sign-in did not complete; run the command again."
-UPGRADE_UNAVAILABLE = "The free tier is not available right now; run `hermes auth add nous` to sign in."
-UPGRADE_REASON_COPY = {
-    "user_declined": "Sign-in was rejected in the browser.",
-    "superseded": "A newer sign-in code replaced this one.",
-    "account_retired": "This free-tier identity was already used or expired; a new one is set up on next use.",
-    "account_not_anonymous": "This free-tier identity was already used or expired; a new one is set up on next use.",
-    "account_busy": "The transfer could not run; run the command again.",
-}
-_RETIRED_REASONS = frozenset({"account_retired", "account_not_anonymous"})
 UPGRADED_AUTH_METHOD = "oauth_device_code"
 
 
@@ -512,27 +498,68 @@ def _retry_after_seconds(response: httpx.Response, default: float) -> float:
         return default
 
 
+def _sleep_until(wake: float, cancelled: Optional[Callable[[], bool]]) -> bool:
+    """Sleep until the monotonic time *wake*. Returns True when *cancelled* fired first.
+
+    Without a hook this is one plain :func:`time.sleep`. With one the sleep is cut into <= 1 s
+    ticks so an attempt stopped from outside ends in about a second instead of blocking to the
+    sign-in code's own expiry.
+    """
+    if cancelled is None:
+        remaining = wake - time.monotonic()
+        if remaining > 0:
+            time.sleep(remaining)
+        return False
+    while True:
+        if cancelled():
+            return True
+        remaining = wake - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(1.0, remaining))
+
+
 def wait_for_promotion(
     client: httpx.Client, portal_base_url: str, claim_code: str, *, expires_in: int, interval: int,
+    cancelled: Optional[Callable[[], bool]] = None,
 ) -> Dict[str, Any]:
     """Poll ``POST /api/anonymous/promotion-status`` until it leaves ``pending`` or our clock runs out.
 
     Returns the final status payload; ``{"status": "timeout"}`` when ``expires_in`` elapsed. 429 honours
     ``Retry-After``; other non-2xx statuses raise through :func:`_raise_for_anon_status`.
+
+    *cancelled* is an optional hook a surface passes to stop an attempt it no longer wants (a newer
+    sign-in replaced it, the user cancelled, the process is shutting down). It is polled at the top
+    of every iteration and on a <= 1 s tick while sleeping; once it has fired this call returns
+    ``{"status": "cancelled"}`` for every outcome except a ``completed`` transfer already in hand,
+    which is reported so the caller's ``cancel_wins_after_promotion`` ruling can decide it.
+    Passing nothing is today's behaviour.
     """
     deadline = time.monotonic() + max(1, int(expires_in))
     wait = max(0, int(interval))
     while time.monotonic() < deadline:
+        if cancelled is not None and cancelled():
+            return {"status": "cancelled"}
         response = client.post(
             f"{portal_base_url.rstrip('/')}/api/anonymous/promotion-status", headers=_anon_headers(),
             json={"claim_code": claim_code})
         if response.status_code == 429:
-            time.sleep(min(_retry_after_seconds(response, default=max(1, wait)), max(0.0, deadline - time.monotonic())))
+            retry = min(_retry_after_seconds(response, default=max(1, wait)),
+                        max(0.0, deadline - time.monotonic()))
+            if _sleep_until(time.monotonic() + retry, cancelled):
+                return {"status": "cancelled"}
             continue
         payload = _raise_for_anon_status(response, action="sign-in")
-        if str(payload.get("status") or "unknown") != "pending":
+        status = str(payload.get("status") or "unknown")
+        if status != "pending":
+            # A completed transfer is already committed on the account service; report it even when
+            # the hook fired during this request. run_sign_in's cancel_wins_after_promotion
+            # rules what each surface does with it. Every other terminal outcome loses to a cancel.
+            if status != "completed" and cancelled is not None and cancelled():
+                return {"status": "cancelled"}
             return payload
-        time.sleep(wait)
+        if _sleep_until(time.monotonic() + wait, cancelled):
+            return {"status": "cancelled"}
     return {"status": "timeout"}
 
 
@@ -613,95 +640,62 @@ def settle_after_upgrade(account_state: Dict[str, Any]) -> Dict[str, Any]:
     return {"model": model, "changed": True}
 
 
-def _print_promotion_outcome(outcome: Dict[str, Any]) -> None:
-    status = str(outcome.get("status") or "unknown")
-    reason = str(outcome.get("reason") or "")
-    if status == "timeout":
-        print(UPGRADE_TIMED_OUT)
-        return
-    print(UPGRADE_REASON_COPY.get(reason, UPGRADE_NOT_COMPLETED))
-    if reason in _RETIRED_REASONS:
-        clear_dead_guest("retired")
+def _poll_for_token(*args, **kwargs) -> Dict[str, Any]:
+    """Keep both the sign-in module seam and the device-flow seam live at call time."""
+    from hermes_cli.auth_device_flow import _poll_for_token as poll
+    return poll(*args, **kwargs)
 
 
-def upgrade_guest(args) -> int:
-    """``hermes auth upgrade``: sign in with a Nous account, transferring the free tier's connectors.
+def persist_nous_credentials(*args, **kwargs):
+    """Keep the existing auth_nous persistence seam behind the sign-in entry point."""
+    from hermes_cli.auth_nous import persist_nous_credentials as persist
+    return persist(*args, **kwargs)
 
-    Returns 0 on success (or when already signed in), 1 otherwise. Never persists anything unless the
-    promotion completed AND the token grant succeeded.
-    """
-    from hermes_cli.auth import PROVIDER_REGISTRY, _resolve_verify
-    from hermes_cli.auth_device_flow import (
-        _is_remote_session, _poll_for_token, _print_device_code_instructions, _request_device_code)
-    from hermes_cli.auth_nous import _nous_http_client, persist_nous_credentials
-    timeout_seconds = float(getattr(args, "timeout", None) or 15.0)
-    open_browser = not getattr(args, "no_browser", False) and not _is_remote_session()
-    state = current_nous_state()
-    if state and not is_guest_state(state):
-        print(UPGRADE_ALREADY_SIGNED_IN)
-        return 0
-    if not state:
-        try:
-            state = ensure_portal_identity(blocking=True, timeout_seconds=timeout_seconds)
-        except AuthError as exc:
-            print(f"{UPGRADE_UNAVAILABLE} ({exc})")
-            return 1
-        if not is_guest_state(state):
-            print(UPGRADE_UNAVAILABLE)
-            return 1
-    anon_token = str(state.get("anon_token") or "")
-    portal = (state.get("portal_base_url") or _portal_base_url()).rstrip("/")
-    pconfig = PROVIDER_REGISTRY["nous"]
-    client_id, scope = pconfig.client_id, pconfig.scope
-    verify = _resolve_verify(insecure=None, ca_bundle=None, auth_state=None)
-    print(UPGRADE_START)
-    try:
-        with _nous_http_client(timeout_seconds, verify) as client:
-            device = _request_device_code(client, portal, client_id, scope)
-            intent = register_promotion_intent(
-                client, portal, anon_token, user_code=str(device["user_code"]),
-                device_code=str(device["device_code"]))
-            # The browser leg is the consent page for THIS sign-in (claim_url), not the generic
-            # device page: it shows both identities and the Move button. Relative paths are
-            # portal-relative.
-            claim_url = str(intent.get("claim_url") or "")
-            if claim_url.startswith("/"):
-                claim_url = f"{portal}{claim_url}"
-            _print_device_code_instructions(
-                claim_url or str(device["verification_uri_complete"]), str(intent["claim_code"]),
-                open_browser=open_browser, swallow_open_errors=True)
-            print(f"  {UPGRADE_DO_NOT_SHARE}")
-            expires_in = min(int(device["expires_in"]), int(intent.get("expires_in") or device["expires_in"]))
-            interval = int(intent.get("interval") or device.get("interval") or 5)
-            print("Waiting for sign-in...")
-            outcome = wait_for_promotion(client, portal, intent["claim_code"], expires_in=expires_in, interval=interval)
-            if str(outcome.get("status")) != "completed":
-                _print_promotion_outcome(outcome)
-                return 1
-            token_data = _poll_for_token(
-                client=client, portal_base_url=portal, client_id=client_id,
-                device_code=str(device["device_code"]), expires_in=max(1, expires_in), poll_interval=interval)
-        account_state = _account_state_from_token(
-            token_data, portal_base_url=portal, client_id=client_id, scope=scope, verify=verify,
-            timeout_seconds=timeout_seconds)
-    except AnonCredentialDead:
-        print(UPGRADE_REASON_COPY["account_retired"])
-        clear_dead_guest("retired")
-        return 1
-    except TimeoutError:
-        print(UPGRADE_TIMED_OUT)
-        return 1
-    except KeyboardInterrupt:
-        print("\nSign-in cancelled.")
-        return 130
-    except Exception as exc:
-        print(f"Sign-in failed: {exc}")
-        return 1
-    persist_nous_credentials(account_state)
-    settled = settle_after_upgrade(account_state)
-    email = str(outcome.get("account_email") or "").strip()
-    print(f"Signed in as {email}. Your connectors are kept." if email else "Signed in. Your connectors are kept.")
-    if settled["changed"]:
-        print(f"Default model is now {settled['model']}." if settled["model"]
-              else "No default model is set yet; run `hermes model` to pick one.")
-    return 0
+
+# Public sign-in imports remain here for existing callers and module-attribute patches.
+# The flow imports this module only inside calls, so either module can be imported first.
+from hermes_cli.anon_sign_in import (  # noqa: E402
+    AlreadySignedIn as AlreadySignedIn,
+    Code as Code,
+    Completed as Completed,
+    Declined as Declined,
+    FREE_TIER_RATE_LIMIT_CHAT as FREE_TIER_RATE_LIMIT_CHAT,
+    Failed as Failed,
+    LOGIN_BUSY_ELSEWHERE as LOGIN_BUSY_ELSEWHERE,
+    LOGIN_COMMAND as LOGIN_COMMAND,
+    LOGIN_DM_ONLY as LOGIN_DM_ONLY,
+    LOGIN_NOT_ALLOWED as LOGIN_NOT_ALLOWED,
+    LOGIN_STARTING as LOGIN_STARTING,
+    Retired as Retired,
+    SignInState as SignInState,
+    Superseded as Superseded,
+    TimedOut as TimedOut,
+    UPGRADE_ALREADY_SIGNED_IN as UPGRADE_ALREADY_SIGNED_IN,
+    UPGRADE_CANCELLED as UPGRADE_CANCELLED,
+    UPGRADE_DO_NOT_SHARE as UPGRADE_DO_NOT_SHARE,
+    UPGRADE_NOT_COMPLETED as UPGRADE_NOT_COMPLETED,
+    UPGRADE_NO_DEFAULT_CHAT as UPGRADE_NO_DEFAULT_CHAT,
+    UPGRADE_NO_DEFAULT_TERMINAL as UPGRADE_NO_DEFAULT_TERMINAL,
+    UPGRADE_REASON_COPY as UPGRADE_REASON_COPY,
+    UPGRADE_START as UPGRADE_START,
+    UPGRADE_TIMED_OUT as UPGRADE_TIMED_OUT,
+    UPGRADE_UNAVAILABLE as UPGRADE_UNAVAILABLE,
+    UPGRADE_UNAVAILABLE_CHAT as UPGRADE_UNAVAILABLE_CHAT,
+    UPGRADE_WAITING as UPGRADE_WAITING,
+    UPGRADE_WAITING_UP_TO as UPGRADE_WAITING_UP_TO,
+    Unavailable as Unavailable,
+    Waiting as Waiting,
+    _RETIRED_REASONS as _RETIRED_REASONS,
+    _default_persist_guard as _default_persist_guard,
+    _outcome_state as _outcome_state,
+    format_wait_line as format_wait_line,
+    run_sign_in as run_sign_in,
+)
+from hermes_cli.anon_sign_in_cli import (  # noqa: E402
+    drain_sign_in_copy as drain_sign_in_copy,
+    render_sign_in_cli as render_sign_in_cli,
+    render_sign_in_cli_code as render_sign_in_cli_code,
+    upgrade_guest as upgrade_guest,
+)
+
+FREE_TIER_STATUS_LINE = f"{FREE_TIER_LABEL} \u00b7 {GUEST_MODEL} \u00b7 {LOGIN_COMMAND} to sign in"
