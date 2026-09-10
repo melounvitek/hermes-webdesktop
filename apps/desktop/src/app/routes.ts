@@ -141,11 +141,11 @@ export function isOverlayView(view: AppView): boolean {
   return OVERLAY_VIEWS.has(view)
 }
 
-/** True when TitlebarControls must unmount the app's fixed tool clusters.
- *  Overlays already own the window; contributed full pages (`extension`)
- *  bring their own titlebar chrome (`titleBar.center` etc.) and the clusters
- *  would otherwise sit on top of it. First-party workspace pages
- *  (skills/messaging/artifacts) keep the clusters. */
+/** True when TitlebarControls must hide the app's fixed tool clusters.
+ *  Overlays already own the window (clusters AND titleBar slots unmount).
+ *  Contributed full pages (`extension`) hide the app clusters but keep the
+ *  titleBar slots so plugin chrome can own that space. First-party workspace
+ *  pages (skills/messaging/artifacts) keep the clusters. */
 export function hidesFixedTitlebarClusters(view: AppView): boolean {
   return isOverlayView(view) || view === 'extension'
 }

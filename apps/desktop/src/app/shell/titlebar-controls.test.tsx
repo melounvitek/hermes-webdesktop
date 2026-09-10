@@ -22,27 +22,43 @@ function renderControls(pathname: string) {
 
 const windowControls = () => screen.queryByLabelText('Window controls')
 const appControls = () => screen.queryByLabelText('App controls')
+const pluginChrome = () => screen.queryByText('plugin-chrome')
 
 describe('TitlebarControls fixed clusters', () => {
-  let disposeRoute: () => void
+  let dispose: () => void
 
   beforeEach(() => {
-    disposeRoute = registry.register({
-      area: ROUTES_AREA,
-      data: { path: '/kanban' },
-      id: 'test-kanban-route',
-      render: () => null
-    })
+    dispose = registry.registerMany([
+      {
+        area: ROUTES_AREA,
+        data: { path: '/kanban' },
+        id: 'test-kanban-route',
+        render: () => null
+      },
+      {
+        area: 'titleBar.center',
+        id: 'test-plugin-chrome',
+        render: () => <span>plugin-chrome</span>
+      }
+    ])
   })
 
   afterEach(() => {
-    disposeRoute()
+    dispose()
     cleanup()
   })
 
   it('hides the app clusters on a contributed full-page route', () => {
     renderControls('/kanban')
 
+    expect(windowControls()).toBeNull()
+    expect(appControls()).toBeNull()
+  })
+
+  it('keeps plugin titlebar contributions on a contributed full-page route', () => {
+    renderControls('/kanban')
+
+    expect(pluginChrome()).not.toBeNull()
     expect(windowControls()).toBeNull()
     expect(appControls()).toBeNull()
   })
@@ -59,6 +75,12 @@ describe('TitlebarControls fixed clusters', () => {
 
     expect(windowControls()).toBeNull()
     expect(appControls()).toBeNull()
+  })
+
+  it('hides plugin titlebar contributions on an overlay', () => {
+    renderControls('/settings')
+
+    expect(pluginChrome()).toBeNull()
   })
 
   it('keeps the app clusters on a first-party workspace page', () => {
