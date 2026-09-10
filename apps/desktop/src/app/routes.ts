@@ -141,6 +141,15 @@ export function isOverlayView(view: AppView): boolean {
   return OVERLAY_VIEWS.has(view)
 }
 
+/** True when TitlebarControls must unmount the app's fixed tool clusters.
+ *  Overlays already own the window; contributed full pages (`extension`)
+ *  bring their own titlebar chrome (`titleBar.center` etc.) and the clusters
+ *  would otherwise sit on top of it. First-party workspace pages
+ *  (skills/messaging/artifacts) keep the clusters. */
+export function hidesFixedTitlebarClusters(view: AppView): boolean {
+  return isOverlayView(view) || view === 'extension'
+}
+
 /** The pathname of a router target. Every classifier below reasons about a
  *  PATH, but callers navigate to full targets (`/skills?tab=mcp`), and an
  *  unstripped query reaches the session-id parser — `/skills?tab=mcp` reads as

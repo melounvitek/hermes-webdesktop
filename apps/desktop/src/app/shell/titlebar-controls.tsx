@@ -25,7 +25,7 @@ import {
 } from '@/store/layout'
 import { $unreadSessionCount } from '@/store/session-dot-state'
 
-import { appViewForPath, isOverlayView } from '../routes'
+import { appViewForPath, hidesFixedTitlebarClusters } from '../routes'
 
 import {
   TITLEBAR_ICON_BADGE_SCALE,
@@ -235,11 +235,12 @@ export function TitlebarControls({ leftTools = [], tools = [], onOpenSettings }:
     }
   ]
 
-  // While a full-screen overlay (settings, command center, …) is open it should
+  // While a full-screen overlay (settings, command center, …) or a contributed
+  // full-context plugin page (`extension`, e.g. /kanban) is open it should
   // visually own the window. These control clusters are `fixed` at a higher
-  // z-index than the overlay card, so they'd otherwise bleed over it — hide them
-  // and let the overlay's own chrome (close button, drag region) take over.
-  if (isOverlayView(appViewForPath(location.pathname))) {
+  // z-index than the overlay card / plugin titlebar chrome, so they'd otherwise
+  // bleed over it — hide them and let that surface's own chrome take over.
+  if (hidesFixedTitlebarClusters(appViewForPath(location.pathname))) {
     return null
   }
 
