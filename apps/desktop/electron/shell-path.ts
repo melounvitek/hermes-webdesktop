@@ -89,7 +89,7 @@ function runProbe(shell, flags, execFileFn, timeoutMs): Promise<string | null> {
       const child = execFileFn(
         shell,
         [...flags, PROBE_COMMAND],
-        { encoding: 'utf8', timeout: timeoutMs, windowsHide: true, detached: process.platform !== 'win32' },
+        { encoding: 'utf8', timeout: timeoutMs, windowsHide: true },
         (_error, stdout) => {
           // A profile script may exit nonzero after the sentinel already
           // printed — trust the sentinel, not the exit code.
@@ -106,25 +106,12 @@ function runProbe(shell, flags, execFileFn, timeoutMs): Promise<string | null> {
         capturedStdout += chunk
       })
 
-      // execFile's own `timeout` only SIGTERMs the direct child; a profile
-      // that spawns a daemon (e.g. Powerlevel10k's gitstatusd) can leave a
-      // grandchild holding the stdout pipe open, so the callback above never
-      // fires and this promise would hang forever. Force-settle past the
-      // requested timeout and reap the whole process group so a hung
-      // profile can never park boot.
+      // Kill the probe child directly before settling so a hung profile cannot park boot.
       hardTimer = setTimeout(() => {
-        if (child?.pid && process.platform !== 'win32') {
-          try {
-            process.kill(-child.pid, 'SIGKILL')
-          } catch {
-            // Group may already be gone.
-          }
-        } else {
-          try {
-            child?.kill?.('SIGKILL')
-          } catch {
-            // Already gone.
-          }
+        try {
+          child?.kill?.('SIGKILL')
+        } catch {
+          // Hard settlement must not depend on kill succeeding.
         }
 
         finish(extractSentinelPath(capturedStdout))
