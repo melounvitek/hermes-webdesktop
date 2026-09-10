@@ -232,7 +232,17 @@ def test_actual_background_tasks_reach_chat_completions(
     ],
 )
 @pytest.mark.parametrize(
-    "entrypoint", ["init", "auto", "switch", "fallback", "restore", "rotation"]
+    "entrypoint",
+    [
+        "init",
+        "auto",
+        "switch",
+        "fallback",
+        "restore",
+        "rotation",
+        "init_fallback",
+        "init_auto",
+    ],
 )
 def test_actual_runtime_transitions_reach_chat_completions(
     tmp_path, monkeypatch, actual_endpoint, provider, hosted, entrypoint
@@ -266,12 +276,20 @@ def test_actual_runtime_transitions_reach_chat_completions(
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
     runtime = resolve_runtime_provider(requested=provider)
     assert runtime["api_mode"] == "chat_completions"
+    initial_base = base_url.removesuffix("/v1")
+    initial_provider = provider
+    initial_key = "actual-test-key"
+    if entrypoint in {"init_fallback", "init_auto"}:
+        initial_base = initial_key = None
+        initial_provider = (
+            "missing-provider" if entrypoint == "init_fallback" else "auto"
+        )
+    elif entrypoint == "rotation":
+        initial_base = base_url.replace("api.actual.inc", "127.0.0.1")
     agent = AIAgent(
-        provider=provider,
-        base_url=base_url.replace("api.actual.inc", "127.0.0.1")
-        if entrypoint == "rotation"
-        else base_url.removesuffix("/v1"),
-        api_key="actual-test-key",
+        provider=initial_provider,
+        base_url=initial_base,
+        api_key=initial_key,
         api_mode=None if entrypoint == "auto" else "codex_responses",
         model="primary-model" if entrypoint == "fallback" else "gpt-5.4",
         enabled_toolsets=[],
@@ -386,7 +404,10 @@ def test_actual_auxiliary_fallback_reaches_chat_completions(
 
 
 @pytest.mark.parametrize("override", ["", "http://127.0.0.1:8081", "invalid-url"])
-def test_actual_setup_keeps_provider_settings_in_yaml(tmp_path, monkeypatch, override):
+@pytest.mark.parametrize("configured_provider", ["actual", "aci"])
+def test_actual_setup_keeps_provider_settings_in_yaml(
+    tmp_path, monkeypatch, override, configured_provider
+):
     from hermes_cli import config as config_module
     from hermes_cli import model_setup_flows as setup
     from hermes_cli.auth import resolve_api_key_provider_credentials
@@ -399,7 +420,7 @@ def test_actual_setup_keeps_provider_settings_in_yaml(tmp_path, monkeypatch, ove
     configured_url = "http://127.0.0.1:8080"
     raw = {
         "model": {
-            "provider": "actual",
+            "provider": configured_provider,
             "default": "old-model",
             "base_url": configured_url,
         }
@@ -435,3 +456,47 @@ def test_actual_setup_keeps_provider_settings_in_yaml(tmp_path, monkeypatch, ove
         runtime = resolve_runtime_provider(requested="actual", **kwargs)
         assert runtime["base_url"] == expected_url + "/v1"
         assert runtime["api_mode"] == "chat_completions"
+
+
+def test_actual_key_reload_keeps_yaml_endpoint(tmp_path, monkeypatch, actual_endpoint):
+    from run_agent import AIAgent
+
+    base_url, requests = actual_endpoint
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("ACTUAL_API_KEY", "actual-test-key")
+    monkeypatch.setenv("ACTUAL_BASE_URL", "http://127.0.0.1:1")
+    (tmp_path / "config.yaml").write_text(
+        yaml.safe_dump({
+            "model": {"provider": "aci", "default": "test-model", "base_url": base_url},
+        }),
+        encoding="utf-8",
+    )
+    env_path = tmp_path / ".env"
+    env_path.write_text("ACTUAL_API_KEY=actual-test-key\n", encoding="utf-8")
+    agent = AIAgent(
+        provider="actual",
+        base_url=base_url,
+        api_key="actual-test-key",
+        model="test-model",
+        enabled_toolsets=[],
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+        save_trajectories=False,
+    )
+    try:
+        assert not agent._try_refresh_env_client_credentials()
+        env_path.write_text("ACTUAL_API_KEY=actual-rotated-key\n", encoding="utf-8")
+        assert agent._try_refresh_env_client_credentials()
+        assert agent.api_key == "actual-rotated-key"
+        assert agent.base_url == base_url + "/v1"
+        assert agent.api_mode == "chat_completions"
+        response = agent._interruptible_api_call(
+            agent._build_api_kwargs([{"role": "user", "content": "Reply briefly."}], [])
+        )
+        assert response.choices[0].message.content == "The task is complete."
+        assert [
+            path for path, body in requests if body.get("model") == "test-model"
+        ] == ["/v1/chat/completions"]
+    finally:
+        agent.client.close()

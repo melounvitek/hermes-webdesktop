@@ -845,6 +845,10 @@ def _routed_client_kwargs(agent, fallback_model, _provider_timeout) -> Dict[str,
     _routed_client, _ = resolve_provider_client(
         agent.provider or "auto", model=agent.model, raw_codex=True)
     if _routed_client is not None:
+        from hermes_cli.providers import is_actual_route, normalize_provider
+        effective_provider = getattr(_routed_client, "_hermes_aux_effective_provider", "")
+        if is_actual_route(effective_provider):
+            agent.provider = normalize_provider(effective_provider)
         return _client_kwargs_from_routed(_routed_client, _provider_timeout)
     # No credentials: try the fallback chain BEFORE failing (an exhausted single-entry pool
     # must not die with a misleading "No LLM provider configured"); only explicitly named
@@ -929,6 +933,11 @@ def _init_openai_client(agent, api_key, base_url, fallback_model, _provider_time
         client_kwargs = _explicit_client_kwargs(agent, api_key, base_url, _provider_timeout)
     else:
         client_kwargs = _routed_client_kwargs(agent, fallback_model, _provider_timeout)
+    from hermes_cli.providers import is_actual_route
+    if is_actual_route(agent.provider, client_kwargs.get("base_url", "")):
+        agent.api_mode = "chat_completions"
+        if hasattr(agent, "_transport_cache"):
+            agent._transport_cache.clear()
     try:
         from agent.bedrock_adapter import configure_bedrock_openai_client_kwargs
         configure_bedrock_openai_client_kwargs(client_kwargs, timeout=_provider_timeout)

@@ -933,8 +933,9 @@ def _model_flow_api_key_provider(config, provider_id, current_model=""):
     effective_base = current_base or pconfig.inference_base_url
 
     if provider_id == "actual":
+        from hermes_cli.providers import normalize_provider
         model_cfg = config.get("model") or {}
-        if isinstance(model_cfg, dict) and model_cfg.get("provider") == provider_id:
+        if isinstance(model_cfg, dict) and normalize_provider(str(model_cfg.get("provider") or "")) == provider_id:
             effective_base = str(model_cfg.get("base_url") or "").strip() or effective_base
 
     if provider_id == "zai":
