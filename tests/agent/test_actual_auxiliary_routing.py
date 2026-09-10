@@ -3,6 +3,7 @@
 import asyncio
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import socket
 import threading
 import time
 
@@ -11,8 +12,24 @@ import yaml
 
 
 @pytest.fixture
-def actual_endpoint():
+def actual_endpoint(monkeypatch):
+    from agent.auxiliary_client import (
+        shutdown_cached_clients,
+        _reset_aux_unhealthy_cache,
+    )
+
+    shutdown_cached_clients()
+    _reset_aux_unhealthy_cache()
     requests = []
+    resolve_address = socket.getaddrinfo
+
+    def local_actual_address(host, *args, **kwargs):
+        if host in ("api.actual.inc", b"api.actual.inc"):
+            host = "127.0.0.1"
+        return resolve_address(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", local_actual_address)
+    monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost,api.actual.inc")
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
@@ -20,6 +37,20 @@ def actual_endpoint():
             requests.append((self.path, payload))
             if self.path != "/v1/chat/completions":
                 self.send_error(404)
+                return
+            if payload["model"] == "unavailable-model":
+                body = json.dumps({
+                    "error": {
+                        "message": "The model is not supported with this account",
+                        "type": "invalid_request_error",
+                        "code": "unsupported_model",
+                    }
+                }).encode()
+                self.send_response(400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
                 return
             content = (
                 '{"title":"Actual background routing"}'
@@ -62,20 +93,43 @@ def actual_endpoint():
             pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
     thread.start()
     try:
         yield f"http://127.0.0.1:{server.server_port}", requests
     finally:
+        shutdown_cached_clients()
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
 
 
-@pytest.mark.parametrize("aux_provider", ["auto", "actual", "aci", "custom"])
-@pytest.mark.parametrize("use_api_key", [False, True])
+@pytest.mark.parametrize(
+    "aux_provider",
+    [
+        "auto",
+        "actual",
+        "actual-computer",
+        "actualcomputer",
+        "aci",
+        "custom",
+        "custom:actual-relay",
+    ],
+)
+@pytest.mark.parametrize(
+    "hosted,use_api_key", [(False, False), (False, True), (True, True)]
+)
+@pytest.mark.parametrize("stale_mode", [None, "codex_responses"])
 def test_actual_background_tasks_reach_chat_completions(
-    tmp_path, monkeypatch, actual_endpoint, aux_provider, use_api_key
+    tmp_path,
+    monkeypatch,
+    actual_endpoint,
+    aux_provider,
+    hosted,
+    use_api_key,
+    stale_mode,
 ):
     from agent.auxiliary_client import async_call_llm
     from agent.context_compressor import ContextCompressor
@@ -83,11 +137,13 @@ def test_actual_background_tasks_reach_chat_completions(
     from hermes_cli.runtime_provider import resolve_runtime_provider
 
     base_url, requests = actual_endpoint
+    if hosted:
+        base_url = base_url.replace("127.0.0.1", "api.actual.inc")
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     if use_api_key:
         monkeypatch.setenv("ACTUAL_API_KEY", "actual-test-key")
         monkeypatch.setenv("ACTUAL_BASE_URL", "http://127.0.0.1:1")
-    aux_model = "override-model" if aux_provider == "custom" else "test-model"
+    aux_model = "override-model" if aux_provider.startswith("custom") else "test-model"
     config = {
         "model": {
             "provider": "aci" if aux_provider == "aci" else "actual",
@@ -98,7 +154,12 @@ def test_actual_background_tasks_reach_chat_completions(
             task: {
                 "provider": aux_provider,
                 "model": aux_model,
-                **({"base_url": base_url + "/v1"} if aux_provider == "custom" else {}),
+                "api_mode": stale_mode,
+                **(
+                    {"base_url": base_url if stale_mode else base_url + "/v1"}
+                    if aux_provider == "custom"
+                    else {}
+                ),
             }
             for task in (
                 "compression",
@@ -107,10 +168,19 @@ def test_actual_background_tasks_reach_chat_completions(
             )
         },
     }
+    config["providers"] = {
+        "actual-relay": {
+            "base_url": base_url if stale_mode else base_url + "/v1",
+            "key_env": "ACTUAL_API_KEY",
+            "transport": stale_mode or "chat_completions",
+        }
+    }
     (tmp_path / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
     runtime = resolve_runtime_provider(requested="actual")
     runtime["model"] = "test-model"
     assert runtime["api_mode"] == "chat_completions"
+    if stale_mode:
+        runtime["api_mode"] = stale_mode
     assert (
         generate_title(
             "Stale conversation", main_runtime=runtime, runtime_validator=lambda: False
@@ -145,10 +215,174 @@ def test_actual_background_tasks_reach_chat_completions(
     )
     assert response.choices[0].message.content == "The task is complete."
     assert len(requests) == 3
-    assert all(
-        path == "/v1/chat/completions" and payload["model"] == aux_model
-        for path, payload in requests
+    assert [(path, payload["model"]) for path, payload in requests] == [
+        ("/v1/chat/completions", aux_model)
+    ] * 3
+
+
+@pytest.mark.parametrize(
+    "provider,hosted",
+    [
+        ("actual", False),
+        ("aci", False),
+        ("actual-computer", False),
+        ("actualcomputer", False),
+        ("custom", True),
+        ("custom:actual-relay", True),
+    ],
+)
+@pytest.mark.parametrize(
+    "entrypoint", ["init", "auto", "switch", "fallback", "restore", "rotation"]
+)
+def test_actual_runtime_transitions_reach_chat_completions(
+    tmp_path, monkeypatch, actual_endpoint, provider, hosted, entrypoint
+):
+    from agent.error_classifier import FailoverReason
+    from hermes_cli.runtime_provider import resolve_runtime_provider
+    from run_agent import AIAgent
+
+    base_url, requests = actual_endpoint
+    if hosted:
+        base_url = base_url.replace("127.0.0.1", "api.actual.inc")
+    base_url += "/v1"
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("ACTUAL_API_KEY", "actual-test-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "actual-test-key")
+    config = {
+        "model": {
+            "provider": provider,
+            "default": "gpt-5.4",
+            "base_url": base_url,
+            "api_mode": "codex_responses",
+        },
+        "providers": {
+            "actual-relay": {
+                "base_url": base_url,
+                "key_env": "ACTUAL_API_KEY",
+                "transport": "codex_responses",
+            }
+        },
+    }
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    runtime = resolve_runtime_provider(requested=provider)
+    assert runtime["api_mode"] == "chat_completions"
+    agent = AIAgent(
+        provider=provider,
+        base_url=base_url.replace("api.actual.inc", "127.0.0.1")
+        if entrypoint == "rotation"
+        else base_url.removesuffix("/v1"),
+        api_key="actual-test-key",
+        api_mode=None if entrypoint == "auto" else "codex_responses",
+        model="primary-model" if entrypoint == "fallback" else "gpt-5.4",
+        enabled_toolsets=[],
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+        save_trajectories=False,
+        fallback_model={
+            "provider": provider,
+            "model": "gpt-5.4",
+            "base_url": base_url.removesuffix("/v1"),
+            "api_key": "actual-test-key",
+            "api_mode": "codex_responses",
+        },
     )
+    try:
+        if entrypoint == "switch":
+            agent.switch_model(
+                "gpt-5.4",
+                provider,
+                api_key="actual-test-key",
+                base_url=base_url.removesuffix("/v1"),
+                api_mode="codex_responses",
+            )
+        elif entrypoint == "fallback":
+            assert agent._try_activate_fallback(FailoverReason.rate_limit)
+        elif entrypoint == "restore":
+            agent._primary_runtime["api_mode"] = "codex_responses"
+            agent._fallback_activated = True
+            assert agent._restore_primary_runtime()
+        elif entrypoint == "rotation":
+            from agent.credential_pool import PooledCredential
+
+            agent._swap_credential(
+                PooledCredential.from_dict(
+                    provider,
+                    {
+                        "id": "rotated",
+                        "access_token": "actual-rotated-key",
+                        "base_url": base_url.removesuffix("/v1"),
+                    },
+                )
+            )
+        assert agent.api_mode == "chat_completions"
+        response = agent._interruptible_api_call(
+            agent._build_api_kwargs([{"role": "user", "content": "Reply briefly."}], [])
+        )
+        assert response.choices[0].message.content == "The task is complete."
+        inference_requests = [
+            (path, body) for path, body in requests if path != "/api/show"
+        ]
+        assert len(inference_requests) == 1
+        assert inference_requests[0][0] == "/v1/chat/completions"
+        assert inference_requests[0][1]["model"] == "gpt-5.4"
+    finally:
+        agent.client.close()
+
+
+@pytest.mark.parametrize("provider", ["actual", "aci", "custom:actual-relay"])
+@pytest.mark.parametrize("async_mode", [False, True])
+def test_actual_auxiliary_fallback_reaches_chat_completions(
+    tmp_path, monkeypatch, actual_endpoint, provider, async_mode
+):
+    from agent.auxiliary_client import call_llm, async_call_llm
+
+    local_url, requests = actual_endpoint
+    actual_url = local_url.replace("127.0.0.1", "api.actual.inc") + "/v1"
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    monkeypatch.setenv("ACTUAL_API_KEY", "actual-test-key")
+    config = {
+        "model": {
+            "provider": "actual",
+            "default": "test-model",
+            "base_url": actual_url,
+        },
+        "providers": {
+            "actual-relay": {
+                "base_url": actual_url,
+                "key_env": "ACTUAL_API_KEY",
+                "transport": "codex_responses",
+            }
+        },
+        "auxiliary": {
+            "session_search": {
+                "provider": "custom",
+                "model": "unavailable-model",
+                "base_url": local_url + "/v1",
+                "fallback_chain": [
+                    {
+                        "provider": provider,
+                        "model": "test-model",
+                        "api_mode": "codex_responses",
+                        "base_url": actual_url,
+                    }
+                ],
+            }
+        },
+    }
+    (tmp_path / "config.yaml").write_text(yaml.safe_dump(config), encoding="utf-8")
+    kwargs = {
+        "task": "session_search",
+        "messages": [{"role": "user", "content": "Summarize the results."}],
+        "timeout": 5,
+    }
+    response = (
+        asyncio.run(async_call_llm(**kwargs)) if async_mode else call_llm(**kwargs)
+    )
+    assert response.choices[0].message.content == "The task is complete."
+    assert requests[0][1]["model"] == "unavailable-model"
+    assert requests[-1][1]["model"] == "test-model"
+    assert all(path == "/v1/chat/completions" for path, _payload in requests)
 
 
 @pytest.mark.parametrize("override", ["", "http://127.0.0.1:8081", "invalid-url"])

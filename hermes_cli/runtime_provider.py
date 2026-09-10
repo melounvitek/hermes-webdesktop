@@ -32,7 +32,7 @@ from hermes_cli.auth import (  # resolve_external_process_provider_credentials i
 from hermes_cli import config as _config_mod
 from hermes_cli import models as _models  # attribute access keeps ``hermes_cli.models.<name>`` patches effective
 from hermes_constants import OPENROUTER_BASE_URL
-from hermes_cli.providers import determine_api_mode, is_official_openai_host, nous_api_mode
+from hermes_cli.providers import determine_api_mode, is_actual_route, is_official_openai_host, nous_api_mode
 from utils import base_url_host_matches, base_url_hostname, env_int
 
 
@@ -91,7 +91,7 @@ def _config_base_url_trustworthy_for_bare_custom(cfg_base_url: str, cfg_provider
 # so the runtime resolver stays in lockstep: api.meta.ai — prompt caching only on Responses;
 # api.router.com — /v1/chat/completions is a minimal shim; api.anthropic.com — native Messages.
 _HOST_MANDATED_API_MODES = {
-    "api.x.ai": "codex_responses", "api.meta.ai": "codex_responses", "api.actual.inc": "codex_responses",
+    "api.x.ai": "codex_responses", "api.meta.ai": "codex_responses", "api.actual.inc": "chat_completions",
     "api.router.com": "codex_responses", "api.anthropic.com": "anthropic_messages",
 }
 
@@ -144,12 +144,16 @@ def _fallback_api_mode(provider: str, base_url: str, model: str = "") -> str:
     first, then the transport the provider overlay declares via ``providers.determine_api_mode``
     (``openai-api`` pointed at us.api.openai.com 400'd on every tool call without it), then
     ``chat_completions``."""
+    if is_actual_route(provider, base_url):
+        return "chat_completions"
     return _detect_api_mode_for_url(base_url) or determine_api_mode(provider, base_url, model) or "chat_completions"
 
 
 def _resolve_plain_custom_api_mode(model_cfg: Dict[str, Any], base_url: str) -> str:
     """api_mode for legacy/plain ``provider: custom`` endpoints — conservative by default: only
     direct OpenAI/xAI/Meta URLs imply Responses; named custom providers opt in via ``api_mode``."""
+    if is_actual_route(base_url=base_url):
+        return "chat_completions"
     configured_mode = _parse_api_mode(model_cfg.get("api_mode"))
     detected_mode = _detect_api_mode_for_url(base_url)
     if configured_mode == "codex_responses" and detected_mode != "codex_responses":
@@ -247,6 +251,9 @@ _NO_ANTHROPIC_CREDENTIALS_MSG = ("No Anthropic credentials found. Set ANTHROPIC_
 
 def _runtime(provider: str, api_mode: str, base_url: Any, api_key: Any, **extra: Any) -> Dict[str, Any]:
     """Build a resolved-runtime dict; ``extra`` carries source/requested_provider/provider-specific keys."""
+    if is_actual_route(provider, base_url):
+        api_mode = "chat_completions"
+        base_url = normalize_actual_base_url(base_url)
     return {"provider": provider, "api_mode": api_mode, "base_url": base_url, "api_key": api_key, **extra}
 
 

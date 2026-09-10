@@ -889,7 +889,8 @@ def _apply_primary_runtime_fields(agent, rt: Dict[str, Any]) -> None:
     agent.provider = rt["provider"]
     agent.requested_provider = rt.get("requested_provider", agent.provider)
     agent.base_url = rt["base_url"]           # setter updates _base_url_lower
-    agent.api_mode = rt["api_mode"]
+    from hermes_cli.providers import is_actual_route
+    agent.api_mode = "chat_completions" if is_actual_route(agent.provider, agent.base_url) else rt["api_mode"]
     if hasattr(agent, "_transport_cache"):
         agent._transport_cache.clear()
     agent.api_key = rt["api_key"]
@@ -1841,7 +1842,7 @@ def _restore_switch_snapshot(agent, snapshot: Dict[str, Any]) -> None:
 
 def _resolve_switch_destination(agent, new_model, new_provider, base_url, api_mode, capabilities, old_norm, new_norm):
     """Resolve ``(api_mode, base_url, destination_capabilities)`` for the switch target."""
-    from hermes_cli.providers import determine_api_mode
+    from hermes_cli.providers import determine_api_mode, is_actual_route
     from agent.native_compaction import resolve_native_compaction_capabilities
     from hermes_cli.models import opencode_provider_family
     # Pass model so dual-wire providers (Nous Portal anthropic/* -> Messages) resolve correctly.
@@ -1855,6 +1856,11 @@ def _resolve_switch_destination(agent, new_model, new_provider, base_url, api_mo
     effective_base_url = base_url
     if not effective_base_url and old_norm == new_norm:
         effective_base_url = getattr(agent, "base_url", "")
+    if is_actual_route(new_provider, effective_base_url):
+        api_mode = "chat_completions"
+        if effective_base_url:
+            from hermes_cli.auth import normalize_actual_base_url
+            base_url = normalize_actual_base_url(effective_base_url)
     destination_capabilities = (
         dict(capabilities)
         if isinstance(capabilities, dict)

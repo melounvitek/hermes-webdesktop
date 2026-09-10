@@ -159,12 +159,29 @@ def test_actual_runtime_ignores_legacy_mode_environment(monkeypatch):
     assert resolved["api_mode"] == "chat_completions"
 
 
-def test_actual_hostname_detection_preserves_custom_responses_route():
+def test_actual_hostname_detection_repairs_custom_responses_route():
+    from hermes_cli.providers import is_actual_route
+
     base_url = "https://api.actual.inc/v1"
 
-    assert rp._detect_api_mode_for_url(base_url) == "codex_responses"
-    assert rp._fallback_api_mode("custom", base_url) == "codex_responses"
-    assert rp._resolve_plain_custom_api_mode({}, base_url) == "codex_responses"
+    assert rp._detect_api_mode_for_url(base_url) == "chat_completions"
+    assert rp._fallback_api_mode("custom", base_url) == "chat_completions"
+    assert rp._resolve_plain_custom_api_mode({}, base_url) == "chat_completions"
+    assert (
+        rp._resolve_plain_custom_api_mode({"api_mode": "codex_responses"}, base_url)
+        == "chat_completions"
+    )
+    for unrelated_url in (
+        "https://api.actual.inc.example/v1",
+        "https://proxy.example/api.actual.inc/v1",
+    ):
+        assert not is_actual_route("custom", unrelated_url)
+        assert (
+            rp._runtime("custom", "codex_responses", unrelated_url, "test-key")[
+                "api_mode"
+            ]
+            == "codex_responses"
+        )
 
 
 def test_actual_runtime_uses_local_env_without_key(monkeypatch):

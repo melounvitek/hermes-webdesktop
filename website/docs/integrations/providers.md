@@ -602,7 +602,7 @@ The base URL can be overridden with `GMI_BASE_URL` (default: `https://api.gmi-se
 
 ### Actual Computer
 
-Your own hardware as a private inference cluster via [Actual Computer](https://actual.inc). Two serving modes, both OpenAI-compatible (Hermes defaults to Chat Completions so reasoning and final content are returned together):
+Your own hardware as a private inference cluster via [Actual Computer](https://actual.inc). Two serving modes, both using Chat Completions so reasoning and final content are returned together:
 
 - **Hosted relay** — `https://api.actual.inc`, end-to-end encrypted, routes to *your* cluster. Authenticate with an `ac_` inference key from [actual.inc/user/keys](https://actual.inc/user/keys).
 - **Local daemon** — on-device at `http://127.0.0.1:8080`, fully offline. No API key needed: Hermes detects the loopback base URL and authenticates with an internal placeholder automatically.
@@ -626,7 +626,7 @@ model:
 Notes:
 - Model IDs come from your cluster's `GET /v1/models` — discover with `hermes model` or `curl -s https://api.actual.inc/v1/models -H "Authorization: Bearer $ACTUAL_API_KEY"`.
 - Bare hosts in `model.base_url` are normalized: `http://127.0.0.1:8080` becomes `http://127.0.0.1:8080/v1` automatically. The legacy `ACTUAL_BASE_URL` environment variable is a fallback when no Actual URL is configured in YAML.
-- The built-in Actual provider uses Chat Completions for chat, compaction, title generation, and other auxiliary tasks. Stale built-in Responses modes are repaired. For an endpoint that requires Responses, configure a named custom provider with `transport: codex_responses` under `providers` in `config.yaml`; per-task `auxiliary.<task>.api_mode` overrides are also supported.
+- Actual uses `/v1/chat/completions` for chat, compaction, title generation, and every other auxiliary task. This also applies to custom providers targeting `api.actual.inc`, model switches, and fallbacks. Legacy Responses settings in the main model, custom provider, or auxiliary task configuration are overridden automatically.
 - Reasoning effort is clamped to Actual's supported range (`none/low/medium/high/max`) — a global `xhigh`/`ultra` setting will not 400 requests.
 - Small local models: Hermes' full default toolset plus the system prompt can exceed a 32k context window, producing an empty-stream error from llama.cpp-family servers. Restrict the toolset (`-t file,web`) or load the model with a larger context. The optional `actual-setup` skill (`hermes skills install official/devops/actual-setup`) covers setup and troubleshooting in detail.
 - Aliases: `actual-computer`, `actualcomputer`, `aci`.

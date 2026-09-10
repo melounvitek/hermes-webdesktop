@@ -167,6 +167,14 @@ def normalize_provider(name: str) -> str:
     return ALIASES.get(key, key)
 
 
+def is_actual_route(provider: str = "", base_url: str = "") -> bool:
+    """Identify Actual by provider/alias or its hosted endpoint, including custom routes."""
+    return (
+        normalize_provider(provider or "") == "actual"
+        or base_url_hostname(base_url) == "api.actual.inc"
+    )
+
+
 def _models_dev_info(canonical: str, allow_network: bool = True):
     """models.dev entry or None. Single-arg call on the default path: test sites monkeypatch
     ``get_provider_info`` with single-arg lambdas."""
@@ -289,6 +297,8 @@ def host_mandated_api_mode(base_url: str = "") -> Optional[str]:
         return None
     url_lower = base_url.rstrip("/").lower()
     hostname = base_url_hostname(base_url)
+    if hostname == "api.actual.inc":
+        return "chat_completions"
     # Exact-hostname matching only — never bare substring — so lookalike hosts
     # (api.openai.com.attacker.test) and path-segment spoofs (proxy.test/api.openai.com/v1) are NOT treated
     # as the real endpoint. (#32243)
@@ -343,6 +353,8 @@ def determine_api_mode(provider: str, base_url: str = "", model: str = "") -> st
     """API mode (wire protocol) for a provider/endpoint: host-mandated mode, then Nous dual-wire
     (model-derived — the overlay alone says openai_chat and would pin Claude on the wrong wire),
     then the known provider's transport, then bedrock, else ``chat_completions``."""
+    if is_actual_route(provider, base_url):
+        return "chat_completions"
     mandated = host_mandated_api_mode(base_url)
     if mandated is not None:
         return mandated

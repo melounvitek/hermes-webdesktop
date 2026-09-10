@@ -915,6 +915,13 @@ class ClientLifecycleMixin:
     def _swap_credential(self, entry) -> None:
         runtime_key = getattr(entry, "runtime_api_key", None) or getattr(entry, "access_token", "")
         runtime_base = getattr(entry, "runtime_base_url", None) or getattr(entry, "base_url", None) or self.base_url
+        from hermes_cli.providers import is_actual_route
+        if is_actual_route(getattr(self, "provider", ""), runtime_base):
+            from hermes_cli.auth import normalize_actual_base_url
+            runtime_base = normalize_actual_base_url(runtime_base)
+            self.api_mode = "chat_completions"
+            if hasattr(self, "_transport_cache"):
+                self._transport_cache.clear()
         self._credential_pool_entry_id = getattr(entry, "id", None)
         from hermes_cli.route_identity import normalize_route_base_url
         route_changed = normalize_route_base_url(self.base_url) != normalize_route_base_url(runtime_base)
