@@ -3491,11 +3491,7 @@ export const zh: Translations = {
   },
 
   guidedGreeting: {
-    lines: [
-      '来了，进来吧。我是 Hermes。给我两分钟，把这里按你的习惯收拾一下，然后我们找件你真正想做的事来做。\n\n先说，我该怎么称呼你？',
-      '你好，我是 Hermes。几个小问题，这里就像是你自己的了，然后我们找点值得做的事。\n\n那么，我该怎么称呼你？',
-      '嗨，你找到我了。我是 Hermes。让我先把一切安排到位，然后我们挑一件实实在在的事开始。\n\n不过第一件事：我该怎么称呼你？'
-    ],
+    line: '来了，进来吧。我是 Hermes。给我两分钟，把这里按你的习惯收拾一下，然后我们找件你真正想做的事来做。\n\n先说，我该怎么称呼你？',
     nameSuggestion: (name: string) => `（如果你愿意，我也可以直接叫你 ${name}。）`
   },
   install: {
@@ -3656,7 +3652,8 @@ export const zh: Translations = {
     stripBody: '打开模型选择器试用，或登录 Nous 账户。',
     openModelPicker: '打开模型选择器',
     dismiss: '关闭',
-    statusLabel: model => `Nous · 免费层 · ${model}`,
+    providerName: 'Nous',
+    statusLabel: model => `Nous · ${model}`,
     signIn: '登录',
     signInHeading: '登录 Nous 账户以解锁更多模型和工具。',
     settingUp: '正在设置免费推理…',

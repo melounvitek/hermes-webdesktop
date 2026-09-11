@@ -7,22 +7,17 @@ import { cn } from '@/lib/utils'
 import { BrandClose } from './scenes/brand'
 import { SideAgents } from './scenes/side-agents'
 import { BLUE, BLUE_DIM, EASE, NOUS_SHADOW } from './scenes/style'
-import { decoded } from './scenes/text'
+import { decoded, SPINNER } from './scenes/text'
 import { INTRO_BEATS, INTRO_PROMPT, INTRO_REPLY_WORDS, INTRO_TOOL_ROWS } from './timeline'
 import { useIntroClock } from './use-intro-clock'
 import { viewportSlot } from './viewport-cube'
 
 const INTRO_BEAT_INDEX: Record<string, number> = Object.fromEntries(INTRO_BEATS.map((b, i) => [b.id, i]))
-const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
 const SKIP = 'Skip'
 const SURFACES = 'Desktop · Messages · Phone · Anywhere'
 
-interface IntroRevealSurfaceProps {
-  onSkip?: () => void
-}
-
-export function IntroRevealSurface({ onSkip }: IntroRevealSurfaceProps = {}) {
-  const { frame, leaving, faded, skip, glowRef, stageRef, brandRef, viewportRef } = useIntroClock(onSkip)
+export function IntroRevealSurface() {
+  const { frame, leaving, faded, skip, glowRef, stageRef, brandRef, viewportRef } = useIntroClock()
   const everywhere = frame.beat >= INTRO_BEAT_INDEX.everywhere
   const brand = frame.beat >= INTRO_BEAT_INDEX.brand
 
@@ -115,7 +110,7 @@ function HeroChat({ frame, viewportRef }: HeroChatProps) {
 
   return (
     <div
-      className="relative w-[46vw] min-w-[560px] max-w-[900px] rounded-xl p-7"
+      className="relative w-[46vw] min-w-[560px] max-w-[1350px] rounded-xl p-7"
       style={{
         background: 'rgba(10, 11, 14, 0.88)',
         border: '1px solid rgba(255,255,255,0.09)',

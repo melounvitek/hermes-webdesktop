@@ -2885,7 +2885,7 @@ export interface Translations {
    *  an English opener above a Japanese reply reads as two different agents.
    *  `nameSuggestion` offers the OS account name as a default. */
   guidedGreeting: {
-    lines: readonly string[]
+    line: string
     nameSuggestion: (name: string) => string
   }
   install: {
@@ -3025,6 +3025,8 @@ export interface Translations {
     openModelPicker: string
     dismiss: string
     // Statusbar chip.
+    /** The status-bar chip's label: the provider name alone; the model id and the sign-in follow it. */
+    providerName: string
     statusLabel: (model: string) => string
     // Sign-in dialog.
     signIn: string

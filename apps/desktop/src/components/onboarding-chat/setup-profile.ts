@@ -24,11 +24,13 @@
 
 import { atom } from 'nanostores'
 
+import { handoffReceiptKey, readHandoffReceipt } from '@/app/contrib/handoff-receipt'
 import type { GatewayRequest } from '@/app/session/hooks/use-prompt-actions/utils'
-import { readKey, writeKey } from '@/lib/storage'
+import { activeGatewayConnectionId } from '@/store/gateway'
 import { machineDescription } from '@/store/machine'
 import type { OnboardingAnswers } from '@/store/onboarding-answers'
 import { PLAIN_SPEECH } from '@/store/onboarding-script'
+import { getSessionOwnerHint } from '@/store/session'
 
 /** Profile name of the onboarding guide. Prefixed so it can't collide with a
  *  profile a user actually named "setup". */
@@ -38,8 +40,6 @@ export const SETUP_PROFILE = 'hermes-setup'
  *  list. Exact-title lookup is how kickoff re-finds it across relaunches, so
  *  this string is also a registry key — change the words, keep them stable. */
 export const SETUP_CHAT_TITLE = 'Welcome to Hermes'
-
-const HANDOFF_DONE_KEY = 'hermes-setup-handoff-done-v1'
 
 export type SetupHandoffPhase = 'done' | 'error' | 'opening' | 'pending'
 
@@ -81,6 +81,19 @@ export interface SetupHandoffState {
 /** The handoff beacon: HandoffCard raises it, the wiring effect performs it.
  *  Null until the model emits the handoff directive. */
 export const $setupHandoff = atom<null | SetupHandoffState>(null)
+export const $handoffError = atom<string | null>(null)
+
+/** Only a deliberate retry lifts an error; re-rendering a directive does not. */
+export function retrySetupHandoff(): void {
+  const state = $setupHandoff.get()
+
+  if (state?.phase !== 'error') {
+    return
+  }
+
+  $handoffError.set(null)
+  $setupHandoff.set({ ...state, phase: 'pending' })
+}
 
 /** The issuing welcome chat owns the completion note, even in a background tile. */
 export interface SetupSession {
@@ -92,11 +105,20 @@ export interface SetupSession {
 
 export const $setupSession = atom<null | SetupSession>(null)
 
-/** Raise the handoff request (once per task — re-parses and re-mounts of the
- *  directive are no-ops, and a relaunch after a completed handoff stays
- *  quiet thanks to the storage latch). */
+/** A null connection is the ambient profile route. Substituting 'local'
+ * would retarget a legacy remote primary onto this machine. */
+export function guideSourceConnectionId(guideStoredId: null | string | undefined): null | string {
+  return (guideStoredId && getSessionOwnerHint(guideStoredId)?.connectionId) || activeGatewayConnectionId() || null
+}
+
+/** The request atom suppresses remounts; only an accepted receipt suppresses relaunches. */
 export function requestSetupHandoff(task: string, brief: string, plan: HandoffPlan, guide: SetupSession): boolean {
-  if ($setupHandoff.get() !== null || readKey(HANDOFF_DONE_KEY) === '1') {
+  if (
+    $setupHandoff.get() !== null ||
+    (guide.storedId &&
+      readHandoffReceipt(handoffReceiptKey(guideSourceConnectionId(guide.storedId), guide.storedId))?.status ===
+        'accepted')
+  ) {
     return false
   }
 
@@ -105,19 +127,7 @@ export function requestSetupHandoff(task: string, brief: string, plan: HandoffPl
   return true
 }
 
-/** Burn the relaunch latch — the build session exists and its chat is open. */
-export function markSetupHandoffDone(): void {
-  writeKey(HANDOFF_DONE_KEY, '1')
-}
-
-/** True once a handoff completed on this install (survives relaunch) — used
- *  by the card to render its settled state when the atom is long gone. */
-export function hasCompletedSetupHandoff(): boolean {
-  return readKey(HANDOFF_DONE_KEY) === '1'
-}
-
 export function resetSetupHandoffForTests(): void {
-  writeKey(HANDOFF_DONE_KEY, null)
   $setupHandoff.set(null)
   $setupSession.set(null)
 }

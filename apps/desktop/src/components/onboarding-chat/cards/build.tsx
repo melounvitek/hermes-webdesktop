@@ -7,20 +7,22 @@
 
 import { useAuiState } from '@assistant-ui/react'
 import { useStore } from '@nanostores/react'
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 
 import { requestComposerSubmit } from '@/app/chat/composer/focus'
 import { useSessionView } from '@/app/chat/session-view'
-import { $handoffError, retrySetupHandoff } from '@/app/contrib/handoff-receipt'
+import { handoffReceiptKey, readHandoffReceipt } from '@/app/contrib/handoff-receipt'
 import { resolveSessionOwner } from '@/app/session/hooks/use-session-actions/utils'
 import type { CardProps } from '@/components/onboarding-chat/cards/frame'
 import { Chip } from '@/components/onboarding-chat/chip'
 import {
+  $handoffError,
   $setupHandoff,
   firstTaskTitle,
-  hasCompletedSetupHandoff,
+  guideSourceConnectionId,
   parseHandoffPlan,
   requestSetupHandoff,
+  retrySetupHandoff,
   SETUP_PROFILE
 } from '@/components/onboarding-chat/setup-profile'
 import { Button } from '@/components/ui/button'
@@ -97,8 +99,8 @@ export function FirstBuildCard({ attrs, locked }: CardProps) {
  * session on the user's default profile, seeds it, and moves the user there.
  *
  * Nothing to ask — the build's shape was settled by the `first` step and there
- * is one surface now, so the card just narrates: opening → landed. Both
- * latches (atom + storage) make re-parses, re-mounts, and relaunches inert,
+ * is one surface now, so the card just narrates: opening → landed. The request
+ * atom and accepted receipt make re-parses, re-mounts, and relaunches inert,
  * and a locked (replayed) transcript never re-fires.
  */
 export function HandoffCard({ attrs, locked }: CardProps) {
@@ -109,10 +111,19 @@ export function HandoffCard({ attrs, locked }: CardProps) {
   const brief = (attrs.brief ?? '').trim().slice(0, 240)
   const plan = parseHandoffPlan(attrs.plan)
   const state = useStore($setupHandoff)
-  const error = useStore($handoffError)
+  let error = useStore($handoffError)
+  let completed = false
+
+  try {
+    completed =
+      !!storedId &&
+      readHandoffReceipt(handoffReceiptKey(guideSourceConnectionId(storedId), storedId))?.status === 'accepted'
+  } catch (receiptError) {
+    error = String(receiptError)
+  }
 
   useEffect(() => {
-    if (!task || !brief || locked || !storedId || !runtimeId || $setupHandoff.get() || hasCompletedSetupHandoff()) {
+    if (!task || !brief || locked || !storedId || !runtimeId || $setupHandoff.get() || completed) {
       return
     }
 
@@ -140,14 +151,14 @@ export function HandoffCard({ attrs, locked }: CardProps) {
     return () => {
       cancelled = true
     }
-  }, [brief, locked, plan, task, storedId, runtimeId])
+  }, [brief, locked, plan, task, storedId, runtimeId, completed])
 
   if (!task || !brief) {
     return null
   }
 
-  const settled = state?.phase === 'done' || (state === null && hasCompletedSetupHandoff())
-  const failed = state?.phase === 'error'
+  const settled = state?.phase === 'done' || (state === null && completed)
+  const failed = state?.phase === 'error' || error !== null
   const title = state?.sessionTitle ?? firstTaskTitle(task)
 
   return (
@@ -175,33 +186,33 @@ export function ProgressCard({ attrs, locked }: CardProps) {
   const messages = useStore(view.$messages)
   const messageId = useAuiState(state => state.message.id)
   const title = (attrs.title ?? '').trim() || 'Working on it'
-  const index = messages.findIndex(message => message.id === messageId)
-  const previous = index < 0 ? [] : messages.slice(0, index)
+  const steps = useMemo(() => {
+    const index = messages.findIndex(message => message.id === messageId)
+    const previous = index < 0 ? [] : messages.slice(0, index)
 
-  const steps = previous.flatMap(message => {
-    const directives = message.parts.flatMap(part =>
-      part.type === 'text' ? (segmentTranscriptDirectives(part.text) ?? []) : []
-    )
-
-    const progress = directives
-      .filter(
-        segment =>
-          segment.kind === 'directive' &&
-          segment.directive.name === 'onboarding' &&
-          segment.directive.attrs.step === 'progress'
+    return previous.flatMap(message => {
+      const directives = message.parts.flatMap(part =>
+        part.type === 'text' ? (segmentTranscriptDirectives(part.text) ?? []) : []
       )
-      .at(-1)
 
-    return progress?.kind === 'directive'
-      ? [{ id: message.id, title: progress.directive.attrs.title?.trim() || 'Working on it' }]
-      : []
-  })
+      const progress = directives
+        .filter(
+          segment =>
+            segment.kind === 'directive' &&
+            segment.directive.name === 'onboarding' &&
+            segment.directive.attrs.step === 'progress'
+        )
+        .at(-1)
 
-  steps.push({ id: messageId, title })
+      return progress?.kind === 'directive'
+        ? [{ id: message.id, title: progress.directive.attrs.title?.trim() || 'Working on it' }]
+        : []
+    })
+  }, [messages, messageId])
 
   return (
     <div className="my-3 grid max-w-md gap-1.5" data-onboarding-card>
-      {steps.map(step => {
+      {[...steps, { id: messageId, title }].map(step => {
         const current = step.id === messageId
 
         return (
