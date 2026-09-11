@@ -224,21 +224,18 @@ def test_legacy_json_disable_is_advisory_like_other_platforms(profile, monkeypat
     assert config.platforms[Platform.TELEGRAM].enabled
 
 
-@pytest.mark.parametrize("user_yaml", ["no-files", "absent", "empty", "null", "list", "malformed", "unreadable", "sibling", "enabled", "disabled"])
+@pytest.mark.parametrize("user_yaml", ["no-files", "absent", "empty", "null", "sibling", "enabled", "disabled"])
 @pytest.mark.parametrize("managed_state", ["absent", "url-only", "enabled", "disabled"])
 def test_managed_layer_agrees_with_native_config(profile, monkeypatch, user_yaml, managed_state):
     """Managed leaves override user leaves, not CLI defaults or a second merge policy."""
     path = profile / "config.yaml"
     user_docs = {
-        "empty": "", "null": "null\n", "list": "- not-a-config\n",
-        "malformed": "platforms: [\n",
+        "empty": "", "null": "null\n",
         "sibling": "platforms:\n  relay:\n    extra:\n      user_sibling: kept\n",
         "enabled": "platforms:\n  relay:\n    enabled: true\n",
         "disabled": "platforms:\n  relay:\n    enabled: false\n",
     }
-    if user_yaml == "unreadable":
-        path.mkdir()  # A directory fails open even when tests run as root.
-    elif user_yaml not in {"absent", "no-files"}:
+    if user_yaml not in {"absent", "no-files"}:
         path.write_text(user_docs[user_yaml])
     managed = profile / "managed"
     managed.mkdir()

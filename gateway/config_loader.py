@@ -336,19 +336,21 @@ def bridge_core_env_settings(yaml_cfg: dict, platforms_data: dict) -> None:
 
 
 def load_yaml_layer(home: Path, gw_data: dict) -> None:
-    """Overlay raw user + managed YAML onto *gw_data* without introducing CLI defaults."""
-    from hermes_cli.config import read_user_config_raw
-    from hermes_cli import managed_scope
+    """Overlay ``config.yaml`` + managed YAML onto *gw_data* in place. Raises on a malformed user
+    file (caller warns + falls back). An ABSENT user file is an empty layer, not a reason to skip
+    the administrator's values: a fleet host with no ``config.yaml`` must still honor them.
+    """
+    import yaml
 
-    # Match the raw runtime/predicate readers: absent, unreadable or malformed
-    # user YAML is an empty layer, not a reason to skip administrator settings.
-    # Use the explicit home rather than a process-global path (multiplex-safe).
-    try:
-        yaml_cfg = read_user_config_raw(home / "config.yaml")
-    except Exception as e:
-        logger.warning("Failed to read %s; applying managed config over an empty user layer: %s",
-                       home / "config.yaml", e)
-        yaml_cfg = {}
+    config_yaml_path = home / "config.yaml"
+    yaml_cfg: dict = {}
+    if config_yaml_path.exists():
+        with open(config_yaml_path, encoding="utf-8") as f:
+            yaml_cfg = yaml.safe_load(f) or {}
+
+    # Managed scope: overlay administrator-pinned values (this loader bypasses
+    # hermes_cli.config.load_config, so managed quick_commands / stt would otherwise be ignored).
+    from hermes_cli import managed_scope
     yaml_cfg = managed_scope.apply_managed_overlay(yaml_cfg)
     if not yaml_cfg:
         return
