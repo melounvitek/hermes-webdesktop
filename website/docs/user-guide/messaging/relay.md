@@ -96,8 +96,9 @@ environment.
 
 ## Configuration
 
-Relay activation remains URL-based for compatibility, unless the effective
-platform configuration explicitly disables it:
+Relay activates when a connector relay URL is configured. To keep a profile off
+the relay even when the deployment injects a URL, disable the platform in
+`config.yaml`:
 
 ```yaml
 platforms:
@@ -105,21 +106,19 @@ platforms:
     enabled: false
 ```
 
-- **Explicit disable wins.** `enabled: false` prevents automatic identity-token
-  resolution, provisioning, credential mutation, registration, policy calls,
-  connection attempts, reconnects, and relay media handling, even with an
-  injected `gateway.relay_url` or `GATEWAY_RELAY_URL`.
-- **Native platforms remain available.** A disabled relay does not suppress
-  native messaging adapters or claim standalone delivery destinations through
-  inherited relay identity variables. Inherited credentials are left unchanged.
-- **Existing activation is preserved.** `enabled: true` still requires a
-  connector URL. Omitting `enabled` keeps the existing URL-based behavior.
+- **Explicit disable wins.** With `enabled: false` the gateway does not resolve
+  an identity token, provision or rewrite `GATEWAY_RELAY_*` credentials, register
+  the relay adapter or send the relevance policy — even with `gateway.relay_url`
+  or `GATEWAY_RELAY_URL` set. Native messaging adapters connect as if no relay
+  URL were present, and cron delivery treats no platform as relay-fronted.
+- **Omitting `enabled` keeps URL-based activation.** `enabled: true` still needs
+  a connector URL. A `gateway.json` `enabled: false` is advisory, as for every
+  other platform; put the opt-out in `config.yaml` (user or managed).
 
-The decision uses the gateway's merged platform configuration, including managed
-settings and supported nested platform sections. Restart the gateway after
-changing this setting. This is not a live teardown mechanism for an already-open
-socket. The explicit `hermes gateway enroll` command remains available while
-runtime relay is disabled.
+The verdict is read once at startup from the same merged platform configuration
+the gateway uses (top-level or `gateway.platforms` block, managed overlay).
+Restart the gateway after changing it; an open relay socket is not torn down.
+`hermes gateway enroll` remains available while runtime relay is disabled.
 
 | Setting | Where | Meaning |
 |---------|-------|---------|
