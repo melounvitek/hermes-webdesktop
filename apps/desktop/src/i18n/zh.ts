@@ -3,6 +3,36 @@ import { defineFieldCopy } from '@/app/settings/field-copy'
 import type { Translations } from './types'
 
 export const zh: Translations = {
+  connectors: {
+    title: '连接你的应用',
+    connect: '连接',
+    skip: '暂不连接',
+    cancel: '停止等待',
+    retry: '重试',
+    grant: '重新连接',
+    connected: '已连接',
+    skipped: '已跳过',
+    disabled: '不可用',
+    failed: '连接失败',
+    needsAuth: '授权已过期',
+    opening: '正在打开登录…',
+    waiting: '请在浏览器中完成连接…',
+    timeout: '仍在等待授权。',
+    keepWaiting: '继续等待',
+    refresh: '刷新状态',
+    statusError: '无法检查连接，请刷新重试。',
+    connectError: '无法开始授权，请重试。',
+    unavailable: '此会话暂时无法使用连接器。',
+    ownerMissing: '请重新打开此对话以管理连接。',
+    search: '查找应用',
+    empty: '没有匹配的应用',
+    continue: '在对话中继续',
+    continueBusy: '等待当前操作完成',
+    continueFailed: '无法继续，请重试。',
+    disclaimer: '连接为可选操作。请仅授权你希望 Hermes 使用的应用。',
+    execution: '连接器工具'
+  },
+
   sessionImport: {
     title: '从其他应用继续',
     subtitle: '将对话导入 Hermes，接着上次的进度继续。',
@@ -3460,6 +3490,14 @@ export const zh: Translations = {
     }
   },
 
+  guidedGreeting: {
+    lines: [
+      '来了，进来吧。我是 Hermes。给我两分钟，把这里按你的习惯收拾一下，然后我们找件你真正想做的事来做。\n\n先说，我该怎么称呼你？',
+      '你好，我是 Hermes。几个小问题，这里就像是你自己的了，然后我们找点值得做的事。\n\n那么，我该怎么称呼你？',
+      '嗨，你找到我了。我是 Hermes。让我先把一切安排到位，然后我们挑一件实实在在的事开始。\n\n不过第一件事：我该怎么称呼你？'
+    ],
+    nameSuggestion: (name: string) => `（如果你愿意，我也可以直接叫你 ${name}。）`
+  },
   install: {
     stageStates: {
       pending: '等待中',

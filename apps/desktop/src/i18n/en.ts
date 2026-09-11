@@ -3,6 +3,36 @@ import { FIELD_DESCRIPTIONS, FIELD_LABELS } from '@/app/settings/constants'
 import type { Translations } from './types'
 
 export const en: Translations = {
+  connectors: {
+    title: 'Connect your apps',
+    connect: 'Connect',
+    skip: 'Not now',
+    cancel: 'Stop waiting',
+    retry: 'Try again',
+    grant: 'Reconnect',
+    connected: 'Connected',
+    skipped: 'Skipped',
+    disabled: 'Unavailable',
+    failed: 'Could not connect',
+    needsAuth: 'Access expired',
+    opening: 'Opening sign-in…',
+    waiting: 'Finish connecting in your browser…',
+    timeout: 'Still waiting for authorization.',
+    keepWaiting: 'Keep waiting',
+    refresh: 'Refresh status',
+    statusError: 'Could not check connections. Try refreshing.',
+    connectError: 'Could not start authorization. Try again.',
+    unavailable: 'Connectors are unavailable for this session.',
+    ownerMissing: 'Reopen this conversation to manage its connections.',
+    search: 'Find an app',
+    empty: 'No matching apps',
+    continue: 'Continue in chat',
+    continueBusy: 'Waiting for this turn to finish',
+    continueFailed: 'Could not continue. Try again.',
+    disclaimer: 'Connecting is optional. Only authorize the apps you want Hermes to use.',
+    execution: 'Connector tools'
+  },
+
   sessionImport: {
     title: 'Continue from another app',
     subtitle: 'Bring a conversation into Hermes and pick up where you left off.',
@@ -3317,6 +3347,14 @@ export const en: Translations = {
     }
   },
 
+  guidedGreeting: {
+    lines: [
+      "Hey, come on in. I'm Hermes. Give me two minutes to set the place up around you, then we'll put me to work on something you actually want done.\n\nFirst though, what should I call you?",
+      "Hey there, I'm Hermes. A couple of quick things and this will feel like yours, then we'll find you something worth doing.\n\nSo, what should I call you?",
+      "Hi, you found me. I'm Hermes. Let me get everything arranged around you, then we'll pick something real to start on.\n\nFirst things first though, what should I call you?"
+    ],
+    nameSuggestion: (name: string) => `(I can also just call you ${name}, if you prefer.)`
+  },
   install: {
     stageStates: {
       pending: 'Pending',
