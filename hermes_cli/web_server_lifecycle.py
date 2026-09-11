@@ -1,6 +1,7 @@
 """Serve-process lifecycle: parent death watchdog, port-conflict preflight, READY announcement, browser open, trusted proxies.
 """
 
+import asyncio
 import logging
 import ipaddress
 import json
@@ -187,6 +188,30 @@ def _eager_reconcile_own_session_db() -> None:
             "startup schema reconcile of state.db failed (%s); session "
             "reads will retry the heal per poll", exc,
         )
+
+
+async def _wisdom_checker_loop(interval: int = 300) -> None:
+    """Run pending reviews and reconcile the typed feed off the request loop."""
+    while True:
+        try:
+            from hermes_cli.config import load_config
+
+            wisdom = (load_config() or {}).get("wisdom") or {}
+            if isinstance(wisdom, dict) and wisdom.get("enabled"):
+                def reconcile_wisdom():
+                    from hermes_wisdom.service import WisdomService
+
+                    service = WisdomService()
+                    service.require_setup()
+                    service.process_professionalism_reviews(max_jobs=4)
+                    return service.check(apply_automatic=False)
+
+                await asyncio.to_thread(reconcile_wisdom)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _log.debug("Collective Wisdom background reconciliation failed", exc_info=True)
+        await asyncio.sleep(interval)
 
 
 def _read_bound_port(server: "uvicorn.Server", fallback: int) -> int:
