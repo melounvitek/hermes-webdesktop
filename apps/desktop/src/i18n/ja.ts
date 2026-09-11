@@ -1182,10 +1182,13 @@ export const ja = defineLocale({
         'speed-gated-quality':
           'より高品質なモデルもこのマシンに載りますが、メモリ帯域の制約で応答が遅くなります — これは速度を保てる最良のモデルです。',
         'fastest-resident':
-          'このハードウェアでフルスピードに達するモデルはありません。GPU メモリ内で動くものの中で最速です。',
-        'least-painful-spilled':
-          'GPU メモリに完全に収まるモデルはありません — システム RAM からの実行で最も快適なモデルです。'
+          'このハードウェアでフルスピードに達するモデルはありません。GPU メモリ内で動くものの中で最速です。'
       } as Record<string, string>,
+      noRecommendationTitle: 'このマシン向けの自動推奨モデルはありません',
+      noRecommendationDetail:
+        '自動セットアップには、GPU メモリまたはユニファイドメモリに完全に収まる厳選モデルが必要です。下の一覧から選ぶか、ほかのモデルを探すこともできます。',
+      noRecommendationAction: 'モデルを探す',
+      quickstartConfigure: '自分で選ぶ',
       downloaded: 'ダウンロード済み',
       downloadAction: size => `ダウンロード · ${size}`,
       downloadProgress: (done, total) => `ダウンロード中 ${done} / ${total}`,

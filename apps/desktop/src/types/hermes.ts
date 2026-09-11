@@ -1400,9 +1400,7 @@ export interface LocalCatalogModel {
   native_context: number
   native_context_label: string
   recommended: boolean
-  /** Why the resolver picked this entry (recommended rows only):
-   *  best-quality-resident | speed-gated-quality | fastest-resident |
-   *  least-painful-spilled. Renders as the Recommended badge's tooltip. */
+  /** Why the resolver picked this entry (recommended rows only). */
   recommended_reason?: string | null
   downloaded: boolean
   downloaded_model_id?: string | null
