@@ -1789,7 +1789,7 @@ class GatewayInboundMixin:
 
         source = dataclasses.replace(entry.origin)
         try:
-            authorized = self._is_user_authorized(source, allow_adapter_delegation=False)
+            authorized = self._is_user_authorized_for_source(source, allow_adapter_delegation=False)
         except Exception:
             logger.warning(
                 "Plugin message injection authorization check failed: plugin=%s session=%s",
