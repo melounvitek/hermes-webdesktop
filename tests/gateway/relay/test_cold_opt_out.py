@@ -10,7 +10,7 @@ import pytest
 import yaml
 
 
-@pytest.mark.parametrize("case", ["native", "url-only", "disabled", "managed", "managed-only", "scoped", "scoped-json"])
+@pytest.mark.parametrize("case", ["native", "url-only", "disabled", "managed", "managed-only", "scoped"])
 def test_cold_fronted_platforms_is_read_only(tmp_path, case):
     home = tmp_path / "primary"
     home.mkdir()
@@ -27,8 +27,6 @@ def test_cold_fronted_platforms_is_read_only(tmp_path, case):
         (managed / "config.yaml").write_text("platforms:\n  relay:\n    enabled: false\n")
     if case == "scoped":
         (scoped / "config.yaml").write_text("platforms:\n  relay:\n    enabled: false\n")
-    elif case == "scoped-json":
-        (scoped / "gateway.json").write_text(json.dumps({"platforms": {"relay": {"enabled": False}}}))
     for root in (home, scoped):
         (root / ".env").write_text("GATEWAY_RELAY_SECRET=dotenv-only-test-secret\n")
     # Allowlist only: never inherit live credentials, profile selectors, or
@@ -45,7 +43,7 @@ def test_cold_fronted_platforms_is_read_only(tmp_path, case):
     code = textwrap.dedent("""
         import json, os, sys
         from hermes_constants import set_hermes_home_override
-        if sys.argv[1].startswith("scoped"):
+        if sys.argv[1] == "scoped":
             set_hermes_home_override(sys.argv[2])
         before = dict(os.environ)
         assert "gateway.run" not in sys.modules

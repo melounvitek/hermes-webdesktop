@@ -71,38 +71,27 @@ def _env_or_cfg_url(env_var: str, cfg_key: str) -> Optional[str]:
 
 
 def relay_explicitly_disabled() -> bool:
-    """The profile's normalized opt-out, before any URL/credential activation.
+    """``platforms.relay.enabled: false`` in the profile's YAML (user or managed).
 
-    Reuse the gateway's platform merge and boolean normalization without running
-    its env/plugin side effects. Absence is not a disable: URL-only deployments
-    predate the platform flag. The raw loader includes managed configuration.
+    Same merge and boolean normalization as the gateway loader, minus its env/plugin
+    side effects, so a standalone scheduler can ask without bootstrapping the gateway.
+    Mirrors the loader's ``_enabled_explicit`` rule: only a YAML ``enabled`` key is
+    authoritative — a legacy ``gateway.json`` block is advisory for relay exactly as it
+    is for every other platform, and an absent key keeps URL-only activation.
     """
     from gateway.config import Platform, PlatformConfig
-    from gateway.config_loader import (
-        bridge_platform_shared_keys, load_legacy_gateway_json, merge_platform_sections,
-    )
-    from hermes_constants import get_hermes_home
+    from gateway.config_loader import bridge_platform_shared_keys, merge_platform_sections
     from hermes_cli.config import read_raw_config
     from hermes_cli.managed_scope import apply_managed_overlay
 
-    # Do not import gateway.run here: standalone routing must not bootstrap
-    # runtime flags, config-to-env bridges or dotenv. The shared cached reader
-    # resolves the context-local home; the same managed overlay is used by the
-    # runtime loader, without introducing CLI defaults into platform precedence.
     cfg = apply_managed_overlay(read_raw_config())
-    data = load_legacy_gateway_json(get_hermes_home())
-    platforms = merge_platform_sections(cfg, cfg.get("gateway"), data)
-    gateway = cfg.get("gateway") or {}
-    bridge_platform_shared_keys(
-        cfg, gateway.get("platforms") if isinstance(gateway, dict) else None,
-        data, platforms, [Platform.RELAY],
-    )
+    gateway = cfg.get("gateway") if isinstance(cfg.get("gateway"), dict) else {}
+    platforms = merge_platform_sections(cfg, gateway, {})
+    bridge_platform_shared_keys(cfg, gateway.get("platforms"), {}, platforms, [Platform.RELAY])
     block = platforms.get("relay")
-    return (
-        isinstance(block, dict)
-        and "enabled" in block
-        and not PlatformConfig.from_dict(block).enabled
-    )
+    if not isinstance(block, dict) or not block.get("extra", {}).get("_enabled_explicit"):
+        return False
+    return not PlatformConfig.from_dict(block).enabled
 
 
 def relay_url() -> Optional[str]:

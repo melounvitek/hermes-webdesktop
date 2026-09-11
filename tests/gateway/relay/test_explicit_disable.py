@@ -64,10 +64,7 @@ def configure(home, state, source, monkeypatch):
         monkeypatch.setenv("GATEWAY_RELAY_URL", URL)
         assert not (home / "config.yaml").exists()
         return
-    if source == "legacy-json":
-        (home / "gateway.json").write_text(json.dumps({"platforms": cfg.pop("platforms")}))
-        monkeypatch.setenv("GATEWAY_RELAY_URL", URL)
-    elif source == "env":
+    if source == "env":
         monkeypatch.setenv("GATEWAY_RELAY_URL", URL)
     elif source == "managed":
         managed = home / "managed"
@@ -200,17 +197,9 @@ async def test_production_startup_respects_profile_opt_out(profile, monkeypatch,
             assert "relay-fronted" in error
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("pinned", [False, True], ids=["unprovisioned", "inherited-secret"])
-async def test_legacy_json_disable_preserves_startup_and_native_delivery(profile, monkeypatch, pinned):
-    await test_production_startup_respects_profile_opt_out(
-        profile, monkeypatch, False, "legacy-json", pinned,
-    )
-
-
 @pytest.mark.parametrize("yaml_state", ["absent", "empty", "sibling", "enabled"])
 @pytest.mark.parametrize("disabled", [False, "false"])
-def test_legacy_json_disable_agrees_with_normalized_config(profile, monkeypatch, yaml_state, disabled):
+def test_legacy_json_disable_is_advisory_like_other_platforms(profile, monkeypatch, yaml_state, disabled):
     (profile / "gateway.json").write_text(json.dumps({"platforms": {
         "relay": {"enabled": disabled},
         "slack": {"enabled": True, "token": "native-test-token"},
@@ -225,11 +214,12 @@ def test_legacy_json_disable_agrees_with_normalized_config(profile, monkeypatch,
         (profile / "config.yaml").write_text(yaml.safe_dump(cfg))
     monkeypatch.setenv("GATEWAY_RELAY_URL", URL)
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "native-telegram-test-token")
-    # Other legacy platforms keep their existing credential-driven enablement.
     monkeypatch.setenv("GATEWAY_RELAY_ALLOW_DIRECT_PLATFORMS", "true")
     config = load_gateway_config()
-    assert relay.relay_explicitly_disabled() is (yaml_state != "enabled")
-    assert config.platforms[Platform.RELAY].enabled is (yaml_state == "enabled")
+    # A legacy gateway.json ``enabled`` is advisory for relay exactly as it is for telegram:
+    # env presence (the URL / the token) re-enables both. Only YAML sets ``_enabled_explicit``.
+    assert relay.relay_explicitly_disabled() is False
+    assert config.platforms[Platform.RELAY].enabled
     assert config.platforms[Platform.SLACK].enabled
     assert config.platforms[Platform.TELEGRAM].enabled
 
@@ -289,7 +279,7 @@ def test_managed_layer_agrees_with_native_config(profile, monkeypatch, user_yaml
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("entry", ["url", "provision", "policy", "registration", "forced-registration", "fronted"])
-@pytest.mark.parametrize("spelling", ["top", "nested", "normalized", "legacy-json", "yaml-wins", "gateway-relay", "top-relay", "managed-disable", "sibling-keeps-disable"])
+@pytest.mark.parametrize("spelling", ["top", "nested", "normalized", "yaml-wins", "gateway-relay", "top-relay", "managed-disable", "sibling-keeps-disable"])
 async def test_disabled_standalone_paths_have_no_relay_side_effects(profile, monkeypatch, entry, spelling):
     block = {"enabled": "false" if spelling == "normalized" else False}
     cfg = {"gateway": {"relay_url": URL}}
@@ -301,8 +291,6 @@ async def test_disabled_standalone_paths_have_no_relay_side_effects(profile, mon
     elif spelling == "top-relay":
         cfg["relay"] = block
         cfg["gateway"]["relay"] = {"enabled": True}
-    elif spelling == "legacy-json":
-        (profile / "gateway.json").write_text(json.dumps({"platforms": {"relay": block}}))
     elif spelling == "managed-disable":
         cfg["platforms"] = {"relay": {"enabled": True}}
         managed = profile / "managed"
