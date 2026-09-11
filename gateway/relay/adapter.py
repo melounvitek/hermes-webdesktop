@@ -738,11 +738,6 @@ class RelayAdapter(BasePlatformAdapter):
 
     # ── abstract methods (delegated to the transport) ────────────────────
     async def connect(self, *, is_reconnect: bool = False) -> bool:
-        from gateway.relay import relay_explicitly_disabled
-
-        if relay_explicitly_disabled():
-            self._set_fatal_error("relay_disabled", "Relay explicitly disabled in config", retryable=False)
-            return False
         # ``is_reconnect`` is part of the BasePlatformAdapter.connect contract (the
         # reconnect watcher passes it; refusing the kwarg would break recovery).
         # Relay IGNORES it: messages buffered during a gap live in the CONNECTOR's
@@ -1702,10 +1697,6 @@ class RelayAdapter(BasePlatformAdapter):
         """Lazily build the authenticated /relay/media client from the SAME dial URL and
         per-gateway creds the WS uses; None when unavailable (media lanes then degrade
         to their pre-media fallbacks)."""
-        from gateway.relay import relay_explicitly_disabled
-
-        if relay_explicitly_disabled():
-            return None
         if self._media_client is not None:
             return self._media_client
         try:

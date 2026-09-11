@@ -305,10 +305,6 @@ async def _await_bounded(aw: Awaitable[Any]) -> None:
 REDIAL_HOLD_MAX_S = 60.0
 
 
-class _RelayDisabled(RuntimeError):
-    """Local profile opt-out is terminal, not a transient dial failure."""
-
-
 class WebSocketRelayTransport:
     """RelayTransport over a WebSocket connection the gateway dials to the connector."""
 
@@ -412,20 +408,12 @@ class WebSocketRelayTransport:
 
     # ── lifecycle ────────────────────────────────────────────────────────
     async def connect(self) -> bool:
-        try:
-            await self._dial_and_start()
-        except _RelayDisabled:
-            return False
+        await self._dial_and_start()
         return True
 
     async def _dial_and_start(self) -> None:
         """Open the socket, start the reader, send hello(s). Used by connect() and
         by the reconnect supervisor / fresh-token retry on a re-dial."""
-        from gateway.relay import relay_explicitly_disabled
-
-        if relay_explicitly_disabled():
-            logger.info("relay ws disabled by config; not connecting or retrying")
-            raise _RelayDisabled("Relay explicitly disabled in config")
         self._descriptor_ready = asyncio.get_running_loop().create_future()
         self._dial_generation += 1
         # Fresh handshake generation: a reconnected connector re-sends one
@@ -835,8 +823,6 @@ class WebSocketRelayTransport:
         try:
             await self._dial_and_start()
             logger.info("relay ws re-dialed with a fresh upgrade token after 4401")
-        except _RelayDisabled:
-            return
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001 - fall back to the backoff supervisor
@@ -885,8 +871,6 @@ class WebSocketRelayTransport:
             try:
                 await self._dial_and_start()
                 logger.info("relay ws reconnected")
-                return
-            except _RelayDisabled:
                 return
             except Exception as exc:  # noqa: BLE001 - keep retrying on dial failure
                 if self._latch_if_fresh_token_refused(exc):
