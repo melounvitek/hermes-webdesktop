@@ -128,3 +128,16 @@ def test_legacy_json_disable_is_advisory_like_other_platforms(profile, monkeypat
     assert relay.relay_explicitly_disabled() is False
     assert config.platforms[Platform.RELAY].enabled is True
     assert config.platforms[Platform.TELEGRAM].enabled is True
+
+
+def test_malformed_user_yaml_drops_the_yaml_layer_for_both_readers(profile, monkeypatch):
+    """The loader falls back to env + gateway.json WITHOUT the managed layer on a malformed user
+    file; the predicate must fall back the same way or startup suppresses native adapters for a
+    relay it then refuses to register."""
+    (profile / "config.yaml").write_text("platforms: [\n")
+    write_disable(profile, "managed", monkeypatch)
+    config = load_gateway_config()
+
+    assert relay.relay_explicitly_disabled() is False
+    assert config.platforms[Platform.RELAY].enabled is True
+    assert relay.relay_url() == URL

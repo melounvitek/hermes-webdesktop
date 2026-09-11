@@ -73,18 +73,23 @@ def _env_or_cfg_url(env_var: str, cfg_key: str) -> Optional[str]:
 def relay_explicitly_disabled() -> bool:
     """``platforms.relay.enabled: false`` in the profile's YAML (user or managed).
 
-    Same merge and boolean normalization as the gateway loader, minus its env/plugin
-    side effects, so a standalone scheduler can ask without bootstrapping the gateway.
+    Same files, merge and boolean normalization as the gateway loader (a malformed user
+    file drops the whole YAML layer there too), minus its env/plugin side effects, so a
+    standalone scheduler can ask without bootstrapping the gateway.
     Mirrors the loader's ``_enabled_explicit`` rule: only a YAML ``enabled`` key is
     authoritative — a legacy ``gateway.json`` block is advisory for relay exactly as it
     is for every other platform, and an absent key keeps URL-only activation.
     """
     from gateway.config import Platform, PlatformConfig
-    from gateway.config_loader import bridge_platform_shared_keys, merge_platform_sections
-    from hermes_cli.config import read_raw_config
-    from hermes_cli.managed_scope import apply_managed_overlay
+    from gateway.config_loader import bridge_platform_shared_keys, merge_platform_sections, read_yaml_layers
+    from hermes_constants import get_hermes_home
 
-    cfg = apply_managed_overlay(read_raw_config())
+    try:
+        cfg = read_yaml_layers(get_hermes_home())
+    except Exception:  # noqa: BLE001 - same fallback as load_gateway_config: no YAML layer at all
+        return False
+    if not isinstance(cfg, dict):
+        return False
     gateway = cfg.get("gateway") if isinstance(cfg.get("gateway"), dict) else {}
     platforms = merge_platform_sections(cfg, gateway, {})
     bridge_platform_shared_keys(cfg, gateway.get("platforms"), {}, platforms, [Platform.RELAY])
