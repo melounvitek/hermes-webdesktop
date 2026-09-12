@@ -4,7 +4,9 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { requestComposerSubmit } from '@/app/chat/composer/focus'
 import { useSessionView } from '@/app/chat/session-view'
+import { isFirstBuildSession } from '@/app/contrib/handoff-receipt'
 import { resolveSessionOwner } from '@/app/session/hooks/use-session-actions/utils'
+import { FirstBuildConnectorOffer } from '@/components/assistant-ui/first-build-connectors'
 import { ToolFallback } from '@/components/assistant-ui/tool/fallback'
 import { Button } from '@/components/ui/button'
 import { ConnectorCard, type ConnectorCardCopy } from '@/components/ui/connector-card'
@@ -24,6 +26,7 @@ export function ConnectorTool(props: ToolCallMessagePartProps) {
   const runtimeId = useStore(view.$runtimeId)
   const storedId = useStore(view.$storedId)
   const messages = useStore(view.$messages)
+  const firstBuild = isFirstBuildSession(storedId)
 
   // One live card per offer. Every manage_connections call renders through
   // here, but only ONE is the card the user acts on; the rest are settled
@@ -84,6 +87,19 @@ export function ConnectorTool(props: ToolCallMessagePartProps) {
   }
 
   const historical = liveId !== props.toolCallId
+  // A status call with no target list describes the whole catalog. That is an
+  // answer for the model, not an offer to the user: rendering it as rows put a
+  // Connect button on every app the gateway knows.
+  const input = recordOf(props.args)
+
+  const untargetedStatus =
+    props.toolName === 'manage_connections' &&
+    (input.action ?? 'status') === 'status' &&
+    !(Array.isArray(input.connectors) && input.connectors.length > 0)
+
+  // Neither kind of part owns the live offer, so neither resolves an owner or
+  // polls the gateway.
+  const inert = historical || untargetedStatus
 
   const [owner, setOwner] = useState<{
     storedId: string
@@ -92,8 +108,10 @@ export function ConnectorTool(props: ToolCallMessagePartProps) {
     profile: string
   } | null>(null)
 
+  const [ownerFailure, setOwnerFailure] = useState<string | null>(null)
+
   useEffect(() => {
-    if (!storedId || !runtimeId || historical) {
+    if (!storedId || !runtimeId || inert) {
       return
     }
 
@@ -115,13 +133,14 @@ export function ConnectorTool(props: ToolCallMessagePartProps) {
       .catch(() => {
         if (!cancelled) {
           setOwner(null)
+          setOwnerFailure(`${storedId}:${runtimeId}`)
         }
       })
 
     return () => {
       cancelled = true
     }
-  }, [storedId, runtimeId, historical])
+  }, [storedId, runtimeId, inert])
   const rows = connectionRows(props.args, props.result)
   const signature = rows.map(row => row.connector).join('|')
   const target = view.kind === 'tile' ? `tile:${storedId}` : 'main'
@@ -140,7 +159,7 @@ export function ConnectorTool(props: ToolCallMessagePartProps) {
   }
 
   const flow = useMemo(() => {
-    if (historical || !runtimeId || !owner || owner.storedId !== storedId || owner.runtimeId !== runtimeId) {
+    if (firstBuild || inert || !runtimeId || !owner || owner.storedId !== storedId || owner.runtimeId !== runtimeId) {
       return null
     }
 
@@ -160,11 +179,10 @@ export function ConnectorTool(props: ToolCallMessagePartProps) {
           `The user clicked Connect for ${connectorTitle(slug)} and the sign-in is open in their browser. Call manage_connections action="wait" connectors=["${slug}"] now and hold there until it reports connected. Do NOT call connect again — a second link cancels the one they are signing in with. Say nothing until wait returns.`
         )
     })
-  }, [runtimeId, owner, storedId, signature, historical])
+  }, [runtimeId, owner, storedId, signature, inert, firstBuild])
 
   const { t } = useI18n()
-  // A result is a snapshot. Reopening a transcript only refreshes status; it
-  // cannot mint links, open tabs or restart an abandoned authorization.
+  // Ordinary sessions require a click to begin authorization.
   useEffect(() => {
     if (!flow) {
       return
@@ -178,12 +196,29 @@ export function ConnectorTool(props: ToolCallMessagePartProps) {
     }
   }, [flow, props.result])
 
-  if (historical) {
+  if (inert) {
     return <ToolFallback {...props} />
   }
 
+  if (firstBuild && storedId && owner?.storedId === storedId && owner.runtimeId === runtimeId) {
+    return (
+      <FirstBuildConnectorOffer
+        connectionId={owner.connectionId}
+        part={props}
+        profile={owner.profile}
+        runtimeId={owner.runtimeId}
+        storedId={storedId}
+        target={view.kind === 'tile' ? `tile:${storedId}` : 'main'}
+      />
+    )
+  }
+
   if (!flow) {
-    return <p className="text-xs text-muted-foreground">{t.connectors.ownerMissing}</p>
+    return (
+      <p className="text-xs text-muted-foreground">
+        {ownerFailure === `${storedId}:${runtimeId}` ? t.connectors.ownerMissing : t.connectors.checking}
+      </p>
+    )
   }
 
   return (

@@ -1,6 +1,29 @@
 import { isRecord } from '@assistant-ui/core/internal'
 import type { ToolCallMessagePart } from '@assistant-ui/react'
 
+import type { ChatMessage } from '@/lib/chat-messages'
+
+export function latestConnectorPart(messages: ChatMessage[]) {
+  return messages
+    .flatMap(message => message.parts)
+    .filter(part => {
+      if (part.type !== 'tool-call') {
+        return false
+      }
+
+      if (part.toolName === 'manage_connections') {
+        const input = recordOf(part.args)
+
+        return (
+          (input.action ?? 'status') !== 'status' || (Array.isArray(input.connectors) && input.connectors.length > 0)
+        )
+      }
+
+      return connectorCalls(part.toolName, part.args).length > 0
+    })
+    .at(-1)
+}
+
 /** Connector names/results as presentation data, never authorization. */
 export interface ConnectorRow {
   connector: string
@@ -38,10 +61,13 @@ const TITLES: ConnectorTitles = {
   gmail: 'Gmail',
   googlecalendar: 'Google Calendar',
   googledrive: 'Google Drive',
+  googledocs: 'Google Docs',
   slack: 'Slack',
   github: 'GitHub',
   notion: 'Notion',
   linear: 'Linear',
+  jira: 'Jira',
+  todoist: 'Todoist',
   figma: 'Figma',
   discord: 'Discord',
   stripe_mcp: 'Stripe',

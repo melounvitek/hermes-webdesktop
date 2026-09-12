@@ -27,6 +27,8 @@ import { atom } from 'nanostores'
 import type { HandoffReceipt } from '@/app/contrib/handoff-leg'
 import { handoffReceiptKey, readHandoffReceipt } from '@/app/contrib/handoff-receipt'
 import type { GatewayRequest } from '@/app/session/hooks/use-prompt-actions/utils'
+import { CONNECTOR_LEAD_ORDER } from '@/components/onboarding-chat/options'
+import { connectorTitle } from '@/lib/connector-tools'
 import { activeGatewayConnectionId } from '@/store/gateway'
 import { machineDescription } from '@/store/machine'
 import type { OnboardingAnswers } from '@/store/onboarding-answers'
@@ -167,8 +169,9 @@ export function composeSetupSoul(): string {
 }
 
 /** The hidden runbook seeded into the first build's session — the work-side
- *  half of the old single-chat script: no-auth first build, the permissions
- *  note, and the live progress cards. */
+ *  half of the old single-chat script: the permissions note, the live progress
+ *  cards, and, when the user picked apps during setup, the connect-first
+ *  opening. With no picks the first build stays account-free. */
 export function buildFirstTaskRunbook(
   task: string,
   answers: OnboardingAnswers,
@@ -177,7 +180,10 @@ export function buildFirstTaskRunbook(
 ): string {
   const name = (answers.name ?? '').trim()
   const context = (answers.context ?? '').trim()
-  const tools = (answers.connectors ?? []).filter(Boolean)
+  const tools = (answers.connectors ?? []).filter(slug => CONNECTOR_LEAD_ORDER.includes(slug))
+  // Machine setup needs no account anywhere; every other plan connects the
+  // picked apps before it does anything else (D85).
+  const connectFirst = tools.length > 0 && plan !== 'machine-setup'
 
   return [
     `You are Hermes. The user's welcome chat just opened this session so one task can have room to run: ${task.trim()}.`,
@@ -186,13 +192,15 @@ export function buildFirstTaskRunbook(
     context
       ? `They already said what they are working on: ${context}. Let it shape your choices without re-asking.`
       : '',
-    tools.length
-      ? `Apps they said they use: ${tools.join(', ')}. Some may already be connected from onboarding; check with manage_connections action="status" before assuming either way, and never require an unconnected one for this first build.`
+    tools.length && !connectFirst
+      ? `Apps they said they use: ${tools.map(connectorTitle).join(', ')}. Some may already be connected from onboarding; check with manage_connections action="status" before assuming either way, and never require an unconnected one for this first build.`
       : '',
-    'Their next message is the go signal: really begin the work — plan briefly, then build (scaffold, research, first artifact).',
+    connectFirst
+      ? 'Their next message is the go signal. Before any plan and before any other tool, connect their apps as the CONNECT FIRST section says; the work itself starts the moment the wait returns or they tell you to start.'
+      : 'Their next message is the go signal: really begin the work — plan briefly, then build (scaffold, research, first artifact).',
     "As you start, tell them in one short sentence: you'll ask for permissions as you go, and they can say no to anything or redirect you.",
-    ...planRunbook(plan, pluginRoot),
-    ...connectorRunbook(tools),
+    ...planRunbook(plan, pluginRoot, connectFirst),
+    ...(connectFirst ? connectFirstRunbook(tools) : []),
     'While the work runs, place ::onboarding{step="progress" title="what you\'re doing"} as its own paragraph at the start of each status turn — the card shows the build breathing live. Keep the titles short and present-tense ("Scaffolding the project", "Wiring the reminder"). Emit each exactly like that, alone on its own line.',
     'When the first pass of the build is DONE: end that turn with ::ask{question="Does this match what you wanted?" options="Looks right|Change something|Take it further"} alone as its own paragraph, emitted EXACTLY as written. Act on their pick immediately. One unreviewed first output is how a build reads as broken; the ask is how it reads as a collaboration.',
     PLAIN_SPEECH
@@ -204,17 +212,22 @@ export function buildFirstTaskRunbook(
 const NO_AUTH_RULE =
   'CRITICAL: this first build must be finishable with NO external account or OAuth (no Gmail, no Slack, no Google sign-in) — connectors get wired only with their consent, and an app that is already connected may be used, one that is not may be offered. Everything else is fair game and the more visible the better: web research with the browser shown to the user as you work, scripts, computer use, a small app, a file-based tracker, a scheduled reminder, a generated page. If the idea needs an account that is not connected, build the no-auth core first and offer the connection as the next step. NEVER route around a connector: an unconnected Gmail is not a cue to install an IMAP client, ask for an app password, or find another way into the same account. The connector IS the way in; if they decline it, the app is out of this build.'
 
-/** The picks invite an optional connection, not a claim that an account is already linked. */
-function connectorRunbook(picks: string[]): string[] {
-  if (picks.length === 0) {
-    return []
-  }
+/** The picks are gateway slugs the user chose during setup; connecting them is
+ *  the session's first act, and the agent owns the wait (D85). The app, not the
+ *  agent, opens the sign-ins and reports back with a hidden note. */
+function connectFirstRunbook(picks: string[]): string[] {
+  const named = picks.map(slug => `${slug} (${connectorTitle(slug)})`).join(', ')
 
   return [
-    `The user said they use these apps: ${picks.join(', ')}. These are real connector slugs. Offer to connect the ones useful for this task BEFORE the build starts, in your first turn, so the work can use them from the beginning — but keep the no-auth core moving and never require sign-in to finish it. If none of them help this task, say so in one line and move on; do not describe the catalog.`,
-    'Before you mention connecting anything, use manage_connections action="status" once. Anything already connected is yours to use for the task, with consent before reading private data. Match the rest against the returned catalog; never invent a connector slug or claim an unavailable app is supported. For the apps they agree to connect, make ONE action="connect" call carrying every slug at once (connectors=["gmail","googlecalendar"]) — the app renders one Connect card per app, side by side, and the user works through them; one call per app strands them clicking through a queue. Do not paste the authorization links into prose. Never call connect a second time for an app that already has a card: a new link cancels the one they are signing in with.',
-    'THE CARD IS THE ASK. After a status that shows an app unconnected, or after a connect, write ONE short line and END YOUR TURN — the user answers with the card’s buttons, not with text. Do not start work, do not call other tools, do not decide for them. Their click arrives as a hidden [connectors] message telling you exactly which manage_connections call to make next; follow it. When it says to wait, call action="wait" for that slug and hold: wait blocks until the authorization lands, so you never guess whether they are done. A timeout, declined consent or gateway outage means not connected, never an empty inbox. Say which apps remain unavailable and offer to continue without them. Never describe a gateway error as proof they need another Nous login.',
-    'Discover the connected app’s relevant tools with tool_search and use real results for the requested task. Never fabricate sample account data as if it came from a connector. Reading is separate from sending, deleting or scheduling: ask before those actions. No automatic daily brief or recurring job unless that is what the user asked for.'
+    `CONNECT FIRST. During setup the user picked these apps, given here as exact gateway slugs: ${named}. Your first action in this session, before any plan and before any other tool call, is ONE manage_connections call with action="connect" and connectors set to every one of those slugs. Do not call action="status" first; the slugs are exact and the catalog check is already done.`,
+    'If every result comes back already active, there is nothing to wait for: begin the task at once.',
+    "The app opens every sign-in from that result in the user's browser and shows one row per app, so never paste the links. In the same turn say one short line: which apps are being connected and, in a clause each, what this task gets from each one. Then end the turn.",
+    'Then call manage_connections action="wait" with the same slugs and timeout_seconds=120, and say nothing until it returns. If the wait comes back as pending because the links were minted moments ago, end your turn: the app sends a hidden note that begins with "[setup] links opened" once your turn ends and the sign-ins are open, and that note is your cue to call the same wait again. A note that arrives after you have already waited needs no reply.',
+    'The user can start early. A message from them that begins with "Start with" or "Start without" names the apps that are connected and the ones they skipped; treat it as the go signal and begin with the connected apps only.',
+    'When the wait returns with every app connected, begin the task at once. When it returns with apps still pending, stop and ask in one line: which apps did not connect, and whether they want you to continue without them or try connecting again (a fresh action="connect" mints new links). Wait for their answer. If they choose to continue without an app, build the version of the task that needs no account for that part and say in one line what the connection would have added.',
+    'Account data comes from the connected apps first. Tools already signed in on this machine, like a logged-in gh, are fair to use when the task benefits; say so in one line when you do.',
+    "Discover a connected app's tools with tool_search and use real results for the task; never fabricate account data. Reading is separate from sending, deleting or scheduling: ask before those. No recurring job unless that is what they asked for.",
+    'Make the result something they can open: a single HTML page when the idea allows it, and at least one real reading or action through a connected app.'
   ]
 }
 
@@ -260,22 +273,22 @@ const pluginRunbook = (root: string) => [
 /** The plan's own instructions, or the no-auth rule when the shape is the
  *  user's own idea. One switch so a new plan cannot half-land: adding a case
  *  here is what makes `plan="…"` mean anything at the other end. */
-function planRunbook(plan: HandoffPlan, pluginRoot: string): string[] {
+function planRunbook(plan: HandoffPlan, pluginRoot: string, connectFirst: boolean): string[] {
   switch (plan) {
     case 'machine-setup':
       return machineSetupRunbook()
 
     case 'plugin':
-      // NO_AUTH_RULE still applies: a plugin that needs an API key on its
-      // first run is the same dead end as any other first build that does.
+      // Without picks NO_AUTH_RULE still applies: a plugin that needs an API
+      // key on its first run is the same dead end as any other first build.
       if (!pluginRoot) {
         throw new Error('The desktop plugin folder is unavailable. Retry before starting the first build.')
       }
 
-      return [...pluginRunbook(pluginRoot), NO_AUTH_RULE]
+      return connectFirst ? pluginRunbook(pluginRoot) : [...pluginRunbook(pluginRoot), NO_AUTH_RULE]
 
     default:
-      return [NO_AUTH_RULE]
+      return connectFirst ? [] : [NO_AUTH_RULE]
   }
 }
 
@@ -309,7 +322,7 @@ export async function buildFirstTaskSeedMessages(
  *  follow are driven by the build's own progress (see first-build.ts), not by
  *  a schedule Setup has to remember to create. */
 export function buildHandoffCompleteNote(task: string): string {
-  return `[setup] handoff complete — "${task.trim()}" is now building in its own session, and the user is watching it there. Say ONE short line and then stop: you're around if they want a hand, and this chat stays where it is. Do not ask a question, do not offer a list, do not schedule anything.`
+  return `[setup] handoff complete — "${task.trim()}" is now building in its own session on the default profile, and the user is watching it there. The app is showing them a short tour of the profile rail and the sessions list right now, so do not describe either. Say ONE short line and then stop: you're around if they want a hand, and this chat stays where it is. Do not ask a question, do not offer a list, do not schedule anything.`
 }
 
 // ── gateway helpers (called from the wiring's kickoff + handoff effects) ─────

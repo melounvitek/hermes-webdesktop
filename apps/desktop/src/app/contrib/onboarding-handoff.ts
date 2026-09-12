@@ -18,10 +18,11 @@ import {
   retrySetupHandoff,
   SETUP_PROFILE
 } from '@/components/onboarding-chat/setup-profile'
-import { declinedLookAround, showProfileSignpost } from '@/components/onboarding-chat/signpost'
+import { showHandoffTour } from '@/components/onboarding-chat/signpost'
 import { findGroupOfPane } from '@/components/pane-shell/tree/model'
 import { $layoutTree, activateTreePane } from '@/components/pane-shell/tree/store'
 import { toChatMessages } from '@/lib/chat-messages'
+import { connectorTitle } from '@/lib/connector-tools'
 import { isOnboardingEnabled } from '@/lib/onboarding-enabled'
 import { requestGatewayForAgent } from '@/store/gateway'
 import { dismissNotification, notify } from '@/store/notifications'
@@ -30,7 +31,6 @@ import { beginOnboardingHandoff, completeOnboardingFlow } from '@/store/onboardi
 import { $activeGatewayProfile, $newChatProfile, $newChatRoute, ensureGatewayAgent } from '@/store/profile'
 import {
   $activeSessionId,
-  $messages,
   $selectedStoredSessionId,
   forgetSessionOwnerHintsForSession,
   setActiveSessionId,
@@ -132,7 +132,6 @@ export function useOnboardingHandoff({
       const setupSession = setupHandoff.guide ?? $setupSession.get()
       const connectionId = setupSession?.connectionId ?? null
 
-      const signpost = !declinedLookAround($messages.get())
       const previousNewChatProfile = $newChatProfile.get()
       const previousNewChatRoute = $newChatRoute.get()
       let receipt: HandoffReceipt | null = null
@@ -160,10 +159,12 @@ export function useOnboardingHandoff({
               saveHandoffReceipt(receiptKey, value)
             },
             personalize: async () => {
+              const answers = $onboardingAnswers.get()
+
               const result = await request<{ saved?: boolean; profile?: string; target?: string }>(
                 owner,
                 'profiles.remember_onboarding',
-                { answers: $onboardingAnswers.get() }
+                { answers: { ...answers, connectors: answers.connectors.map(connectorTitle) } }
               )
 
               if (!result.saved || result.profile !== BUILD_PROFILE || result.target !== 'user') {
@@ -282,8 +283,8 @@ export function useOnboardingHandoff({
           PROMPT_SUBMIT_REQUEST_TIMEOUT_MS
         ).catch(error => console.warn('[handoff] guide note was not delivered', error))
 
-        if (signpost && $selectedStoredSessionId.get() === receipt.storedId) {
-          void showProfileSignpost()
+        if ($selectedStoredSessionId.get() === receipt.storedId) {
+          void showHandoffTour()
         }
       } catch (error) {
         console.error('[handoff] first build needs recovery', error)
