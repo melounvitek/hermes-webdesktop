@@ -522,7 +522,7 @@ class SessionDB(
         self._retired_capture_lock = threading.Lock()
         self._retire_connection: Optional[Callable[[Any], None]] = None
         self._connection_pinned = False  # one unmatched C reference taken at most once per handle
-        self._wal_lock_guard_held = False  # hermes_state_lockguard.hold() taken by _open_writer
+        self._wal_lock_guard: dict = {}  # hermes_state_lockguard.hold() record, see _open_writer
         self._db_corrupt, self._db_corrupt_reason = False, ""  # sticky quarantine (StateDbCorruptError)
         self._fts_usermerge_floor_applied = False  # one-shot usermerge-floor write guard
         self._fts_enabled = self._fts_stale = self._trigram_available = False
@@ -602,11 +602,10 @@ class SessionDB(
         # FTS optimization is OPT-IN (`hermes db optimize`); no background worker races session lifecycle.
         self._ensure_db_file_generation()
         if self._wal_active:
-            # Independent copies of the two POSIX locks that keep a sibling's close from unlinking
-            # this WAL generation: any in-process open()/close() of state.db or -shm cancels SQLite's
-            # own (howtocorrupt §2.2), these survive it. Released in close().
-            _lockguard.hold(self.db_path)
-            self._wal_lock_guard_held = True
+            # OFD copies of the two POSIX locks that keep a sibling's close from unlinking this WAL
+            # generation: any in-process open()/close() of state.db or -shm cancels SQLite's own
+            # (howtocorrupt §2.2); these survive it. Lifted in close().
+            self._wal_lock_guard = _lockguard.hold(self.db_path)
 
     def _open_read_only(self) -> None:
         """Read-only attach for cross-profile aggregation: no schema init, NO write
@@ -1111,11 +1110,8 @@ class SessionDB(
             return False
         if sys.platform.startswith("linux"):
             watched = _watched_sqlite_sidecar_paths(self.db_path)
-            guard_fds = _lockguard.owned_fds()
             try:
                 for target, fd_path in _proc_fd_targets(os.getpid()):
-                    if int(fd_path.rsplit("/", 1)[1]) in guard_fds:
-                        continue  # the lock guard's own descriptor (see hermes_state_lockguard)
                     canonical = _canonical_sqlite_path(target)
                     if (" (deleted)" in target and canonical in watched
                             and _fd_is_truly_unlinked(fd_path, watched[canonical])):
@@ -1334,8 +1330,8 @@ class SessionDB(
         """
         if self._quarantine_reason() is not None:
             return
-        if self._wal_lock_guard_held:
-            _lockguard.refresh(self.db_path)  # -shm minted after open, or path re-pointed
+        if self._wal_lock_guard:
+            _lockguard.hold(self.db_path, self._wal_lock_guard)  # a -shm minted after open
         try:
             with self._lock:
                 result = self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)").fetchone()
@@ -1414,10 +1410,7 @@ class SessionDB(
                         self._conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
                     except Exception as exc:
                         logger.debug("WAL checkpoint (PASSIVE) at close failed: %s", exc)
-                # Release the guard first: SQLite's close-time reset then sees only real holders
-                # (a sibling process's own intact locks still refuse the unlink; a true last close
-                # ends the generation, so a later state.db replace never pairs with a stale WAL).
-                self._release_wal_lock_guard()
+                _lockguard.release(self._wal_lock_guard)  # before the close: see release()
                 if retire_without_close:
                     self._pin_connection(self._conn)
                     self._conn = None
@@ -1427,12 +1420,6 @@ class SessionDB(
                     # Only a clean close ends the generation; retain the recorded
                     # identity when retiring an unsafe handle.
                     self._db_sidecar_identity = {}
-                    _lockguard.retire_idle(self.db_path)
-
-    def _release_wal_lock_guard(self) -> None:
-        if self._wal_lock_guard_held:
-            self._wal_lock_guard_held = False
-            _lockguard.release(self.db_path)
 
     def __del__(self) -> None:
         """Safety net: close() if the caller forgot. Attribute access stays
