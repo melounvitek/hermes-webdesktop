@@ -543,16 +543,15 @@ class InProcessCronScheduler(CronScheduler):
             # See #87644.
             _cycle_exc: BaseException | None = None
             # Enumeration and gating run on the ticker thread; a raising gate callable must
-            # fail THIS cycle (logged, no heartbeats), not end the thread (#111010).
+            # fail THIS cycle (logged, no heartbeats, NO ticks), not end the thread (#111010).
+            # Publish the list only once the gate has filtered it: a partial assignment would
+            # tick the ungated set — the exact stand-down the Desktop gate exists for (#100489).
             cycle_homes: list = []
             try:
-                cycle_homes = [
-                    _profile_entry(e) for e in _existing_profile_homes(profile_homes)
-                ]
+                enumerated = [_profile_entry(e) for e in _existing_profile_homes(profile_homes)]
                 if profile_gate is not None:
-                    cycle_homes = [
-                        (name, home) for name, home in cycle_homes if profile_gate(name, home)
-                    ]
+                    enumerated = [(name, home) for name, home in enumerated if profile_gate(name, home)]
+                cycle_homes = enumerated
             except BaseException as e:
                 logger.error("Cron profile enumeration error: %s", e, exc_info=True)
                 _tick_error = f"{type(e).__name__}: {e}"
