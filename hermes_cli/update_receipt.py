@@ -297,7 +297,11 @@ def collect_fleet_versions(*, pre_restart_pids: Optional[list[int]] = None) -> l
     results: list[dict[str, Any]] = []
     expected_sha = _code_identity(refresh=True).get("sha")
     try:
-        from gateway.status import read_runtime_status, runtime_status_pid_is_live
+        from gateway.status import (
+            live_gateway_pid_for_home,
+            read_runtime_status,
+            runtime_status_pid_is_live,
+        )
 
         for profile, home in _profile_homes():
             sock = _socket_identity(home)
@@ -313,10 +317,19 @@ def collect_fleet_versions(*, pre_restart_pids: Optional[list[int]] = None) -> l
                 pid = int(record.get("pid"))
             except (TypeError, ValueError):
                 continue
-            if runtime_status_pid_is_live(record):
+            # A state file is only a fallback claim. Its SHA is evidence about
+            # its own PID only when the profile's canonical identity resolver
+            # verifies that same live gateway.
+            if live_gateway_pid_for_home(home) == pid:
                 results.append(
                     _fleet_row(profile, pid, record.get("code_sha"), record.get("code_version"), expected_sha)
                 )
+                continue
+            # A live non-gateway (or a gateway for another profile) can write a
+            # plausible state file. Keep the fail-open visibility row, but never
+            # let that file's SHA classify the process as current or stale.
+            if runtime_status_pid_is_live(record):
+                results.append(_fleet_row(profile, pid, None, record.get("code_version"), None))
                 continue
             # Dead PID (or a live PID recycled by an unrelated process during the update's own
             # churn): a DOWN row only when this exact pid was alive at update start AND the record
