@@ -1222,11 +1222,14 @@ def terminal_tool(
 
         session_key = get_current_session_key(default="") or (task_id or "")
 
-        # A supervised-gateway identity check can enter a kernel-level psutil
-        # query.  Put the whole pre-execution chain behind the command's wall
-        # clock deadline so that a wedged probe cannot hold a cron run forever.
-        # A timed-out guard fails open: its worker is abandoned, while ordinary
-        # guard rejections and exceptions keep their original behavior.
+        # The supervised-gateway identity probe ends in a kernel process query
+        # (psutil create_time) that has wedged for the better part of an hour on
+        # macOS; ``env.execute`` is already behind ``run_bounded_sync`` but this
+        # chain ran ahead of it, so the tool call never returned and the cron
+        # slot stayed occupied (#111922). Share the command's own deadline. A
+        # guard that never rendered a verdict fails CLOSED: these checks apply
+        # unconditionally (``force`` cannot bypass them), so the command is
+        # refused with a retryable error instead of running unguarded.
         from agent.deadline import run_bounded_sync
 
         bounded_guard = run_bounded_sync(
@@ -1237,10 +1240,11 @@ def terminal_tool(
             label="terminal.pre-exec-guard",
         )
         if bounded_guard.timed_out:
-            logger.warning(
-                "Terminal pre-execution guard timed out after %ss; continuing fail-open",
-                plan.effective_timeout,
-            )
+            raise _Rejected(_error_json(
+                f"Terminal pre-execution guard did not finish within {plan.effective_timeout}s "
+                "(process-identity probe wedged); the command was not run. Retry the call.",
+                status="error",
+            ))
         # Pre-exec security checks (tirith + dangerous command detection);
         # force=True means the user already confirmed.
         verdict = _run_approval_guards(command, env_type, plan.config, force=force)
