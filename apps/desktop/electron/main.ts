@@ -30,6 +30,7 @@ import {
 } from 'electron'
 
 import { classifyActiveRuntime } from './active-runtime-state'
+import { claimStaleBackendExitRecovery } from './backend-stale-exit-recovery'
 import {
   destroyKeepaliveAgents,
   downloadAgentFor,
@@ -1467,6 +1468,7 @@ const backendDialClaims = new BackendDialClaims()
 // True while connection-config:apply soft-rehomes the primary — suppresses the
 // backend-exit toast so an intentional kill doesn't look like a crash.
 let softRehomeInProgress = false
+let staleExitRecoveryClaimed = false
 // Additional per-profile backends, keyed by profile name. The PRIMARY backend
 // (the desktop's launch profile) stays managed by backendConnectionState +
 // startHermes(); this pool only holds EXTRA profile
@@ -12950,6 +12952,7 @@ async function prepareProfileRenameRequest(request) {
 }
 
 function startHermes() {
+  staleExitRecoveryClaimed = false
   return localBackendLifecycle.start(runHermesStart)
 }
 
@@ -13235,6 +13238,16 @@ async function runHermesStart() {
 
       if (!backendConnectionState.clearForCurrentProcess(processOwner)) {
         rememberLog(`Ignoring stale Hermes backend error: ${error.message}`)
+        if (claimStaleBackendExitRecovery({
+          hasCurrentProcess: backendConnectionState.getProcess() !== null,
+          hasPendingStart: backendConnectionState.getPendingPromise() !== null,
+          intentionalTeardown: softRehomeInProgress || isQuittingForHandoff,
+          recoveryClaimed: staleExitRecoveryClaimed
+        })) {
+          staleExitRecoveryClaimed = true
+          sendBackendExit({ code: null, signal: null, error: error.message })
+          startHermes().catch(() => {})
+        }
         rejectBackendStart?.(new Error('Hermes backend start was superseded by a newer connection attempt.'))
 
         return
@@ -13258,6 +13271,17 @@ async function runHermesStart() {
 
       if (!backendConnectionState.clearForCurrentProcess(processOwner)) {
         rememberLog(formatBackendExitLine('Ignoring stale Hermes backend exit', code, signal, primaryOutputTail))
+
+        if (claimStaleBackendExitRecovery({
+          hasCurrentProcess: backendConnectionState.getProcess() !== null,
+          hasPendingStart: backendConnectionState.getPendingPromise() !== null,
+          intentionalTeardown: softRehomeInProgress || isQuittingForHandoff,
+          recoveryClaimed: staleExitRecoveryClaimed
+        })) {
+          staleExitRecoveryClaimed = true
+          sendBackendExit({ code, signal })
+          startHermes().catch(() => {})
+        }
 
         if (!backendReady) {
           rejectBackendStart?.(new Error('Hermes backend start was superseded by a newer connection attempt.'))
