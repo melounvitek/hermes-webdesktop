@@ -287,7 +287,10 @@ def collect_fleet_versions(*, pre_restart_pids: Optional[list[int]] = None) -> l
 
     ``stale``   — gateway stamped a code_sha that differs from the updated checkout's HEAD (it is still
     serving pre-update modules). ``unknown`` — gateway predates the code-identity stamp (started before this
-    feature landed) or identity could not be resolved. ``down``    — the gateway was ALIVE when this update
+    feature landed), identity could not be resolved, or the state file's live PID is not the
+    verified gateway for that home (``live_gateway_pid_for_home``): ``write_runtime_status`` re-stamps
+    ``pid``/``code_sha`` for whatever process writes it, so a foreign writer must never read as
+    ``current`` (#110420, sibling of #109680). ``down``    — the gateway was ALIVE when this update
     started (``pre_restart_pids``), its runtime status still says running, but the PID is dead and no
     successor rewrote the record: the restart phase stopped it and nothing came back. Without this row a
     killed-and-never-replaced gateway produced NO entry at all and the matrix passed silently (Phase-1
