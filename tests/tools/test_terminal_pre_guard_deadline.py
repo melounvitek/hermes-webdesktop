@@ -31,6 +31,7 @@ def _plan(timeout: float = 0.05) -> SimpleNamespace:
 def stubbed_pipeline(monkeypatch):
     """Stub planning/env/approval/execution; returns the list of executions that happened."""
     calls: list[str] = []
+    monkeypatch.setattr(terminal_module, "_PRE_EXEC_GUARD_MIN_TIMEOUT_S", 0)
     monkeypatch.setattr(terminal_module, "_plan_execution", lambda *_a, **_k: _plan())
     monkeypatch.setattr(terminal_module, "_acquire_env", lambda *_a, **_k: object())
     monkeypatch.setattr(
@@ -71,3 +72,20 @@ def test_completed_pre_execution_guard_verdicts_pass_through(monkeypatch, stubbe
     monkeypatch.setattr(terminal_module, "_pre_exec_block", _rejecting_probe)
     assert terminal_module.terminal_tool("echo ok") == '{"status":"blocked"}'
     assert stubbed_pipeline == ["foreground"]
+
+
+def test_pre_execution_guard_on_the_deadline_worker_sees_the_tool_threads_interrupt(monkeypatch, stubbed_pipeline):
+    """/stop keys on the tool thread's tid; the guard chain moved onto a worker must still see it."""
+    from tools.interrupt import is_interrupted, set_interrupt
+
+    seen: list[bool] = []
+    monkeypatch.setattr(terminal_module, "_pre_exec_block", lambda *_a, **_k: seen.append(is_interrupted()))
+
+    set_interrupt(True)
+    try:
+        terminal_module.terminal_tool("echo ok")
+    finally:
+        set_interrupt(False)
+
+    assert seen == [True], "guard on the deadline worker was blind to the tool thread's interrupt bit"
+    assert is_interrupted() is False, "the tool thread's own interrupt view must not leak past the guard"
