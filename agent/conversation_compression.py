@@ -1027,6 +1027,7 @@ def run_compress_context_with_progress_timeout(
     on_commit_overrun: Optional[Callable[[float, float], None]] = None,
     fence: Optional[CompressionCommitFence] = None, telemetry_agent: Any = None, stall_fallback: bool = True,
     new_fence: Optional[Callable[[], CompressionCommitFence]] = None,
+    fallback_worker: Optional[Callable[[CompressionCommitFence], Tuple[list, str]]] = None,
 ) -> Tuple[list, str]:
     """Run ``worker(fence)`` under a sync progress-aware (idle + ceiling) timeout.
     Budgets bound the PRE-commit phase only: an admitted commit always completes (overrun logged, surfaced
@@ -1139,7 +1140,7 @@ def run_compress_context_with_progress_timeout(
         # the summary-failure cooldown, which would no-op the retry's summary call.
         if stall_fallback:
             recovered = _retry_compression_on_fallback_chain(
-                worker=worker, messages=messages, system_prompt_fallback=system_prompt_fallback,
+                worker=fallback_worker or worker, messages=messages, system_prompt_fallback=system_prompt_fallback,
                 idle_timeout_seconds=idle, total_ceiling_seconds=ceiling, on_commit_overrun=on_commit_overrun,
                 on_timeout_cause=on_timeout_cause, telemetry_agent=telemetry_agent, new_fence=new_fence,
             )
