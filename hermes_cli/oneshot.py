@@ -253,6 +253,9 @@ def run_oneshot(
     # Non-interactive by definition — an approval prompt would hang forever.
     os.environ["HERMES_YOLO_MODE"] = "1"
     os.environ["HERMES_ACCEPT_HOOKS"] = "1"
+    # Same finite-chat marker as `hermes chat -q` (cli.py): the session-source resolver uses it to drop an
+    # inherited tui/desktop transport label, and delegate dispatch to route detached results inline.
+    os.environ["HERMES_SINGLE_QUERY_SESSION"] = "1"
 
     # Nothing here drains process_registry.completion_queue (only cli.py's process_loop and the
     # gateway watchers do), so left unbound delegate_task would be forced background and every
