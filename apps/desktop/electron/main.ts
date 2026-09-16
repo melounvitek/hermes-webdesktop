@@ -12999,6 +12999,15 @@ function scheduleUnexpectedPrimaryRecovery({ code = null, signal = null, error =
   })
 
   if (!claimed) {
+    if (primaryExitRecovery.isCrashLooping()) {
+      const message =
+        'Hermes backend keeps crashing right after it restarts; not restarting it again. Relaunch Hermes Desktop.'
+      rememberLog(`[supervisor] ${message}`)
+      sendBackendExit({ code, signal, error: message })
+
+      return true
+    }
+
     return false
   }
 
