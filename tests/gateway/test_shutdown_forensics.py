@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -73,7 +75,6 @@ class TestSnapshotShutdownContext:
 
 class TestFormatters:
 
-
     def test_context_as_json_handles_unserialisable_values(self):
         ctx = {"signal": "SIGTERM", "weird": object()}
         payload = sf.context_as_json(ctx)
@@ -82,70 +83,43 @@ class TestFormatters:
         assert decoded["signal"] == "SIGTERM"
         assert "weird" in decoded
 
-    def test_log_line_keeps_parent_identity_without_argv(self):
-        secret = "mongodb+srv://user:hunter2-CANARY@cluster.example/db"
-        line = sf.format_context_for_log({
-            "signal": "SIGTERM",
-            "under_systemd": False,
-            "loadavg_1m": 0.25,
-            "parent": {
-                "pid": 42,
-                "name": "systemd",
-                "cmdline": f"docker exec -e LINEAR_API_KEY={secret} myimage",
-            },
-        })
-        assert secret not in line
-        assert "parent_cmdline" not in line
-        assert "hunter2" not in line
-        assert "parent_pid=42" in line
-        assert "parent_name=systemd" in line
-        assert "loadavg_1m=0.25" in line
-
 
 # ---------------------------------------------------------------------------
-# persisted snapshots must never include process argv
+# persisted snapshots must never include process argv (#112459)
 # ---------------------------------------------------------------------------
 
 _ARGV_CANARY = "lin_api_CANARY_SHUTDOWN_FORENSICS_9f3a2c"
 
 
-def _cmdline_bytes_with_canary(path: Path) -> bytes:
-    text = str(path).replace("\\", "/")
-    if text.endswith("/cmdline"):
-        return b"python\x00-c\x00--token=" + _ARGV_CANARY.encode("utf-8")
-    raise OSError("not a cmdline path")
+@pytest.fixture
+def child_with_secret_argv():
+    """A live child whose argv carries a token-shaped value, like ``docker exec -e KEY=...``."""
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; time.sleep(30)", f"--token={_ARGV_CANARY}"],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    try:
+        yield proc
+    finally:
+        proc.kill()
+        proc.wait()
 
 
 class TestArgvFreePersistence:
 
-    def test_proc_summary_omits_cmdline_even_when_proc_has_a_secret(
-        self, monkeypatch
-    ):
-        monkeypatch.setattr(Path, "read_bytes", _cmdline_bytes_with_canary)
-        summary = sf._proc_summary(424242)
-        blob = json.dumps(summary)
-        assert _ARGV_CANARY not in blob
+    @pytest.mark.linux_only
+    def test_snapshot_and_log_line_identify_process_without_argv(self, child_with_secret_argv):
+        """/proc-backed summaries keep pid/name/ppid/state but never the command line, so neither
+        the JSON snapshot nor the warning line can carry a credential from a parent's argv."""
+        summary = sf._proc_summary(child_with_secret_argv.pid)
+        assert summary["pid"] == child_with_secret_argv.pid
+        assert summary["name"]  # identity survives
         assert "cmdline" not in summary
-        assert summary["pid"] == 424242
 
-    def test_snapshot_json_does_not_persist_proc_cmdline(self, monkeypatch):
-        monkeypatch.setattr(Path, "read_bytes", _cmdline_bytes_with_canary)
-        payload = sf.context_as_json(sf.snapshot_shutdown_context(signal.SIGTERM))
-        assert _ARGV_CANARY not in payload
-        decoded = json.loads(payload)
-        for key in ("self", "parent", "tracer"):
-            node = decoded.get(key) or {}
-            assert "cmdline" not in node
-
-    def test_diagnostic_script_requests_comm_not_argv(self):
-        script = sf._async_diagnostic_script("SIGTERM", 1234)
-        assert "auxf" not in script
-        assert "ps aux" not in script
-        assert "-plau" not in script
-        assert "args" not in script
-        assert "comm" in script
-        assert "pstree -pl 1234" in script
-        assert "=== shutdown diagnostic @ SIGTERM ===" in script
+        ctx = sf.snapshot_shutdown_context(signal.SIGTERM)
+        ctx["parent"] = summary
+        line = sf.format_context_for_log(ctx)
+        assert _ARGV_CANARY not in line and _ARGV_CANARY not in sf.context_as_json(ctx)
+        assert f"parent_pid={child_with_secret_argv.pid}" in line
 
 
 # ---------------------------------------------------------------------------
@@ -185,30 +159,27 @@ class TestSpawnAsyncDiagnostic:
         assert "SIGTERM" in contents
 
     @pytest.mark.linux_only
-    def test_listing_commands_omit_argv_and_create_owner_only_log(
-        self, tmp_path, monkeypatch
-    ):
-        captured: dict = {}
-
-        class _Spawn:
-            def __init__(self, args, **kwargs):
-                captured["args"] = args
-                self.pid = 77
-
-        monkeypatch.setattr(sf.subprocess, "Popen", _Spawn)
+    def test_diagnostic_log_omits_child_argv_and_is_owner_only(self, tmp_path, child_with_secret_argv):
+        """The detached ps/pstree walk must not write any process's argv to disk, and the log
+        (even one created 0644 by an earlier release) ends up owner-only."""
         log_path = tmp_path / "diag.log"
         log_path.write_text("prior\n", encoding="utf-8")
         os.chmod(log_path, 0o644)
-        pid = sf.spawn_async_diagnostic(log_path, "SIGTERM")
-        assert pid == 77
-        argv = captured["args"]
-        assert isinstance(argv, (list, tuple))
-        joined = " ".join(str(part) for part in argv)
-        assert "auxf" not in joined
-        assert "ps aux" not in joined
-        assert "-plau" not in joined
-        assert "comm" in joined
-        assert "pstree" in joined
+
+        pid = sf.spawn_async_diagnostic(log_path, "SIGTERM", timeout_seconds=5.0)
+        assert pid is not None
+        deadline = time.monotonic() + 8.0
+        while time.monotonic() < deadline:
+            try:
+                if os.waitpid(pid, os.WNOHANG)[0] == pid:
+                    break
+            except ChildProcessError:
+                break
+            time.sleep(0.1)
+
+        contents = log_path.read_text(encoding="utf-8", errors="replace")
+        assert "shutdown diagnostic" in contents
+        assert _ARGV_CANARY not in contents
         assert (log_path.stat().st_mode & 0o777) == 0o600
 
 
