@@ -127,8 +127,6 @@ def _patch_update_deps(monkeypatch, tmp_path, run_side_effect):
     )
     monkeypatch.setattr(update_cmd, "_update_node_dependencies", lambda: [])
     monkeypatch.setattr(update_cmd_deps, "_update_node_dependencies", lambda: [])
-    monkeypatch.setattr(update_cmd, "_purge_stale_hermes_modules", lambda: None)
-    monkeypatch.setattr(hermes_main, "_purge_stale_hermes_modules", lambda: None)
 
     import hermes_cli.gateway as hermes_gateway
 
@@ -347,7 +345,6 @@ def test_run_pending_restart_true_when_no_gateways(monkeypatch, capsys):
     monkeypatch.setattr(
         "hermes_cli.gateway.find_gateway_pids", lambda **k: []
     )
-    monkeypatch.setattr(hermes_main, "_purge_stale_hermes_modules", lambda: None)
 
     # An empty PID scan is insufficient; every supervisor scope must answer empty.
     monkeypatch.setattr(update_cmd_fleet, "_systemd_gateway_unit_listings", lambda: [
@@ -767,3 +764,4 @@ def test_startup_warn_kept_when_receipt_owed_gateway_is_down(monkeypatch, capsys
 
     assert "did not restart running gateways" in capsys.readouterr().err
     assert update_cmd._fleet_restart_pending_marker_path().exists()
+
