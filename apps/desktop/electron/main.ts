@@ -16862,6 +16862,8 @@ async function dispatchRegistryApiRequest(
     timeoutMs: resolveTimeoutMs(request?.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
   })
 
+  desktopProfilePreferences.afterProfileRequest(registryConnectionId, request, response, connection.mode)
+
   return (request?.method || 'GET').toUpperCase() === 'GET'
     ? tagRegistrySessionResponse(requestPath, response, registryConnectionId)
     : response
@@ -16898,10 +16900,7 @@ async function handleHermesApiRequest(request) {
   const registryConnectionId = apiRequestRegistryConnectionId(request)
 
   if (registryConnectionId) {
-    const response = await dispatchRegistryApiRequest(request, registryConnectionId)
-    desktopProfilePreferences.afterProfileRequest(registryConnectionId, request, response)
-
-    return response
+    return dispatchRegistryApiRequest(request, registryConnectionId)
   }
 
   // Remote-profile session requests would otherwise hit the local primary off
@@ -16938,9 +16937,10 @@ async function handleHermesApiRequest(request) {
     : resolveRouteProfile(tornDownProfile, apiRoute.backendProfile)
 
   let response
+  let connection
 
   try {
-    const connection = await ensureBackend(routeProfile, { passive: request?.passive, spawnPriority })
+    connection = await ensureBackend(routeProfile, { passive: request?.passive, spawnPriority })
     const timeoutMs = resolveTimeoutMs(request?.timeoutMs, DEFAULT_FETCH_TIMEOUT_MS)
 
     response = await fetchJsonForBackend(connection, apiRoute.requestPath, {
@@ -16964,7 +16964,7 @@ async function handleHermesApiRequest(request) {
   }
 
   try {
-    desktopProfilePreferences.afterProfileRequest(null, request, response)
+    desktopProfilePreferences.afterProfileRequest(null, request, response, connection.mode)
   } finally {
     await profileRename?.complete()
   }
@@ -16981,7 +16981,7 @@ ipcMain.handle('hermes:api', async (_event, request) => {
   const registryConnectionId = apiRequestRegistryConnectionId(request)
 
   if (deletingProfile && registryConnectionId) {
-    const response = await dispatchConnectionScopedProfileDelete(request, {
+    return dispatchConnectionScopedProfileDelete(request, {
       acquire: profile => profileDeletionGate.acquire(profile),
       connectionKind: connectionId => registryConnectionKind(connectionId),
       dispatch: routeProfile =>
@@ -16991,9 +16991,6 @@ ipcMain.handle('hermes:api', async (_event, request) => {
       prepareLocal: localRequest => prepareProfileDeleteRequest(localRequest).then(() => undefined),
       teardownConnection: (connectionId, profile) => teardownConnectionScopedProfileBackend(connectionId, profile)
     })
-    desktopProfilePreferences.afterProfileRequest(registryConnectionId, request, response)
-
-    return response
   }
 
   if (!mutatingProfile) {
