@@ -2381,11 +2381,15 @@ def _resolve_gateway_model_context(
         context_length=context_length, context_source=context_source)
 
 
-def _resolve_runtime_agent_kwargs_for_provider(provider: str) -> dict:
-    """Resolve runtime credentials for a specific provider (e.g. from channel override)."""
+def _resolve_runtime_agent_kwargs_for_provider(provider: str, target_model: Optional[str] = None) -> dict:
+    """Resolve runtime credentials for a specific provider (e.g. from channel override).
+
+    ``target_model`` is the model the override will actually send: the ladder's model-keyed rungs
+    (OpenCode free tier, Zen/Go relay + api_mode) must see it rather than config's ``default``,
+    or a ``*-free`` default routes a Go-only override to the keyless Zen relay (#112600)."""
     from hermes_cli.runtime_provider import resolve_runtime_provider, format_runtime_provider_error
     try:
-        runtime = resolve_runtime_provider(requested=provider)
+        runtime = resolve_runtime_provider(requested=provider, target_model=target_model or None)
     except Exception as exc:
         raise RuntimeError(format_runtime_provider_error(exc)) from exc
     return {
@@ -2430,7 +2434,7 @@ def _try_resolve_fallback_provider() -> dict | None:
                 from hermes_cli.fallback_config import effective_runtime_provider, resolve_entry_api_key
                 runtime = resolve_runtime_provider(
                     requested=entry.get("provider"), explicit_base_url=entry.get("base_url"),
-                    explicit_api_key=resolve_entry_api_key(entry))
+                    explicit_api_key=resolve_entry_api_key(entry), target_model=entry.get("model") or None)
                 # Named custom entries resolve to the bare "custom" billing class; persist the configured
                 # identity so UI/billing rows match the manual-switch path (#98739).
                 runtime["provider"] = effective_runtime_provider(entry, runtime)
