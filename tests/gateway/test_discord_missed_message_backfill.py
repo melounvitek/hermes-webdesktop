@@ -427,6 +427,27 @@ def test_final_delivery_remains_complete_after_processing_hook(adapter):
 
 
 @pytest.mark.asyncio
+async def test_unthreaded_final_reply_records_recovery_completion(adapter):
+    """The ledger anchor must survive reply_to_mode=off's visual suppression."""
+    adapter._reply_to_mode = "off"
+    channel = FakeChannel(channel_id=123)
+    channel.send = AsyncMock(return_value=SimpleNamespace(id=9005))
+    adapter._client.get_channel = lambda _channel_id: channel
+    message = make_message(message_id=92, channel=channel)
+    adapter._record_discord_message_seen(message, status="processing")
+
+    result = await adapter.send(
+        "123",
+        "Done",
+        metadata={"notify": True, "reply_to_message_id": "92"},
+    )
+
+    assert result.success is True
+    assert channel.send.await_args.kwargs["reference"] is None
+    assert adapter._discord_message_is_persistently_complete("92") is True
+
+
+@pytest.mark.asyncio
 async def test_iter_candidates_keeps_latest_messages_when_window_exceeds_limit(adapter, monkeypatch):
     class RealisticChannel(FakeChannel):
         def history(self, **kwargs):
