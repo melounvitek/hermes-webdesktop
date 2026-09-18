@@ -18,8 +18,8 @@ import { $bindings } from '@/store/keybinds'
 import { setTerminalTakeover } from '../store'
 
 import {
-  $activeTerminalId,
-  $terminals,
+  $visibleActiveTerminalId,
+  $visibleTerminals,
   closeAllTerminals,
   closeOtherTerminals,
   closeTerminal,
@@ -36,8 +36,8 @@ const RAIL_ACTION =
  *  shell's `exit`, middle-click, or the context menu. */
 export function TerminalRail() {
   const { t } = useI18n()
-  const terminals = useStore($terminals)
-  const activeId = useStore($activeTerminalId)
+  const terminals = useStore($visibleTerminals)
+  const activeId = useStore($visibleActiveTerminalId)
   const bindings = useStore($bindings)
   const toggleHint = bindings['view.showTerminal']?.[0]
   const newHint = bindings['view.newTerminal']?.[0]
@@ -121,7 +121,10 @@ function TerminalRailItem({ active, canCloseOthers, index, term, toggleHint }: T
               className="absolute inset-y-0.5 right-0 w-0.5 rounded-l-sm bg-(--ui-stroke-primary)"
             />
           )}
-          <Tip label={<TipHintLabel hint={toggleHint && formatCombo(toggleHint)} text={label} />} placement="right-rail">
+          <Tip
+            label={<TipHintLabel hint={toggleHint && formatCombo(toggleHint)} text={label} />}
+            placement="right-rail"
+          >
             <button
               aria-label={label}
               aria-selected={active}

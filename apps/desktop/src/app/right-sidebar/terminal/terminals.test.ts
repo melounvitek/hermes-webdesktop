@@ -9,6 +9,10 @@ async function loadTerminalStore() {
   vi.doMock('@/store/session', () => ({
     $currentCwd
   }))
+  vi.doMock('@/store/profile', () => ({
+    $activeProfile: atom('default'),
+    $activeGatewayProfile: atom('alpha')
+  }))
 
   return { ...(await import('./terminals')), $currentCwd }
 }

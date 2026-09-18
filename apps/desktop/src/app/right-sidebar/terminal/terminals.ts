@@ -1,16 +1,19 @@
 import { atom, computed } from 'nanostores'
 
 import { readKey, writeKey } from '@/lib/storage'
+import { $activeGatewayProfile } from '@/store/profile'
 import { $currentCwd } from '@/store/session'
 
 import { setTerminalTakeover } from '../store'
 
-import { seedAgentTerminalCommand } from './agent-terminal-stream'
+import { agentTerminalKey, seedAgentTerminalCommand } from './agent-terminal-stream'
 
 /** One in-app terminal tab. `id` is the renderer-side handle (distinct from the
  *  PTY session id the main process mints); each instance owns its own shell. */
 export interface TerminalEntry {
   id: string
+  /** Browser tabs belong to their shell or agent session's profile for their whole lifetime. */
+  profile?: string
   /** Display label. `auto` adopts the resolved shell name until the user renames. */
   title: string
   auto: boolean
@@ -50,6 +53,7 @@ interface PersistedTerminalState {
 }
 
 const TERMINALS_STORAGE_KEY = 'hermes.desktop.terminals.v1'
+const browser = import.meta.env.VITE_BROWSER === '1'
 
 // Cap a single tab's replayed history so the persisted layout can't blow the
 // localStorage quota. Roughly mirrors VS Code's persistentSessionScrollback
@@ -84,6 +88,14 @@ function sanitizePersistedTerminal(value: unknown): PersistedTerminalEntry | nul
 
 function loadPersistedTerminals(): PersistedTerminalState {
   const fallback: PersistedTerminalState = { activeTerminalId: null, terminals: [] }
+
+  if (browser) {
+    // Old browser tabs have no ownership; never respawn them or retain output.
+    writeKey(TERMINALS_STORAGE_KEY, null)
+
+    return fallback
+  }
+
   const raw = readKey(TERMINALS_STORAGE_KEY)
 
   if (!raw) {
@@ -118,6 +130,10 @@ function loadPersistedTerminals(): PersistedTerminalState {
 // / layout.ts). Capturing history this way means a snapshot is already on disk
 // well before the renderer tears down, so app quit needs no unload hook.
 function persistTerminals(list: readonly TerminalEntry[], activeTerminalId: null | string) {
+  if (browser) {
+    return
+  }
+
   const terminals = list
     .filter(term => term.kind === 'user')
     .map(term => ({
@@ -149,8 +165,15 @@ export const $activeTerminalId = atom<string | null>(restored.activeTerminalId)
 $terminals.subscribe(list => persistTerminals(list, $activeTerminalId.get()))
 $activeTerminalId.subscribe(active => persistTerminals($terminals.get(), active))
 
+export const $visibleTerminals = computed([$terminals, $activeGatewayProfile], (list, profile) =>
+  browser ? list.filter(term => Boolean(term.profile) && term.profile === profile) : list
+)
+export const $visibleActiveTerminalId = computed([$visibleTerminals, $activeTerminalId], (list, id) =>
+  !browser || list.some(term => term.id === id) ? id : (list[0]?.id ?? null)
+)
+
 export const $activeTerminal = computed(
-  [$terminals, $activeTerminalId],
+  [$visibleTerminals, $visibleActiveTerminalId],
   (list, id) => list.find(term => term.id === id) ?? null
 )
 
@@ -161,7 +184,17 @@ const newId = () =>
  *  tie to session/project state); pass an explicit cwd to override. Returns the id. */
 export function createTerminal(cwd: string = $currentCwd.get()): string {
   const id = newId()
-  $terminals.set([...$terminals.get(), { id, title: 'Terminal', auto: true, cwd, kind: 'user' }])
+  $terminals.set([
+    ...$terminals.get(),
+    {
+      id,
+      title: 'Terminal',
+      auto: true,
+      cwd,
+      kind: 'user',
+      ...(browser ? { profile: $activeGatewayProfile.get() } : {})
+    }
+  ])
   $activeTerminalId.set(id)
 
   return id
@@ -171,38 +204,57 @@ export function createTerminal(cwd: string = $currentCwd.get()): string {
 // resurrect it on the next poll while the process is still running.
 const surfacedProcs = new Set<string>()
 
-const findByProc = (procId: string) => $terminals.get().find(term => term.procId === procId)
+const findByProc = (procId: string, profile?: string) =>
+  $terminals.get().find(term => term.procId === procId && (!browser || term.profile === profile))
 
 /** Auto-surface an agent background process as a read-only tab — once. Returns
  *  the tab id, or null if it was already surfaced and the user has since closed it. */
-export function ensureAgentTerminal(procId: string, title: string): string | null {
-  const existing = findByProc(procId)
+export function ensureAgentTerminal(procId: string, title: string, profile?: string): string | null {
+  const key = agentTerminalKey(procId, profile)
+
+  if (!key) {
+    return null
+  }
+
+  const existing = findByProc(procId, profile)
 
   if (existing) {
     return existing.id
   }
 
-  if (surfacedProcs.has(procId)) {
+  if (surfacedProcs.has(key)) {
     return null
   }
 
-  surfacedProcs.add(procId)
+  surfacedProcs.add(key)
   const id = newId()
-  $terminals.set([...$terminals.get(), { id, title: title || 'agent', auto: false, cwd: '', kind: 'agent', procId }])
+  $terminals.set([
+    ...$terminals.get(),
+    { id, title: title || 'agent', auto: false, cwd: '', kind: 'agent', procId, profile }
+  ])
 
   return id
 }
 
 /** Open + focus an agent process's tab (the status-stack link), recreating it if
  *  the user had closed it. Opens the pane. */
-export function openAgentTerminal(procId: string, title: string): void {
-  surfacedProcs.add(procId)
-  seedAgentTerminalCommand(procId, title)
-  let id = findByProc(procId)?.id
+export function openAgentTerminal(procId: string, title: string, profile?: string): void {
+  const key = agentTerminalKey(procId, profile)
+
+  if (!key) {
+    return
+  }
+
+  surfacedProcs.add(key)
+  seedAgentTerminalCommand(procId, title, profile)
+  let id = findByProc(procId, profile)?.id
 
   if (!id) {
     id = newId()
-    $terminals.set([...$terminals.get(), { id, title: title || 'agent', auto: false, cwd: '', kind: 'agent', procId }])
+    $terminals.set([
+      ...$terminals.get(),
+      { id, title: title || 'agent', auto: false, cwd: '', kind: 'agent', procId, profile }
+    ])
   }
 
   $activeTerminalId.set(id)
@@ -213,13 +265,13 @@ export function openAgentTerminal(procId: string, title: string): void {
  *  If a status-stack click already opened an agent tab, don't create a
  *  second, unrelated user shell just because the pane became visible. */
 export function ensureTerminal(): void {
-  if ($terminals.get().length === 0) {
+  if ($visibleTerminals.get().length === 0) {
     createTerminal()
   }
 }
 
 export function selectTerminal(id: string): void {
-  if ($terminals.get().some(term => term.id === id)) {
+  if ($visibleTerminals.get().some(term => term.id === id)) {
     $activeTerminalId.set(id)
   }
 }
@@ -249,8 +301,8 @@ $currentCwd.listen(cwd => {
     return
   }
 
-  const list = $terminals.get()
-  const active = list.find(term => term.id === $activeTerminalId.get())
+  const list = $visibleTerminals.get()
+  const active = list.find(term => term.id === $visibleActiveTerminalId.get())
 
   if (active?.kind === 'user' && terminalCwd(active) === target) {
     return
@@ -265,7 +317,7 @@ $currentCwd.listen(cwd => {
 
 /** Move the active tab by `direction` (+1 next / -1 prev), wrapping around. */
 export function cycleTerminal(direction: 1 | -1): void {
-  const list = $terminals.get()
+  const list = $visibleTerminals.get()
 
   if (list.length < 2) {
     return
@@ -273,7 +325,7 @@ export function cycleTerminal(direction: 1 | -1): void {
 
   const current = Math.max(
     0,
-    list.findIndex(term => term.id === $activeTerminalId.get())
+    list.findIndex(term => term.id === $visibleActiveTerminalId.get())
   )
 
   $activeTerminalId.set(list[(current + direction + list.length) % list.length].id)
@@ -289,6 +341,7 @@ export function closeTerminal(id: string): void {
     return
   }
 
+  const wasVisible = $visibleTerminals.get().some(term => term.id === id)
   const next = list.filter(term => term.id !== id)
   $terminals.set(next)
 
@@ -296,7 +349,7 @@ export function closeTerminal(id: string): void {
     $activeTerminalId.set((next[index] ?? next[index - 1])?.id ?? null)
   }
 
-  if (!next.length) {
+  if (wasVisible && !$visibleTerminals.get().length) {
     setTerminalTakeover(false)
   }
 }
@@ -306,8 +359,8 @@ export function closeTerminal(id: string): void {
  *  The process is NOT killed — only the view is dropped; `surfacedProcs` keeps
  *  it from auto-resurfacing, and the status-stack row can reopen it on demand.
  *  No-op when no such tab exists. */
-export function closeAgentTerminalByProc(procId: string): boolean {
-  const term = $terminals.get().find(t => t.kind === 'agent' && t.procId === procId)
+export function closeAgentTerminalByProc(procId: string, profile?: string): boolean {
+  const term = findByProc(procId, profile)
 
   if (!term) {
     return false
@@ -319,7 +372,7 @@ export function closeAgentTerminalByProc(procId: string): boolean {
 }
 
 export function closeActiveTerminal(): void {
-  const id = $activeTerminalId.get()
+  const id = $visibleActiveTerminalId.get()
 
   if (id) {
     closeTerminal(id)
@@ -327,11 +380,13 @@ export function closeActiveTerminal(): void {
 }
 
 export function closeAllTerminals(): void {
-  if ($terminals.get().length === 0) {
+  const visible = new Set($visibleTerminals.get().map(term => term.id))
+
+  if (!visible.size) {
     return
   }
 
-  $terminals.set([])
+  $terminals.set($terminals.get().filter(term => !visible.has(term.id)))
   $activeTerminalId.set(null)
   setTerminalTakeover(false)
 }
@@ -340,7 +395,8 @@ export function closeOtherTerminals(id: string): void {
   const keep = $terminals.get().find(term => term.id === id)
 
   if (keep) {
-    $terminals.set([keep])
+    const visible = new Set($visibleTerminals.get().map(term => term.id))
+    $terminals.set($terminals.get().filter(term => term.id === id || !visible.has(term.id)))
     $activeTerminalId.set(keep.id)
   }
 }
@@ -349,6 +405,10 @@ export function closeOtherTerminals(id: string): void {
  *  the next launch. Oversized buffers are tail-trimmed to stay under the storage
  *  budget; only user tabs ever carry one. */
 export function updateTerminalReviveBuffer(id: string, reviveBuffer: string): void {
+  if (browser) {
+    return
+  }
+
   const capped =
     reviveBuffer.length > MAX_REVIVE_BUFFER_CHARS ? reviveBuffer.slice(-MAX_REVIVE_BUFFER_CHARS) : reviveBuffer
 

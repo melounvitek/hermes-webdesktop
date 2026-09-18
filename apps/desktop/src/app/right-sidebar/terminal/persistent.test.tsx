@@ -139,9 +139,48 @@ describe('PersistentTerminal rect tracking', () => {
     mount.unmount()
     $terminalTakeover.set(false)
     vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
+    document.documentElement.style.removeProperty('zoom')
     vi.restoreAllMocks()
     setDocumentHidden(false)
     delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
+  })
+
+  it.each(['1', '0'])('tracks rounded viewport bounds through scale changes (browser=%s)', browser => {
+    vi.stubEnv('VITE_BROWSER', browser)
+    const raf = installRaf()
+    let currentRect = rect(55.796875, 1115.8125, 291.796875, 124.203125)
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => currentRect)
+    document.documentElement.style.zoom = '0.9'
+
+    mount.render(<Harness />)
+
+    const overlay = mount.container!.querySelector<HTMLElement>('[data-persistent-terminal]')!
+    expect(
+      mutationObserveCalls.some(
+        call => call.target === document.documentElement && call.options?.attributeFilter?.includes('style')
+      )
+    ).toBe(true)
+
+    for (const zoom of [0.9, 1, 1.25, 0.9]) {
+      currentRect = rect(62.1 * zoom, 1239.8 * zoom, 324.2 * zoom, 138.1 * zoom)
+      document.documentElement.style.zoom = String(zoom)
+      act(() => {
+        mutationObserverCallback?.([], {} as MutationObserver)
+        raf.runNext()
+      })
+
+      const scale = browser === '1' ? zoom : 1
+      const top = parseFloat(overlay.style.top) * scale
+      const left = parseFloat(overlay.style.left) * scale
+      expect(top).toBeCloseTo(Math.floor(currentRect.top))
+      expect(left).toBeCloseTo(Math.floor(currentRect.left))
+      expect(left + parseFloat(overlay.style.width) * scale).toBeCloseTo(Math.ceil(currentRect.right))
+      expect(top + parseFloat(overlay.style.height) * scale).toBeCloseTo(Math.ceil(currentRect.bottom))
+
+      act(() => raf.runNext())
+      expect(raf.pending()).toBe(0)
+    }
   })
 
   it('settles after rect changes instead of polling forever', () => {

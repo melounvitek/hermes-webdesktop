@@ -3781,6 +3781,17 @@ export const en: Translations = {
   },
 
   rightSidebar: {
+    terminalDisconnected: 'Terminal disconnected',
+    terminalReconnecting: 'Reconnecting to terminal…',
+    terminalEmpty: 'No terminal in this profile',
+    terminalErrors: {
+      connection: 'Could not connect to the terminal. Check your connection and retry. Unsent input is not replayed.',
+      'missing-plugin': 'Install and enable browser-terminal plugin on the Hermes server, then restart the dashboard.',
+      'missing-session':
+        'The server no longer has this terminal. Close this tab and open a new terminal to start another shell.',
+      auth: 'Terminal authentication failed. Sign in again, then retry.',
+      superseded: 'This terminal was attached elsewhere. Retry to reconnect here.'
+    },
     aria: 'Right sidebar',
     panelsAria: 'Right sidebar panels',
     files: 'File system',

@@ -22,7 +22,17 @@ import { useTerminalFontController } from './use-terminal-font'
 // Read-only terminal for an agent background process: a write-only xterm (no PTY,
 // no input) fed live by the backend output stream, keyed by process id. Shares
 // the user terminal's look so the two read as one surface.
-export function useAgentTerminal({ active, id, procId }: { active: boolean; id: string; procId: string }) {
+export function useAgentTerminal({
+  active,
+  id,
+  procId,
+  profile
+}: {
+  active: boolean
+  id: string
+  procId: string
+  profile?: string
+}) {
   const { renderedMode, theme, themeName } = useTheme()
   const hostRef = useRef<HTMLDivElement | null>(null)
   const termRef = useRef<Terminal | null>(null)
@@ -149,7 +159,7 @@ export function useAgentTerminal({ active, id, procId }: { active: boolean; id: 
       initialActiveFitRef.current = active
 
       // Stream live output straight into the terminal (replays backlog on attach).
-      unregister = registerAgentTerminalWriter(procId, chunk => term.write(chunk))
+      unregister = registerAgentTerminalWriter(procId, chunk => term.write(chunk), profile)
       unregisterReader = registerTerminalReader(id, makeTerminalReader(term))
     }
 

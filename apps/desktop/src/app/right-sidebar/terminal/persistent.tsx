@@ -132,14 +132,19 @@ export function PersistentTerminal({ onAddSelectionToChat }: PersistentTerminalP
       const top = Math.floor(r.top)
       const left = Math.floor(r.left)
 
+      // Browser UI scale uses root CSS zoom; fixed offsets need layout units,
+      // not the already-scaled viewport bounds. Electron uses native zoom.
+      const zoom =
+        import.meta.env.VITE_BROWSER === '1' ? Number(getComputedStyle(document.documentElement).zoom) || 1 : 1
+
       // Inactive keep-alive panes deliberately retain the same rect as the
       // foreground pane, so visibility must be sampled independently.
       const next: Rect = {
         hidden: isElementInHiddenPane(slot),
-        top,
-        left,
-        width: Math.ceil(r.right) - left,
-        height: Math.ceil(r.bottom) - top
+        top: top / zoom,
+        left: left / zoom,
+        width: (Math.ceil(r.right) - left) / zoom,
+        height: (Math.ceil(r.bottom) - top) / zoom
       }
 
       if (!sameRect(prev, next)) {

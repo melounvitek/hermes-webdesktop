@@ -15,7 +15,7 @@ export function handleDesktopBridgeEvent(ctx: GatewayEventContext): boolean {
 
   if (event.type === 'agent.terminal.output') {
     // Live chunk from a background process → its read-only agent terminal tab.
-    writeAgentTerminalChunk(payload?.process_id ?? '', payload?.chunk ?? '')
+    writeAgentTerminalChunk(payload?.process_id ?? '', payload?.chunk ?? '', event.profile)
 
     return true
   }
@@ -23,7 +23,7 @@ export function handleDesktopBridgeEvent(ctx: GatewayEventContext): boolean {
   if (event.type === 'terminal.close') {
     // Agent closed its own read-only tab via the desktop-gated close_terminal tool.
     // The process is untouched — this only drops the view.
-    closeAgentTerminalByProc(payload?.process_id ?? '')
+    closeAgentTerminalByProc(payload?.process_id ?? '', event.profile)
 
     return true
   }
