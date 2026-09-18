@@ -69,10 +69,11 @@ def message_agent_tool_schema() -> dict:
                 "asynchronous, like texting: it validates the target against the live "
                 "roster, delivers your message into that agent's own Bot Chat with your "
                 "attribution automatically prefixed, and returns immediately with a "
-                "delivery acknowledgement. It does NOT return their reply and you must "
-                "not wait or poll for one — send it, finish your turn, and the reply "
-                "arrives later as a background-process completion notification that "
-                "wakes you. COMPOSE the message yourself: write what YOU want to say to "
+                "dispatch acknowledgement (the hand-off to a background delivery process, "
+                "not a delivery receipt). It does NOT return their reply and you must "
+                "not wait or poll for one — send it, finish your turn, and that process's "
+                "completion notification wakes you with the outcome: their reply, or the "
+                "delivery failure. COMPOSE the message yourself: write what YOU want to say to "
                 "that agent (lead with the point; include the concrete ask or result). "
                 "Never paste the user's words verbatim — paraphrase the actionable "
                 "substance, and keep private 1:1 chat content private. Message one "
@@ -646,9 +647,11 @@ def _spawn_delivery(command: str, label: str, *, dm_file: Optional[str] = None,
         return json.dumps({
             "status": "sent",
             "to": label,
-            "detail": (f"Message dispatched to {label}. This is asynchronous — do NOT wait "
-                       "or poll. Finish your turn now; when the delivery completes, its "
-                       "notification carries the reply — relay it then, attributed to that agent."),
+            "detail": (f"Message dispatched to {label}: this acknowledges the hand-off to a "
+                       "background delivery process, not a delivery receipt — do NOT wait or poll. "
+                       "Finish your turn now; that process's completion notification carries the "
+                       "delivery outcome — the reply (relay it then, attributed to that agent) or "
+                       "the delivery failure (report it; the message was NOT delivered)."),
             "process_id": proc_id,
             "sent_at": int(time.time()),
         })
