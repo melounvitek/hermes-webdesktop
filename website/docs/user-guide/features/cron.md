@@ -540,6 +540,15 @@ When scheduling jobs, you specify where the output goes:
 
 The agent's final response is automatically delivered to the configured `deliver:` target — the agent does not send messages itself, so there is nothing to call in the cron prompt.
 
+Delivered output is secret-redacted on the way out, on every lane: the platform message, the
+session mirror (payload and the job name spliced around it), and a `bot-chat` turn. Credential
+shapes (vendor-prefixed API keys, tokens, `KEY=value` assignments) are masked even when
+`security.redact_secrets: false` — that setting governs your own logs, not what leaves the
+machine — and a redactor failure replaces the payload rather than sending it unscanned.
+Credential-named URL query parameters are not stripped (magic links and pre-signed URLs are
+legitimate cron output), and user-chosen secrets with no recognisable shape are not detected.
+The run document under `cron/output/<job_id>/` keeps the agent's response as written.
+
 ### Delivery failures are a distinct status
 
 Execution and delivery are tracked separately. When the agent run succeeds but
