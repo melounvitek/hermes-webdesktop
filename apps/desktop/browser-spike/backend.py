@@ -21,6 +21,7 @@ import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, build_opener
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -124,7 +125,14 @@ def main():
     parser.add_argument("--web-dist", type=Path, required=True)
     parser.add_argument("--python", type=Path, default=Path.home() / ".hermes/hermes-agent/venv/bin/python")
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--public-url", help="HTTPS origin for a tailnet proxy; generates a password login")
     args = parser.parse_args()
+    if args.public_url:
+        origin = urlsplit(args.public_url)
+        if (origin.scheme != "https" or not origin.hostname or origin.username or origin.password
+                or origin.path not in ("", "/") or origin.query or origin.fragment):
+            parser.error("--public-url must be an HTTPS origin without a path or credentials")
+        args.public_url = args.public_url.rstrip("/")
     # Keep the venv path: resolving its python symlink would select the bare interpreter.
     args.python = args.python.expanduser().absolute()
     web_dist = args.web_dist.expanduser().resolve()
@@ -167,6 +175,17 @@ def main():
         "HTTP_PROXY": model_url, "HTTPS_PROXY": model_url, "ALL_PROXY": model_url,
         "NO_PROXY": "127.0.0.1,localhost,::1", "HF_HUB_OFFLINE": "1",
     }
+    if args.public_url:
+        login = {"username": "spike", "password": secrets.token_urlsafe(18)}
+        login_file = run_dir / "login.json"
+        with open(login_file, "x", opener=lambda path, flags: os.open(path, flags, 0o600)) as out:
+            json.dump(login, out)
+        hash_code = "import sys; from plugins.dashboard_auth.basic import hash_password; print(hash_password(sys.stdin.read()))"
+        password_hash = subprocess.check_output(
+            [str(args.python), "-c", hash_code], input=login["password"], cwd=home, env=env, text=True).strip()
+        config["dashboard"] = {"public_url": args.public_url, "basic_auth": {
+            "username": login["username"], "password_hash": password_hash}}
+        (hermes_home / "config.yaml").write_text(json.dumps(config, indent=2))
     # Verify the installed venv resolves application modules from THIS worktree.
     probe = "import importlib.util,json; print(json.dumps({n:importlib.util.find_spec(n).origin for n in ['hermes_cli.main','run_agent','tui_gateway.server']}))"
     origins = json.loads(subprocess.check_output([str(args.python), "-c", probe], cwd=home, env=env, text=True))
@@ -178,7 +197,8 @@ def main():
         child = subprocess.Popen(command, cwd=home, env=env, stdout=log, stderr=subprocess.STDOUT)
     runtime = {"run_dir": str(run_dir), "home": str(home), "hermes_home": str(hermes_home),
                "harness_pid": os.getpid(), "backend_pid": child.pid, "backend_log": str(log_path),
-               "model_url": model_url + "/v1", "command": command, "imports": origins}
+               "model_url": model_url + "/v1", "command": command, "imports": origins,
+               "public_url": args.public_url}
     print(json.dumps(runtime, indent=2), flush=True)
 
     def stop(_signum, _frame):
@@ -198,9 +218,13 @@ def main():
             if match:
                 url = f"http://127.0.0.1:{match.group(1)}"
                 try:
-                    with http.open(url, timeout=2) as response:
+                    with http.open(url + ("/api/status" if args.public_url else ""), timeout=2) as response:
                         assert response.status == 200
-                        assert token in response.read().decode(), "SPA must receive the real backend session token"
+                        if args.public_url:
+                            status = json.load(response)
+                            assert status["auth_required"] and "basic" in status["auth_providers"]
+                        else:
+                            assert token in response.read().decode(), "SPA must receive the real backend session token"
                     break
                 except OSError:
                     pass

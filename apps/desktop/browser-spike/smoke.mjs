@@ -6,8 +6,8 @@ import { chromium, expect } from '@playwright/test'
 const runtimePath = process.argv[2]
 if (!runtimePath) throw new Error('Usage: node browser-spike/smoke.mjs <harness runtime.json> [artifact directory]')
 const runtime = JSON.parse(await readFile(runtimePath, 'utf8'))
-const { url } = runtime
-assert.equal(new URL(url).hostname, '127.0.0.1')
+assert.equal(new URL(runtime.url).hostname, '127.0.0.1')
+const url = runtime.public_url || runtime.url
 assert.equal(new URL(runtime.model_url).hostname, '127.0.0.1')
 assert.equal(path.resolve(runtimePath), path.join(runtime.run_dir, 'runtime.json'))
 assert.equal(runtime.hermes_home, path.join(runtime.run_dir, 'home', '.hermes'))
@@ -15,11 +15,6 @@ const config = JSON.parse(await readFile(path.join(runtime.hermes_home, 'config.
 assert.equal(config.model.default, 'browser-spike-local')
 assert.equal(config.model.provider, 'custom')
 assert.equal(config.model.base_url, runtime.model_url)
-// Require the harness's random credential and verify the running backend before
-// opening the renderer, which can itself submit background prompts.
-const response = await fetch(new URL('/api/config', url), { headers: { 'X-Hermes-Session-Token': runtime.token } })
-assert.equal(response.status, 200)
-assert.equal((await response.json()).model, config.model.default)
 const target = path.join(runtime.home, 'approval-target')
 const artifacts = process.argv[3] || '/tmp/hermes-browser-evidence'
 await mkdir(artifacts, { recursive: true })
@@ -80,6 +75,22 @@ async function complete(start, text) {
   return result.text
 }
 try {
+  // Verify fixture credentials and the live model before opening the renderer,
+  // which can itself submit background prompts.
+  const headers = runtime.public_url ? {} : { 'X-Hermes-Session-Token': runtime.token }
+  if (runtime.public_url) {
+    assert.equal(runtime.public_url, config.dashboard.public_url)
+    assert.equal((await page.request.get(new URL('/api/config', url).href)).status(), 401)
+    const login = JSON.parse(await readFile(path.join(runtime.run_dir, 'login.json'), 'utf8'))
+    const response = await page.request.post(new URL('/auth/password-login', url).href, {
+      data: { provider: 'basic', ...login },
+      headers: { Origin: url }
+    })
+    assert.equal(response.status(), 200)
+  }
+  const response = await page.request.get(new URL('/api/config', url).href, { headers })
+  assert.equal(response.status(), 200)
+  assert.equal((await response.json()).model, config.model.default)
   await page.goto(url)
   const first = await send('spike: hello from Chromium')
   await complete(first, 'Spike turn 1: spike: hello from Chromium')
