@@ -1,3 +1,4 @@
+import './browser/install'
 import './styles.css'
 // Side-effect: reports in-flight turns to the main process for the quit guard.
 import './store/active-work'

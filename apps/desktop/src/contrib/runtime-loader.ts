@@ -451,7 +451,7 @@ async function scanDiskPlugins(): Promise<void> {
 
   // Re-entrancy guard: the 5s poll must not overlap a slow in-flight scan
   // (reads/loads can exceed the interval).
-  if (!desktop || scanning) {
+  if (!desktop?.readDir || scanning) {
     return
   }
 
@@ -563,7 +563,7 @@ export const $diskPluginsScanPending = atom(false)
 export function watchRuntimePlugins(): void {
   const desktop = window.hermesDesktop
 
-  if (watching || !desktop) {
+  if (watching || !desktop?.onPreviewFileChanged) {
     return
   }
 
