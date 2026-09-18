@@ -2,6 +2,7 @@ import { useStore } from '@nanostores/react'
 import { useState } from 'react'
 
 import { useSessionView } from '@/app/chat/session-view'
+import { blobToDataUrl } from '@/app/session/hooks/use-prompt-actions/utils'
 import { ImageLightbox } from '@/components/chat/zoomable-image'
 import { Codicon } from '@/components/ui/codicon'
 import { Tip } from '@/components/ui/tooltip'
@@ -53,13 +54,17 @@ function AttachmentPill({ attachment, onRemove }: { attachment: ComposerAttachme
   const isUploading = attachment.uploadState === 'uploading'
   const hasUploadError = attachment.uploadState === 'error'
 
-  const canPreview = attachment.kind !== 'folder' && attachment.kind !== 'terminal' && !isUploading
+  const canPreview =
+    attachment.kind !== 'folder' &&
+    attachment.kind !== 'terminal' &&
+    !isUploading &&
+    !(attachment.kind === 'file' && attachment.blob && !attachment.refText)
 
   const detail =
     attachment.detail && attachment.detail !== attachment.label ? attachment.detail : undefined
 
-  // Keep full image bytes out of composer state. New chips read their path only
-  // when clicked; previewUrl remains a compatibility fallback for older drafts.
+  // Read the full path/blob source only when clicked; previewUrl remains a
+  // compatibility fallback for older drafts.
   const [loadedImageSrc, setLoadedImageSrc] = useState<string>()
   const lightboxSrc = attachment.kind === 'image' && !isUploading ? attachment.previewUrl || loadedImageSrc : undefined
   const [lightboxOpen, setLightboxOpen] = useState(false)
@@ -72,7 +77,7 @@ function AttachmentPill({ attachment, onRemove }: { attachment: ComposerAttachme
 
     if (attachment.kind === 'image') {
       try {
-        let source = lightboxSrc || ''
+        let source = lightboxSrc || (attachment.blob ? await blobToDataUrl(attachment.blob) : '')
 
         // Upload may replace `path` with a gateway-side staged path while
         // `detail` still carries the original host path. If submit then fails,

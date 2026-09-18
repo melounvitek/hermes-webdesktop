@@ -100,8 +100,9 @@ describe('AttachmentList', () => {
     expect($previewTabs.get()).toHaveLength(0)
   })
 
-  it('loads a path-backed full image only when opened and releases it when closed', async () => {
-    const readFileDataUrl = vi.fn(async () => DATA_URL)
+  it.each(['path', 'blob'])('loads a %s-backed full image only when opened and releases it when closed', async source => {
+    const fullSource = source === 'blob' ? 'data:image/png;base64,aGVsbG8=' : DATA_URL
+    const readFileDataUrl = vi.fn(async () => fullSource)
 
     Object.defineProperty(window, 'hermesDesktop', {
       configurable: true,
@@ -112,7 +113,7 @@ describe('AttachmentList', () => {
       id: 'img-on-demand',
       kind: 'image',
       label: 'shot.png',
-      path: '/tmp/shot.png',
+      ...(source === 'blob' ? { blob: new Blob(['hello'], { type: 'image/png' }) } : { path: '/tmp/shot.png' }),
       thumbnailUrl: THUMBNAIL_URL
     }
 
@@ -120,23 +121,23 @@ describe('AttachmentList', () => {
 
     expect(readFileDataUrl).not.toHaveBeenCalled()
     expect(screen.getByAltText<HTMLImageElement>('shot.png').getAttribute('src')).toBe(THUMBNAIL_URL)
-    expect(container.querySelector(`img[src="${DATA_URL}"]`)).toBeNull()
+    expect(container.querySelector(`img[src="${fullSource}"]`)).toBeNull()
 
     await act(async () => {
       fireEvent.click(screen.getByRole('button', { name: /shot\.png/ }))
     })
 
-    expect(readFileDataUrl).toHaveBeenCalledOnce()
+    expect(readFileDataUrl).toHaveBeenCalledTimes(source === 'blob' ? 0 : 1)
     const lightboxImage = (await screen.findByRole('dialog')).querySelector<HTMLImageElement>('img')
 
-    expect(lightboxImage?.getAttribute('src')).toBe(DATA_URL)
+    expect(lightboxImage?.getAttribute('src')).toBe(fullSource)
 
     await act(async () => {
       fireEvent.click(lightboxImage!)
     })
 
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
-    expect(container.querySelector(`img[src="${DATA_URL}"]`)).toBeNull()
+    expect(container.querySelector(`img[src="${fullSource}"]`)).toBeNull()
   })
 
   it('falls back to the original host path after an image was staged for a different filesystem', async () => {

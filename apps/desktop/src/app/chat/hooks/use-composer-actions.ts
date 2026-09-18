@@ -1,8 +1,10 @@
-import { useCallback } from 'react'
+import { useCallback, useLayoutEffect, useRef } from 'react'
 
 import { requestComposerFocus, requestComposerInsert, requestComposerInsertRefs } from '@/app/chat/composer/focus'
 import { droppedFileInlineRef } from '@/app/chat/composer/inline-refs'
 import { pasteSizeLabel } from '@/app/chat/composer/large-paste'
+import { blobToDataUrl } from '@/app/session/hooks/use-prompt-actions/utils'
+import { browserAttachment, pickBrowserFiles } from '@/browser/attachments'
 import { formatRefValue } from '@/components/assistant-ui/directive-text'
 import { useI18n } from '@/i18n'
 import { attachmentId, contextPath, pathLabel } from '@/lib/chat-runtime'
@@ -19,7 +21,9 @@ import {
   setComposerTerminalSelection,
   updateComposerAttachment
 } from '@/store/composer'
+import { $activeGatewayRoute } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
+import { $connection, $selectedStoredSessionId } from '@/store/session'
 
 import type { ImageDetachResponse } from '../../types'
 
@@ -61,9 +65,9 @@ export async function attachmentPreviewDataUrl(filePath: string): Promise<string
 
 let attachmentPreviewQueue = Promise.resolve()
 
-async function queuedAttachmentPreview(filePath: string): Promise<{ previewUrl: string; thumbnailUrl?: string }> {
+async function queuedAttachmentPreview(source: string | Blob): Promise<{ previewUrl: string; thumbnailUrl?: string }> {
   const task = attachmentPreviewQueue.then(async () => {
-    const previewUrl = await attachmentPreviewDataUrl(filePath)
+    const previewUrl = typeof source === 'string' ? await attachmentPreviewDataUrl(source) : await blobToDataUrl(source)
     const thumbnailUrl = previewUrl.startsWith('data:image/') ? await downscaleDataUrlForPreview(previewUrl) : undefined
 
     return { previewUrl, thumbnailUrl }
@@ -335,6 +339,7 @@ const MAIN_ACTIONS_SCOPE: ComposerActionsScope = {
 interface ComposerActionsOptions {
   activeSessionId: string | null
   currentCwd: string
+  contextKey?: string
   requestGateway: <T>(method: string, params?: Record<string, unknown>) => Promise<T>
   scope?: ComposerActionsScope
 }
@@ -342,11 +347,38 @@ interface ComposerActionsOptions {
 export function useComposerActions({
   activeSessionId,
   currentCwd,
+  contextKey,
   requestGateway,
   scope = MAIN_ACTIONS_SCOPE
 }: ComposerActionsOptions) {
   const { t } = useI18n()
   const copy = t.desktop
+  // Invalidate even on A→B→A switches while a picker or clipboard read is open.
+  const generation = useRef(0)
+  useLayoutEffect(() => {
+    const invalidate = () => {
+      generation.current += 1
+    }
+
+    invalidate()
+
+    // Foreground switches re-home only main; tiles retain their own recipient.
+    const subscriptions =
+      scope.target === 'main'
+        ? [$activeGatewayRoute.listen(invalidate), $connection.listen(invalidate), $selectedStoredSessionId.listen(invalidate)]
+        : []
+
+    return () => {
+      invalidate()
+      subscriptions.forEach(unsubscribe => unsubscribe())
+    }
+  }, [activeSessionId, contextKey, scope.target])
+
+  const captureContext = useCallback(() => {
+    const captured = generation.current
+
+    return () => generation.current === captured
+  }, [])
 
   /** Add to this scope's composer and focus it. All sidebar/picker/drop
    *  attach paths funnel through here. */
@@ -394,15 +426,50 @@ export function useComposerActions({
     [attachToMain]
   )
 
+  const attachBrowserBlob = useCallback(
+    async (blob: Blob, kind: 'file' | 'image') => {
+      const attachment = browserAttachment(blob, kind)
+      attachToMain(attachment)
+
+      if (kind === 'image') {
+        try {
+          const { thumbnailUrl } = await queuedAttachmentPreview(blob)
+          scope.updateIfCurrent(attachment, { thumbnailUrl })
+        } catch (err) {
+          notifyError(err, copy.imagePreviewFailed)
+        }
+      }
+
+      return true
+    },
+    [attachToMain, copy.imagePreviewFailed, scope]
+  )
+
   const pickContextPaths = useCallback(
     async (kind: 'file' | 'folder') => {
+      const isCurrent = captureContext()
+
+      if (import.meta.env.VITE_BROWSER === '1' && kind === 'file') {
+        const files = await pickBrowserFiles()
+
+        for (const file of files) {
+          if (!isCurrent()) {
+            return
+          }
+
+          await attachBrowserBlob(file, 'file')
+        }
+
+        return
+      }
+
       const paths = await selectDesktopPaths({
         title: kind === 'file' ? 'Add files as context' : 'Add folders as context',
         defaultPath: currentCwd || undefined,
         directories: kind === 'folder'
       })
 
-      if (!paths?.length) {
+      if (!paths?.length || !isCurrent()) {
         return
       }
 
@@ -419,7 +486,7 @@ export function useComposerActions({
         })
       }
     },
-    [attachToMain, currentCwd]
+    [attachBrowserBlob, attachToMain, captureContext, currentCwd]
   )
 
   const insertContextPathInlineRef = useCallback(
@@ -507,7 +574,10 @@ export function useComposerActions({
 
   const attachImageBlob = useCallback(
     async (blob: Blob, isCurrent: () => boolean = () => true) => {
-      if (blob.size === 0 || !isCurrent()) {
+      const contextIsCurrent = captureContext()
+      const canAttach = () => contextIsCurrent() && isCurrent()
+
+      if (blob.size === 0 || !canAttach()) {
         return false
       }
 
@@ -515,10 +585,14 @@ export function useComposerActions({
         return false
       }
 
+      if (import.meta.env.VITE_BROWSER === '1') {
+        return attachBrowserBlob(blob, 'image')
+      }
+
       try {
         const buffer = await blob.arrayBuffer()
 
-        if (!isCurrent()) {
+        if (!canAttach()) {
           return false
         }
 
@@ -532,17 +606,33 @@ export function useComposerActions({
           return false
         }
 
-        return isCurrent() ? attachImagePath(savedPath) : false
+        return canAttach() ? attachImagePath(savedPath) : false
       } catch (err) {
         notifyError(err, copy.imageAttachFailed)
 
         return false
       }
     },
-    [attachImagePath, copy.imageAttach, copy.imageAttachFailed, copy.imageWriteFailed]
+    [attachBrowserBlob, attachImagePath, captureContext, copy.imageAttach, copy.imageAttachFailed, copy.imageWriteFailed]
   )
 
   const pickImages = useCallback(async () => {
+    const isCurrent = captureContext()
+
+    if (import.meta.env.VITE_BROWSER === '1') {
+      const files = await pickBrowserFiles('image/*')
+
+      for (const file of files) {
+        if (!isCurrent()) {
+          return
+        }
+
+        await attachImageBlob(file, isCurrent)
+      }
+
+      return
+    }
+
     const paths = await selectDesktopPaths({
       title: copy.attachImages,
       defaultPath: currentCwd || undefined,
@@ -559,14 +649,55 @@ export function useComposerActions({
     }
 
     for (const path of paths) {
+      if (!isCurrent()) {
+        return
+      }
+
       await attachImagePath(path)
     }
-  }, [attachImagePath, copy.attachImages, currentCwd, t.composer.images])
+  }, [attachImageBlob, attachImagePath, captureContext, copy.attachImages, currentCwd, t.composer.images])
 
   const pasteClipboardImage = useCallback(
     async ({ silent = false }: { silent?: boolean } = {}) => {
+      const isCurrent = captureContext()
+
       try {
+        if (import.meta.env.VITE_BROWSER === '1') {
+          // Empty DOM pastes need the native WSL fallback, not a browser
+          // permission prompt. Explicit menu pastes may request clipboard access.
+          if (silent) {
+            return false
+          }
+
+          const items = await navigator.clipboard.read()
+          let attached = false
+
+          for (const item of items) {
+            const type = item.types.find(type => type.startsWith('image/'))
+
+            if (type) {
+              const blob = await item.getType(type)
+
+              if (!isCurrent()) {
+                return false
+              }
+
+              attached = (await attachImageBlob(blob, isCurrent)) || attached
+            }
+          }
+
+          if (!attached) {
+            notify({ kind: 'warning', title: copy.clipboard, message: copy.noClipboardImage })
+          }
+
+          return attached
+        }
+
         const path = await window.hermesDesktop?.saveClipboardImage()
+
+        if (!isCurrent()) {
+          return false
+        }
 
         if (!path) {
           if (!silent) {
@@ -591,7 +722,7 @@ export function useComposerActions({
         return false
       }
     },
-    [attachImagePath, copy.clipboard, copy.clipboardPasteFailed, copy.noClipboardImage]
+    [attachImageBlob, attachImagePath, captureContext, copy.clipboard, copy.clipboardPasteFailed, copy.noClipboardImage]
   )
 
   /**
@@ -664,10 +795,15 @@ export function useComposerActions({
         return false
       }
 
+      const isCurrent = captureContext()
       let attached = false
       let lastFailure: string | null = null
 
       for (const candidate of candidates) {
+        if (!isCurrent()) {
+          return attached
+        }
+
         const { file, isDirectory, path: knownPath } = candidate
 
         // Path-only entry (in-app drag from the file browser tree, etc.).
@@ -707,6 +843,17 @@ export function useComposerActions({
           continue
         }
 
+        if (import.meta.env.VITE_BROWSER === '1') {
+          if (isDirectory) {
+            continue
+          }
+
+          const kind = file.type.startsWith('image/') || isImagePath(file.name) ? 'image' : 'file'
+          attached = (await attachBrowserBlob(file, kind)) || attached
+
+          continue
+        }
+
         const fallbackPath =
           !knownPath && window.hermesDesktop?.getPathForFile ? window.hermesDesktop.getPathForFile(file) : ''
 
@@ -721,7 +868,7 @@ export function useComposerActions({
           // it before submit. Persist the File bytes into Desktop's durable
           // composer-image cache first; keep the native path as a compatibility
           // fallback for older shells that cannot save the buffer.
-          if ((await attachImageBlob(file)) || (filePath && (await attachImagePath(filePath)))) {
+          if ((await attachImageBlob(file, isCurrent)) || (isCurrent() && filePath && (await attachImagePath(filePath)))) {
             attached = true
 
             continue
@@ -747,7 +894,15 @@ export function useComposerActions({
 
       return attached
     },
-    [attachContextFilePath, attachContextFolderPath, attachImageBlob, attachImagePath, copy.dropFiles]
+    [
+      attachBrowserBlob,
+      attachContextFilePath,
+      attachContextFolderPath,
+      attachImageBlob,
+      attachImagePath,
+      captureContext,
+      copy.dropFiles
+    ]
   )
 
   const removeAttachment = useCallback(

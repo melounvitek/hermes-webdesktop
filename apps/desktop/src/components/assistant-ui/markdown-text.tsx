@@ -10,6 +10,7 @@ import {
 import type { code as streamdownCode } from '@streamdown/code'
 import { type ComponentProps, memo, type ReactNode, useEffect, useMemo, useState } from 'react'
 
+import { useSessionView } from '@/app/chat/session-view'
 import { ExpandableBlock } from '@/components/chat/expandable-block'
 import { PreviewAttachment } from '@/components/chat/preview-attachment'
 import { chunkByLines, SyntaxHighlighter } from '@/components/chat/shiki-highlighter'
@@ -40,6 +41,7 @@ import { previewTargetFromMarkdownHref } from '@/lib/preview-targets'
 import { sessionRefFromMarkdownHref } from '@/lib/session-refs'
 import { isDirectiveInProgress } from '@/lib/transcript-directives'
 import { cn } from '@/lib/utils'
+import { knownOwnerForSession } from '@/store/session-states'
 
 import { ArtifactCard } from './artifact-card'
 import { SessionRefLink } from './directive-text'
@@ -110,12 +112,26 @@ function preprocessWithTailRepair(text: string): string {
 }
 
 function useOpenMediaFile(path: string) {
+  const view = useSessionView()
   const [openFailed, setOpenFailed] = useState(false)
 
   const open = () => {
-    if (window.hermesDesktop && isRemoteGateway()) {
+    const sessionId = view.$storedId.get() || view.$runtimeId.get()
+    const owner = knownOwnerForSession(sessionId)
+    const remoteOwner = owner && typeof owner === 'object' && owner.connectionId !== 'local'
+
+    if (window.hermesDesktop && (remoteOwner || isRemoteGateway())) {
       setOpenFailed(false)
-      void downloadGatewayMediaFile(path).catch(() => setOpenFailed(true))
+      void downloadGatewayMediaFile(
+        path,
+        sessionId
+          ? {
+              sessionId,
+              profile: typeof owner === 'string' ? owner : owner?.targetProfile || owner?.profile,
+              connectionId: typeof owner === 'object' ? owner?.connectionId : undefined
+            }
+          : undefined
+      ).catch(() => setOpenFailed(true))
     } else {
       openExternalLink(mediaExternalUrl(path))
     }

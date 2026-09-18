@@ -7,6 +7,7 @@ import { DirectiveContent } from '@/components/assistant-ui/directive-text'
 import { ContextMenu, ContextMenuTrigger, HERMES_CONTEXT_MENU_TRIGGER_ATTR } from '@/components/ui/context-menu'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { formatCombo } from '@/lib/keybinds/combo'
+import { $notifications } from '@/store/notifications'
 import { $previewTabs, closeRightRail } from '@/store/preview'
 import { $connection } from '@/store/session'
 
@@ -49,6 +50,7 @@ function attach(html: string): HTMLElement {
 
 afterEach(() => {
   $contextMenu.set(null)
+  $notifications.set([])
   $connection.set(null)
   closeRightRail()
   cleanup()
@@ -186,6 +188,19 @@ describe('AppContextMenu', () => {
     expect(await screen.findByText('Copy image')).toBeTruthy()
     expect(screen.getByText('Copy image address')).toBeTruthy()
     expect(screen.getByText('Save image as…')).toBeTruthy()
+  })
+
+  it('shows an image download failure instead of silently losing a rejected save', async () => {
+    installBridge({ saveImageFromUrl: vi.fn().mockRejectedValue(new Error('HTTP 403: download denied')) })
+    mountMenu()
+    const host = attach('<img src="https://example.com/pic.png">')
+    fireEvent.contextMenu(host.querySelector('img')!)
+    fireEvent.click(await screen.findByText('Save image as…'))
+    await waitFor(() =>
+      expect($notifications.get()).toEqual([
+        expect.objectContaining({ kind: 'error', message: expect.stringContaining('download denied') })
+      ])
+    )
   })
 
   it('opens the edit menu in an editable and augments it with spellcheck', async () => {

@@ -212,7 +212,7 @@ export async function gatewayMediaDataUrl(path: string): Promise<string> {
 // used by preview endpoints.
 export async function downloadGatewayMediaFile(
   path: string,
-  origin?: { sessionId: string; profile?: string }
+  origin?: { sessionId: string; profile?: string; connectionId?: string }
 ): Promise<{ canceled?: boolean; path?: string; saved: boolean }> {
   // URI conversion belongs to the gateway OS, not the renderer's URL parser.
   const file = path
@@ -223,9 +223,10 @@ export async function downloadGatewayMediaFile(
   }
 
   return window.hermesDesktop.saveGatewayFile({
-    connectionId: conn?.connectionId,
+    // An explicit origin is a complete scope; never fill its gaps from the foreground.
+    connectionId: origin ? origin.connectionId : conn?.connectionId,
     path: file,
-    profile: origin?.profile ?? conn?.profile,
+    profile: origin ? origin.profile : conn?.profile,
     ...(origin ? { sessionId: origin.sessionId } : {}),
     suggestedName: mediaName(file).replace(/(?:%[0-9a-f]{2})+/gi, encoded => {
       try {

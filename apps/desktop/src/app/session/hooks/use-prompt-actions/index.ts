@@ -70,6 +70,7 @@ import {
 import { useSlashCommand } from './slash'
 import { useSubmitPrompt } from './submit'
 import {
+  base64FromDataUrl,
   blobToDataUrl,
   delay,
   friendlyRemoteAttachError,
@@ -136,7 +137,7 @@ export async function uploadComposerAttachment(
   const { backendCwd, remote, requestGateway, storedSessionId, onSessionRecovered, terminalBackend } = opts
   const path = attachment.path ?? ''
   const label = attachment.label || pathLabel(path)
-  const uploadBytes = remote || attachmentPathNeedsUpload(path, backendCwd, terminalBackend)
+  const uploadBytes = Boolean(attachment.blob) || remote || attachmentPathNeedsUpload(path, backendCwd, terminalBackend)
 
   // Read bytes/paths ONCE, outside the retry. Only the session-scoped RPC is
   // replayed on recovery — re-reading a multi-MB file to retry a dead session
@@ -148,7 +149,15 @@ export async function uploadComposerAttachment(
 
   if (uploadBytes) {
     try {
-      if (attachment.kind === 'image') {
+      if (attachment.blob) {
+        const dataUrl = await blobToDataUrl(attachment.blob)
+
+        if (attachment.kind === 'image') {
+          imagePayload = { contentBase64: base64FromDataUrl(dataUrl), filename: label }
+        } else {
+          fileDataUrl = dataUrl
+        }
+      } else if (attachment.kind === 'image') {
         imagePayload = await readImageForRemoteAttach(path, attachment.previewUrl)
       } else {
         fileDataUrl = await readFileDataUrlForAttach(path)
@@ -192,7 +201,9 @@ export async function uploadComposerAttachment(
 
     const result = await requestGateway<FileAttachResponse>('file.attach', {
       name: label,
-      path,
+      // file.attach prefers an existing path over bytes. A browser File's name
+      // (or an earlier staged path on retry) must never override its source.
+      ...(!attachment.blob ? { path } : {}),
       session_id: liveSessionId,
       ...(fileDataUrl ? { data_url: fileDataUrl } : {})
     })
@@ -364,7 +375,10 @@ export function usePromptActions({
 
         if (inFlight) {
           await inFlight
-          attachment = $composerAttachments.get().find(item => item.id === attachment.id) ?? attachment
+          attachment =
+            $composerAttachments.get().find(item =>
+              item.id === attachment.id && item.occurrenceId === attachment.occurrenceId
+            ) ?? attachment
         }
 
         // Already-synced or pathless refs (terminal, url, etc.) pass through.
@@ -372,7 +386,7 @@ export function usePromptActions({
         // attachedSessionId) — don't re-upload it. Compare against the LIVE id:
         // after a mid-loop recovery an earlier chip's attachedSessionId points
         // at the dead runtime and must be re-staged.
-        if (!attachment.path || attachment.attachedSessionId === liveSessionId) {
+        if ((!attachment.path && !attachment.blob) || attachment.attachedSessionId === liveSessionId) {
           synced.push(attachment)
 
           continue
@@ -433,25 +447,40 @@ export function usePromptActions({
     async (sessionId: string, attachment: ComposerAttachment) => {
       const remote = isSessionRemote(sessionId)
 
-      setComposerAttachmentUploadState(attachment.id, 'uploading')
+      if (attachment.occurrenceId) {
+        patchMainComposerAttachmentOccurrence(attachment, { uploadState: 'uploading' })
+      } else {
+        setComposerAttachmentUploadState(attachment.id, 'uploading')
+      }
 
       try {
-        // Update-only: if the user removed the chip while this was uploading,
-        // don't resurrect it — just drop the staged result on the floor.
-        updateComposerAttachment(
-          await uploadComposerAttachment(attachment, {
-            backendCwd: $currentCwd.get(),
-            remote,
-            requestGateway,
-            sessionId,
-            terminalBackend: $terminalBackend.get()
+        const staged = await uploadComposerAttachment(attachment, {
+          backendCwd: $currentCwd.get(),
+          remote,
+          requestGateway,
+          sessionId,
+          terminalBackend: $terminalBackend.get()
+        })
+
+        if (attachment.occurrenceId) {
+          patchMainComposerAttachmentOccurrence(attachment, {
+            attachedSessionId: staged.attachedSessionId,
+            refText: staged.refText,
+            uploadState: undefined
           })
-        )
+        } else {
+          updateComposerAttachment(staged)
+        }
       } catch (err) {
         // Leave the chip in place so submit-time sync can retry (or the user can
         // remove it) and flag the card; also toast so a hard failure (unreadable
         // file, gateway perms) isn't swallowed while the user keeps typing.
-        setComposerAttachmentUploadState(attachment.id, 'error')
+        if (attachment.occurrenceId) {
+          patchMainComposerAttachmentOccurrence(attachment, { uploadState: 'error' })
+        } else {
+          setComposerAttachmentUploadState(attachment.id, 'error')
+        }
+
         notifyError(err, copy.dropFiles)
       }
     },
@@ -468,7 +497,7 @@ export function usePromptActions({
     for (const attachment of composerAttachments) {
       const needsUpload =
         attachment.kind === 'file' &&
-        Boolean(attachment.path) &&
+        Boolean(attachment.path || attachment.blob) &&
         !attachment.attachedSessionId &&
         !attachment.uploadState &&
         !eagerUploadInFlight.current.has(attachment.id)

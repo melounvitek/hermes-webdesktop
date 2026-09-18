@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, expect, it, vi } from 'vitest'
 
@@ -21,7 +21,7 @@ const paths = vi.hoisted(() => [
 vi.mock('@/hermes', async () => ({
   ...(await vi.importActual('@/hermes')),
   listAllProfileSessions: async () => ({
-    sessions: [{ id: 'artifact-session', title: 'Fixture', profile: 'origin-profile' }]
+    sessions: [{ id: 'artifact-session', title: 'Fixture', profile: 'origin-profile', connection_id: 'origin-host' }]
   }),
   getAllSessionMessages: async () => ({
     messages: [
@@ -78,7 +78,7 @@ it('keeps discovered file paths and originating session scope intact through rem
   await waitFor(() => expect(saveGatewayFile).toHaveBeenCalledTimes(paths.length))
   expect(saveGatewayFile.mock.calls.map(([request]) => request)).toEqual(
     paths.map(path => ({
-      connectionId: 'remote-fixture',
+      connectionId: 'origin-host',
       profile: 'origin-profile',
       sessionId: 'artifact-session',
       path,
@@ -86,5 +86,16 @@ it('keeps discovered file paths and originating session scope intact through rem
     }))
   )
   expect(screen.getByRole('link').getAttribute('href')).toBe('https://example.com/report.txt')
+  expect(openExternal).not.toHaveBeenCalled()
+
+  // A foreground switch must not turn a remote artifact into a local file:// open.
+  act(() => $connection.set({ ...$connection.get()!, mode: 'local', connectionId: 'local' }))
+  fireEvent.click(screen.getByRole('button', { name: 'USER.md' }))
+  await waitFor(() => expect(saveGatewayFile).toHaveBeenCalledTimes(paths.length + 1))
+  expect(saveGatewayFile.mock.calls.at(-1)?.[0]).toMatchObject({
+    connectionId: 'origin-host',
+    profile: 'origin-profile',
+    sessionId: 'artifact-session'
+  })
   expect(openExternal).not.toHaveBeenCalled()
 })

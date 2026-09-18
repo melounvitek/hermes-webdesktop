@@ -128,6 +128,53 @@ describe('session tile attachment occurrence ownership', () => {
     $sessionStates.set({})
   })
 
+  it.each(['file', 'image'] as const)(
+    'stages pathless browser %s bytes for the tile and retains them on failure',
+    async kind => {
+      const scope = createScope()
+
+      const blob = new File(['hello'], kind === 'image' ? 'photo.png' : 'report.txt', {
+        type: kind === 'image' ? 'image/png' : 'text/plain'
+      })
+
+      const original = { id: 'browser-upload', occurrenceId: 'browser-occurrence', kind, label: blob.name, blob }
+      scope.attachments.add(original)
+      requestGateway.mockImplementation(async (method: string) => {
+        if (method.startsWith('image.attach') || method === 'file.attach') {
+          return { attached: true, path: STAGED_PATH, ref_text: '@file:staged/report.txt' }
+        }
+
+        if (method === 'prompt.submit') {
+          throw new Error('submit failed')
+        }
+
+        return {}
+      })
+
+      const { result } = renderHook(() =>
+        useSessionTileActions({ requestGateway, runtimeId: RUNTIME_ID, scope, storedSessionId: STORED_ID })
+      )
+
+      await act(async () => {
+        expect(await result.current.submitText('describe')).toBe(false)
+      })
+      const [method, params] = requestGateway.mock.calls[0]!
+      expect(method).toBe(kind === 'image' ? 'image.attach_bytes' : 'file.attach')
+      expect(params.session_id).toBe(RUNTIME_ID)
+      expect(params.path).toBeUndefined()
+      expect(kind === 'image' ? params.content_base64 : params.data_url).toBe(
+        kind === 'image' ? 'aGVsbG8=' : 'data:text/plain;base64,aGVsbG8='
+      )
+      expect(scope.attachments.$attachments.get()[0]).toMatchObject({ blob, attachedSessionId: RUNTIME_ID })
+      await act(async () => {
+        await result.current.submitText('retry')
+      })
+      expect(
+        requestGateway.mock.calls.filter(([method]) => method === 'file.attach' || method === 'image.attach_bytes')
+      ).toHaveLength(1)
+    }
+  )
+
   it('preserves a thumbnail that resolves before tile submit staging', async () => {
     const scope = createScope()
     const original = makeAttachment()

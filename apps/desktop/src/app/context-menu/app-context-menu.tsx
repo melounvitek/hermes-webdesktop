@@ -22,6 +22,7 @@ import { formatCombo } from '@/lib/keybinds/combo'
 import { isRemoteGateway } from '@/lib/media'
 import { reachablePreviewUrl } from '@/lib/preview-reach'
 import { openCommandPalette } from '@/store/command-palette'
+import { notifyError } from '@/store/notifications'
 import { openPreview } from '@/store/preview'
 import { toggleProfileRailVisible } from '@/store/profile-rail-prefs'
 import { toggleStatusbarVisible } from '@/store/statusbar-prefs'
@@ -276,7 +277,11 @@ function domSections(open: Extract<OpenContextMenu, { kind: 'dom' }>, t: Transla
             icon="save"
             key="image-save"
             label={copy.image.saveImageAs}
-            onSelect={() => void window.hermesDesktop?.saveImageFromUrl?.(target.imageUrl)}
+            onSelect={() =>
+              void window.hermesDesktop
+                ?.saveImageFromUrl?.(target.imageUrl)
+                .catch(error => notifyError(error, t.desktop.imageDownloadFailed))
+            }
           />
         ) : null
       ].filter(Boolean)
@@ -452,7 +457,11 @@ function guestSections(open: Extract<OpenContextMenu, { kind: 'guest' }>, t: Tra
             icon="save"
             key="guest-image-save"
             label={copy.image.saveImageAs}
-            onSelect={() => void window.hermesDesktop?.saveImageFromUrl?.(imageUrl)}
+            onSelect={() =>
+              void window.hermesDesktop
+                ?.saveImageFromUrl?.(imageUrl)
+                .catch(error => notifyError(error, t.desktop.imageDownloadFailed))
+            }
           />
         ) : null
       ].filter(Boolean)

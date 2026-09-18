@@ -1,8 +1,14 @@
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { $composerAttachments, type ComposerAttachment, updateComposerAttachment } from '@/store/composer'
-import { $connection } from '@/store/session'
+import {
+  $composerAttachments,
+  type ComposerAttachment,
+  createComposerAttachmentScope,
+  updateComposerAttachment
+} from '@/store/composer'
+import { $activeGatewayRoute } from '@/store/gateway'
+import { $connection, $selectedStoredSessionId } from '@/store/session'
 
 import { droppedFileInlineRefs } from '../composer/inline-refs'
 
@@ -287,6 +293,237 @@ describe('attachmentPreviewDataUrl', () => {
     $connection.set({ mode: 'remote' } as never)
 
     await expect(attachmentPreviewDataUrl('/home/gateway/shot.png')).resolves.toBe(REMOTE_PREVIEW)
+  })
+})
+
+describe('browser composer ingestion', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs()
+    vi.restoreAllMocks()
+    Reflect.deleteProperty(window, 'hermesDesktop')
+    $composerAttachments.set([])
+  })
+
+  it('retains picked, dropped and pasted bytes without native filesystem calls', async () => {
+    vi.stubEnv('VITE_BROWSER', '1')
+    const native = vi.fn()
+    Object.defineProperty(window, 'hermesDesktop', {
+      configurable: true,
+      value: {
+        saveImageBuffer: native,
+        saveClipboardImage: native,
+        selectPaths: native
+      }
+    })
+    const file = new File(['report'], 'report.txt', { type: 'text/plain' })
+    const image = new File(['image'], 'photo.png', { type: 'image/png' })
+    let input!: HTMLInputElement
+    vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(function (this: HTMLInputElement) {
+      input = this
+    })
+
+    const { result } = renderHook(() =>
+      useComposerActions({ activeSessionId: null, currentCwd: '', requestGateway: vi.fn() })
+    )
+
+    const pending = result.current.pickContextPaths('file')
+    expect(input?.type).toBe('file')
+    expect(input.multiple).toBe(true)
+    Object.defineProperty(input, 'files', { value: [file] })
+    input.dispatchEvent(new Event('change'))
+    await act(async () => {
+      await pending
+    })
+    await act(async () => {
+      expect(await result.current.attachDroppedItems([{ file, path: file.name }])).toBe(true)
+    })
+    await act(async () => {
+      expect(await result.current.attachImageBlob(image)).toBe(true)
+    })
+    const pickedImage = result.current.pickImages()
+    Object.defineProperty(input, 'files', { value: [image] })
+    input.dispatchEvent(new Event('change'))
+    await act(async () => {
+      await pickedImage
+    })
+    const attachments = $composerAttachments.get()
+    expect(attachments).toHaveLength(4)
+    expect(attachments.map(a => a.blob)).toEqual([file, file, image, image])
+    expect(attachments.every(a => !a.path && !a.refText && a.occurrenceId)).toBe(true)
+    expect(attachments[2]?.thumbnailUrl).toMatch(/^data:image\//)
+    expect(native).not.toHaveBeenCalled()
+    expect(input.isConnected).toBe(false)
+  })
+
+  it.each(['foreground route', 'foreground connection', 'foreground session'])(
+    'keeps a tile picker attached to its unchanged owner after switching %s',
+    async change => {
+      vi.stubEnv('VITE_BROWSER', '1')
+
+      const attachments = createComposerAttachmentScope()
+      const otherAttachments = createComposerAttachmentScope()
+      const foreground = {
+        route: $activeGatewayRoute.get(),
+        connection: $connection.get(),
+        session: $selectedStoredSessionId.get()
+      }
+
+      let input!: HTMLInputElement
+      vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(function (this: HTMLInputElement) {
+        input = this
+      })
+
+      const { result, rerender, unmount } = renderHook(() => {
+        const composer = useComposerActions({
+          activeSessionId: 'runtime-a',
+          currentCwd: '',
+          requestGateway: vi.fn(),
+          scope: { ...attachments, target: 'tile:a' }
+        })
+
+        useComposerActions({
+          activeSessionId: 'runtime-b',
+          currentCwd: '',
+          requestGateway: vi.fn(),
+          scope: { ...otherAttachments, target: 'tile:b' }
+        })
+
+        return composer
+      })
+
+      const file = new File(['report'], 'report.txt', { type: 'text/plain' })
+      const pending = result.current.pickContextPaths('file')
+
+      try {
+        if (change === 'foreground route') {
+          $activeGatewayRoute.set('owner-b')
+        }
+
+        if (change === 'foreground connection') {
+          $connection.set({ mode: 'remote' } as never)
+        }
+
+        if (change === 'foreground session') {
+          $selectedStoredSessionId.set('stored-b')
+        }
+
+        // TileChat recreates the scope wrapper on foreground-driven renders,
+        // but its attachment scope and owner remain unchanged.
+        rerender()
+        Object.defineProperty(input, 'files', { value: [file] })
+        input.dispatchEvent(new Event('change'))
+        await act(async () => {
+          await pending
+        })
+
+        expect(attachments.$attachments.get()).toEqual([expect.objectContaining({ blob: file })])
+        expect(otherAttachments.$attachments.get()).toEqual([])
+        expect($composerAttachments.get()).toEqual([])
+      } finally {
+        unmount()
+        $activeGatewayRoute.set(foreground.route)
+        $connection.set(foreground.connection)
+        $selectedStoredSessionId.set(foreground.session)
+      }
+    }
+  )
+
+  it.each(['session', 'owner', 'target', 'unmount'])(
+    'discards a tile picker after its own %s changes',
+    async change => {
+      vi.stubEnv('VITE_BROWSER', '1')
+      const attachments = createComposerAttachmentScope()
+      let input!: HTMLInputElement
+      vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(function (this: HTMLInputElement) {
+        input = this
+      })
+
+      const initialProps = { session: 'runtime-a', owner: 'owner-a', target: 'tile:a' }
+      const { result, rerender, unmount } = renderHook(
+        ({ session, owner, target }) =>
+          useComposerActions({
+            activeSessionId: session,
+            contextKey: owner,
+            currentCwd: '',
+            requestGateway: vi.fn(),
+            scope: { ...attachments, target }
+          }),
+        { initialProps }
+      )
+
+      const pending = result.current.pickContextPaths('file')
+
+      if (change === 'unmount') {
+        unmount()
+      } else {
+        rerender({ ...initialProps, [change]: 'other' })
+        rerender(initialProps)
+      }
+
+      Object.defineProperty(input, 'files', { value: [new File(['report'], 'report.txt')] })
+      input.dispatchEvent(new Event('change'))
+      await act(async () => {
+        await pending
+      })
+
+      expect(attachments.$attachments.get()).toEqual([])
+    }
+  )
+
+  it.each(['session', 'profile', 'connection', 'selection', 'route', 'unmount', 'cancel'])('discards a picker after %s changes', async change => {
+    vi.stubEnv('VITE_BROWSER', '1')
+    let input!: HTMLInputElement
+    vi.spyOn(HTMLInputElement.prototype, 'click').mockImplementation(function (this: HTMLInputElement) {
+      input = this
+    })
+
+    const { result, rerender, unmount } = renderHook(
+      ({ session, contextKey }) =>
+        useComposerActions({ activeSessionId: session, contextKey, currentCwd: '', requestGateway: vi.fn() }),
+      { initialProps: { session: 'first', contextKey: '/draft/first' } }
+    )
+
+    const pending = result.current.pickImages()
+    expect(input?.type).toBe('file')
+    expect(input.accept).toBe('image/*')
+
+    if (change === 'session') {
+      rerender({ session: 'second', contextKey: '/draft/first' })
+    }
+
+    if (change === 'route') {
+      rerender({ session: 'first', contextKey: '/draft/second' })
+    }
+
+    if (change === 'profile') {
+      const route = $activeGatewayRoute.get()
+      $activeGatewayRoute.set('other-profile')
+      $activeGatewayRoute.set(route)
+    }
+
+    if (change === 'connection') {
+      const connection = $connection.get()
+      $connection.set({ mode: 'remote' } as never)
+      $connection.set(connection)
+    }
+
+    if (change === 'selection') {
+      const session = $selectedStoredSessionId.get()
+      $selectedStoredSessionId.set('other-session')
+      $selectedStoredSessionId.set(session)
+    }
+
+    if (change === 'unmount') {
+      unmount()
+    }
+
+    Object.defineProperty(input, 'files', { value: [new File(['x'], 'shot.png', { type: 'image/png' })] })
+    input.dispatchEvent(new Event(change === 'cancel' ? 'cancel' : 'change'))
+    await act(async () => {
+      await pending
+    })
+    expect($composerAttachments.get()).toEqual([])
+    expect(input.isConnected).toBe(false)
   })
 })
 

@@ -227,7 +227,7 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
       }
 
       for (const attachment of attachments) {
-        if (!attachment.path || attachment.attachedSessionId === liveSessionId) {
+        if ((!attachment.path && !attachment.blob) || attachment.attachedSessionId === liveSessionId) {
           synced.push(attachment)
 
           continue

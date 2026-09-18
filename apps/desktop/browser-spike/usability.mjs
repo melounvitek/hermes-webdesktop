@@ -1,0 +1,677 @@
+import assert from 'node:assert/strict'
+import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { chromium, expect } from '@playwright/test'
+
+// Run after build:browser and backend.py. Only this fixture's loopback origin is allowed.
+const runtimePath = process.argv[2]
+if (!runtimePath) throw new Error('Usage: node browser-spike/usability.mjs <runtime.json> [artifact directory]')
+const runtime = JSON.parse(await readFile(runtimePath, 'utf8'))
+assert.equal(new URL(runtime.url).hostname, '127.0.0.1')
+assert.equal(new URL(runtime.model_url).hostname, '127.0.0.1')
+assert.equal(runtime.public_url, null, 'Use a private loopback fixture, not a public or live service')
+assert.equal(path.dirname(runtime.run_dir), os.tmpdir())
+assert.ok(path.basename(runtime.run_dir).startsWith('hermes-browser-spike-'))
+assert.equal(await realpath(runtime.run_dir), runtime.run_dir)
+assert.equal(path.resolve(runtimePath), path.join(runtime.run_dir, 'runtime.json'))
+assert.equal(runtime.home, path.join(runtime.run_dir, 'home'))
+assert.equal(runtime.hermes_home, path.join(runtime.home, '.hermes'))
+const config = JSON.parse(await readFile(path.join(runtime.hermes_home, 'config.yaml'), 'utf8'))
+assert.equal(config.model.default, 'browser-spike-local')
+assert.equal(config.model.provider, 'custom')
+assert.equal(config.model.base_url, runtime.model_url)
+const artifacts = process.argv[3] || path.join(runtime.run_dir, 'usability-evidence')
+await mkdir(artifacts, { recursive: true })
+const browser = await chromium.launch({
+  executablePath: process.env.CHROME_PATH || '/usr/bin/google-chrome',
+  headless: true
+})
+const frames = [],
+  errors = [],
+  blocked = [],
+  results = [],
+  downloads = []
+let nextSocketId = 0
+const headers = { 'X-Hermes-Session-Token': runtime.token }
+const profiles = ['usability-a', 'usability-b']
+const png = Buffer.from(
+  'iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAEUlEQVR4nGMQmvDuPwgzwBgAVeQKPT6g3A0AAAAASUVORK5CYII=',
+  'base64'
+)
+const requestFrames = (start = 0) => frames.slice(start).filter(f => f.direction === 'sent')
+const attachFrames = start =>
+  requestFrames(start).filter(f => ['image.attach_bytes', 'file.attach', 'image.attach'].includes(f.method))
+const eventsSince = start =>
+  frames
+    .slice(start)
+    .filter(f => f.direction === 'received' && f.method === 'event')
+    .map(f => f.params)
+
+async function newPage() {
+  const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, acceptDownloads: true })
+  await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: runtime.url })
+  await context.route('**/*', route => {
+    const url = new URL(route.request().url())
+    if (url.origin === runtime.url || ['data:', 'blob:'].includes(url.protocol)) return route.continue()
+    blocked.push({ url: url.href, resourceType: route.request().resourceType() })
+    return route.abort('blockedbyclient')
+  })
+  await context.routeWebSocket('**/*', ws => {
+    const url = new URL(ws.url())
+    if (url.origin === runtime.url.replace('http:', 'ws:')) ws.connectToServer()
+    else {
+      blocked.push({ url: ws.url(), resourceType: 'websocket' })
+      ws.close()
+    }
+  })
+  const page = await context.newPage()
+  page.setDefaultTimeout(15000)
+  page.on('pageerror', error => errors.push(error.stack))
+  page.on('response', response => {
+    if (new URL(response.url()).pathname === '/api/fs/download') {
+      downloads.push({
+        url: response.url(),
+        status: response.status(),
+        headers: response.headers(),
+        requestHeaders: response.request().headers()
+      })
+    }
+  })
+  page.on('websocket', ws => {
+    const socket = ++nextSocketId
+    const transportProfile = new URL(ws.url()).searchParams.get('profile') || 'default'
+    for (const [event, direction] of [
+      ['framereceived', 'received'],
+      ['framesent', 'sent']
+    ]) {
+      ws.on(event, ({ payload }) => {
+        const message = JSON.parse(String(payload))
+        // Tile RPCs may omit profile: the real backend binds their runtime
+        // session to the owner returned by session.create/session.resume.
+        const sessionOwner = message.params?.session_id
+          ? frames.findLast(f => f.direction === 'received' && f.result?.session_id === message.params.session_id)
+              ?.result?.info?.profile_name
+          : undefined
+        frames.push({
+          direction,
+          socket,
+          transportProfile,
+          profile: message.params?.profile || sessionOwner || transportProfile,
+          ...message
+        })
+      })
+    }
+  })
+  await page.goto(runtime.url)
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible({ timeout: 60000 })
+  return page
+}
+
+async function check(name, body) {
+  let page
+  try {
+    page = await newPage()
+    await body(page)
+    results.push({ name, status: 'PASS' })
+    console.log(`PASS: ${name}`)
+  } catch (error) {
+    results.push({ name, status: 'FAIL', error: error.stack })
+    console.error(`FAIL: ${name}\n${error.stack}`)
+    process.exitCode = 1
+  } finally {
+    if (page) {
+      await page.screenshot({ path: path.join(artifacts, `${name}.png`) })
+      await writeFile(path.join(artifacts, `${name}.aria.txt`), await page.locator('body').ariaSnapshot())
+      await page.context().close()
+    }
+  }
+}
+
+async function send(page, text) {
+  const start = frames.length
+  const input = page.getByRole('textbox', { name: 'Message', exact: true })
+  await input.fill(text)
+  await input.press('Enter')
+  await expect.poll(() => eventsSince(start).some(e => e.type === 'message.complete'), { timeout: 60000 }).toBe(true)
+  const events = eventsSince(start)
+  const completed = events.find(e => e.type === 'message.complete').payload
+  assert.notEqual(completed.status, 'error', JSON.stringify(completed))
+  assert.equal(
+    events.some(e => e.type === 'error'),
+    false
+  )
+  assert.ok(completed.text.includes(text), completed.text)
+  return start
+}
+
+async function selectProfile(page, profile) {
+  const button = page.getByRole('button', { name: profile, exact: true })
+  await button.click()
+  await expect(button).toHaveAttribute('aria-pressed', 'true')
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeEditable()
+}
+
+function sessionRow(page, marker) {
+  // Single-session lists have no reorder wrapper; target either row shape
+  // inside the sidebar, never a matching transcript or tab caption.
+  return page
+    .locator('[data-tree-group="grp-sessions"]')
+    .getByRole('button', { name: new RegExp(marker) })
+    .first()
+}
+
+async function menuClick(page) {
+  await page.getByRole('button', { name: 'Add context', exact: true }).click()
+  await page.getByRole('menuitem', { name: /Prompt snippets/ }).click()
+  const dialog = page.getByRole('dialog')
+  await expect(dialog).toBeVisible()
+  await dialog.getByRole('button', { name: /Code review/ }).click()
+  await expect(dialog).not.toBeVisible()
+  await expect(page.getByRole('textbox', { name: 'Message', exact: true })).not.toBeEmpty()
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill('')
+}
+
+async function geometry(page, percent) {
+  const button = page.getByRole('button', { name: 'Open settings', exact: true })
+  await expect
+    .poll(() => button.evaluate(el => el.getBoundingClientRect().width / el.offsetWidth))
+    .toBeCloseTo(percent / 100, 2)
+  const control = await button.evaluate(el => ({
+    width: el.getBoundingClientRect().width,
+    height: el.getBoundingClientRect().height,
+    layoutWidth: el.offsetWidth
+  }))
+  const layout = await page.getByRole('contentinfo').evaluate(el => ({
+    shell: el.getBoundingClientRect().toJSON(),
+    viewport: { width: innerWidth, height: innerHeight }
+  }))
+  return { ...control, ...layout }
+}
+
+async function pick(page, files, images = false) {
+  await page.getByRole('button', { name: 'Add context', exact: true }).click()
+  const [chooser] = await Promise.all([
+    page.waitForEvent('filechooser'),
+    page.getByRole('menuitem', { name: images ? 'Images…' : 'Files…', exact: true }).click()
+  ])
+  await chooser.setFiles(files)
+}
+
+async function dropFiles(page, files) {
+  const input = page.getByRole('textbox', { name: 'Message', exact: true })
+  // Browser DataTransfer carries real Files, not fabricated server paths.
+  // This exercises DOM drag handlers, not OS file-manager drag integration.
+  await input.evaluate(
+    (el, files) => {
+      const transfer = new DataTransfer()
+      for (const file of files)
+        transfer.items.add(
+          new File([Uint8Array.from(atob(file.base64), c => c.charCodeAt(0))], file.name, { type: file.mimeType })
+        )
+      for (const name of ['dragenter', 'dragover', 'drop'])
+        el.dispatchEvent(new DragEvent(name, { bubbles: true, cancelable: true, dataTransfer: transfer }))
+    },
+    files.map(file => ({ name: file.name, mimeType: file.mimeType, base64: file.buffer.toString('base64') }))
+  )
+}
+
+async function modelRequests() {
+  return (await readFile(path.join(runtime.run_dir, 'model-requests.jsonl'), 'utf8'))
+    .trim()
+    .split('\n')
+    .map(line => JSON.parse(line))
+}
+
+try {
+  const probe = await browser.newContext()
+  const response = await probe.request.get(`${runtime.url}/api/config`, { headers })
+  assert.equal(response.status(), 200)
+  assert.equal((await response.json()).model, config.model.default)
+  // This disposable fixture has no credentials to clone and no external models.
+  for (const profile of profiles) {
+    const home = path.join(runtime.hermes_home, 'profiles', profile)
+    await mkdir(path.join(home, 'workspace'), { recursive: true })
+    // The loopback model accepts image_url parts. Keep the profile's attachment
+    // directory inside its workspace so @file expansion exercises the real bytes.
+    await writeFile(
+      path.join(home, 'config.yaml'),
+      JSON.stringify({
+        ...config,
+        model: { ...config.model, supports_vision: true },
+        agent: { ...config.agent, image_input_mode: 'native' },
+        terminal: { ...config.terminal, cwd: home }
+      })
+    )
+    await writeFile(
+      path.join(home, 'workspace', 'résumé & report.bin'),
+      Buffer.concat([Buffer.from(`${profile}\n`), Buffer.from([0, 255, 1, 128])])
+    )
+  }
+  await probe.close()
+
+  await check('scale-and-menus', async page => {
+    await menuClick(page)
+    const baseline = await geometry(page, 90)
+    const measurements = [{ percent: 90, ...baseline }]
+    for (const percent of [100, 125]) {
+      await page.getByRole('button', { name: 'Open settings', exact: true }).click()
+      await page.getByRole('button', { name: 'Appearance', exact: true }).click()
+      await page.getByRole('button', { name: `${percent}%`, exact: true }).click()
+      await page.getByRole('button', { name: 'Close settings', exact: true }).click()
+      const measured = await geometry(page, percent)
+      measurements.push({ percent, ...measured })
+      assert.ok(Math.abs(measured.width / baseline.width - percent / 90) < 0.02)
+      await menuClick(page)
+    }
+    await page.reload()
+    await geometry(page, 125)
+    await menuClick(page)
+    measurements.push({ percent: 125, persisted: true, ...(await geometry(page, 125)) })
+    await writeFile(path.join(artifacts, 'scale-geometry.json'), JSON.stringify(measurements, null, 2))
+    for (const { percent, shell, viewport } of measurements) {
+      assert.ok(
+        Math.abs(shell.left) <= 2 &&
+          Math.abs(shell.width - viewport.width) <= 2 &&
+          Math.abs(shell.bottom - viewport.height) <= 2,
+        `At ${percent}%, shell is x=${shell.left}, width=${shell.width}, bottom=${shell.bottom}; viewport is ${viewport.width}×${viewport.height}`
+      )
+    }
+  })
+
+  await check('attachments-a-b-a', async page => {
+    const completedMarkers = []
+    for (const [index, method] of ['picker', 'drop', 'paste'].entries()) {
+      const profile = profiles[index % 2]
+      await selectProfile(page, profile)
+      const marker = `usability-${method}-${Date.now()}`
+      const text = Buffer.from(`${marker}: nonimage bytes\n`)
+      const files = [
+        { name: `${marker}.png`, mimeType: 'image/png', buffer: png },
+        { name: `${marker}.txt`, mimeType: 'text/plain', buffer: text }
+      ]
+      // Dragging New session onto the composer creates a fresh tile, rather
+      // than testing the primary pane's unbound draft as if it were a tile.
+      await page
+        .getByRole('button', { name: /^New session Ctrl/ })
+        .dragTo(page.getByRole('textbox', { name: 'Message', exact: true }))
+      await expect(
+        page.locator('[data-session-anchor^="session-tile:"]').getByRole('textbox', { name: 'Message', exact: true })
+      ).toBeEditable()
+      const staged = frames.length
+      if (method === 'picker') {
+        await pick(page, [files[0]], true)
+        await pick(page, [files[1]])
+      } else if (method === 'drop') await dropFiles(page, files)
+      else {
+        // A genuine Chromium clipboard image paste. OS nonimage file clipboard
+        // paste is not a supported web ClipboardItem type and is not covered.
+        await page.evaluate(async base64 => {
+          const blob = new Blob([Uint8Array.from(atob(base64), c => c.charCodeAt(0))], { type: 'image/png' })
+          await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+        }, png.toString('base64'))
+        await page.getByRole('textbox', { name: 'Message', exact: true }).press('Control+v')
+      }
+      const chips = page.locator('[data-slot="composer-attachments"]')
+      await expect(chips.getByRole('button', { name: /^Remove / })).toHaveCount(method === 'paste' ? 1 : 2)
+      assert.equal(
+        attachFrames(staged).length,
+        0,
+        'FRESH tile drafts keep files local until submit; main existing-session files deliberately eager-upload'
+      )
+      const submitted = await send(page, `spike: ${marker}`)
+      const attaches = attachFrames(submitted)
+      assert.deepEqual(
+        attaches.map(f => f.method).sort(),
+        method === 'paste' ? ['image.attach_bytes'] : ['file.attach', 'image.attach_bytes']
+      )
+      assert.ok(
+        attaches.every(f => f.profile === profile),
+        'Attachment RPC must target the selected profile'
+      )
+      const image = attaches.find(f => f.method === 'image.attach_bytes')
+      const file = attaches.find(f => f.method === 'file.attach')
+      if (file) assert.deepEqual(Buffer.from(file.params.data_url.split(',')[1], 'base64'), text)
+      // Clipboard serialization can re-encode PNG; other entry paths must preserve bytes.
+      if (method !== 'paste') assert.deepEqual(Buffer.from(image.params.content_base64, 'base64'), png)
+      let imagePath
+      for (const attach of attaches) {
+        const reply = frames.find(f => f.direction === 'received' && f.socket === attach.socket && f.id === attach.id)
+        assert.equal(reply?.result?.attached, true, JSON.stringify(reply))
+        const storedPath = await realpath(reply.result.path)
+        if (attach === image) imagePath = storedPath
+        assert.ok(storedPath.startsWith(path.join(runtime.hermes_home, 'profiles', profile) + path.sep), storedPath)
+        const bytes = await readFile(storedPath)
+        assert.deepEqual(bytes, attach === file ? text : Buffer.from(image.params.content_base64, 'base64'))
+      }
+      await expect(chips).not.toBeVisible()
+      const resumeStart = frames.length
+      await page.reload()
+      // Reopen the saved tile session explicitly; cold boot can land on the
+      // primary workspace rather than this profile's tile tab.
+      await selectProfile(page, profile)
+      await sessionRow(page, marker).click()
+      await expect
+        .poll(() => requestFrames(resumeStart).some(f => f.method === 'session.resume'), { timeout: 60000 })
+        .toBe(true)
+      const resumedUser = page
+        .locator('[data-slot="aui_user-message-root"]')
+        .filter({ hasText: `spike: ${marker}` })
+        .last()
+      await expect(resumedUser).toBeVisible({ timeout: 60000 })
+      // Attachment thumbnails are flow siblings of the sticky user bubble.
+      const resumedImage = page.getByRole('img', { name: imagePath, exact: true })
+      await expect(resumedImage).toBeVisible()
+      await expect.poll(() => resumedImage.evaluate(img => img.naturalWidth)).toBeGreaterThan(0)
+      await send(page, `spike: resumed-${marker}`)
+      const requests = await modelRequests()
+      const request = requests.findLast(r => JSON.stringify(r.messages).includes(`resumed-${marker}`))
+      assert.ok(request, 'The local model must receive the resumed turn')
+      for (const previous of completedMarkers.filter(previous => previous.profile !== profile)) {
+        assert.ok(
+          !JSON.stringify(request.messages).includes(previous.marker),
+          'A sibling profile transcript must not leak into model history'
+        )
+      }
+      completedMarkers.push({ profile, marker })
+      if (file)
+        assert.ok(
+          JSON.stringify(request.messages).includes(text.toString().trim()),
+          'Nonimage content must survive resume'
+        )
+      assert.ok(
+        request.messages.some(
+          m =>
+            m.role === 'user' &&
+            Array.isArray(m.content) &&
+            m.content.some(
+              p => p.type === 'image_url' && p.image_url.url === `data:image/png;base64,${image.params.content_base64}`
+            )
+        ),
+        'Image content must survive resume into real model history'
+      )
+      results.push({ name: `${profile}-${method}-submit-resume`, status: 'PASS' })
+      console.log(`PASS: ${profile} ${method} submit/resume`)
+    }
+  })
+
+  await check('existing-main-attachments-a-b-a', async page => {
+    for (const [index, method] of ['picker', 'drop', 'paste'].entries()) {
+      const profile = profiles[index % 2]
+      await selectProfile(page, profile)
+      const seed = profile === profiles[0] ? 'picker' : 'drop'
+      // Open a saved sidebar session into MAIN, not its fresh-draft tile.
+      await sessionRow(page, `usability-${seed}-`).click()
+      const main = page.locator('[data-session-anchor="workspace"]')
+      await expect(main.getByRole('button', { name: 'Edit message', exact: true }).first()).toBeVisible()
+      const marker = `existing-${method}-${Date.now()}`
+      const text = Buffer.from(`${marker}: eager file bytes\n`)
+      const files = [
+        { name: `${marker}.png`, mimeType: 'image/png', buffer: png },
+        { name: `${marker}.txt`, mimeType: 'text/plain', buffer: text }
+      ]
+      const staged = frames.length
+      if (method === 'picker') {
+        await pick(page, [files[0]], true)
+        await pick(page, [files[1]])
+      } else if (method === 'drop') await dropFiles(page, files)
+      else {
+        await page.evaluate(async base64 => {
+          const blob = new Blob([Uint8Array.from(atob(base64), c => c.charCodeAt(0))], { type: 'image/png' })
+          await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })])
+        }, png.toString('base64'))
+        await main.getByRole('textbox', { name: 'Message', exact: true }).press('Control+v')
+      }
+      const chips = main.locator('[data-slot="composer-attachments"]')
+      await expect(chips.getByRole('button', { name: /^Remove / })).toHaveCount(method === 'paste' ? 1 : 2)
+      if (method !== 'paste') {
+        await expect.poll(() => attachFrames(staged).filter(f => f.method === 'file.attach').length).toBe(1)
+        const eager = attachFrames(staged)[0]
+        await expect
+          .poll(
+            () =>
+              frames.find(f => f.direction === 'received' && f.socket === eager.socket && f.id === eager.id)?.result
+                ?.attached
+          )
+          .toBe(true)
+      }
+      assert.deepEqual(
+        attachFrames(staged).map(f => f.method),
+        method === 'paste' ? [] : ['file.attach']
+      )
+      const submitted = await send(page, `spike: ${marker}`)
+      assert.deepEqual(
+        attachFrames(submitted).map(f => f.method),
+        ['image.attach_bytes'],
+        'Submit must not upload the eager file twice'
+      )
+      for (const attach of attachFrames(staged)) {
+        assert.equal(attach.profile, profile)
+        const reply = frames.find(f => f.direction === 'received' && f.socket === attach.socket && f.id === attach.id)
+        assert.equal(reply?.result?.attached, true, JSON.stringify(reply))
+        const storedPath = await realpath(reply.result.path)
+        assert.ok(storedPath.startsWith(path.join(runtime.hermes_home, 'profiles', profile) + path.sep), storedPath)
+        assert.deepEqual(
+          await readFile(storedPath),
+          attach.method === 'file.attach' ? text : Buffer.from(attach.params.content_base64, 'base64')
+        )
+      }
+      await expect(chips).not.toBeVisible()
+      await page.reload()
+      await expect(
+        page
+          .locator('[data-session-anchor="workspace"]')
+          .getByRole('button', { name: 'Edit message', exact: true })
+          .filter({ hasText: marker })
+      ).toBeVisible({ timeout: 60000 })
+      await send(page, `spike: resumed-${marker}`)
+      const request = (await modelRequests()).findLast(r => JSON.stringify(r.messages).includes(`resumed-${marker}`))
+      assert.ok(request, 'Existing-session attachments must reach the real model after resume')
+      if (method !== 'paste') assert.ok(JSON.stringify(request.messages).includes(text.toString().trim()))
+      const image = attachFrames(staged).find(f => f.method === 'image.attach_bytes')
+      assert.ok(
+        request.messages.some(
+          m =>
+            m.role === 'user' &&
+            Array.isArray(m.content) &&
+            m.content.some(
+              p => p.type === 'image_url' && p.image_url.url === `data:image/png;base64,${image.params.content_base64}`
+            )
+        )
+      )
+      results.push({ name: `${profile}-existing-main-${method}-submit-resume`, status: 'PASS' })
+    }
+  })
+
+  await check('downloads-a-b-a', async page => {
+    for (const profile of [...profiles, profiles[0]]) {
+      await selectProfile(page, profile)
+      const filename = 'résumé & report.bin'
+      const file = path.join(runtime.hermes_home, 'profiles', profile, 'workspace', filename)
+      const unauthorized = await page.request.get(
+        `${runtime.url}/api/fs/download?path=${encodeURIComponent(file)}&profile=${profile}`
+      )
+      assert.equal(unauthorized.status(), 401, 'Downloads must require authentication')
+      await send(page, `spike: [fixture download](#media:${encodeURIComponent(file)})`)
+      const start = downloads.length
+      const [download] = await Promise.all([
+        page.waitForEvent('download'),
+        page.getByRole('button', { name: 'Download', exact: true }).last().click()
+      ])
+      assert.equal(download.suggestedFilename(), filename)
+      const destination = path.join(artifacts, `${profile}-${start}.bin`)
+      await download.saveAs(destination)
+      assert.deepEqual(await readFile(destination), await readFile(file))
+      const request = downloads[start]
+      assert.equal(request.status, 200)
+      assert.equal(new URL(request.url).searchParams.get('profile'), profile)
+      assert.equal(request.requestHeaders['x-hermes-session-token'], runtime.token)
+      assert.match(request.headers['content-disposition'], /^attachment;/)
+      results.push({ name: `${profile}-download-bytes-filename`, status: 'PASS' })
+    }
+  })
+  await check('relative-download-a-tile-b-foreground', async page => {
+    const filename = 'résumé & report.bin'
+    const relative = `./workspace/${filename}`
+    await selectProfile(page, profiles[0])
+    await sessionRow(page, 'usability-picker-').click()
+    await expect(
+      page
+        .locator('[data-session-anchor="workspace"]')
+        .getByRole('button', { name: 'Edit message', exact: true })
+        .first()
+    ).toBeVisible()
+    await send(page, `spike: [owner relative download](#media:${encodeURIComponent(relative)})`)
+    await selectProfile(page, profiles[1])
+    await sessionRow(page, 'usability-drop-').click()
+    const main = page.locator('[data-session-anchor="workspace"]')
+    await expect(main.getByRole('button', { name: 'Edit message', exact: true }).first()).toBeVisible()
+    await page.getByRole('button', { name: 'Filters', exact: true }).click()
+    await page.getByRole('menuitemcheckbox', { name: 'All profiles', exact: true }).click()
+    await page.keyboard.press('Escape')
+    await sessionRow(page, 'usability-picker-').click({ button: 'right' })
+    await page.getByRole('menuitem', { name: 'Open in new tab', exact: true }).click()
+    const tile = page.locator('[data-session-anchor^="session-tile:"]')
+    await expect(tile.getByRole('button', { name: 'Download', exact: true }).last()).toBeVisible()
+    const storedId = (await tile.getAttribute('data-session-anchor')).slice('session-tile:'.length)
+    const tabBox = await page.locator(`[data-tree-tab="session-tile:${storedId}"]`).boundingBox()
+    const paneBox = await tile.boundingBox()
+    // Real tab drag: keep both transcripts visible, then focus B's main composer.
+    await page.mouse.move(tabBox.x + tabBox.width / 3, tabBox.y + tabBox.height / 2)
+    await page.mouse.down()
+    await page.mouse.move(paneBox.x + paneBox.width - 20, paneBox.y + paneBox.height / 2, { steps: 20 })
+    await page.mouse.up()
+    await expect(main).toBeVisible()
+    await expect(tile).toBeVisible()
+    await main.getByRole('textbox', { name: 'Message', exact: true }).click()
+    const foreground = page.getByRole('contentinfo').getByRole('button', { name: profiles[1], exact: true })
+    await expect(foreground).toBeVisible()
+    const downloadButton = tile.getByRole('button', { name: 'Download', exact: true }).last()
+    // Config's terminal cwd is not a user-chosen session workspace. Prove the
+    // fail-closed response and visible error before explicitly choosing one.
+    const [unavailable] = await Promise.all([
+      page.waitForResponse(response => new URL(response.url()).pathname === '/api/fs/download'),
+      downloadButton.evaluate(button => button.click())
+    ])
+    assert.equal(unavailable.status(), 400)
+    const detail = (await unavailable.json()).detail
+    assert.equal(detail, 'Session working directory is unavailable')
+    const alert = page.getByRole('alert').filter({ hasText: 'Download failed' })
+    await expect(alert).toBeVisible()
+    await expect(alert).toContainText(detail)
+    await expect(downloadButton).toBeEnabled()
+    await expect(foreground).toBeVisible()
+    await page.screenshot({ path: path.join(artifacts, 'relative-download-no-workspace.png') })
+    await writeFile(
+      path.join(artifacts, 'relative-download-no-workspace.json'),
+      JSON.stringify({ ...downloads.at(-1), detail, alert: await alert.innerText() }, null, 2)
+    )
+    await alert.getByRole('button', { name: 'Dismiss notification', exact: true }).click()
+    await expect(alert).not.toBeVisible()
+
+    // Projects' folder picker is native in local browser mode. Use the public
+    // RPC instead, with A's actual live id (not the stored id used by downloads).
+    const owner = frames.findLast(
+      f =>
+        f.direction === 'received' &&
+        (f.result?.session_key === storedId ||
+          f.result?.resumed === storedId ||
+          f.result?.stored_session_id === storedId)
+    )?.result
+    assert.ok(owner?.session_id, 'A must have a live session from the real resume frames')
+    assert.equal(owner.info.profile_name, profiles[0])
+    const cwd = path.join(runtime.hermes_home, 'profiles', profiles[0])
+    const wsUrl = new URL('/api/ws', runtime.url.replace('http:', 'ws:'))
+    wsUrl.searchParams.set('token', runtime.token)
+    wsUrl.searchParams.set('profile', profiles[0])
+    const reply = await page.evaluate(
+      ({ url, sessionId, cwd, profile }) =>
+        new Promise((resolve, reject) => {
+          const ws = new WebSocket(url)
+          const timer = setTimeout(() => {
+            ws.close()
+            reject(new Error('session.cwd.set timed out'))
+          }, 15000)
+          ws.onopen = () =>
+            ws.send(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: 'fixture-set-workspace',
+                method: 'session.cwd.set',
+                params: { session_id: sessionId, cwd, profile }
+              })
+            )
+          ws.onmessage = event => {
+            const reply = JSON.parse(event.data)
+            if (reply.id !== 'fixture-set-workspace') return
+            clearTimeout(timer)
+            resolve(reply)
+            ws.close()
+          }
+          ws.onclose = () => {
+            clearTimeout(timer)
+            reject(new Error('Workspace socket closed before reply'))
+          }
+        }),
+      { url: wsUrl.href, sessionId: owner.session_id, cwd, profile: profiles[0] }
+    )
+    assert.equal(reply.error, undefined, JSON.stringify(reply))
+    assert.equal(reply.result.cwd, cwd)
+    await expect(foreground).toBeVisible()
+    results.push({ name: 'relative-download-no-workspace-visible-error', status: 'PASS' })
+    const start = downloads.length
+    // Invoke the real tile button without pointer hover/focus-follow switching
+    // the foreground to A first. No bridge, resolver, or transport is mocked.
+    // Capture HTTP failure bodies rather than hiding them behind a download
+    // timeout. Closing the page cancels the pending event on that failure path.
+    const downloadEvent = page.waitForEvent('download').catch(() => null)
+    const [response] = await Promise.all([
+      page.waitForResponse(response => new URL(response.url()).pathname === '/api/fs/download'),
+      downloadButton.evaluate(button => button.click())
+    ])
+    await expect(foreground).toBeVisible()
+    const request = downloads[start]
+    const query = new URL(request.url).searchParams
+    assert.equal(query.get('path'), relative)
+    assert.equal(query.get('profile'), profiles[0])
+    assert.equal(query.get('session_id'), storedId, 'Relative path must resolve in A’s owning session')
+    assert.equal(request.url, unavailable.url(), 'Choosing a workspace must fix the same download, not retarget it')
+    assert.equal(request.requestHeaders['x-hermes-session-token'], runtime.token)
+    if (!response.ok()) {
+      const detail = await response.text()
+      await writeFile(
+        path.join(artifacts, 'relative-download-error.json'),
+        JSON.stringify({ ...request, detail }, null, 2)
+      )
+      assert.fail(`Owning A session resolved, but relative download returned HTTP ${response.status()}: ${detail}`)
+    }
+    assert.equal(request.status, 200)
+    assert.match(request.headers['content-disposition'], /^attachment;/)
+    const download = await downloadEvent
+    assert.ok(download, 'A successful response must produce a browser download')
+    assert.equal(download.suggestedFilename(), filename)
+    const destination = path.join(artifacts, 'a-tile-b-foreground.bin')
+    await download.saveAs(destination)
+    const source = path.join(runtime.hermes_home, 'profiles', profiles[0], 'workspace', filename)
+    assert.deepEqual(await readFile(destination), await readFile(source))
+    assert.notDeepEqual(
+      await readFile(destination),
+      await readFile(path.join(runtime.hermes_home, 'profiles', profiles[1], 'workspace', filename))
+    )
+  })
+  assert.deepEqual(errors, [], 'Chromium page errors')
+  // Optional remote font styles are deliberately unavailable in this isolated run.
+  assert.deepEqual(
+    blocked.filter(r => !['font', 'stylesheet'].includes(r.resourceType)),
+    [],
+    'Unexpected outbound requests were blocked'
+  )
+} finally {
+  await writeFile(
+    path.join(artifacts, 'results.json'),
+    JSON.stringify({ results, errors, blocked, downloads }, null, 2)
+  )
+  await writeFile(path.join(artifacts, 'frames.json'), JSON.stringify(frames, null, 2))
+  await browser.close()
+  console.log(`Evidence: ${artifacts}`)
+}

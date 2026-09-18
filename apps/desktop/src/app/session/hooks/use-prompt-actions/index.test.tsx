@@ -2866,6 +2866,43 @@ describe('usePromptActions file attachment sync', () => {
     }
   }
 
+  it.each(['file', 'image'] as const)('stages pathless browser %s bytes before main submit', async kind => {
+    $connection.set({ mode: 'local' } as never)
+
+    const blob = new File(['hello'], kind === 'image' ? 'photo.png' : 'report.txt', {
+      type: kind === 'image' ? 'image/png' : 'text/plain'
+    })
+
+    const attachment = { id: 'browser-upload', occurrenceId: 'browser-occurrence', kind, label: blob.name, blob }
+
+    const requestGateway = vi.fn(async (method: string, _params?: Record<string, unknown>) => {
+      if (method.startsWith('image.attach') || method === 'file.attach') {
+        return { attached: true, path: '/staged/photo.png', ref_text: '@file:staged/report.txt' } as never
+      }
+
+      return {} as never
+    })
+
+    let handle: HarnessHandle | null = null
+    await actRender(
+      <Harness onReady={h => (handle = h)} refreshSessions={async () => undefined} requestGateway={requestGateway} />
+    )
+    expect(await handle!.submitText('describe', { attachments: [attachment] })).toBe(true)
+    const [method, params] = requestGateway.mock.calls[0]!
+    expect(method).toBe(kind === 'image' ? 'image.attach_bytes' : 'file.attach')
+    expect(params?.session_id).toBe(RUNTIME_SESSION_ID)
+    expect(params?.path).toBeUndefined()
+    expect(kind === 'image' ? params?.content_base64 : params?.data_url).toBe(
+      kind === 'image' ? 'aGVsbG8=' : 'data:text/plain;base64,aGVsbG8='
+    )
+    const prompt = requestGateway.mock.calls.find(([method]) => method === 'prompt.submit')
+    expect(prompt).toBeDefined()
+
+    if (kind === 'file') {
+      expect(prompt?.[1]?.text).toContain('@file:staged/report.txt')
+    }
+  })
+
   it('uploads file bytes via file.attach on a remote gateway and submits the rewritten ref', async () => {
     // Remote gateway can't read the client-disk path, so the desktop must upload
     // the bytes and submit the workspace-relative ref the gateway hands back —

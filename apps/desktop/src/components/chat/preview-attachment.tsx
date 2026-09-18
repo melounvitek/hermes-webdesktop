@@ -9,12 +9,14 @@ import { downloadGatewayMediaFile } from '@/lib/media'
 import { previewName } from '@/lib/preview-targets'
 import { notifyError } from '@/store/notifications'
 import { $previewTabSources, closePreviewForSource, openPreview, type PreviewRecordSource } from '@/store/preview'
+import { knownOwnerForSession } from '@/store/session-states'
 
 export function PreviewAttachment({ source = 'manual', target }: { source?: PreviewRecordSource; target: string }) {
   const { t } = useI18n()
   // This link lives in one session's transcript; resolve it against THAT
   // session's cwd, not the primary chat's.
-  const cwd = useStore(useSessionView().$cwd)
+  const view = useSessionView()
+  const cwd = useStore(view.$cwd)
   const openSources = useStore($previewTabSources)
   const [opening, setOpening] = useState(false)
   const [downloading, setDownloading] = useState(false)
@@ -108,7 +110,19 @@ export function PreviewAttachment({ source = 'manual', target }: { source?: Prev
       // Works in both modes: the Electron main process fetches the bytes
       // through the session's backend connection (local gateway or remote)
       // and prompts for a save location.
-      const result = await downloadGatewayMediaFile(target)
+      const sessionId = view.$storedId.get() || view.$runtimeId.get()
+      const owner = knownOwnerForSession(sessionId)
+
+      const result = await downloadGatewayMediaFile(
+        target,
+        sessionId
+          ? {
+              sessionId,
+              profile: typeof owner === 'string' ? owner : owner?.targetProfile || owner?.profile,
+              connectionId: typeof owner === 'object' ? owner?.connectionId : undefined
+            }
+          : undefined
+      )
 
       if (mountedRef.current && result.saved) {
         setDownloaded(true)

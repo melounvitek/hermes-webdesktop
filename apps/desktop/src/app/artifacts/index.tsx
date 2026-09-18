@@ -280,8 +280,14 @@ export function ArtifactsView({ setStatusbarItemGroup: _setStatusbarItemGroup, .
         // URL. Fetch the bytes over the authenticated fs bridge instead.
         // Tilde/relative hrefs have no file URL form. Keep them gateway-owned:
         // expanding them on the client would target the wrong home or cwd.
-        if (isRemoteGateway() && isArtifactFilePath(artifact.value)) {
-          await downloadGatewayMediaFile(artifact.value, { sessionId: artifact.sessionId, profile: artifact.profile })
+        const remoteOwner = artifact.connectionId && artifact.connectionId !== 'local'
+
+        if ((remoteOwner || isRemoteGateway()) && isArtifactFilePath(artifact.value)) {
+          await downloadGatewayMediaFile(artifact.value, {
+            connectionId: artifact.connectionId,
+            sessionId: artifact.sessionId,
+            profile: artifact.profile
+          })
 
           return
         }

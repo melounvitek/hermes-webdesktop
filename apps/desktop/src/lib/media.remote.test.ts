@@ -260,6 +260,21 @@ describe('downloadGatewayMediaFile', () => {
     })
   })
 
+  it('keeps explicit origins independent of the foreground connection and profile', async () => {
+    for (const origin of [
+      { sessionId: 'background-session', profile: 'research', connectionId: 'origin-host' },
+      { sessionId: 'background-session', profile: 'research' },
+      { sessionId: 'background-session' }
+    ]) {
+      await downloadGatewayMediaFile('./report.md', origin)
+      expect(saveGatewayFile).toHaveBeenLastCalledWith({
+        ...origin,
+        path: './report.md',
+        suggestedName: 'report.md'
+      })
+    }
+  })
+
   it('rejects when the desktop bridge is unavailable', async () => {
     vi.stubGlobal('window', { hermesDesktop: {} })
 
