@@ -2844,6 +2844,7 @@ export interface Translations {
     notAvailableTitle: string
     unsupportedMessage: string
     connectionRetry: string
+    gitUnusable: string
     connectionSettings: string
     openDownloadPage: string
     latestBody: string
