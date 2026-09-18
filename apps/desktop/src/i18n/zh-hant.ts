@@ -170,6 +170,7 @@ export const zhHant = defineLocale({
       back: '返回',
       openLogs: '開啟記錄',
       repairHint: '修復會重新執行安裝程式，在新機器上可能需要幾分鐘。',
+      browserReloadHint: '重試會重新載入此頁面。重新載入或離開頁面登入會遺失未傳送的附件。',
       remoteSignInHint: signInLabel =>
         `先登出已儲存的遠端瀏覽器工作階段，然後開啟${signInLabel}。使用本機閘道可切換至內建後端。`,
       signOutAndSignIn: '登出並重新登入',

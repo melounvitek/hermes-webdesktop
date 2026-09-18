@@ -20,6 +20,7 @@ import type { RemoteReauth } from './boot-failure-reauth'
 import {
   deriveProviderShape,
   isRemoteConfig,
+  isRemoteReauthError,
   isRemoteReauthFailure,
   signInLabel,
   sshFailureMessage
@@ -87,6 +88,8 @@ export function BootFailureOverlay() {
   // juggling, no second connection form to maintain).
   const [view, setView] = useState<RecoveryView>('recovery')
 
+  const browser = window.hermesDesktop?.browser
+  const browserReauth = browser?.authRequired && isRemoteReauthError(boot.error)
   const visible = Boolean(boot.error) && !boot.running
   // While first-run onboarding owns the picker/flow we let it surface its own
   // progress; the recovery overlay is for hard failures, which it covers via a
@@ -94,7 +97,7 @@ export function BootFailureOverlay() {
   const suppressed = onboarding.flow.status !== 'idle' && onboarding.flow.status !== 'error'
 
   useEffect(() => {
-    if (!visible) {
+    if (!visible || browser) {
       return
     }
 
@@ -102,7 +105,7 @@ export function BootFailureOverlay() {
       ?.getRecentLogs()
       .then(res => setLogs(res.lines ?? []))
       .catch(() => undefined)
-  }, [boot.error, visible])
+  }, [boot.error, browser, visible])
 
   // Resolve whether this boot failure is a remote-gateway reauth so we can
   // offer the actionable "Sign in" path instead of the local-only recovery
@@ -122,7 +125,7 @@ export function BootFailureOverlay() {
     void (async () => {
       const desktop = window.hermesDesktop
 
-      if (!desktop?.getConnectionConfig) {
+      if (browser || !desktop?.getConnectionConfig) {
         return
       }
 
@@ -165,7 +168,7 @@ export function BootFailureOverlay() {
     return () => {
       cancelled = true
     }
-  }, [boot.error, visible])
+  }, [boot.error, browser, visible])
 
   if (!visible || suppressed) {
     return null
@@ -173,7 +176,7 @@ export function BootFailureOverlay() {
 
   const retry = async () => {
     setBusy('retry')
-    await window.hermesDesktop?.resetBootstrap().catch(() => undefined)
+    await window.hermesDesktop?.resetBootstrap?.().catch(() => undefined)
     window.location.reload()
   }
 
@@ -313,9 +316,17 @@ export function BootFailureOverlay() {
   // the structured isCloudBackendDown/statusCode it carries through boot
   // progress. When set, the recovery screen leads with the cloud-specific
   // guidance instead of the generic remote-failure copy (#85335).
-  const cloudDown = Boolean(boot.isCloudBackendDown)
+  const cloudDown = !browser && Boolean(boot.isCloudBackendDown)
 
-  if (remoteReauth) {
+  if (browser) {
+    actions = browserReauth
+      ? [
+          { key: 'signin', label: t.install.signIn, onClick: () => browser.signIn(), icon: <LogIn /> },
+          { ...retryAction, variant: 'secondary' }
+        ]
+      : [retryAction]
+    hint = copy.browserReloadHint
+  } else if (remoteReauth) {
     actions = [
       {
         key: 'signin',
@@ -406,11 +417,15 @@ export function BootFailureOverlay() {
           <div>
             <DialogPrimitive.Title asChild>
               <h2 className="text-[0.9375rem] font-semibold tracking-tight">
-                {remoteReauth ? copy.remoteTitle : cloudDown ? copy.cloudDownTitle : copy.title}
+                {browserReauth || remoteReauth ? copy.remoteTitle : cloudDown ? copy.cloudDownTitle : copy.title}
               </h2>
             </DialogPrimitive.Title>
             <p className="mt-1 text-[0.8125rem] leading-5 text-(--ui-text-tertiary)">
-              {remoteReauth ? copy.remoteDescription : cloudDown ? copy.cloudDownDescription : copy.description}
+              {browserReauth || remoteReauth
+                ? copy.remoteDescription
+                : cloudDown
+                  ? copy.cloudDownDescription
+                  : copy.description}
             </p>
           </div>
         </div>
@@ -439,15 +454,17 @@ export function BootFailureOverlay() {
                   {action.label}
                 </Button>
               ))}
-              <Button onClick={openLogs} variant="ghost">
-                <FileText />
-                {copy.openLogs}
-              </Button>
+              {!browser ? (
+                <Button onClick={openLogs} variant="ghost">
+                  <FileText />
+                  {copy.openLogs}
+                </Button>
+              ) : null}
             </div>
             <p className="text-xs text-muted-foreground">{hint}</p>
           </div>
 
-          {logs.length > 0 ? (
+          {!browser && logs.length > 0 ? (
             <div className="grid gap-2">
               <Button
                 className="-ml-2 self-start font-medium"

@@ -1,7 +1,8 @@
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { $desktopBoot } from '@/store/boot'
+import { createBrowserBridge } from '@/browser/bridge'
+import { $desktopBoot, failDesktopBoot } from '@/store/boot'
 import { $desktopOnboarding } from '@/store/onboarding'
 
 import { BootFailureOverlay } from './boot-failure-overlay'
@@ -66,6 +67,55 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('BootFailureOverlay', () => {
+  it.each([
+    { authRequired: true, expired: true },
+    { authRequired: false, expired: true },
+    { authRequired: true, expired: false },
+    { authRequired: false, expired: false }
+  ])(
+    'offers browser recovery without native controls: auth=$authRequired expired=$expired',
+    async ({ authRequired, expired }) => {
+      const originalDesktop = window.hermesDesktop
+      const originalLocation = window.location
+      const reload = vi.fn()
+      const assign = vi.fn()
+      Object.defineProperty(window, 'location', {
+        configurable: true,
+        value: { ...originalLocation, pathname: '/', search: '?view=chat', hash: '#/session-one', assign, reload }
+      })
+      Object.defineProperty(window, 'hermesDesktop', {
+        configurable: true,
+        value: createBrowserBridge({ token: '', authRequired })
+      })
+      failDesktopBoot(expired ? 'Gateway sign-in required' : 'Could not connect to Hermes gateway')
+
+      try {
+        render(<BootFailureOverlay />)
+
+        expect(screen.queryByRole('button', { name: /repair|gateway settings|use local gateway|logs/i })).toBeNull()
+        expect(screen.getByText(/unsent attachments/i)).toBeTruthy()
+        expect(assign).not.toHaveBeenCalled()
+        expect(reload).not.toHaveBeenCalled()
+
+        if (authRequired && expired) {
+          expect(screen.getByRole('dialog', { name: /sign-in required/i })).toBeTruthy()
+          fireEvent.click(screen.getByRole('button', { name: /^sign in$/i }))
+          expect(new URL(assign.mock.calls[0][0], originalLocation.origin).searchParams.get('next')).toBe(
+            '/?view=chat#/session-one'
+          )
+        } else {
+          expect(screen.queryByRole('button', { name: /sign in/i })).toBeNull()
+        }
+
+        fireEvent.click(screen.getByRole('button', { name: /retry|reload/i }))
+        await waitFor(() => expect(reload).toHaveBeenCalledTimes(1))
+      } finally {
+        Object.defineProperty(window, 'hermesDesktop', { configurable: true, value: originalDesktop })
+        Object.defineProperty(window, 'location', { configurable: true, value: originalLocation })
+      }
+    }
+  )
+
   it('keeps keyboard focus inside the recovery surface', () => {
     render(
       <>

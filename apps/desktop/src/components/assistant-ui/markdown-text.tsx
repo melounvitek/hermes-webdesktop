@@ -84,13 +84,17 @@ function useCodePlugin(): CodePlugin | null {
 
     let cancelled = false
 
-    void import('@streamdown/code').then(({ code }) => {
-      codePluginCache = code
+    void import('@streamdown/code')
+      .then(({ code }) => {
+        codePluginCache = code
 
-      if (!cancelled) {
-        setPlugin(code)
-      }
-    })
+        if (!cancelled) {
+          setPlugin(code)
+        }
+      })
+      .catch(() => {
+        // Highlighting is optional; keep the existing fallback if its chunk fails to load.
+      })
 
     return () => {
       cancelled = true

@@ -11,6 +11,9 @@ afterEach(() => {
 })
 
 it('applies document-wide UI scale, reports changes and restores it independently of profiles', async () => {
+  vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+    new Response('<script>window.__HERMES_SESSION_TOKEN__="test";</script>')
+  )
   const bridge = createBrowserBridge({ token: '', authRequired: false })
   expect((await bridge.zoom.get()).percent).toBe(90)
   const changed = vi.fn()

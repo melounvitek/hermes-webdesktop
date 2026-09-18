@@ -272,6 +272,7 @@ export interface Translations {
       back: string
       openLogs: string
       repairHint: string
+      browserReloadHint: string
       remoteSignInHint: (signInLabel: string) => string
       signOutAndSignIn: string
       remoteFailureHint: string

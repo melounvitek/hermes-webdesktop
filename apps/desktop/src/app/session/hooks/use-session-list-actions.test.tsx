@@ -251,6 +251,78 @@ describe('refreshSessions identity + loading hygiene', () => {
     expect($messagingTruncated.get()).toBe(true)
   })
 
+  it('absorbs an offline refresh without changing cached slices and recovers on the next refresh', async () => {
+    listSidebarSessions.mockResolvedValue(
+      sidebar(
+        { sessions: [row('recent')], profiles_truncated: { default: true } },
+        [row('cron', { source: 'cron' })],
+        [row('message', { source: 'telegram' })]
+      )
+    )
+    const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
+
+    await act(async () => {
+      await result.current.refreshSessions()
+    })
+
+    setSessionProfilesUsage({ default: { cost_usd: 3, tokens: 30 } })
+    setMessagingTruncated(true)
+
+    const stores = [
+      $sessions,
+      $cronSessions,
+      $messagingSessions,
+      $sessionProfilesTruncated,
+      $sessionProfilesUsage,
+      $messagingTruncated
+    ]
+
+    const cached = stores.map(store => store.get())
+    listSidebarSessions.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+
+    await act(async () => {
+      await expect(result.current.refreshSessions()).resolves.toBeUndefined()
+    })
+
+    stores.forEach((store, index) => expect(store.get()).toBe(cached[index]))
+    expect($sessionsLoading.get()).toBe(false)
+    expect(listSidebarSessions).toHaveBeenCalledTimes(2)
+
+    const recovered = sidebar(
+      { sessions: [row('recent', { title: 'Updated' })] },
+      [row('new-cron', { source: 'cron' })],
+      [row('new-message', { source: 'telegram' })]
+    )
+
+    listSidebarSessions.mockResolvedValueOnce(recovered)
+
+    await act(async () => {
+      await result.current.refreshSessions()
+    })
+
+    expect(listSidebarSessions).toHaveBeenCalledTimes(3)
+    expect($sessions.get()).toEqual(recovered.recents.sessions)
+    expect($cronSessions.get()).toEqual(recovered.cron.sessions)
+    expect($messagingSessions.get()).toEqual(recovered.messaging.sessions)
+    expect($sessionProfilesTruncated.get()).toEqual({})
+    expect($sessionProfilesUsage.get()).toEqual({})
+    expect($messagingTruncated.get()).toBe(false)
+  })
+
+  it('absorbs an offline initial refresh and releases the loading state', async () => {
+    listSidebarSessions.mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))
+
+    await act(async () => {
+      const refresh = result.current.refreshSessions()
+      expect($sessionsLoading.get()).toBe(true)
+      await expect(refresh).resolves.toBeUndefined()
+    })
+
+    expect($sessions.get()).toEqual([])
+    expect($sessionsLoading.get()).toBe(false)
+  })
+
   it('still accepts a genuine empty recents page when the backend reported no errors', async () => {
     listSidebarSessions.mockResolvedValue(sidebar({ sessions: [row('a')] }))
     const { result } = renderHook(() => useSessionListActions({ profileScope: 'default' }))

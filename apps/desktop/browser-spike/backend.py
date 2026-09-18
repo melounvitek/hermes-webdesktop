@@ -3,6 +3,8 @@
 
 Run with --web-dist <built SPA directory>.
 Every launch gets a fresh home. runtime.json records URLs, PIDs and log paths.
+With --restartable, SIGUSR1 (or a killed child) restarts on the same port/home
+with a new token. 'spike: hold' streams once, then waits for hold-stream removal.
 Prompts: 'spike: clarify' calls the real clarify tool; 'spike: approval' asks
 permission to remove a disposable directory inside the isolated home. Anything
 else streams an echo numbered by user turns in the actual model request history.
@@ -112,6 +114,12 @@ class ModelFixture(BaseHTTPRequestHandler):
             else:
                 for i in range(0, len(text), 8):
                     chunk({"content": text[i:i + 8]})
+                    if i == 0 and "spike: hold" in prompt.lower():
+                        deadline = time.monotonic() + 90
+                        while (self.server.run_dir / "hold-stream").exists():
+                            if time.monotonic() >= deadline:
+                                raise TimeoutError("Harness did not release hold-stream")
+                            time.sleep(0.05)
                     time.sleep(0.08)
             chunk({}, finish)
             self.wfile.write(b"data: [DONE]\n\n")
@@ -125,6 +133,7 @@ def main():
     parser.add_argument("--web-dist", type=Path, required=True)
     parser.add_argument("--python", type=Path, default=Path.home() / ".hermes/hermes-agent/venv/bin/python")
     parser.add_argument("--port", type=int, default=0)
+    parser.add_argument("--restartable", action="store_true", help="Restart child on SIGUSR1 or child exit")
     parser.add_argument("--public-url", help="HTTPS origin for a tailnet proxy; generates a password login")
     args = parser.parse_args()
     if args.public_url:
@@ -183,8 +192,12 @@ def main():
         hash_code = "import sys; from plugins.dashboard_auth.basic import hash_password; print(hash_password(sys.stdin.read()))"
         password_hash = subprocess.check_output(
             [str(args.python), "-c", hash_code], input=login["password"], cwd=home, env=env, text=True).strip()
+        # Basic auth otherwise generates a per-process key, intentionally signing
+        # everyone out on restart. Keep this disposable home's login valid while
+        # the separate loopback/bootstrap token still rotates with each child.
         config["dashboard"] = {"public_url": args.public_url, "basic_auth": {
-            "username": login["username"], "password_hash": password_hash}}
+            "username": login["username"], "password_hash": password_hash,
+            "secret": secrets.token_hex(32)}}
         (hermes_home / "config.yaml").write_text(json.dumps(config, indent=2))
     # Verify the installed venv resolves application modules from THIS worktree.
     probe = "import importlib.util,json; print(json.dumps({n:importlib.util.find_spec(n).origin for n in ['hermes_cli.main','run_agent','tui_gateway.server']}))"
@@ -206,15 +219,20 @@ def main():
 
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
+    restart = threading.Event()
+    if args.restartable:
+        signal.signal(signal.SIGUSR1, lambda _signum, _frame: restart.set())
     try:
         # The real backend's sentinel contains the kernel-selected port for --port 0.
         import re
         deadline = time.monotonic() + 90
+        generation = 0
+        log_offset = 0
         http = build_opener(ProxyHandler({}))
         while True:
             if child.poll() is not None:
                 raise RuntimeError(f"Backend exited {child.returncode}: {log_path.read_text()}")
-            match = re.search(r"HERMES_DASHBOARD_READY port=(\d+)", log_path.read_text())
+            match = re.search(r"HERMES_DASHBOARD_READY port=(\d+)", log_path.read_text()[log_offset:])
             if match:
                 url = f"http://127.0.0.1:{match.group(1)}"
                 try:
@@ -225,16 +243,39 @@ def main():
                             assert status["auth_required"] and "basic" in status["auth_providers"]
                         else:
                             assert token in response.read().decode(), "SPA must receive the real backend session token"
-                    break
                 except OSError:
                     pass
+                else:
+                    runtime.update(url=url, token=token, generation=generation,
+                                   restartable=args.restartable, backend_pid=child.pid,
+                                   ws_url=url.replace("http:", "ws:") + "/api/ws?token=" + token)
+                    pending = run_dir / "runtime.pending.json"
+                    pending.write_text(json.dumps(runtime, indent=2))
+                    pending.replace(run_dir / "runtime.json")
+                    print("READY " + json.dumps({"url": url, "run_dir": str(run_dir),
+                                                "generation": generation}), flush=True)
+                    if not args.restartable:
+                        child.wait()
+                        break
+                    while child.poll() is None and not restart.wait(0.1):
+                        pass
+                    restart.clear()
+                    # Abrupt loss is intentional: regression cases must not rely
+                    # on a graceful shutdown persisting an interrupted turn.
+                    child.kill()
+                    child.wait()
+                    command[command.index("--port") + 1] = match.group(1)
+                    token = secrets.token_urlsafe(32)
+                    env["HERMES_DASHBOARD_SESSION_TOKEN"] = token
+                    log_offset = len(log_path.read_text())
+                    with log_path.open("a") as log:
+                        child = subprocess.Popen(command, cwd=home, env=env, stdout=log,
+                                                 stderr=subprocess.STDOUT)
+                    generation += 1
+                    deadline = time.monotonic() + 90
             if time.monotonic() > deadline:
                 raise TimeoutError(f"Backend not ready; inspect {log_path}")
             time.sleep(0.2)
-        runtime.update(url=url, token=token, ws_url=url.replace("http:", "ws:") + "/api/ws?token=" + token)
-        (run_dir / "runtime.json").write_text(json.dumps(runtime, indent=2))
-        print("READY " + json.dumps({"url": url, "run_dir": str(run_dir)}), flush=True)
-        child.wait()
     except KeyboardInterrupt:
         pass
     finally:

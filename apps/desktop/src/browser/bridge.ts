@@ -15,6 +15,20 @@ export function createBrowserBridge({ token, authRequired }: BrowserConfig) {
   const writeText = navigator.clipboard?.writeText.bind(navigator.clipboard)
   const readText = navigator.clipboard?.readText.bind(navigator.clipboard)
 
+  const bootListeners = new Set<(progress: DesktopBootProgress) => void>()
+  let authError: string | null = null
+
+  const bootProgress = (): DesktopBootProgress => ({
+    error: authError,
+    fakeMode: false,
+    message: authError ?? '',
+    phase: authError ? 'backend.error' : 'backend.ready',
+    progress: 100,
+    running: false,
+    retryable: !authError,
+    timestamp: Date.now()
+  })
+
   const wsUrl = (profile?: string | null, ticket?: string) =>
     buildHermesWebSocketUrl({
       path: '/api/ws',
@@ -70,8 +84,19 @@ export function createBrowserBridge({ token, authRequired }: BrowserConfig) {
     if (!response.ok) {
       const message = `HTTP ${response.status}: ${await response.text()}`
 
-      if (authRequired && (response.status === 401 || response.status === 403)) {
-        throw new GatewayReauthRequiredError(message)
+      // A resource-level 403 is not proof that the login expired. The ticket
+      // endpoint, unlike a file/settings operation, is an authentication probe.
+      if (
+        authRequired &&
+        (response.status === 401 || (response.status === 403 && url.pathname === '/api/auth/ws-ticket'))
+      ) {
+        authError = `Gateway sign-in required. ${message}`
+
+        for (const listener of bootListeners) {
+          listener(bootProgress())
+        }
+
+        throw new GatewayReauthRequiredError(authError)
       }
 
       throw new Error(message)
@@ -87,6 +112,13 @@ export function createBrowserBridge({ token, authRequired }: BrowserConfig) {
   }
 
   return {
+    browser: {
+      authRequired,
+      signIn() {
+        const { pathname, search, hash } = window.location
+        window.location.assign(`/login?${new URLSearchParams({ next: pathname + search + hash })}`)
+      }
+    },
     // Never forward the gateway's custom auth header through a redirect.
     ...createBrowserDownloads(request => fetchResponse(request, 'error')),
     zoom: createBrowserZoom(),
@@ -96,6 +128,35 @@ export function createBrowserBridge({ token, authRequired }: BrowserConfig) {
     localModelsEnabled: false,
     api,
     async getConnection(profile?: string | null): Promise<HermesConnection> {
+      if (!authRequired) {
+        // Refresh before publishing the descriptor: both sockets and media URLs
+        // need the token from the current backend process, without a page reload.
+        const response = await fetch('/', {
+          cache: 'no-store',
+          credentials: 'same-origin',
+          redirect: 'error',
+          signal: AbortSignal.timeout(15_000)
+        })
+
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}: could not refresh browser credentials`)
+        }
+
+        const document = new DOMParser().parseFromString(await response.text(), 'text/html')
+
+        const assignment = Array.from(document.scripts)
+          .map(
+            script => script.textContent?.match(/window\.__HERMES_SESSION_TOKEN__\s*=\s*("(?:[^"\\]|\\.)*")\s*;/)?.[1]
+          )
+          .find(Boolean)
+
+        if (!assignment) {
+          throw new Error('Backend returned no browser session token. Reload the page.')
+        }
+
+        token = JSON.parse(assignment) as string
+      }
+
       return {
         baseUrl: window.location.origin,
         token,
@@ -127,18 +188,16 @@ export function createBrowserBridge({ token, authRequired }: BrowserConfig) {
       return wsUrl(profile, ticket)
     },
     async getBootProgress(): Promise<DesktopBootProgress> {
-      return {
-        error: null,
-        fakeMode: false,
-        message: '',
-        phase: 'backend.ready',
-        progress: 100,
-        running: false,
-        timestamp: Date.now()
+      return bootProgress()
+    },
+    onBootProgress(listener: (progress: DesktopBootProgress) => void) {
+      bootListeners.add(listener)
+
+      return () => {
+        bootListeners.delete(listener)
       }
     },
     // Browser transport observes disconnects; there is no child-process lifecycle.
-    onBootProgress: () => () => {},
     onBackendExit: () => () => {},
     notify: async () => false,
     async writeClipboard(text: string) {

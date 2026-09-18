@@ -172,6 +172,8 @@ export const ja = defineLocale({
       back: '戻る',
       openLogs: 'ログを開く',
       repairHint: '修復はインストーラーを再実行します。新しいマシンでは数分かかる場合があります。',
+      browserReloadHint:
+        '再試行すると、このページが再読み込みされます。再読み込みやサインイン画面への移動で、未送信の添付ファイルは失われます。',
       remoteSignInHint: signInLabel =>
         `保存済みのリモートブラウザセッションからサインアウトし、${signInLabel}を開きます。代わりにバンドルされたバックエンドに切り替えるには「ローカルゲートウェイを使用」を選択してください。`,
       signOutAndSignIn: 'サインアウトして再サインイン',

@@ -371,6 +371,9 @@ export function useSessionListActions({ profileScope }: UseSessionListActionsArg
             messagingErrors?.length ? prev : result.messaging.sessions.length >= MESSAGING_SECTION_LIMIT
           )
         }
+      } catch {
+        // Background refreshes keep cached slices on failure; the next refresh retries.
+        return
       } finally {
         // Request identity preserves the zero-argument refresh contract across a
         // failed activation epoch; an explicit owner predicate is stronger and
