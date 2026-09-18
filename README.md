@@ -32,6 +32,27 @@ Use any model you want — [Nous Portal](https://portal.nousresearch.com), OpenR
 
 ---
 
+## Browser edition — local project status
+
+This checkout also builds the official desktop renderer for a browser, using
+stock Hermes APIs rather than a separate UI or backend. The browser bundle is
+running against an existing Hermes installation behind password-gated Tailscale
+Serve. The user confirmed the deployed fixes work in real use.
+
+- [x] Browser chat, streaming, session reload/resume, approvals and clarification.
+- [x] Password-authenticated, tailnet-only access to real Hermes.
+- [x] File picker, drag/drop and image paste, with image and file submit/resume.
+- [x] Authenticated downloads with profile/session ownership and useful filenames.
+- [x] Persistent Appearance → UI Scale; browser-native zoom shortcuts unchanged.
+- [x] 311 focused tests, 15 Chromium usability checks, typecheck, browser/Electron
+      builds and independent review.
+- [x] Deploy the fixes (`652a4df9cc`) and confirm them in real use.
+
+This is not a finished release. Reconnect/authentication edge cases, remaining
+native-only controls, general server file editing, installation/releases and
+upstream-sync automation are still pending. No GitHub fork or push has been made.
+See [the project plan](plan.md) for evidence, limitations and the deployment handoff.
+
 ## Quick Install
 
 ### Linux, macOS, WSL2, Termux
