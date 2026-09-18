@@ -3667,6 +3667,7 @@ class GatewayRunner(
         # the clock; and a one-shot latch so the "platform owns the suspend" notice logs once.
         self._scale_to_zero_cooldown_until: float = 0.0
         self._scale_to_zero_no_suspend_logged: bool = False
+        self._scale_to_zero_direct_platform_logged: bool = False
 
     def _open_session_db_for_active_scope(self, raise_on_error: bool = False) -> Any:
         """AsyncSessionDB for the active profile scope, resolved per access (not in ``__init__``) since
