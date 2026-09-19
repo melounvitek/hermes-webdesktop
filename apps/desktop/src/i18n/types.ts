@@ -634,6 +634,31 @@ export interface Translations {
       enableAll: string
       enableAllDesc: string
       focusedHint: string
+      browser: {
+        title: string
+        body: string
+        enable: string
+        disable: string
+        test: string
+        description: string
+        limits: string
+        status: Record<
+          | 'off'
+          | 'enabling'
+          | 'enabled'
+          | 'requested'
+          | 'denied'
+          | 'default'
+          | 'insecure'
+          | 'unsupported'
+          | 'disconnected'
+          | 'otherTab'
+          | 'failed'
+          | 'reset'
+          | 'limit',
+          string
+        >
+      }
       kinds: Record<
         'approval' | 'backgroundDone' | 'credits' | 'input' | 'plugin' | 'turnDone' | 'turnError',
         { label: string; description: string }

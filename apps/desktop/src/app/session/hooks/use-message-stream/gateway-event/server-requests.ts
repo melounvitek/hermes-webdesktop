@@ -2,6 +2,7 @@ import { readActivePreview } from '@/app/chat/right-rail/preview-reader'
 import { readActiveTerminal } from '@/app/right-sidebar/terminal/buffer'
 import { $activeTerminal } from '@/app/right-sidebar/terminal/terminals'
 import { pendingClarifyToolPayload } from '@/app/session/hooks/use-session-actions/restore-pending-clarify'
+import { notifyBrowserAttention } from '@/browser/attention-notifications'
 import { translateNow } from '@/i18n'
 import { restorePendingClarifyToolCall } from '@/lib/chat-messages'
 import { isBrowserClient } from '@/lib/platform'
@@ -20,6 +21,13 @@ import {
   setVaultUnlockRequest
 } from '@/store/prompts'
 import { rememberServerRequest } from '@/store/server-requests'
+import { getSessionOwnerHints, ownerLookupSessionRows } from '@/store/session'
+import {
+  $sessionTiles,
+  knownOwnerForSession,
+  runtimeSessionOwner,
+  storedSessionIdForRuntimeId
+} from '@/store/session-states'
 import { requestScrollToBottom } from '@/store/thread-scroll'
 import { $toursEnabled } from '@/store/tours'
 
@@ -64,8 +72,38 @@ const markNeedsInput = (ctx: ServerRequestContext) => {
   }
 }
 
+const notifyBrowserRequest = (ctx: ServerRequestContext) => {
+  const owner = knownOwnerForSession(ctx.sessionId)
+  const storedId = storedSessionIdForRuntimeId(ctx.sessionId) ?? ctx.sessionId
+  const tiles = $sessionTiles.get().filter(tile => tile.storedSessionId === storedId)
+  const rows = ownerLookupSessionRows().filter(row => row.id === storedId)
+  // The general resolver chooses the first row; copied databases can have the
+  // same stored ID in multiple profiles. Only use its fallback when unique.
+  const proven =
+    runtimeSessionOwner(ctx.sessionId) === owner ||
+    (tiles.length === 1 && tiles[0].ownerProfile === owner) ||
+    (rows.length > 0 && rows.every(row => !row.connection_id && row.profile === owner))
+  const owned =
+    !ctx.request.connectionId &&
+    typeof owner === 'string' &&
+    Boolean(owner.trim()) &&
+    getSessionOwnerHints(storedId).length === 0 &&
+    proven
+  // Primary request.profile is a socket tag, not proof of this session's owner.
+  notifyBrowserAttention({
+    id: ctx.request.id,
+    method: ctx.request.method,
+    sessionId: ctx.sessionId,
+    owned,
+    replayed: ctx.request.replayed,
+    active: ctx.isActiveSession
+  })
+}
+
 const notifyInput = (ctx: ServerRequestContext, body: string) => {
-  if (!ctx.request.replayed) {
+  if (isBrowserClient()) {
+    notifyBrowserRequest(ctx)
+  } else if (!ctx.request.replayed) {
     dispatchNativeNotification({
       body,
       kind: 'input',
@@ -197,7 +235,9 @@ const approval: Handler = ctx => {
   }).catch(() => undefined)
   markNeedsInput(ctx)
 
-  if (!request.replayed) {
+  if (isBrowserClient()) {
+    notifyBrowserRequest(ctx)
+  } else if (!request.replayed) {
     dispatchNativeNotification({
       actions: [
         {

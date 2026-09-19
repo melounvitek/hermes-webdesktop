@@ -701,6 +701,33 @@ export const en: Translations = {
       enableAll: 'Enable notifications',
       enableAllDesc: 'Off silences every notification below.',
       focusedHint: 'Completion alerts only fire while Hermes is in the background.',
+      browser: {
+        title: 'Hermes',
+        body: 'A conversation needs your attention.',
+        enable: 'Enable attention notifications in this tab',
+        disable: 'Disable in this tab',
+        test: 'Send test notification',
+        description:
+          'Generic alerts for new approval and input requests received by this tab. No conversation text is shared. Clicking an alert only focuses this tab.',
+        limits:
+          'Desktop only, while this tab is open and connected. The active chat stays quiet while focused. Other tabs and browser profiles may see different requests; enable in one browser only. Reload, disconnect, profile changes or suspension turn alerts off. No completion, mobile or closed-tab alerts. Browser and OS settings can still block presentation.',
+        status: {
+          off: 'Off in this tab, even if browser permission is already granted.',
+          enabling: 'Waiting for permission and exclusive access to notifications…',
+          enabled: 'Enabled in this tab. Other tabs on this origin cannot enable at the same time.',
+          requested: 'Notification requested. If nothing appeared, check browser and system notification settings.',
+          denied: 'Notifications are blocked. Change permission in browser site settings before enabling again.',
+          default: 'Permission was not granted. Alerts remain off; you can try Enable again.',
+          insecure:
+            'Notifications need HTTPS or a trusted localhost context. Plain HTTP LAN addresses are not supported.',
+          unsupported: 'Notifications or exclusive tab coordination are unavailable in this browser.',
+          disconnected: 'Alerts are off because the connection is unavailable. Reconnect, then enable again.',
+          otherTab: 'Another tab is handling notifications. Disable them there before enabling here.',
+          failed: 'The notification request failed. Alerts are off; check browser and system settings.',
+          reset: 'Alerts were turned off after the tab or profile changed. Enable again when ready.',
+          limit: 'The notification memory limit was reached. Alerts are off; reload this tab to start again.'
+        }
+      },
       kinds: {
         approval: {
           label: 'Approval needed',

@@ -9,6 +9,7 @@ import {
 } from '@hermes/shared'
 import { atom } from 'nanostores'
 
+import { disableBrowserAttention, setBrowserAttentionConnected } from '@/browser/attention-notifications'
 import type { HermesConnection } from '@/global'
 import { HermesGateway, setApiRequestConnection } from '@/hermes'
 import { translateNow } from '@/i18n'
@@ -326,6 +327,10 @@ export function dispatchPrimaryServerRequest(request: ServerRequest, profile: st
 export function setPrimaryGateway(gateway: HermesGateway | null, profile = 'default'): void {
   const next = normKey(profile)
 
+  if (g.primaryGateway !== gateway || g.primaryProfile !== next) {
+    setBrowserAttentionConnected(false)
+  }
+
   if (g.primaryGateway !== gateway) {
     g.primaryConnectionId = null
     g.primaryConnectionMode = null
@@ -539,7 +544,10 @@ function reportGatewayState(profile: string, state: ConnectionState): void {
   }
 
   if (normKey(profile) === g.activeKey) {
+    setBrowserAttentionConnected(state === 'open')
     setGatewayState(state)
+  } else if (state !== 'open') {
+    disableBrowserAttention('disconnected')
   }
 }
 
@@ -563,8 +571,15 @@ function applyActive(profile: string, activationEpoch: number): boolean {
     return false
   }
 
+  const previousKey = g.activeKey
   g.activeKey = normKey(profile)
   const gateway = activeGateway()
+
+  if (previousKey !== g.activeKey || g.$gateway.get() !== gateway) {
+    disableBrowserAttention('reset')
+  }
+
+  setBrowserAttentionConnected(gateway?.connectionState === 'open')
   g.$gateway.set(gateway)
   setGatewayState(gateway?.connectionState ?? 'closed')
   // Push the active scope's registry connection into the hermes module (null
