@@ -13,7 +13,6 @@ import { useQueryClient } from '@tanstack/react-query'
 import { type CSSProperties, lazy, type ReactNode, Suspense, useCallback, useEffect, useMemo, useRef } from 'react'
 import { useLocation, useNavigate } from 'react-router'
 
-import { graftRefreshedTailOntoBackfill } from '@/app/chat/transcript-backfill'
 import { formatRefValue } from '@/components/assistant-ui/directive-text'
 import { BootFailureOverlay } from '@/components/boot-failure-overlay'
 import { ConfirmHost } from '@/components/confirm-host'
@@ -37,11 +36,9 @@ import { RemoteDisplayBanner } from '@/components/remote-display-banner'
 import { SendDiagnosticsHost } from '@/components/send-diagnostics-dialog'
 import { TipHost } from '@/components/tips'
 import { emitGatewayEvent } from '@/contrib/events'
-import { getLatestSessionMessages } from '@/hermes'
 import { translateNow } from '@/i18n'
-import { type ChatMessage, chatMessageText, preserveLocalAssistantErrors, toChatMessages } from '@/lib/chat-messages'
+import { type ChatMessage, chatMessageText } from '@/lib/chat-messages'
 import { isMessagingSource } from '@/lib/session-source'
-import { latestSessionTodos } from '@/lib/todos'
 import { activateWakeIndicator } from '@/lib/wake-indicator'
 import { playWakeSound } from '@/lib/wake-sound'
 import { $billingSettingsRequest } from '@/store/billing-block'
@@ -90,7 +87,6 @@ import {
   setMessages
 } from '@/store/session'
 import { $titlebarAppActionsSide, titlebarAppActionsClusterCounts } from '@/store/titlebar-app-actions'
-import { clearSessionTodos, setSessionTodos, todosForHydration } from '@/store/todos'
 import { armWakeWord, stopClientCapture } from '@/store/wake-word'
 import { isAuxiliaryWindow, isBrowserWindow, isHudWindow } from '@/store/windows'
 import { useSkinCommand } from '@/themes/use-skin-command'
@@ -168,6 +164,7 @@ import { useOnboardingHandoff } from './onboarding-handoff'
 import { useOnboardingKickoff } from './onboarding-kickoff'
 import { $restartPreviewServer, useTitlebarToolContributions } from './panes'
 import { type AmbientGatewayRequest, createSessionRpcDispatcher } from './session-rpc-dispatcher'
+import { hydrateStoredSession } from './stored-session-hydration'
 import { ChatRoutesSurface, SidebarSurface, StatusbarSurface, TerminalSurface } from './surfaces'
 import type { WiringActions, WiringApi } from './types'
 import { POOL_LIMITS_SETTINGS_ROUTE } from './wiring-routing'
@@ -252,9 +249,9 @@ export function ContribWiring({ children }: { children: ReactNode }) {
         return
       }
 
-      void window.hermesDesktop?.recycleBackend?.(normalizeProfileKey($activeGatewayProfile.get())).catch(err =>
-        notifyError(err, translateNow('notifications.errors.restartHermesFailed'))
-      )
+      void window.hermesDesktop
+        ?.recycleBackend?.(normalizeProfileKey($activeGatewayProfile.get()))
+        .catch(err => notifyError(err, translateNow('notifications.errors.restartHermesFailed')))
     }
   }, [backendRestartRequest])
 
@@ -491,41 +488,13 @@ export function ContribWiring({ children }: { children: ReactNode }) {
         resolveActiveTranscriptSession(storedSessionId, runtimeSessionId)
       )
 
-      for (let index = 0; index < Math.max(1, attempts); index += 1) {
-        try {
-          const latest = await getLatestSessionMessages(storedSessionId, storedProfile)
-          const messages = toChatMessages(latest.messages)
-          updateSessionState(
-            runtimeSessionId,
-            state => ({
-              ...state,
-              // Post-turn rehydrate reads only the newest tail page — graft it
-              // onto any backfilled older pages instead of dropping them.
-              messages: preserveLocalAssistantErrors(
-                graftRefreshedTailOntoBackfill(messages, state.messages),
-                state.messages
-              )
-            }),
-            storedSessionId
-          )
-
-          const restored = todosForHydration(latestSessionTodos(messages))
-
-          if (restored) {
-            setSessionTodos(runtimeSessionId, restored)
-          } else {
-            clearSessionTodos(runtimeSessionId)
-          }
-
-          return
-        } catch {
-          // Best-effort fallback when live stream payloads are empty.
-        }
-
-        if (index < attempts - 1) {
-          await new Promise(resolve => window.setTimeout(resolve, 250))
-        }
-      }
+      return hydrateStoredSession({
+        storedSessionId,
+        runtimeSessionId,
+        profile: storedProfile,
+        attempts,
+        updateSessionState
+      })
     },
     [activeSessionIdRef, selectedStoredSessionIdRef, updateSessionState]
   )
@@ -1319,7 +1288,10 @@ export function ContribWiring({ children }: { children: ReactNode }) {
           />
         )}
         {!isHudWindow() && customWindowControls && (
-          <WslgWindowControls isFullscreen={Boolean(connection?.isFullscreen)} isMaximized={Boolean(connection?.isMaximized)} />
+          <WslgWindowControls
+            isFullscreen={Boolean(connection?.isFullscreen)}
+            isMaximized={Boolean(connection?.isMaximized)}
+          />
         )}
         {children}
       </div>
