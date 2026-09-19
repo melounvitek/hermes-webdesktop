@@ -1485,7 +1485,7 @@ export interface SessionTileDelegate {
   submitToSession(runtimeId: string, text: string): Promise<void>
   /** THE session-state write path — routes through the wiring cache so the
    *  cache, the primary view (when active), and every tile mirror agree. */
-  updateSession(runtimeId: string, updater: (state: ClientSessionState) => ClientSessionState): ClientSessionState
+  updateSession(runtimeId: string, updater: (state: ClientSessionState) => ClientSessionState, storedSessionId?: string | null, rebindFrom?: string): ClientSessionState
 }
 
 let delegate: SessionTileDelegate | null = null

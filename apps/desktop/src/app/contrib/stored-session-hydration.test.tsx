@@ -150,14 +150,17 @@ it('rejects a held response after runtime rebinding or todo-only live progress',
 
     if (change === 'owner') {
       h.update(SID, s => ({ ...s, storedSessionId: 'different-stored' }))
+    } else {
+      setSessionTodos(SID, todos)
     }
-    setSessionTodos(SID, todos)
+
+    const beforeTodos = $todosBySession.get()[SID]
     await act(async () => {
       deliver(rows(['stale', 'stale reply']))
       await h.invoked.mock.results[0].value
     })
     expect(h.state().messages).toBe(before)
-    expect($todosBySession.get()[SID]).toEqual(todos)
+    expect($todosBySession.get()[SID]).toBe(beforeTodos)
     cleanup()
   }
 })

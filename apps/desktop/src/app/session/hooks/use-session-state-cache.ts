@@ -341,9 +341,19 @@ export function useSessionStateCache({
     (
       sessionId: string,
       updater: (state: ClientSessionState) => ClientSessionState,
-      storedSessionId?: string | null
+      storedSessionId?: string | null,
+      rebindFrom?: string
     ) => {
-      const previous = ensureSessionState(sessionId, storedSessionId)
+      const binding = storedSessionId ? runtimeIdByStoredSessionIdRef.current.get(storedSessionId) : undefined
+      const canBind = !rebindFrom || !binding || binding === rebindFrom || binding === sessionId
+      const previous = ensureSessionState(sessionId, canBind ? storedSessionId : undefined)
+
+      // A recovered slice may already have its stored id from an inbound event.
+      // Repair the reverse binding too, but never replace a newer binding.
+      if (rebindFrom && storedSessionId && canBind) {
+        runtimeIdByStoredSessionIdRef.current.set(storedSessionId, sessionId)
+      }
+
       // Give the updater the raw previous state so it can return the same
       // reference when nothing changed (the caller sees a no-op). Previously
       // the param was always a fresh spread, so every call looked like a

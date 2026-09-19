@@ -4357,6 +4357,7 @@ export const zh = defineLocale({
     setProfileFailed: '设置配置档案失败',
     sttDisabled: '设置中已禁用语音转文字。',
     stopFailed: '停止失败',
+    stopUnconfirmed: '无法确认上一轮已停止。再次发送前，请重试停止或重新连接。',
     regenerateFailed: '重新生成失败',
     editFailed: '编辑失败',
     editTurnUnavailable: '此回合已不在服务器历史中（可能已被压缩移除）。',

@@ -3556,6 +3556,7 @@ export const zhHant = defineLocale({
     setProfileFailed: '設定設定檔失敗',
     sttDisabled: '設定中已停用語音轉文字。',
     stopFailed: '停止失敗',
+    stopUnconfirmed: '無法確認上一輪已停止。再次傳送前，請重試停止或重新連線。',
     regenerateFailed: '重新生成失敗',
     editFailed: '編輯失敗',
     editTurnUnavailable: '此回合已不在伺服器歷史中（可能已被壓縮移除）。',

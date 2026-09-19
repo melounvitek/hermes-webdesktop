@@ -68,6 +68,7 @@ import {
   type SurvivorUserRowIds
 } from './rewind'
 import { useSlashCommand } from './slash'
+import { interruptStoppedSession } from './stop'
 import { useSubmitPrompt } from './submit'
 import {
   base64FromDataUrl,
@@ -748,19 +749,21 @@ export function usePromptActions({
     clearAllPrompts(sessionId)
     clearClarifyRequest(undefined, sessionId)
 
+    const storedId = $sessionStates.get()[sessionId]?.storedSessionId ?? selectedStoredSessionIdRef.current
+
     try {
-      await withSessionNotFoundResume(
+      await interruptStoppedSession({
         sessionId,
-        selectedStoredSessionIdRef.current,
-        liveId => requestGateway('session.interrupt', { session_id: liveId }),
-        {
-          requestGateway,
-          onRecovered: recoveredId => {
+        storedSessionId: storedId,
+        requestGateway,
+        updateSessionState,
+        onRecovered: (recoveredId, previousId) => {
+          if (activeSessionIdRef.current === previousId && selectedStoredSessionIdRef.current === storedId) {
             activeSessionIdRef.current = recoveredId
             setActiveSessionId(recoveredId)
           }
         }
-      )
+      })
     } catch (err) {
       // Keep Stop retryable and queued intent intact when cancellation fails.
       notifyError(err, copy.stopFailed)

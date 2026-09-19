@@ -24,7 +24,7 @@ export async function waitForStoppedTurn(sessionId: string): Promise<void> {
   await new Promise<void>((resolve, reject) => {
     const timer = setTimeout(() => {
       unsubscribe()
-      reject(new Error('The previous turn is still stopping. Retry Stop or reconnect before sending again.'))
+      reject(new Error(translateNow('desktop.stopUnconfirmed')))
     }, 15_000)
 
     const unsubscribe = $sessionStates.listen(states => {

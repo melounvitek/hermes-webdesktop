@@ -3812,6 +3812,7 @@ export interface Translations {
     setProfileFailed: string
     sttDisabled: string
     stopFailed: string
+    stopUnconfirmed: string
     regenerateFailed: string
     editFailed: string
     editTurnUnavailable: string

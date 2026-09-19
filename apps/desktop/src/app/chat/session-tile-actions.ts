@@ -57,6 +57,7 @@ import {
   runRewindSubmit,
   type SurvivorUserRowIds
 } from '../session/hooks/use-prompt-actions/rewind'
+import { interruptStoppedSession } from '../session/hooks/use-prompt-actions/stop'
 import { useSubmitPrompt } from '../session/hooks/use-prompt-actions/submit'
 import {
   markSessionRecentlyInterrupted,
@@ -350,20 +351,25 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
     clearAllPrompts(sessionId)
     clearClarifyRequest(undefined, sessionId)
 
+    const storedId = storedIdRef.current
+    const delegate = sessionTileDelegate()
+
     try {
-      await withSessionNotFoundResume(
+      await interruptStoppedSession({
         sessionId,
-        storedIdRef.current,
-        liveId => requestSessionGateway('session.interrupt', { session_id: liveId }),
-        {
-          requestGateway: requestSessionGateway,
-          onRecovered: bindRecoveredRuntime
+        storedSessionId: storedId,
+        requestGateway,
+        updateSessionState: (id, change, storedId, rebindFrom) => delegate?.updateSession(id, change, storedId, rebindFrom),
+        onRecovered: (recoveredId, previousId) => {
+          if (runtimeIdRef.current === previousId && storedIdRef.current === storedId) {
+            bindRecoveredRuntime(recoveredId)
+          }
         }
-      )
+      })
     } catch (err) {
       notifyError(err, copy.stopFailed)
     }
-  }, [bindRecoveredRuntime, copy.stopFailed, requestSessionGateway, update])
+  }, [bindRecoveredRuntime, copy.stopFailed, requestGateway, update])
 
   // A hidden note mid-turn rides session.steer into the model's next tool
   // result: no optimistic bubble, no user turn. The main composer has the same

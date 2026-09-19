@@ -271,7 +271,7 @@ export function useSessionTileDelegate({
                   : state
               )
             })
-            .catch(error => notifyError(error, 'Could not confirm Stop. Retry Stop or reconnect.'))
+            .catch(error => notifyError(error, translateNow('desktop.stopUnconfirmed')))
 
           return true
         }
@@ -483,7 +483,7 @@ export function useSessionTileDelegate({
           { requestGateway: routedRequest, onRecovered: rebindTileRuntime(runtimeId) }
         )
       },
-      updateSession: (runtimeId, updater) => updateSessionState(runtimeId, updater)
+      updateSession: (runtimeId, updater, storedSessionId, rebindFrom) => updateSessionState(runtimeId, updater, storedSessionId, rebindFrom)
     })
   }, [
     archiveSession,

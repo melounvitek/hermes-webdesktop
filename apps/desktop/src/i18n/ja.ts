@@ -3635,6 +3635,7 @@ export const ja = defineLocale({
     setProfileFailed: 'プロファイルの設定に失敗しました',
     sttDisabled: '音声認識は設定で無効になっています。',
     stopFailed: '停止に失敗しました',
+    stopUnconfirmed: '前のターンが停止したことを確認できませんでした。再送信する前に、停止を再試行するか再接続してください。',
     regenerateFailed: '再生成に失敗しました',
     editFailed: '編集に失敗しました',
     editTurnUnavailable: 'このターンはサーバー履歴にありません（圧縮で削除された可能性があります）。',

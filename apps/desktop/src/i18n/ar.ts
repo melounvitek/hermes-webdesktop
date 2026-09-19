@@ -3216,6 +3216,7 @@ export const ar = defineLocale({
     setProfileFailed: 'فشل ضبط الملف الشخصي',
     sttDisabled: 'تحويل الكلام إلى نص معطل',
     stopFailed: 'فشل الإيقاف',
+    stopUnconfirmed: 'تعذر التأكد من توقف الجولة السابقة. أعد محاولة الإيقاف أو الاتصال قبل الإرسال مجددًا.',
     regenerateFailed: 'فشلت إعادة التوليد',
     editFailed: 'فشل التحرير',
     editTurnUnavailable: 'هذه الجولة لم تعد في سجل الخادم (ربما أزيلت بالضغط).',
