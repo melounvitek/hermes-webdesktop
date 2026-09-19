@@ -1,10 +1,13 @@
 import { atom, computed } from 'nanostores'
 
+import { translateNow } from '@/i18n'
 import { persistentAtom } from '@/lib/persisted'
+import { isBrowserClient } from '@/lib/platform'
 import { readKey } from '@/lib/storage'
 import { normalize } from '@/lib/text'
 
 import { $rightRailActiveTabId, type RightRailTabId, selectRightRailTab } from './layout'
+import { notify } from './notifications'
 import { canOpenBrowserWindow, openBrowserInNewWindow } from './windows'
 
 /**
@@ -120,11 +123,13 @@ function isPdfFileTarget(target: PreviewTarget): boolean {
 export function decodePreviewTabs(raw: string): PreviewTab[] {
   const parsed = JSON.parse(raw) as unknown
 
-  return (Array.isArray(parsed) ? parsed.filter(isPreviewTab) : []).map(tab =>
-    isPdfFileTarget(tab.target) && tab.target.previewKind === 'binary'
-      ? { ...tab, target: { ...tab.target, previewKind: 'pdf' as const } }
-      : tab
-  )
+  return (Array.isArray(parsed) ? parsed.filter(isPreviewTab) : [])
+    .filter(tab => !isBrowserClient() || tab.target.kind !== 'url')
+    .map(tab =>
+      isPdfFileTarget(tab.target) && tab.target.previewKind === 'binary'
+        ? { ...tab, target: { ...tab.target, previewKind: 'pdf' as const } }
+        : tab
+    )
 }
 
 export const $previewTabs = persistentAtom<PreviewTab[]>(TABS_STORAGE_KEY, [], {
@@ -383,6 +388,12 @@ function previewTargetForSource(target: PreviewTarget, source: PreviewRecordSour
  *  its target so a stale label/path can't outlive the thing it points at. The
  *  only way anything reaches a preview. */
 export function openPreview(target: PreviewTarget, source: PreviewRecordSource = 'manual') {
+  if (isBrowserClient() && target.kind === 'url') {
+    notify({ kind: 'warning', message: translateNow('preview.web.browserUnavailable') })
+
+    return
+  }
+
   const resolved = previewTargetForSource(target, source)
   const current = $previewTabs.get()
   const id = resolved.kind === 'url' ? browserTabId(current) : previewTabId(resolved)
@@ -408,6 +419,12 @@ export function openBrowserTab() {
 
 /** Another Browser, always — the strip's "+". */
 export function newBrowserTab() {
+  if (isBrowserClient()) {
+    openBrowserTab()
+
+    return
+  }
+
   const id = mintBrowserTabId()
 
   $previewTabs.set([...$previewTabs.get(), { id, target: blankPage() }])

@@ -6,7 +6,9 @@ import { Codicon } from '@/components/ui/codicon'
 import { Tip } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
 import { isDesktopFsRemoteMode } from '@/lib/desktop-fs'
+import { openLink } from '@/lib/external-link'
 import { normalizeOrLocalPreviewTarget, openPreviewTargetInBrowser } from '@/lib/local-preview'
+import { isBrowserClient } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 import { notifyError } from '@/store/notifications'
 import { $previewTabSources, closePreviewForSource, openPreview } from '@/store/preview'
@@ -91,9 +93,15 @@ export const PreviewStatusRow = memo(function PreviewStatusRow({ item, onDismiss
         />
       }
       // Plain click opens the link in the browser, except remote files which
-      // only the in-app gateway-backed preview can read. ⌘/Ctrl-click always
-      // uses the in-app preview pane. (isOpen still toggles the pane closed.)
+      // only the in-app gateway-backed preview can read. In Electron, ⌘/Ctrl-click
+      // uses the in-app preview pane. Browser URL clicks always open externally.
       onActivate={event => {
+        if (isBrowserClient() && /^https?:\/\//i.test(item.target.trim())) {
+          openLink(item.target)
+
+          return
+        }
+
         if (event.metaKey || event.ctrlKey) {
           void togglePreview()
         } else {

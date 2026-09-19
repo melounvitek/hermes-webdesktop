@@ -3428,6 +3428,7 @@ export interface Translations {
       address: string
       addressPlaceholder: string
       blankPageBody: string
+      browserUnavailable: string
       finishedRestarting: (message?: string) => string
       failedRestarting: (message: string) => string
       unknownError: string

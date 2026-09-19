@@ -3563,6 +3563,7 @@ export const ru = defineLocale({
       address: 'Адрес',
       addressPlaceholder: 'Введите адрес',
       blankPageBody: 'Введите адрес выше, чтобы просматривать, или попросите Hermes открыть страницу.',
+      browserUnavailable: 'Предпросмотр URL недоступен в браузерной версии. Открывайте ссылки в отдельной вкладке браузера.',
       finishedRestarting: message => `Hermes завершил перезапуск сервера предпросмотра${message ? `: ${message}` : ''}`,
       failedRestarting: message => `Перезапуск сервера не удался: ${message}`,
       unknownError: 'неизвестная ошибка',

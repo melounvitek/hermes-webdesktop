@@ -4,11 +4,13 @@ import { $activeTerminal } from '@/app/right-sidebar/terminal/terminals'
 import { pendingClarifyToolPayload } from '@/app/session/hooks/use-session-actions/restore-pending-clarify'
 import { translateNow } from '@/i18n'
 import { restorePendingClarifyToolCall } from '@/lib/chat-messages'
+import { isBrowserClient } from '@/lib/platform'
 import type { PreviewActAction } from '@/lib/preview-act/act-in-page'
 import type { TourAction, TourStep } from '@/lib/tour'
 import { normalizeChoices, normalizeQuestions, setClarifyRequest, warnDroppedChoices } from '@/store/clarify'
 import type { ScopedServerRequest } from '@/store/gateway'
 import { dispatchNativeNotification } from '@/store/native-notifications'
+import { $previewTarget } from '@/store/preview'
 import {
   receiveApprovalRequest,
   setSecretRequest,
@@ -290,7 +292,28 @@ const terminalRead: Handler = ({ request }) => {
   )
 }
 
-const previewRead: Handler = ({ request }) => {
+const previewRead: Handler = ({ isActiveSession, request, sessionId }) => {
+  if (isBrowserClient()) {
+    // Like actions, a scoped read belongs to the window showing its session.
+    if (sessionId && !isActiveSession) {
+      return
+    }
+
+    if (!isActiveSession) {
+      answerValue(request, { error: 'Preview reads require the session the user is looking at.', success: false })
+
+      return
+    }
+
+    const target = $previewTarget.get()
+
+    if (!target || target.kind === 'url') {
+      answerValue(request, { error: translateNow('preview.web.browserUnavailable'), success: false })
+
+      return
+    }
+  }
+
   // read_preview tool: the active preview tab's page text is async. Empty = nothing open.
   void readActivePreview({ count: num(request.params.count), start: num(request.params.start) }).then(result =>
     answerValue(request, result)
@@ -314,6 +337,12 @@ const previewAct: Handler = ({ isActiveSession, request, sessionId }) => {
       error: 'The in-app browser only takes actions in the session the user is looking at.',
       success: false
     })
+
+    return
+  }
+
+  if (isBrowserClient()) {
+    answerValue(request, { error: translateNow('preview.web.browserUnavailable'), success: false })
 
     return
   }

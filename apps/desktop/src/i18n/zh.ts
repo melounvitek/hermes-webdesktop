@@ -3989,6 +3989,7 @@ export const zh = defineLocale({
       address: '地址',
       addressPlaceholder: '输入地址',
       blankPageBody: '在上方输入地址开始浏览，或让 Hermes 打开一个页面。',
+      browserUnavailable: '浏览器版不支持 URL 预览。请在单独的浏览器标签页中打开链接。',
       finishedRestarting: message => `Hermes 已完成预览服务器重启${message ? `: ${message}` : ''}`,
       failedRestarting: message => `服务器重启失败：${message}`,
       unknownError: '未知错误',

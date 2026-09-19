@@ -3261,6 +3261,7 @@ export const ja = defineLocale({
       address: 'アドレス',
       addressPlaceholder: 'アドレスを入力',
       blankPageBody: '上のアドレス欄に入力するか、Hermes にページを開くよう頼んでください。',
+      browserUnavailable: 'ブラウザ版では URL のプレビューは利用できません。リンクは別のブラウザタブで開いてください。',
       finishedRestarting: message =>
         `Hermes がプレビューサーバーの再起動を完了しました${message ? `: ${message}` : ''}`,
       failedRestarting: message => `サーバーの再起動に失敗しました: ${message}`,

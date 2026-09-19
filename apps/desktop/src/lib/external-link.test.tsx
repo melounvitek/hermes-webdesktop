@@ -122,6 +122,25 @@ describe('external link helpers', () => {
     await waitFor(() => expect($previewTabs.get().at(-1)?.target.url).toBe('https://example.com/path/to/resource'))
   })
 
+  it.each(['http://example.invalid/page', 'https://example.invalid/page'])(
+    'opens a browser-client user click synchronously outside the app: %s',
+    async href => {
+      const openExternal = vi.fn()
+      installDesktopBridge({ browser: { authRequired: false, signIn: vi.fn() }, openExternal })
+      render(<ExternalLink href={href}>Browser link</ExternalLink>)
+      fireEvent.click(screen.getByRole('link', { name: 'Browser link' }))
+
+      try {
+        // No await: the popup must retain the originating user gesture.
+        expect(openExternal).toHaveBeenCalledExactlyOnceWith(href)
+        expect($previewTabs.get()).toHaveLength(0)
+      } finally {
+        // Drain the old async open path even on RED, before cleanup clears tabs.
+        await import('@/store/preview')
+      }
+    }
+  )
+
   // Platform-specific on purpose (same rule as terminal links / middle-click):
   // ⌘ on macOS, Ctrl elsewhere. The suite runs as non-mac.
   it('escapes to the OS browser on the platform open-elsewhere modifier', () => {

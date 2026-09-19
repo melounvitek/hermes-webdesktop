@@ -4,6 +4,7 @@ import { useEffect } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { assistantTextPart, type ChatMessage } from '@/lib/chat-messages'
+import { $notifications } from '@/store/notifications'
 import { $previewTabs, $previewTarget, closeRightRail, type PreviewTarget } from '@/store/preview'
 import { $activeSessionId, $currentCwd, $messages, $selectedStoredSessionId } from '@/store/session'
 
@@ -81,6 +82,25 @@ describe('preview routing', () => {
   })
 
   describe('open_preview', () => {
+    it('refuses agent URL events visibly in the browser without opening an external window', async () => {
+      const openExternal = vi.fn()
+      Object.defineProperty(window, 'hermesDesktop', {
+        configurable: true,
+        value: {
+          browser: { authRequired: false, signIn: vi.fn() },
+          openExternal,
+          normalizePreviewTarget: vi.fn(async (url: string) => ({ kind: 'url', label: 'Page', source: url, url }))
+        }
+      })
+      $notifications.set([])
+      render(<Harness />)
+      await emitPreviewOpen('https://example.invalid')
+      await waitFor(() => expect($notifications.get().at(-1)?.message).toMatch(/unavailable.*browser/i))
+      expect($previewTabs.get()).toHaveLength(0)
+      expect(openExternal).not.toHaveBeenCalled()
+      $notifications.set([])
+    })
+
     // The rail used to hold a session-keyed singleton alongside its tabs, written
     // under one session-id rule and reconciled under another. A live session with
     // no stored id yet resolved to '' on the write side, so the target was set and

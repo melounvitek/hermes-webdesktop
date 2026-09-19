@@ -105,6 +105,23 @@ describe('AppContextMenu', () => {
     expect(Boolean(screen.queryByRole('menuitem', { name: 'Update Hermes' }))).toBe(!browser)
   })
 
+  it('keeps external opening and URL copying but excludes in-app URL opening in browser mode', async () => {
+    const openExternal = vi.fn()
+    const writeClipboard = vi.fn().mockResolvedValue(true)
+    installBridge({ browser: { authRequired: false, signIn: vi.fn() }, openExternal, writeClipboard })
+    mountMenu()
+    const host = attach('<a href="https://example.invalid/docs">Docs</a>')
+    fireEvent.contextMenu(host.querySelector('a')!)
+    fireEvent.click(await screen.findByText('Copy URL'))
+    expect(writeClipboard).toHaveBeenCalledWith('https://example.invalid/docs')
+    fireEvent.contextMenu(host.querySelector('a')!)
+    expect(await screen.findByText('Open in external browser')).toBeTruthy()
+    expect(screen.queryByText('Open in in-app browser')).toBeNull()
+    fireEvent.click(screen.getByText('Open in external browser'))
+    expect(openExternal).toHaveBeenCalledWith('https://example.invalid/docs')
+    expect($previewTabs.get()).toHaveLength(0)
+  })
+
   it('opens the link menu on a chat link right-click', async () => {
     installBridge()
     mountMenu()

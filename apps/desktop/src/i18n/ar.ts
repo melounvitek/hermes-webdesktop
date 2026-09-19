@@ -2795,6 +2795,7 @@ export const ar = defineLocale({
       address: 'العنوان',
       addressPlaceholder: 'أدخل العنوان',
       blankPageBody: 'اكتب عنوانًا في الأعلى للتصفح، أو اطلب من Hermes فتح صفحة.',
+      browserUnavailable: 'معاينة الروابط غير متاحة في إصدار المتصفح. افتح الروابط في علامة تبويب منفصلة.',
       finishedRestarting: message => `أنهى Hermes إعادة تشغيل خادم المعاينة${message ? `: ${message}` : ''}`,
       failedRestarting: message => `فشلت إعادة تشغيل الخادم: ${message}`,
       unknownError: 'خطأ غير معروف',
