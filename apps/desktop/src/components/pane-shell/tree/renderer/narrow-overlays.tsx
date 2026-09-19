@@ -9,12 +9,14 @@
 import { useStore } from '@nanostores/react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 
+import { TITLEBAR_HEIGHT } from '@/app/shell/titlebar'
 import { $chatOnboardingSolo } from '@/components/onboarding-chat/assembly'
 import { PaneTab, PaneTabLabel, PaneTabStrip } from '@/components/ui/pane-tab'
 import { ContribBoundary, ContribRender } from '@/contrib/react/boundary'
 import { useContributions } from '@/contrib/react/use-contributions'
 import type { Contribution } from '@/contrib/types'
 import { ESCAPE_PRIORITY, isTopEscapeLayer, pushEscapeLayer } from '@/lib/escape-layers'
+import { isBrowserClient } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
 import { PANE_TOGGLE_REVEAL_EVENT } from '../..'
@@ -30,6 +32,10 @@ export function NarrowOverlays() {
   const panes = useContributions('panes')
   const hiddenPanes = useStore($hiddenTreePanes)
   const [reveal, setReveal] = useState<{ id: string; pinned: boolean } | null>(null)
+  const insideClick = useRef<MouseEvent | null>(null)
+  const currentReveal = useRef(reveal)
+  currentReveal.current = reveal
+  const browser = isBrowserClient()
 
   // Own an Escape layer only while something is revealed, so Escape closes the
   // overlay only when it's the top layer (never under a dialog / edit mode).
@@ -44,6 +50,54 @@ export function NarrowOverlays() {
     () => (solo ? [] : panes.filter(p => paneChrome(p).collapsible && inTree.has(p.id) && !hiddenPanes.has(p.id))),
     [solo, panes, inTree, hiddenPanes]
   )
+
+  useEffect(() => {
+    if (!browser || !narrow) {
+      return
+    }
+
+    const childSurfaceOpen = () =>
+      Boolean(
+        document.querySelector(
+          '[role="dialog"],[role="alertdialog"],[role="menu"],[role="listbox"],[data-slot="popover-content"]'
+        )
+      )
+
+    // Menus/dialogs can close on pointerdown, before the click reaches us.
+    let childOwnedGesture = false
+    let gestureReveal: typeof reveal = null
+
+    const onPointerDown = () => {
+      gestureReveal = currentReveal.current
+      childOwnedGesture = childSurfaceOpen() || !isTopEscapeLayer(ESCAPE_PRIORITY.narrowOverlay)
+    }
+
+    const onClick = (event: MouseEvent) => {
+      if (
+        event.button !== 0 ||
+        event.defaultPrevented ||
+        insideClick.current === event ||
+        childOwnedGesture ||
+        childSurfaceOpen() ||
+        !isTopEscapeLayer(ESCAPE_PRIORITY.narrowOverlay) ||
+        window.getSelection()?.isCollapsed === false
+      ) {
+        return
+      }
+
+      // Keep any pane opened/switched by this gesture, including non-titlebar controls.
+      // Do not consume the click: focusing/editing the uncovered chat still works.
+      setReveal(current => (current === gestureReveal ? null : current))
+    }
+
+    document.addEventListener('pointerdown', onPointerDown, true)
+    document.addEventListener('click', onClick)
+
+    return () => {
+      document.removeEventListener('pointerdown', onPointerDown, true)
+      document.removeEventListener('click', onClick)
+    }
+  }, [browser, narrow])
 
   const collapsiblesRef = useRef(collapsibles)
   collapsiblesRef.current = collapsibles
@@ -158,10 +212,17 @@ export function NarrowOverlays() {
           // panes beneath it — a see-through overlay reads as text bleeding
           // through text. Contract: `[data-glass-opaque]` in styles.css.
           data-glass-opaque=""
+          onClickCapture={event => {
+            // React ancestry includes the sidebar's portalled controls.
+            insideClick.current = event.nativeEvent
+          }}
           onMouseLeave={() => setReveal(current => (current?.pinned ? current : null))}
           // Match the pane's docked width (sessions ~237px, files its rail
           // width) instead of a fat fixed 20rem — capped for tiny screens.
-          style={{ width: `min(${(revealed.data as { width?: string } | undefined)?.width ?? '18rem'}, 85vw)` }}
+          style={{
+            top: browser ? TITLEBAR_HEIGHT : undefined,
+            width: `min(${(revealed.data as { width?: string } | undefined)?.width ?? '18rem'}, 85vw)`
+          }}
         >
           {/* Zone-mates share the overlay through the zone's own tab strip
               (SESSIONS | BOTS) — a lone pane keeps the stripless form. */}
