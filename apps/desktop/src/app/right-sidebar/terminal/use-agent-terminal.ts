@@ -143,16 +143,19 @@ export function useAgentTerminal({
       termRef.current = term
       mountedRef.current = true
 
-      try {
-        const webgl = new WebglAddon()
-        webgl.onContextLoss(() => {
-          webgl.dispose()
-          webglRef.current = null
-        })
-        term.loadAddon(webgl)
-        webglRef.current = webgl
-      } catch {
-        // No WebGL — xterm falls back to the DOM renderer.
+      // As in user terminals, root CSS zoom clips WebGL's first row in browsers.
+      if (import.meta.env.VITE_BROWSER !== '1') {
+        try {
+          const webgl = new WebglAddon()
+          webgl.onContextLoss(() => {
+            webgl.dispose()
+            webglRef.current = null
+          })
+          term.loadAddon(webgl)
+          webglRef.current = webgl
+        } catch {
+          // No WebGL — xterm falls back to the DOM renderer.
+        }
       }
 
       fitRef.current?.(active)

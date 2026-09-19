@@ -187,9 +187,63 @@ async function command(state, sid, text) {
   return socket.output.slice(start).split(`__begin_${mark}__`).at(-1).split(`__done_${mark}__`)[0]
 }
 
+async function assertInitialPromptVisible(name) {
+  // Output arrival precedes xterm's paint frame (the helper starts at 1×1).
+  await expect.poll(() => input().evaluate(element => element.getBoundingClientRect().height)).toBeGreaterThan(2)
+  const geometry = await terminal().locator('.xterm-screen').evaluate(screen => {
+    const box = screen.getBoundingClientRect()
+    const caret = screen.querySelector('.xterm-helper-textarea').getBoundingClientRect()
+    const height = caret.height
+    const ancestors = []
+    for (let node = screen; node; node = node.parentElement) {
+      const rect = node.getBoundingClientRect(), css = getComputedStyle(node)
+      ancestors.push({ rect: rect.toJSON(), scrollTop: node.scrollTop, overflow: css.overflow })
+    }
+    // Hit-test the first row, not merely its outer terminal pane.
+    const uncovered = [2, height / 2, height - 2].every(y =>
+      [2, box.width / 2, box.width - 2].every(x =>
+        screen.contains(document.elementFromPoint(box.left + x, box.top + y))))
+    return { x: box.x, y: box.y, width: box.width, height, caret: caret.toJSON(), uncovered, ancestors }
+  })
+  await writeFile(path.join(artifacts, `${name}-geometry.json`), JSON.stringify(geometry, null, 2))
+  assert.ok(geometry.uncovered, 'The first row must not be covered by chrome')
+  for (const ancestor of geometry.ancestors) {
+    if (!/hidden|clip|auto|scroll/.test(ancestor.overflow)) continue
+    assert.ok(geometry.y >= ancestor.rect.top - 1 && geometry.y + geometry.height <= ancestor.rect.bottom + 1,
+      'The first row must fit inside every clipping ancestor')
+  }
+  // Inspect the actual composed screenshot, not canvas/buffer text: a selectable
+  // prompt can still be clipped by a mismatched WebGL viewport.
+  const png = await page.screenshot({ path: path.join(artifacts, `${name}.png`), animations: 'disabled' })
+  const ink = await page.evaluate(async ({ image, row }) => {
+    const bitmap = await createImageBitmap(await (await fetch(image)).blob())
+    const canvas = document.createElement('canvas')
+    canvas.width = bitmap.width; canvas.height = bitmap.height
+    const ctx = canvas.getContext('2d'); ctx.drawImage(bitmap, 0, 0)
+    const x = Math.ceil(row.x), y = Math.ceil(row.y)
+    const width = Math.floor(row.width) - 2, height = Math.floor(row.height)
+    const { data } = ctx.getImageData(x, y, width, height)
+    const background = data.slice((width - 1) * 4, width * 4)
+    let left = width, right = -1, top = height, bottom = -1
+    // Exclude the cursor: its full-height block must not disguise clipped text.
+    for (let py = 0; py < height; py++) for (let px = 0; px < Math.min(width, Math.floor(row.caret.left) - x); px++) {
+      const i = (py * width + px) * 4
+      if (Math.max(...[0, 1, 2].map(c => Math.abs(data[i + c] - background[c]))) < 60) continue
+      left = Math.min(left, px); right = Math.max(right, px)
+      top = Math.min(top, py); bottom = Math.max(bottom, py)
+    }
+    bitmap.close()
+    return { left: x + left, top: y + top, right: x + right, bottom: y + bottom,
+      width: Math.max(0, right - left + 1), height: Math.max(0, bottom - top + 1) }
+  }, { image: `data:image/png;base64,${png.toString('base64')}`, row: geometry })
+  await writeFile(path.join(artifacts, `${name}-visibility.json`), JSON.stringify({ geometry, ink }, null, 2))
+  assert.ok(ink.width >= geometry.height * 3 && ink.height >= geometry.height * 0.4,
+    `Initial prompt glyphs must paint across the first row, not just a cursor sliver: ${JSON.stringify(ink)}`)
+}
+
 async function visibleBuffer() {
-  // Real mouse selection reads painted xterm cells via its public textarea,
-  // including WebGL mode. No private xterm object or bridge access.
+  // Mouse selection reads xterm buffer cells via its public textarea, NOT proof
+  // that glyphs are painted. assertInitialPromptVisible checks the screen separately.
   const screen = terminal().locator('.xterm-screen')
   const box = await screen.boundingBox()
   await page.mouse.move(box.x + 1, box.y + 1)
@@ -272,8 +326,23 @@ try {
     await expect.poll(() => state.sessions.length).toBe(1)
     a = state.sessions[0]
     await expect.poll(() => state.sockets.find(s => s.sid === a.id)?.output || '').toMatch(/[%#$>]\s/)
+    await expect(input()).toBeVisible()
+    await assertInitialPromptVisible('first-prompt')
+    const original = await page.evaluate(() => window.hermesDesktop.zoom.get())
+    try {
+      for (const percent of [90, 100, 125]) {
+        await page.evaluate(value => window.hermesDesktop.zoom.setPercent(value), percent)
+        await openTerminal(state)
+        await assertInitialPromptVisible(`fresh-first-prompt-${percent}`)
+        await tabs().last().click({ button: 'right' })
+        await page.getByRole('menuitem', { name: 'Close', exact: true }).click()
+        await expect(tabs()).toHaveCount(1)
+      }
+    } finally {
+      await page.evaluate(value => window.hermesDesktop.zoom.setPercent(value), original.percent)
+    }
+    assert.ok(!frames.some(f => f.direction === 'sent' && f.binary), 'First-prompt visibility must pass without shell input')
     assert.match(await visibleBuffer(), /[%#$>]\s/)
-    await snapshot('first-prompt')
     aPid = await identity(state, a, runtime, baselineHome, baselineCwd, '')
     assert.match(await command(state, a.id, "stty -echo; SPIKE_KEEP='A-owned'; printf 'Unicode: žluťoučký 東京 🦀\\n'"), /Unicode: žluťoučký 東京 🦀/)
     assert.ok((await visibleBuffer()).includes('Unicode: žluťoučký 東京 🦀'))

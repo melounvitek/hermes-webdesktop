@@ -985,18 +985,21 @@ export function useTerminalSession({
         term.focus()
       }
 
-      // WebGL renderer matches the dashboard ChatPage path; xterm's default DOM
-      // renderer paints SGR via CSS classes that visibly mute against our skins.
-      try {
-        const webgl = new WebglAddon()
-        webgl.onContextLoss(() => {
-          webgl.dispose()
-          webglRef.current = null
-        })
-        term.loadAddon(webgl)
-        webglRef.current = webgl
-      } catch (err) {
-        console.warn('[hermes-terminal] WebGL unavailable; falling back to DOM', err)
+      // Root CSS zoom resizes WebGL's drawing buffer without updating its GL
+      // viewport, clipping the first row below 100%. Browser uses xterm's DOM
+      // renderer; Electron's native zoom keeps the WebGL dimensions in sync.
+      if (import.meta.env.VITE_BROWSER !== '1') {
+        try {
+          const webgl = new WebglAddon()
+          webgl.onContextLoss(() => {
+            webgl.dispose()
+            webglRef.current = null
+          })
+          term.loadAddon(webgl)
+          webglRef.current = webgl
+        } catch (err) {
+          console.warn('[hermes-terminal] WebGL unavailable; falling back to DOM', err)
+        }
       }
 
       fitAndResize(initialActiveRef.current)
