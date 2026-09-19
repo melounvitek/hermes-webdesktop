@@ -114,7 +114,19 @@ const emojibaseAssets = () => ({
 
 export default defineConfig(({ command }) => ({
   base: './',
-  plugins: [react(), babel({ presets: [compilerPreset()] }), tailwindcss(), emojibaseAssets()],
+  plugins: [
+    react(),
+    babel({ presets: [compilerPreset()] }),
+    tailwindcss(),
+    emojibaseAssets(),
+    process.env.VITE_BROWSER === '1' && {
+      name: 'hermes:browser-icon',
+      transformIndexHtml: {
+        order: 'pre',
+        handler: html => html.replaceAll('href="/apple-touch-icon.png"', 'href="/src/browser/icon.png?no-inline"')
+      }
+    }
+  ],
   css: {
     // Pin an explicit (empty) PostCSS config. Tailwind is handled entirely by
     // `@tailwindcss/vite`, so the renderer needs no PostCSS plugins — and
