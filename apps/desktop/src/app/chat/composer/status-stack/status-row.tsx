@@ -10,6 +10,7 @@ import { capitalize } from '@/lib/text'
 import type { TodoStatus } from '@/lib/todos'
 import { cn } from '@/lib/utils'
 import type { ComposerStatusItem } from '@/store/composer-status'
+import { knownOwnerForSession } from '@/store/session-states'
 
 const toolLabel = (name: string) => name.split('_').filter(Boolean).map(capitalize).join(' ') || name
 
@@ -72,6 +73,7 @@ function leadingGlyph(item: ComposerStatusItem, s: Translations['statusStack']):
 
 interface StatusItemRowProps {
   item: ComposerStatusItem
+  sessionId?: string | null
   /** Clear a finished background task from the stack. */
   onDismiss?: (id: string) => void
   /** Open the subagent's own session window, livestreamed by the gateway's
@@ -86,7 +88,7 @@ interface StatusItemRowProps {
  * Memoised + keyed by id so parent re-renders never remount it (the spinner
  * keeps ticking instead of resetting).
  */
-export const StatusItemRow = memo(function StatusItemRow({ item, onDismiss, onOpen, onStop }: StatusItemRowProps) {
+export const StatusItemRow = memo(function StatusItemRow({ item, onDismiss, onOpen, onStop, sessionId }: StatusItemRowProps) {
   const { t } = useI18n()
   const s = t.statusStack
   const failed = item.state === 'failed'
@@ -102,8 +104,11 @@ export const StatusItemRow = memo(function StatusItemRow({ item, onDismiss, onOp
   const canOpen = item.type === 'subagent' && !!onOpen
 
   // Background rows link to their read-only terminal tab; subagents open their session.
+  const owner = knownOwnerForSession(sessionId)
+  const profile = typeof owner === 'string' ? owner : owner?.profile
+  const canMirror = import.meta.env.VITE_BROWSER !== '1' || Boolean(profile)
   const onActivate =
-    item.type === 'background' ? () => openAgentTerminal(item.id, item.title) : canOpen ? onOpen : undefined
+    item.type === 'background' && canMirror ? () => openAgentTerminal(item.id, item.title, profile) : canOpen ? onOpen : undefined
 
   return (
     <Fragment>

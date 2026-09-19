@@ -41,7 +41,11 @@ export function setActiveTerminalId(id: string | null): void {
   activeId = id
 }
 
-export function readActiveTerminal(opts: TerminalReadOptions = {}): TerminalReadResult | null {
+export function readActiveTerminal(opts: TerminalReadOptions = {}, expectedId?: string): TerminalReadResult | null {
+  if (expectedId !== undefined && expectedId !== activeId) {
+    return null
+  }
+
   const reader = activeId === null ? null : readers.get(activeId)
 
   return reader ? reader(opts) : null

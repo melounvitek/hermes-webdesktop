@@ -8,6 +8,7 @@ import type { CSSProperties } from 'react'
 
 import { writeClipboardText } from '@/components/ui/copy-button'
 import { markRightPanePerf } from '@/debug/right-pane-events'
+import type { HermesTerminalStatus } from '@/global'
 import { triggerHaptic } from '@/lib/haptics'
 import { isComposerChord } from '@/lib/keybinds/chords'
 import { $previewTarget } from '@/store/preview'
@@ -234,6 +235,7 @@ interface UseTerminalSessionOptions {
   /** Renderer-side terminal id (the tab handle), used to key the agent reader. */
   id: string
   cwd: string
+  profile?: string
   /** Only the active tab is visible, owns the agent reader, and runs injections. */
   active: boolean
   onAddSelectionToChat: (text: string, label?: string) => void
@@ -386,7 +388,8 @@ export function useTerminalSession({
   onAddSelectionToChat,
   restoreCwd,
   reviveBuffer,
-  onShell
+  onShell,
+  profile
 }: UseTerminalSessionOptions) {
   // Key off renderedMode (the painted surface type), not resolvedMode (the
   // clicked switch) — a skin can keep a light surface in "dark" mode, and we
@@ -404,6 +407,10 @@ export function useTerminalSession({
   const termRef = useRef<Terminal | null>(null)
   const webglRef = useRef<WebglAddon | null>(null)
   const sessionIdRef = useRef<string | null>(null)
+  const profileRef = useRef(profile)
+  const retryRef = useRef<(() => void) | null>(null)
+  const [connectionStatus, setConnectionStatus] = useState<HermesTerminalStatus>({ state: 'connecting' })
+  const retry = useCallback(() => retryRef.current?.(), [])
   // Snapshot the revive buffer once: live snapshots feed updateTerminalReviveBuffer
   // and would otherwise re-arm replay on every store-driven re-render.
   const initialReviveBufferRef = useRef(reviveBuffer)
@@ -417,6 +424,7 @@ export function useTerminalSession({
   // persistSnapshot so an untouched tab never re-saves an accumulating snapshot.
   const hasSessionActivityRef = useRef(false)
   const initialActiveRef = useRef(active)
+  const activeRef = useRef(active)
   const shellNameRef = useRef('shell')
   const selectionLabelRef = useRef('')
   const selectionRef = useRef('')
@@ -436,7 +444,8 @@ export function useTerminalSession({
   useEffect(() => {
     onAddSelectionToChatRef.current = onAddSelectionToChat
     onShellRef.current = onShell
-  }, [onAddSelectionToChat, onShell])
+    activeRef.current = active
+  }, [onAddSelectionToChat, onShell, active])
 
   // Live selection at call time. A redraw-heavy TUI (spinners, clocks) outruns
   // onSelectionChange, so trust xterm directly — fall back to the native
@@ -475,6 +484,10 @@ export function useTerminalSession({
   // TUI redraw races. Only swallow ⌘/Ctrl+L when there's text to send, else it
   // must reach the shell as clear-screen.
   useEffect(() => {
+    if (import.meta.env.VITE_BROWSER === '1' && !active) {
+      return
+    }
+
     const onKeyDown = (event: KeyboardEvent) => {
       if (!isComposerChord(event) || !readSelection().trim()) {
         return
@@ -488,7 +501,7 @@ export function useTerminalSession({
     window.addEventListener('keydown', onKeyDown, { capture: true })
 
     return () => window.removeEventListener('keydown', onKeyDown, { capture: true })
-  }, [addSelectionToChat, readSelection])
+  }, [addSelectionToChat, readSelection, active])
 
   // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
   useEffect(() => {
@@ -497,6 +510,7 @@ export function useTerminalSession({
 
     if (!host || !terminalApi) {
       setStatus('closed')
+      setConnectionStatus({ state: 'disconnected', reason: 'missing-plugin' })
 
       return
     }
@@ -652,6 +666,10 @@ export function useTerminalSession({
     }
 
     const scheduleSnapshot = () => {
+      if (import.meta.env.VITE_BROWSER === '1') {
+        return
+      }
+
       if (snapshotTimer) {
         return
       }
@@ -848,12 +866,34 @@ export function useTerminalSession({
       return false
     })
 
-    const startSession = () =>
+    const reportConnection = (next: HermesTerminalStatus) => {
+      if (disposed) {
+        return
+      }
+      setConnectionStatus(next)
+      setStatus(next.state === 'open' ? 'open' : next.state === 'disconnected' ? 'closed' : 'starting')
+    }
+
+    const startSession = () => {
+      reportConnection({ state: 'connecting' })
+
+      if (sessionIdRef.current) {
+        // Explicit recovery reattaches the owned shell; never start a replacement.
+        void terminalApi.attach(sessionIdRef.current)
+
+        return
+      }
+
       void terminalApi
         // Prefer the prior session's last cwd so a reopened tab lands where the
         // user last `cd`'d; the main side falls back to the launch cwd (then
         // home) if that dir no longer exists.
-        .start({ cols: term.cols, cwd: initialRestoreCwdRef.current || cwd, rows: term.rows })
+        .start({
+          cols: term.cols,
+          cwd: initialRestoreCwdRef.current || cwd,
+          rows: term.rows,
+          ...(import.meta.env.VITE_BROWSER === '1' ? { profile: profileRef.current } : {})
+        })
         .then(async session => {
           if (disposed) {
             void terminalApi.dispose(session.id)
@@ -890,22 +930,44 @@ export function useTerminalSession({
             })
           )
 
+          if (terminalApi.onStatus) {
+            cleanup.push(terminalApi.onStatus(session.id, reportConnection))
+          }
+
           const attached = await terminalApi.attach(session.id)
 
+          if (disposed) {
+            return
+          }
+
           if (!attached) {
+            if (terminalApi.onStatus) {
+              return
+            } // browser publishes its recovery state
             throw new Error('Terminal session disappeared before its output stream attached')
           }
 
           setStatus('open')
 
           window.requestAnimationFrame(() => {
-            term.clearSelection() // drop any selection painted over transient boot rows
+            if (!disposed) {
+              term.clearSelection()
+            } // drop any selection painted over transient boot rows
           })
         })
         .catch(error => {
-          setStatus('closed')
-          term.write(`Terminal failed to start: ${error instanceof Error ? error.message : String(error)}\r\n`)
+          if (disposed) {
+            return
+          }
+          reportConnection({ state: 'disconnected', reason: error?.reason ?? 'connection' })
+
+          if (import.meta.env.VITE_BROWSER !== '1') {
+            term.write(`Terminal failed to start: ${error instanceof Error ? error.message : String(error)}\r\n`)
+          }
         })
+    }
+
+    retryRef.current = startSession
 
     // Open + fit + start only once webfonts settle. Fitting with fallback metrics
     // picks the wrong row count, the shell boots at that size, then the real font
@@ -918,20 +980,26 @@ export function useTerminalSession({
 
       term.open(host)
       mountedRef.current = true
-      term.focus()
 
-      // WebGL renderer matches the dashboard ChatPage path; xterm's default DOM
-      // renderer paints SGR via CSS classes that visibly mute against our skins.
-      try {
-        const webgl = new WebglAddon()
-        webgl.onContextLoss(() => {
-          webgl.dispose()
-          webglRef.current = null
-        })
-        term.loadAddon(webgl)
-        webglRef.current = webgl
-      } catch (err) {
-        console.warn('[hermes-terminal] WebGL unavailable; falling back to DOM', err)
+      if (import.meta.env.VITE_BROWSER !== '1' || activeRef.current) {
+        term.focus()
+      }
+
+      // Root CSS zoom resizes WebGL's drawing buffer without updating its GL
+      // viewport, clipping the first row below 100%. Browser uses xterm's DOM
+      // renderer; Electron's native zoom keeps the WebGL dimensions in sync.
+      if (import.meta.env.VITE_BROWSER !== '1') {
+        try {
+          const webgl = new WebglAddon()
+          webgl.onContextLoss(() => {
+            webgl.dispose()
+            webglRef.current = null
+          })
+          term.loadAddon(webgl)
+          webglRef.current = webgl
+        } catch (err) {
+          console.warn('[hermes-terminal] WebGL unavailable; falling back to DOM', err)
+        }
       }
 
       fitAndResize(initialActiveRef.current)
@@ -953,6 +1021,7 @@ export function useTerminalSession({
 
     return () => {
       disposed = true
+      retryRef.current = null
       mountedRef.current = false
       cleanup.forEach(run => run())
       fitRef.current = null
@@ -1040,10 +1109,16 @@ export function useTerminalSession({
 
         webglRef.current?.clearTextureAtlas()
         term?.refresh(0, term.rows - 1)
-        term?.focus()
       }
     })
   }, [active, status])
+
+  // Connection recovery may redraw the shell, but only selection takes focus.
+  useEffect(() => {
+    if (active && mountedRef.current) {
+      termRef.current?.focus()
+    }
+  }, [active, mountedRef])
 
   // Flush a queued command (e.g. a provider-disconnect) into the live session.
   // Only the active tab runs it (so a broadcast doesn't fan out to every shell);
@@ -1072,6 +1147,8 @@ export function useTerminalSession({
 
   return {
     addSelectionToChat,
+    connectionStatus,
+    retry,
     hostRef,
     selection,
     selectionStyle,

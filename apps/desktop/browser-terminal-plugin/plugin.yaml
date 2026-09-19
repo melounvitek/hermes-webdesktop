@@ -1,0 +1,3 @@
+name: browser-terminal
+version: 0.1.0
+description: Optional authenticated browser host shells (Linux). Not a sandbox.

@@ -93,8 +93,8 @@ vi.mock('./buffer', () => ({
   registerTerminalReader: terminalRegistrations.registerReader
 }))
 
-function Harness() {
-  const { hostRef } = useAgentTerminal({ active: false, id: 'agent-tab', procId: 'proc-1' })
+function Harness({ profile }: { profile?: string }) {
+  const { hostRef } = useAgentTerminal({ active: false, id: 'agent-tab', procId: 'proc-1', profile })
 
   return <div ref={hostRef} />
 }
@@ -131,7 +131,19 @@ describe('useAgentTerminal', () => {
   afterEach(() => {
     vi.clearAllMocks()
     vi.unstubAllGlobals()
+    vi.unstubAllEnvs()
     Reflect.deleteProperty(globalThis.document, 'fonts')
+  })
+
+  it('subscribes a hidden browser mirror to its captured owner, not the foreground profile', async () => {
+    vi.stubEnv('VITE_BROWSER', '1')
+    const { unmount } = render(<Harness profile="background-owner" />)
+    await act(async () => resolveFontLoad([]))
+    await waitFor(() => expect(terminalRegistrations.registerWriter).toHaveBeenCalledWith(
+      'proc-1', expect.any(Function), 'background-owner'
+    ))
+    expect(resizeObserverConstructor).not.toHaveBeenCalled()
+    unmount()
   })
 
   it('unmounts safely while initial font preparation is pending', async () => {

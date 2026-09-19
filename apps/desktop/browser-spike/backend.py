@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import secrets
 import shlex
+import shutil
 import signal
 import subprocess
 import tempfile
@@ -134,6 +135,7 @@ def main():
     parser.add_argument("--python", type=Path, default=Path.home() / ".hermes/hermes-agent/venv/bin/python")
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--restartable", action="store_true", help="Restart child on SIGUSR1 or child exit")
+    parser.add_argument("--terminal-plugin", action="store_true", help="Install the optional plugin into the disposable home")
     parser.add_argument("--public-url", help="HTTPS origin for a tailnet proxy; generates a password login")
     args = parser.parse_args()
     if args.public_url:
@@ -172,6 +174,10 @@ def main():
                       "background_review": {"enabled": False}},
         "curator": {"enabled": False},
     }
+    if args.terminal_plugin:
+        shutil.copytree(ROOT / "apps/desktop/browser-terminal-plugin", hermes_home / "plugins/browser-terminal")
+        config["plugins"] = {"enabled": ["browser-terminal"]}
+        (home / ".zshrc").touch()  # Suppress first-run setup in the disposable home.
     # JSON is valid YAML and keeps the launcher stdlib-only.
     (hermes_home / "config.yaml").write_text(json.dumps(config, indent=2))
     token = secrets.token_urlsafe(32)
@@ -211,7 +217,7 @@ def main():
     runtime = {"run_dir": str(run_dir), "home": str(home), "hermes_home": str(hermes_home),
                "harness_pid": os.getpid(), "backend_pid": child.pid, "backend_log": str(log_path),
                "model_url": model_url + "/v1", "command": command, "imports": origins,
-               "public_url": args.public_url}
+               "public_url": args.public_url, "terminal_plugin": args.terminal_plugin}
     print(json.dumps(runtime, indent=2), flush=True)
 
     def stop(_signum, _frame):

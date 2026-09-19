@@ -1,12 +1,16 @@
 import { useStore } from '@nanostores/react'
 import { useEffect } from 'react'
 
+import { Button } from '@/components/ui/button'
+import { EmptyState } from '@/components/ui/empty-state'
+import { useI18n } from '@/i18n'
 import { $backgroundStatusBySession } from '@/store/composer-status'
+import { knownOwnerForSession } from '@/store/session-states'
 
 import { seedAgentTerminalCommand, syncAgentTerminalSnapshot } from './agent-terminal-stream'
 import { setActiveTerminalId } from './buffer'
 import { AgentTerminalInstance, TerminalInstance } from './instance'
-import { $activeTerminalId, $terminals, ensureAgentTerminal } from './terminals'
+import { $terminals, $visibleActiveTerminalId, createTerminal, ensureAgentTerminal } from './terminals'
 
 interface TerminalWorkspaceProps {
   onAddSelectionToChat: (text: string, label?: string) => void
@@ -18,12 +22,13 @@ interface TerminalWorkspaceProps {
  *  new-terminal control live in the pane DOM — see TerminalPaneChrome. */
 export function TerminalWorkspace({ onAddSelectionToChat }: TerminalWorkspaceProps) {
   const terminals = useStore($terminals)
-  const activeId = useStore($activeTerminalId)
+  const activeId = useStore($visibleActiveTerminalId)
+  const { t } = useI18n()
   const background = useStore($backgroundStatusBySession)
 
   // Mirror the tab selection into the agent reader (read_terminal reads it).
   useEffect(() => {
-    const unsubscribe = $activeTerminalId.subscribe(setActiveTerminalId)
+    const unsubscribe = $visibleActiveTerminalId.subscribe(setActiveTerminalId)
 
     return () => {
       unsubscribe()
@@ -35,20 +40,37 @@ export function TerminalWorkspace({ onAddSelectionToChat }: TerminalWorkspacePro
   // Live chunks stream via agent.terminal.output; the process-list snapshot also
   // seeds/falls back so the tab never stays blank if the stream races startup.
   useEffect(() => {
-    for (const list of Object.values(background)) {
+    for (const [sessionId, list] of Object.entries(background)) {
+      const owner = knownOwnerForSession(sessionId)
+      const profile = typeof owner === 'string' ? owner : owner?.profile
+
       for (const item of list) {
-        ensureAgentTerminal(item.id, item.title)
-        seedAgentTerminalCommand(item.id, item.title)
-        syncAgentTerminalSnapshot(item.id, item.output ?? '')
+        ensureAgentTerminal(item.id, item.title, profile)
+        seedAgentTerminalCommand(item.id, item.title, profile)
+        syncAgentTerminalSnapshot(item.id, item.output ?? '', profile)
       }
     }
   }, [background])
 
   return (
     <>
+      {import.meta.env.VITE_BROWSER === '1' && !activeId && (
+        <div className="grid place-items-center p-4">
+          <EmptyState title={t.rightSidebar.terminalEmpty} />
+          <Button onClick={() => createTerminal()} size="sm" variant="secondary">
+            {t.rightSidebar.terminalNew}
+          </Button>
+        </div>
+      )}
       {terminals.map(term =>
         term.kind === 'agent' ? (
-          <AgentTerminalInstance active={term.id === activeId} id={term.id} key={term.id} procId={term.procId!} />
+          <AgentTerminalInstance
+            active={term.id === activeId}
+            id={term.id}
+            key={term.id}
+            procId={term.procId!}
+            profile={term.profile}
+          />
         ) : (
           <TerminalInstance
             active={term.id === activeId}
@@ -56,6 +78,7 @@ export function TerminalWorkspace({ onAddSelectionToChat }: TerminalWorkspacePro
             id={term.id}
             key={term.id}
             onAddSelectionToChat={onAddSelectionToChat}
+            profile={term.profile}
             restoreCwd={term.restoreCwd}
             reviveBuffer={term.reviveBuffer}
           />

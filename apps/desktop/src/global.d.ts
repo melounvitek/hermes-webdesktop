@@ -509,8 +509,15 @@ declare global {
         dispose: (id: string) => Promise<boolean>
         onData: (id: string, callback: (payload: string) => void) => () => void
         onExit: (id: string, callback: (payload: HermesTerminalExit) => void) => () => void
+        /** Browser transport health; native PTYs do not need reconnect state. */
+        onStatus?: (id: string, callback: (status: HermesTerminalStatus) => void) => () => void
         resize: (id: string, size: { cols: number; rows: number }) => Promise<boolean>
-        start: (options?: { cols?: number; cwd?: string; rows?: number }) => Promise<HermesTerminalSession>
+        start: (options?: {
+          cols?: number
+          cwd?: string
+          rows?: number
+          profile?: string
+        }) => Promise<HermesTerminalSession>
         write: (id: string, data: string) => Promise<boolean>
       }
       reachPreviewUrl?: (url: string) => Promise<string>
@@ -638,6 +645,11 @@ export interface HermesTerminalSession {
   cwd: string
   id: string
   shell: string
+}
+
+export interface HermesTerminalStatus {
+  state: 'connecting' | 'open' | 'reconnecting' | 'disconnected'
+  reason?: 'connection' | 'missing-plugin' | 'missing-session' | 'auth' | 'superseded'
 }
 
 export interface HermesTerminalExit {

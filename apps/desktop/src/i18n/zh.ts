@@ -3861,6 +3861,16 @@ export const zh = defineLocale({
   },
 
   rightSidebar: {
+    terminalDisconnected: '终端已断开连接',
+    terminalReconnecting: '正在重新连接终端…',
+    terminalEmpty: '此配置中没有终端',
+    terminalErrors: {
+      connection: '无法连接终端。请检查连接后重试。未发送的输入不会重新发送。',
+      'missing-plugin': '请在 Hermes 服务器上安装并启用 browser-terminal 插件，然后重启仪表盘。',
+      'missing-session': '服务器上已不存在此终端。请关闭此标签页并打开新终端以启动另一个 shell。',
+      auth: '终端身份验证失败。请重新登录后重试。',
+      superseded: '此终端已在其他位置连接。重试以在此处重新连接。'
+    },
     aria: '右侧边栏',
     panelsAria: '右侧边栏面板',
     files: '文件系统',

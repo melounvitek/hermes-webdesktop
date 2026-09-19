@@ -1,5 +1,6 @@
 import { readActivePreview } from '@/app/chat/right-rail/preview-reader'
 import { readActiveTerminal } from '@/app/right-sidebar/terminal/buffer'
+import { $activeTerminal } from '@/app/right-sidebar/terminal/terminals'
 import { pendingClarifyToolPayload } from '@/app/session/hooks/use-session-actions/restore-pending-clarify'
 import { translateNow } from '@/i18n'
 import { restorePendingClarifyToolCall } from '@/lib/chat-messages'
@@ -271,8 +272,22 @@ const vaultUnlockPrompt: Handler = ctx => {
 // ── Desktop-surface bridges (answered immediately, no card) ─────────────────
 
 const terminalRead: Handler = ({ request }) => {
+  const terminal = $activeTerminal.get()
+
+  if (import.meta.env.VITE_BROWSER === '1' && (!request.profile || request.profile !== terminal?.profile)) {
+    answerValue(request, null)
+
+    return
+  }
+
   // read_terminal tool: serialize the renderer's xterm buffer. Empty = no live pane.
-  answerValue(request, readActiveTerminal({ count: num(request.params.count), start: num(request.params.start) }))
+  answerValue(
+    request,
+    readActiveTerminal(
+      { count: num(request.params.count), start: num(request.params.start) },
+      import.meta.env.VITE_BROWSER === '1' ? terminal?.id : undefined
+    )
+  )
 }
 
 const previewRead: Handler = ({ request }) => {

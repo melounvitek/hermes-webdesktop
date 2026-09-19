@@ -3302,6 +3302,16 @@ export interface Translations {
   }
 
   rightSidebar: {
+    terminalDisconnected: string
+    terminalReconnecting: string
+    terminalEmpty: string
+    terminalErrors: {
+      connection: string
+      'missing-plugin': string
+      'missing-session': string
+      auth: string
+      superseded: string
+    }
     aria: string
     panelsAria: string
     files: string
