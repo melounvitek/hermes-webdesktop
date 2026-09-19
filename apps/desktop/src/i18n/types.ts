@@ -306,6 +306,7 @@ export interface Translations {
     copyDetailFailed: string
     backendOutOfDateTitle: string
     backendOutOfDateMessage: string
+    browserBackendOutOfDateMessage: string
     installMethodUnsupportedTitle: string
     updateHermes: string
     updateReadyTitle: string

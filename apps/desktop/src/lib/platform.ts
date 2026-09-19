@@ -10,6 +10,8 @@
  * `os.release()`.
  */
 
+export const isBrowserClient = (): boolean => typeof window !== 'undefined' && Boolean(window.hermesDesktop?.browser)
+
 export const isMacPlatform = (): boolean =>
   typeof navigator !== 'undefined' && /mac/i.test(navigator.platform || navigator.userAgent || '')
 

@@ -24,6 +24,7 @@ import {
   Trash2,
   Wrench
 } from '@/lib/icons'
+import { isBrowserClient } from '@/lib/platform'
 import { exportSession } from '@/lib/session-export'
 import { fmtDateTime } from '@/lib/time'
 import { useStoreSelector } from '@/lib/use-session-slice'
@@ -267,6 +268,10 @@ export function CommandCenterView({ initialSection, onClose, onDeleteSession, on
 
   const runSystemAction = useCallback(
     async (kind: 'restart' | 'update') => {
+      if (kind === 'update' && isBrowserClient()) {
+        return
+      }
+
       setSystemError('')
 
       // A profile served by the shared multiplexer restarts every bot on this device: ask first.
@@ -458,9 +463,11 @@ export function CommandCenterView({ initialSection, onClose, onDeleteSession, on
                         <Button onClick={() => void runSystemAction('restart')} size="xs" variant="text">
                           {cc.restartGateway}
                         </Button>
-                        <Button onClick={() => void runSystemAction('update')} size="xs" variant="textStrong">
-                          {cc.updateHermes}
-                        </Button>
+                        {!isBrowserClient() && (
+                          <Button onClick={() => void runSystemAction('update')} size="xs" variant="textStrong">
+                            {cc.updateHermes}
+                          </Button>
+                        )}
                       </div>
                     </div>
                     {systemAction && (

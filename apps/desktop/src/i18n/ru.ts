@@ -219,6 +219,8 @@ export const ru = defineLocale({
     copyDetail: 'Копировать подробность',
     copyDetailFailed: 'Не удалось скопировать подробность уведомления',
     backendOutOfDateTitle: 'Устаревший бэкенд',
+    browserBackendOutOfDateMessage:
+      'Бэкенд не сообщает о возможностях, необходимых этой браузерной сборке. Некоторые функции могут не работать. Обновление бэкенда здесь недоступно.',
     backendOutOfDateMessage:
       'Ваш бэкенд Hermes старше этой сборки приложения и может работать некорректно. Обновите их, чтобы они совпали.',
     installMethodUnsupportedTitle: 'Неподдерживаемый способ установки',

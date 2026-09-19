@@ -48,6 +48,11 @@ export function createBrowserBridge({ token, authRequired }: BrowserConfig) {
       throw new Error('Only same-origin /api/ requests are supported')
     }
 
+    // Some renderer actions call REST directly instead of the update store.
+    if (decodeURIComponent(url.pathname).replace(/\/+$/, '') === '/api/hermes/update') {
+      throw new Error('Backend updates are unavailable in the browser.')
+    }
+
     if (request.profile && !url.searchParams.has('profile')) {
       url.searchParams.set('profile', request.profile)
     }

@@ -19,6 +19,7 @@ import { useI18n } from '@/i18n'
 import { buildCommitChangelog, type CommitGroup } from '@/lib/commit-changelog'
 import { openExternalLink } from '@/lib/external-link'
 import { AlertCircle, Check, Copy, Terminal } from '@/lib/icons'
+import { isBrowserClient } from '@/lib/platform'
 import { resolveUpdateCopy, type UpdateTarget } from '@/lib/update-copy'
 import { cn } from '@/lib/utils'
 import { requestRoute } from '@/store/recovery-requests'
@@ -75,10 +76,14 @@ export function UpdatesOverlay() {
   const install = isBackend ? applyBackendUpdate : applyUpdates
 
   useEffect(() => {
-    if (open && !status && !checking) {
+    if (!isBrowserClient() && open && !status && !checking) {
       void check()
     }
   }, [check, checking, open, status])
+
+  if (isBrowserClient()) {
+    return null
+  }
 
   const behind = status?.behind ?? 0
   const updateAvailable = status?.updateAvailable || behind > 0

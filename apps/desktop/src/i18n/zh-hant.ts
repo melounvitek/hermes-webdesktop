@@ -205,6 +205,8 @@ export const zhHant = defineLocale({
     copyDetail: '複製詳情',
     copyDetailFailed: '無法複製通知詳情',
     backendOutOfDateTitle: '後端版本過舊',
+    browserBackendOutOfDateMessage:
+      '此後端未回報目前瀏覽器版本所需的功能。部分功能可能無法正常運作。無法在此更新後端。',
     backendOutOfDateMessage: '您的 Hermes 後端早於目前的桌面版本，可能無法正常運作。請更新以保持一致。',
     installMethodUnsupportedTitle: '不受支援的安裝方式',
     updateHermes: '更新 Hermes',

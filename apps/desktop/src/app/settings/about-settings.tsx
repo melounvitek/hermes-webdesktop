@@ -6,6 +6,7 @@ import { Button } from '@/components/ui/button'
 import { Codicon } from '@/components/ui/codicon'
 import { type Translations, useI18n } from '@/i18n'
 import { AlertTriangle, CheckCircle2, ExternalLink, Loader2, RefreshCw } from '@/lib/icons'
+import { isBrowserClient } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 import {
   $desktopVersion,
@@ -99,6 +100,23 @@ export function AboutSettings() {
     statusLine = a.tapCheck
   }
 
+  const releaseNotesLink = (
+    <Button asChild className="ml-auto" size="sm" variant="text">
+      <a
+        href={RELEASE_NOTES_URL}
+        onClick={event => {
+          event.preventDefault()
+          void window.hermesDesktop?.openExternal?.(RELEASE_NOTES_URL)
+        }}
+        rel="noreferrer"
+        target="_blank"
+      >
+        <ExternalLink className="size-3" />
+        {a.releaseNotes}
+      </a>
+    </Button>
+  )
+
   return (
     <SettingsContent>
       <div className="flex flex-col items-center gap-3 pt-6 pb-2 text-center">
@@ -159,79 +177,70 @@ export function AboutSettings() {
         )}
       </div>
 
-      <div className="mx-auto mt-4 w-full max-w-2xl">
-        <SectionHeading icon={RefreshCw} title={a.updates} />
+      {isBrowserClient() ? (
+        <div className="mx-auto mt-4 w-full max-w-2xl">{releaseNotesLink}</div>
+      ) : (
+        <div className="mx-auto mt-4 w-full max-w-2xl">
+          <SectionHeading icon={RefreshCw} title={a.updates} />
 
-        <div
-          className={cn(
-            'rounded-xl border px-4 py-3 text-sm',
-            statusTone === 'available' && 'border-primary/30 bg-primary/5 text-foreground',
-            statusTone === 'error' && 'border-destructive/35 bg-destructive/5 text-destructive',
-            statusTone === 'idle' && 'border-border/70 bg-muted/20 text-foreground'
-          )}
-        >
-          <div className="flex items-start gap-2">
-            {statusTone === 'available' ? (
-              <Codicon className="mt-0.5 size-4 shrink-0 text-primary" name="cloud-download" size="1rem" />
-            ) : statusTone === 'error' ? null : (
-              <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+          <div
+            className={cn(
+              'rounded-xl border px-4 py-3 text-sm',
+              statusTone === 'available' && 'border-primary/30 bg-primary/5 text-foreground',
+              statusTone === 'error' && 'border-destructive/35 bg-destructive/5 text-destructive',
+              statusTone === 'idle' && 'border-border/70 bg-muted/20 text-foreground'
             )}
-            <div className="min-w-0">
-              <p className="font-medium">{statusLine}</p>
-              <p className="mt-1 text-xs text-muted-foreground">
-                {a.lastChecked(relativeTime(status?.fetchedAt, a))}
-                {justChecked && !checking ? a.justNowSuffix : ''}
-              </p>
+          >
+            <div className="flex items-start gap-2">
+              {statusTone === 'available' ? (
+                <Codicon className="mt-0.5 size-4 shrink-0 text-primary" name="cloud-download" size="1rem" />
+              ) : statusTone === 'error' ? null : (
+                <CheckCircle2 className="mt-0.5 size-4 shrink-0 text-emerald-600 dark:text-emerald-400" />
+              )}
+              <div className="min-w-0">
+                <p className="font-medium">{statusLine}</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  {a.lastChecked(relativeTime(status?.fetchedAt, a))}
+                  {justChecked && !checking ? a.justNowSuffix : ''}
+                </p>
+              </div>
+            </div>
+
+            <div className="mt-3 flex flex-wrap items-center gap-4">
+              <Button
+                disabled={checking || applying || !supported}
+                onClick={() => void handleCheck()}
+                size="sm"
+                variant="textStrong"
+              >
+                {checking ? <Loader2 className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
+                {checking ? a.checking : a.checkNow}
+              </Button>
+
+              {updateAvailable && supported && !applying && (
+                <>
+                  <Button onClick={() => startActiveUpdate()} size="sm">
+                    {a.updateNow}
+                  </Button>
+                  <Button onClick={() => openUpdatesWindow('client')} size="sm" variant="textStrong">
+                    {a.seeWhatsNew}
+                  </Button>
+                </>
+              )}
+
+              {releaseNotesLink}
             </div>
           </div>
 
-          <div className="mt-3 flex flex-wrap items-center gap-4">
-            <Button
-              disabled={checking || applying || !supported}
-              onClick={() => void handleCheck()}
-              size="sm"
-              variant="textStrong"
-            >
-              {checking ? <Loader2 className="size-3 animate-spin" /> : <RefreshCw className="size-3" />}
-              {checking ? a.checking : a.checkNow}
-            </Button>
+          <ListRow
+            description={a.automaticUpdatesDesc}
+            hint={a.branchCommit(status?.branch ?? 'unknown', status?.currentSha?.slice(0, 7) ?? 'unknown')}
+            title={a.automaticUpdates}
+          />
 
-            {updateAvailable && supported && !applying && (
-              <>
-                <Button onClick={() => startActiveUpdate()} size="sm">
-                  {a.updateNow}
-                </Button>
-                <Button onClick={() => openUpdatesWindow('client')} size="sm" variant="textStrong">
-                  {a.seeWhatsNew}
-                </Button>
-              </>
-            )}
-
-            <Button asChild className="ml-auto" size="sm" variant="text">
-              <a
-                href={RELEASE_NOTES_URL}
-                onClick={event => {
-                  event.preventDefault()
-                  void window.hermesDesktop?.openExternal?.(RELEASE_NOTES_URL)
-                }}
-                rel="noreferrer"
-                target="_blank"
-              >
-                <ExternalLink className="size-3" />
-                {a.releaseNotes}
-              </a>
-            </Button>
-          </div>
+          <UninstallSection />
         </div>
-
-        <ListRow
-          description={a.automaticUpdatesDesc}
-          hint={a.branchCommit(status?.branch ?? 'unknown', status?.currentSha?.slice(0, 7) ?? 'unknown')}
-          title={a.automaticUpdates}
-        />
-
-        <UninstallSection />
-      </div>
+      )}
     </SettingsContent>
   )
 }

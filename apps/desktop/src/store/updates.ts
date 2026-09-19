@@ -16,6 +16,7 @@ import type {
 } from '@/global'
 import { checkHermesUpdate, getActionStatus, updateHermes } from '@/hermes'
 import { translateNow } from '@/i18n'
+import { isBrowserClient } from '@/lib/platform'
 import { persistString, storedString } from '@/lib/storage'
 import { $connectionsRegistry, refreshConnectionsRegistry } from '@/store/connections'
 import { reconnectGateway } from '@/store/gateway-reconnect'
@@ -65,6 +66,10 @@ export const $updateOverlayTarget = atom<UpdateTarget>('client')
 export const setUpdateOverlayOpen = (open: boolean) => $updateOverlayOpen.set(open)
 
 export const openUpdateOverlayFor = (target: UpdateTarget) => {
+  if (isBrowserClient()) {
+    return
+  }
+
   $updateOverlayTarget.set(target)
   $updateOverlayOpen.set(true)
   void (target === 'backend' ? checkBackendUpdates({ force: true }) : checkUpdates({ force: true }))
@@ -167,17 +172,21 @@ export function reportBackendContract(contract: number | undefined): void {
   }
 
   notify({
-    action: {
-      label: translateNow('notifications.updateHermes'),
-      onClick: () => {
-        snoozeSkewToast()
-        void applyBackendUpdate()
-      }
-    },
+    action: isBrowserClient()
+      ? undefined
+      : {
+          label: translateNow('notifications.updateHermes'),
+          onClick: () => {
+            snoozeSkewToast()
+            void applyBackendUpdate()
+          }
+        },
     durationMs: 0,
     id: SKEW_TOAST_ID,
     kind: 'warning',
-    message: translateNow('notifications.backendOutOfDateMessage'),
+    message: translateNow(
+      isBrowserClient() ? 'notifications.browserBackendOutOfDateMessage' : 'notifications.backendOutOfDateMessage'
+    ),
     onDismiss: () => snoozeSkewToast(),
     title: translateNow('notifications.backendOutOfDateTitle')
   })
@@ -215,7 +224,7 @@ export function reportInstallMethodWarning(message: string | undefined): void {
  * showed the user a machine they weren't told about, with no way back.
  */
 export function maybeNotifyUpdateAvailable(status: DesktopUpdateStatus | null, target: UpdateTarget = 'client') {
-  if (!status || status.supported === false || status.error || !status.targetSha) {
+  if (isBrowserClient() || !status || status.supported === false || status.error || !status.targetSha) {
     return
   }
 
@@ -299,6 +308,10 @@ export function openUpdatesWindow(target: UpdateTarget = activeUpdateTarget()): 
  * machine's status and must not fan out to the others.
  */
 export function startActiveUpdate(target?: UpdateTarget): void {
+  if (isBrowserClient()) {
+    return
+  }
+
   if (!target && hasMultipleUpdateTargets()) {
     $updateOverlayOpen.set(true)
     void applyEverythingUpdate()
@@ -383,13 +396,14 @@ function isRemoteMode(): boolean {
 }
 
 function mapBackendCheck(res: BackendUpdateCheckResponse): DesktopUpdateStatus {
-  const behind = res.behind ?? 0
+  const behind = typeof res.behind === 'number' && res.behind >= 0 ? res.behind : null
 
   return {
     supported: res.can_apply,
     message: res.message ?? undefined,
+    error: behind === null && !res.update_available ? 'check-failed' : undefined,
     updateAvailable: res.update_available,
-    behind: behind > 0 ? behind : 0,
+    behind,
     currentVersion: res.current_version,
     targetSha: res.update_available ? `backend:${res.current_version}` : undefined,
     commits: res.commits,
@@ -474,6 +488,10 @@ export async function checkUpdates({ force = false }: UpdateCheckOptions = {}): 
 }
 
 export async function applyUpdates(opts: DesktopUpdateApplyOptions = {}): Promise<DesktopUpdateApplyResult> {
+  if (isBrowserClient()) {
+    return { ok: false, error: 'unavailable' }
+  }
+
   const bridge = window.hermesDesktop?.updates
 
   if (!bridge) {
@@ -812,6 +830,10 @@ async function runBackendUpdate(): Promise<DesktopUpdateApplyResult> {
 }
 
 export function applyBackendUpdate(): Promise<DesktopUpdateApplyResult> {
+  if (isBrowserClient()) {
+    return Promise.resolve({ ok: false, error: 'unavailable' })
+  }
+
   if (backendUpdateInFlight) {
     return backendUpdateInFlight
   }
@@ -887,6 +909,10 @@ export function hasMultipleUpdateTargets(): boolean {
 let updateEverythingInFlight: Promise<void> | null = null
 
 export function applyEverythingUpdate(): Promise<void> {
+  if (isBrowserClient()) {
+    return Promise.resolve()
+  }
+
   if (updateEverythingInFlight) {
     return updateEverythingInFlight
   }
