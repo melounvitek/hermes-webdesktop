@@ -245,6 +245,76 @@ try {
     assert.equal((await readConfig(context, 'default')).agent.max_turns, config.agent.max_turns)
   })
 
+  await check('settings-delayed-b-response', async ({ page, context, observations }) => {
+    const [a, b] = await Promise.all(profiles.map(async profile =>
+      String((await readConfig(context, profile)).agent.max_turns)))
+    assert.notEqual(a, b)
+    await selectProfile(page, profiles[0])
+    await openSettings(page)
+    await expect(maxTurns(page)).toHaveValue(a)
+    await page.getByRole('button', { name: 'Close settings', exact: true }).click()
+    await expect(maxTurns(page)).toHaveCount(0)
+
+    const release = Promise.withResolvers()
+    const held = []
+    const mismatches = []
+    // Fetch stock B data now, but deliver none of it until Settings has mounted.
+    await page.route(url => url.origin === runtime.url && url.pathname === '/api/config' &&
+      url.searchParams.get('profile') === profiles[1], async route => {
+      if (route.request().method() !== 'GET') return route.fallback()
+      const response = await route.fetch()
+      held.push({ url: route.request().url(), status: response.status(), body: await response.json() })
+      await release.promise
+      await route.fulfill({ response })
+    })
+    // Observe from before mounting, so even a transient editable A seed fails.
+    const probe = await page.evaluateHandle(() => {
+      const values = []
+      const sample = () => {
+        const field = document.querySelector('[data-tour="field-agent.max_turns"] input')
+        if (field && !field.matches(':disabled') && !field.readOnly && !values.includes(field.value)) {
+          values.push(field.value)
+        }
+      }
+      const observer = new MutationObserver(sample)
+      observer.observe(document.body, { childList: true, subtree: true, attributes: true })
+      return { values, sample, observer }
+    })
+    try {
+      await selectProfile(page, profiles[1])
+      await page.getByRole('button', { name: 'Open settings', exact: true }).click()
+      await page.getByRole('button', { name: 'Advanced', exact: true }).click()
+      await expect.poll(() => new URLSearchParams(new URL(page.url()).hash.split('?')[1]).get('tab')).toBe('config:advanced')
+      await expect(maxTurns(page).or(page.locator('[data-slot="skeleton"]')).first()).toBeVisible()
+      await expect.poll(() => held.length).toBeGreaterThan(0)
+      for (const response of held) {
+        assert.equal(response.status, 200)
+        assert.equal(String(response.body.agent.max_turns), b)
+      }
+      if (await maxTurns(page).count()) await maxTurns(page).scrollIntoViewIfNeeded()
+      await page.screenshot({ path: path.join(artifacts, 'settings-b-response-held.png') })
+      await writeFile(path.join(artifacts, 'settings-b-response-held.aria.txt'), await page.locator('body').ariaSnapshot())
+      const values = await probe.evaluate(({ values, sample }) => { sample(); return values })
+      observations.push({ phase: 'B response held', cachedA: a, expectedB: b, editableValues: values, held })
+      try { assert.equal(values.includes(a), false, 'A must never seed an editable B settings field while B is pending') }
+      catch (error) { mismatches.push(error.stack) }
+    } finally {
+      await probe.evaluate(({ observer }) => observer.disconnect())
+      await probe.dispose()
+      release.resolve()
+      await page.unrouteAll({ behavior: 'wait' })
+    }
+    try { await expect(maxTurns(page)).toHaveValue(b) }
+    catch (error) { mismatches.push(error.stack) }
+    observations.push({ phase: 'B response released', expected: b, actual: await maxTurns(page).inputValue() })
+    await page.getByRole('button', { name: 'Close settings', exact: true }).click()
+    await selectProfile(page, profiles[0])
+    await openSettings(page)
+    await expect(maxTurns(page)).toHaveValue(a)
+    observations.push({ phase: 'return A', expected: a, actual: await maxTurns(page).inputValue() })
+    assert.deepEqual(mismatches, [], 'Settings drafts must belong to the active profile before and after its response')
+  })
+
   await check('settings-active-a-b-a', async ({ page, context, observations }) => {
     const mismatches = []
     for (const profile of [...profiles, profiles[0]]) {

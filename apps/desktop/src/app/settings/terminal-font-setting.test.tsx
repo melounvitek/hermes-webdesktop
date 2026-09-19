@@ -8,7 +8,6 @@ import { TerminalFontSetting } from './terminal-font-setting'
 
 const mocks = vi.hoisted(() => ({
   cache: vi.fn(),
-  configUpdatedAt: 1,
   loadedConfig: {} as Record<string, unknown>,
   notifyError: vi.fn(),
   profileSwitch: null as null | (() => void),
@@ -41,8 +40,8 @@ vi.mock('@/store/notifications', () => ({
 }))
 
 vi.mock('../hooks/use-config-record', () => ({
-  setHermesConfigCache: (config: Record<string, unknown>) => mocks.cache(config),
-  useHermesConfigRecord: () => ({ data: mocks.loadedConfig, dataUpdatedAt: mocks.configUpdatedAt })
+  hermesConfigCacheWriter: () => (config: Record<string, unknown>) => mocks.cache(config),
+  useHermesConfigRecord: () => ({ data: mocks.loadedConfig })
 }))
 
 vi.mock('../hooks/use-on-profile-switch', () => ({
@@ -62,7 +61,6 @@ async function flushAutosave() {
 describe('TerminalFontSetting', () => {
   beforeEach(() => {
     vi.useFakeTimers()
-    mocks.configUpdatedAt = 1
     mocks.loadedConfig = {
       display: { skin: 'hermes' },
       terminal: { backend: 'local', cwd: '/workspace', font_family: '' }
@@ -136,20 +134,20 @@ describe('TerminalFontSetting', () => {
     expect(mocks.notifyError).toHaveBeenCalledWith(expect.any(Error), 'Autosave failed')
   })
 
-  it('drops the prior profile font and reseeds after a refetch reuses its cached record', () => {
+  it('reseeds immediately from the next profile’s cached config record', () => {
     const sharedConfig = { terminal: { font_family: 'MesloLGS NF' } }
     mocks.loadedConfig = sharedConfig
     const view = render(<TerminalFontSetting />)
 
     expect($terminalFontFamily.get()).toBe('MesloLGS NF')
-    act(() => mocks.profileSwitch?.())
-    expect($terminalFontFamily.get()).toBe('')
-    expect((screen.getByRole('combobox', { name: 'Terminal Font' }) as HTMLInputElement).disabled).toBe(true)
+    mocks.loadedConfig = { terminal: { font_family: 'Hack' } }
+    act(() => {
+      mocks.profileSwitch?.()
+      view.rerender(<TerminalFontSetting />)
+    })
 
-    mocks.configUpdatedAt = 2
-    view.rerender(<TerminalFontSetting />)
-
-    expect((screen.getByRole('combobox', { name: 'Terminal Font' }) as HTMLInputElement).value).toBe('MesloLGS NF')
-    expect($terminalFontFamily.get()).toBe('MesloLGS NF')
+    expect((screen.getByRole('combobox', { name: 'Terminal Font' }) as HTMLInputElement).value).toBe('Hack')
+    expect($terminalFontFamily.get()).toBe('Hack')
+    expect(mocks.save).not.toHaveBeenCalled()
   })
 })

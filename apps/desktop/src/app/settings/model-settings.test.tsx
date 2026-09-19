@@ -27,13 +27,13 @@ const startManualOnboarding = vi.fn()
 const startManualProviderOAuth = vi.fn()
 let profileSwitchHandler: (() => void) | null = null
 
-vi.mock('@/hermes', () => ({
+vi.mock('@/hermes', async () => ({
   getGlobalModelInfo: (profile?: null | string) => getGlobalModelInfo(profile),
   getGlobalModelOptions: (opts?: unknown, profile?: null | string) => getGlobalModelOptions(opts, profile),
   getAuxiliaryModels: (profile?: null | string) => getAuxiliaryModels(profile),
   getApiRequestProfile: () => 'default',
   getMoaModels: (profile?: null | string) => getMoaModels(profile),
-  profileScopeKey: (scope?: null | string) => (scope ?? '').trim() || 'default',
+  profileScopeKey: (await import('@/api/client')).profileScopeKey,
   setModelAssignment: (body: unknown) => setModelAssignment(body),
   getRecommendedDefaultModel: (slug: string) => getRecommendedDefaultModel(slug),
   saveMoaModels: (body: unknown) => saveMoaModels(body),

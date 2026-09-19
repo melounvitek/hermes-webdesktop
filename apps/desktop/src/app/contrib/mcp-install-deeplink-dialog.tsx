@@ -20,7 +20,7 @@ import { getServers } from '@/lib/mcp-servers'
 import { $mcpInstallRequest } from '@/store/mcp-deeplink-install'
 import { notify, readableError } from '@/store/notifications'
 
-import { setHermesConfigCache } from '../hooks/use-config-record'
+import { hermesConfigCacheWriter, hermesConfigScope } from '../hooks/use-config-record'
 
 /**
  * Explicit-confirm gate for `hermes://mcp/install` deep links. The payload is
@@ -98,12 +98,14 @@ export function McpInstallDeepLinkDialog() {
 
     setSaving(true)
     setError(null)
+    const scope = hermesConfigScope()
+    const writeConfigCache = hermesConfigCacheWriter(scope)
 
     try {
       // Merge over the FRESHEST server map — saveMcpServers replaces the whole
       // `mcp_servers` document, so saving over a stale snapshot would drop
       // servers added elsewhere since the dialog opened.
-      const current = getServers(await getHermesConfigRecord())
+      const current = getServers(await getHermesConfigRecord(scope))
 
       if (Object.prototype.hasOwnProperty.call(current, trimmedName)) {
         setExistingNames(Object.keys(current))
@@ -113,8 +115,8 @@ export function McpInstallDeepLinkDialog() {
       }
 
       const nextServers = { ...current, [trimmedName]: request.config }
-      await saveMcpServers(nextServers)
-      setHermesConfigCache(previous => (previous ? { ...previous, mcp_servers: nextServers } : previous))
+      await saveMcpServers(nextServers, scope)
+      writeConfigCache(previous => (previous ? { ...previous, mcp_servers: nextServers } : previous))
       notify({ kind: 'success', title: m.savedTitle, message: m.savedMessage(trimmedName) })
       $mcpInstallRequest.set(null)
       navigate(`/skills?tab=mcp&server=${encodeURIComponent(trimmedName)}`)

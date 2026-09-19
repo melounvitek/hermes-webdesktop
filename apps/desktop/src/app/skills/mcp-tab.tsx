@@ -371,10 +371,11 @@ export function McpTab({ gateway, profile }: { gateway: HermesGateway | null; pr
     error: configError,
     refetch: refetchConfig,
     dataUpdatedAt: configUpdatedAt,
-    errorUpdatedAt: configErroredAt
+    errorUpdatedAt: configErroredAt,
+    scope: configScope
   } = useHermesConfigRecord(profile)
 
-  const setConfig = hermesConfigCacheWriter(profile)
+  const setConfig = hermesConfigCacheWriter(configScope)
 
   // True from a profile switch until the config query resettles for the new
   // profile. Until then `config` (and thus `servers`) still holds profile A's

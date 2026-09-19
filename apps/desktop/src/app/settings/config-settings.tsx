@@ -6,7 +6,7 @@ import { useSearchParams } from 'react-router'
 
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { getElevenLabsVoices, getHermesConfigSchema, saveHermesConfig } from '@/hermes'
+import { getElevenLabsVoices, getHermesConfigSchema, profileScopeKey, saveHermesConfigRecord } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import { isSubmitEnter } from '@/lib/ime'
@@ -23,13 +23,11 @@ import {
 import { $disableF12, setDisableF12 } from '@/store/disable-f12'
 import { $keepAwake, setKeepAwake } from '@/store/keep-awake'
 import { notify, notifyError } from '@/store/notifications'
-import { normalizeProfileKey } from '@/store/profile'
 import { repoDiscoveryPolicyFromConfig, repoDiscoveryPolicySignature, scanAndRecordRepos } from '@/store/projects'
 import { $settingsRequestProfile } from '@/store/settings-scope'
 import type { ConfigFieldSchema, HermesConfigRecord } from '@/types/hermes'
 
-import { hermesConfigCacheWriter, useHermesConfigRecord } from '../hooks/use-config-record'
-import { useOnProfileSwitch } from '../hooks/use-on-profile-switch'
+import { hermesConfigCacheWriter, useHermesConfigRecord, useHermesConfigScope } from '../hooks/use-config-record'
 import { PanelEmpty } from '../overlays/panel'
 
 import { ConfigField } from './config-field'
@@ -57,19 +55,19 @@ export function ConfigSettings({
   onMainModelChanged,
   importInputRef
 }: ConfigSettingsProps) {
-  // Shared "Applies to" scope (null → the app's active profile). Remount the
-  // inner page per scope so every draft/seed/autosave ref resets wholesale
-  // when the target profile changes — the same guarantee useOnProfileSwitch
-  // provides for app-wide switches, without hand-clearing each piece.
+  // Reset drafts and pending saves on concrete target changes, including
+  // switches while following the active profile (no selector override).
   const scopeProfile = useStore($settingsRequestProfile)
+  const scope = useHermesConfigScope(scopeProfile)
 
   return (
     <ConfigSettingsInner
       activeSectionId={activeSectionId}
       importInputRef={importInputRef}
-      key={scopeProfile ?? '__active__'}
+      key={profileScopeKey(scope)}
       onConfigSaved={onConfigSaved}
       onMainModelChanged={onMainModelChanged}
+      scope={scope}
       scopeProfile={scopeProfile}
     />
   )
@@ -87,8 +85,9 @@ function ConfigSettingsInner({
   onConfigSaved,
   onMainModelChanged,
   importInputRef,
+  scope,
   scopeProfile
-}: ConfigSettingsProps & { scopeProfile: string | undefined }) {
+}: ConfigSettingsProps & { scope: ReturnType<typeof useHermesConfigScope>; scopeProfile: string | undefined }) {
   const { t } = useI18n()
   const c = t.settings.config
   const keepAwake = useStore($keepAwake)
@@ -97,21 +96,16 @@ function ConfigSettingsInner({
   // from — and saved back through — the shared config cache, so edits are visible
   // in the MCP/model surfaces and reopening the page doesn't reload-flash.
   const [config, setConfig] = useState<HermesConfigRecord | null>(null)
-  const { data: loadedConfig, isError: configLoadFailed, refetch: refetchConfig } = useHermesConfigRecord(scopeProfile)
-  // Writes land on the same cache key the query above reads (base key when
-  // following the active profile, suffixed when a scope override is set).
-  const writeConfigCache = useMemo(() => hermesConfigCacheWriter(scopeProfile), [scopeProfile])
+  const { data: loadedConfig, isError: configLoadFailed, refetch: refetchConfig } = useHermesConfigRecord(scope)
+  const writeConfigCache = useMemo(() => hermesConfigCacheWriter(scope), [scope])
 
   const {
     data: schemaResponse,
     isError: schemaFailed,
     refetch: refetchSchema
   } = useQuery({
-    // Base key when following the active profile (matches every pre-existing
-    // consumer); suffixed only for an explicit scope override.
-    queryKey:
-      scopeProfile == null ? ['hermes-config-schema'] : ['hermes-config-schema', normalizeProfileKey(scopeProfile)],
-    queryFn: () => getHermesConfigSchema(scopeProfile),
+    queryKey: ['hermes-config-schema', profileScopeKey(scope)],
+    queryFn: () => getHermesConfigSchema(scope),
     staleTime: 5 * 60 * 1000
   })
 
@@ -122,9 +116,6 @@ function ConfigSettingsInner({
   const savedDiscoverySignatureRef = useRef<string | undefined>(undefined)
   const [saveVersion, setSaveVersion] = useState(0)
 
-  // Seed the local draft once, the first time the shared record lands.
-  // Background refetches thereafter must not clobber in-progress edits.
-  const configSeeded = useRef(false)
   // Snapshot of the record as it was when the draft was seeded. Autosave
   // diffs the draft against this (not against disk) so a field the user
   // never touched — possibly changed out-of-band by `hermes config set`
@@ -137,27 +128,24 @@ function ConfigSettingsInner({
 
   // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
   useEffect(() => {
-    if (loadedConfig && !configSeeded.current) {
-      configSeeded.current = true
+    // Seed once per editor; background refetches must not clobber edits.
+    if (loadedConfig && !configBaselineRef.current) {
       configBaselineRef.current = loadedConfig
       savedDiscoverySignatureRef.current = repoDiscoveryPolicySignature(repoDiscoveryPolicyFromConfig(loadedConfig))
       setConfig(loadedConfig)
     }
   }, [loadedConfig])
 
-  // A profile switch invalidates (but doesn't clear) the shared config query, so
-  // the local draft would otherwise keep profile A's data and autosave it into
-  // B. Drop the seed + draft (re-seeds from B's refetch) and zero saveVersion so
-  // the pending debounced autosave is cancelled by its effect cleanup.
-  useOnProfileSwitch(() => {
-    configSeeded.current = false
-    configBaselineRef.current = null
-    savedDiscoverySignatureRef.current = undefined
-    setConfig(null)
-    saveVersionRef.current = 0
-    setSaveVersion(0)
-    saveQueueRef.current = Promise.resolve()
-  })
+  const mounted = useRef(false)
+
+  // eslint-disable-next-line no-restricted-syntax -- queued saves must stop when their editor leaves
+  useEffect(() => {
+    mounted.current = true
+
+    return () => {
+      mounted.current = false
+    }
+  }, [])
 
   useEffect(() => {
     let cancelled = false
@@ -179,7 +167,6 @@ function ConfigSettingsInner({
       })
 
     return () => void (cancelled = true)
-    // scopeProfile is constant per mount (the inner component is keyed on it).
   }, [scopeProfile])
 
   // eslint-disable-next-line no-restricted-syntax -- autosave bookkeeping refs, not an atom mirror
@@ -197,9 +184,13 @@ function ConfigSettingsInner({
       // baseline advance — each save's diff is computed once its predecessor
       // has fully resolved.
       saveQueueRef.current = saveQueueRef.current.then(async () => {
+        if (!mounted.current) {
+          return
+        }
+
         try {
           const patch = diffConfig(configBaselineRef.current ?? {}, snapshot)
-          const result = await saveHermesConfig(patch, scopeProfile)
+          const result = await saveHermesConfigRecord(patch, scope)
 
           if (!result.ok) {
             throw new Error(c.autosaveFailed)
@@ -215,7 +206,7 @@ function ConfigSettingsInner({
           // reflect the edit without their own refetch.
           writeConfigCache(snapshot)
 
-          if (saveVersionRef.current === v) {
+          if (mounted.current && saveVersionRef.current === v) {
             // The repo-discovery scan reads the ACTIVE profile's workspace
             // policy; skip it when this page is editing another profile.
             if (scopeProfile == null) {
@@ -227,10 +218,12 @@ function ConfigSettingsInner({
               }
             }
 
-            onConfigSaved?.()
+            if (mounted.current) {
+              onConfigSaved?.()
+            }
           }
         } catch (err) {
-          if (saveVersionRef.current === v) {
+          if (mounted.current && saveVersionRef.current === v) {
             notifyError(err, c.autosaveFailed)
           }
         }

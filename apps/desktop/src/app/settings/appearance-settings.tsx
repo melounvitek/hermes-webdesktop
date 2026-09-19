@@ -61,7 +61,7 @@ import { installVscodeThemeFromMarketplace } from '@/themes/install'
 import type { DesktopTheme } from '@/themes/types'
 import { $marketplaceInstalls, isUserTheme, removeUserTheme } from '@/themes/user-themes'
 
-import { setHermesConfigCache, useHermesConfigRecord } from '../hooks/use-config-record'
+import { hermesConfigCacheWriter, useHermesConfigRecord } from '../hooks/use-config-record'
 
 import { ChatFontSetting } from './chat-font-setting'
 import { MODE_OPTIONS } from './constants'
@@ -89,7 +89,8 @@ function ResumeLastSessionSetting() {
     }
 
     const next = setNested(config, 'display.resume_last_session', on)
-    setHermesConfigCache(next)
+    const writeConfigCache = hermesConfigCacheWriter()
+    writeConfigCache(next)
     // Sparse patch: PUT /api/config deep-merges, and echoing the cached
     // snapshot would overwrite keys other surfaces changed since it loaded.
     void saveHermesConfig(setNested({}, 'display.resume_last_session', on))
@@ -99,7 +100,7 @@ function ResumeLastSessionSetting() {
         }
       })
       .catch(error => {
-        setHermesConfigCache(config)
+        writeConfigCache(config)
         notifyError(error, t.settings.config.autosaveFailed)
       })
   }

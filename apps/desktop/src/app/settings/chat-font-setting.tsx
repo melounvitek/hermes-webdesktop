@@ -8,9 +8,8 @@ import { notifyError } from '@/store/notifications'
 import { CHAT_FONT_SUGGESTIONS, normalizeChatFontFamily, setChatFontFamilyFromConfig } from '@/themes/chat-font'
 import type { HermesConfigRecord } from '@/types/hermes'
 
-import { setHermesConfigCache, useHermesConfigRecord } from '../hooks/use-config-record'
+import { hermesConfigCacheWriter, useHermesConfigRecord } from '../hooks/use-config-record'
 import { useOnProfileSwitch } from '../hooks/use-on-profile-switch'
-import { useProfileSwitchLatch } from '../hooks/use-profile-switch-latch'
 
 import { getNested, setNested } from './helpers'
 import { ListRow } from './primitives'
@@ -30,12 +29,8 @@ function fontFamilyFromConfig(config: HermesConfigRecord): string {
 export function ChatFontSetting() {
   const { t } = useI18n()
   const copy = t.settings.appearance
-  const { data: loadedConfig, dataUpdatedAt } = useHermesConfigRecord()
+  const { data: loadedConfig } = useHermesConfigRecord()
   const [draft, setDraft] = useState<string | null>(null)
-  // The seed effect refuses to reseed while the query still carries the
-  // previous profile's stamp. A structurally-shared refetch keeps the object
-  // reference but bumps the stamp.
-  const { arm: armProfileLatch, pending: profilePending } = useProfileSwitchLatch({ dataUpdatedAt })
   const [saveVersion, setSaveVersion] = useState(0)
   const saveVersionRef = useRef(0)
 
@@ -44,19 +39,19 @@ export function ChatFontSetting() {
   }
 
   useEffect(() => {
-    if (!loadedConfig || draft !== null || profilePending) {
+    // Cached seeds may be stale; follow revalidation until the user edits.
+    if (!loadedConfig || (draft !== null && saveVersion !== 0)) {
       return
     }
 
     const value = fontFamilyFromConfig(loadedConfig)
     setDraft(value)
     setChatFontFamilyFromConfig(value)
-  }, [draft, loadedConfig, profilePending])
+  }, [draft, loadedConfig, saveVersion])
 
   useOnProfileSwitch(() => {
     saveVersionRef.current += 1
     setDraft(null)
-    armProfileLatch()
     setSaveVersion(0)
     setChatFontFamilyFromConfig('')
   })
@@ -77,6 +72,7 @@ export function ChatFontSetting() {
 
     const timeout = window.setTimeout(() => {
       const next = setNested(loadedConfig, CONFIG_PATH, value)
+      const writeConfigCache = hermesConfigCacheWriter()
 
       // Sparse patch: PUT /api/config deep-merges; echoing the cached snapshot
       // would overwrite keys other surfaces changed since it loaded.
@@ -90,7 +86,7 @@ export function ChatFontSetting() {
             return
           }
 
-          setHermesConfigCache(next)
+          writeConfigCache(next)
         })
         .catch(error => {
           if (saveVersionRef.current !== version) {

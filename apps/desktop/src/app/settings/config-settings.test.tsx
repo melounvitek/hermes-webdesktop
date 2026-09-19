@@ -12,10 +12,11 @@ const getHermesConfigSchema = vi.fn()
 const saveHermesConfig = vi.fn()
 const getElevenLabsVoices = vi.fn()
 
-vi.mock('@/hermes', () => ({
+vi.mock('@/hermes', async () => ({
+  profileScopeKey: (await import('@/api/client')).profileScopeKey,
   getHermesConfigRecord: () => getHermesConfigRecord(),
   getHermesConfigSchema: () => getHermesConfigSchema(),
-  saveHermesConfig: (config: unknown, profile?: string) => saveHermesConfig(config, profile),
+  saveHermesConfigRecord: (config: unknown, profile?: unknown) => saveHermesConfig(config, profile),
   getElevenLabsVoices: () => getElevenLabsVoices(),
   setApiRequestProfile: () => {}
 }))
@@ -100,7 +101,10 @@ describe('ConfigSettings autosave', () => {
       await vi.advanceTimersByTimeAsync(700)
 
       await vi.waitFor(() =>
-        expect(saveHermesConfig).toHaveBeenCalledWith({ compression: { codex_gpt55_autoraise: false } }, undefined)
+        expect(saveHermesConfig).toHaveBeenCalledWith(
+          { compression: { codex_gpt55_autoraise: false } },
+          { connectionId: null, profile: 'default' }
+        )
       )
     } finally {
       vi.useRealTimers()

@@ -54,13 +54,8 @@ export function VoiceProviderFields({
   const { t } = useI18n()
   const keys = useMemo(() => voiceProviderKeys(section, providerKey), [section, providerKey])
   const { data: loadedConfig } = useHermesConfigRecord(profile)
-  // Parents pass `profile` as a fresh object literal each render; keying the
-  // writer and the autosave effect on its identity would re-arm the 550ms
-  // timer on every unrelated re-render. Key on the scope string instead
-  // (null when unscoped, which maps to the bare cache row).
+  // Parents may pass a fresh scope object on each render; don't re-arm autosave.
   const scopeKey = profile == null ? null : profileScopeKey(profile)
-  // eslint-disable-next-line react-hooks/exhaustive-deps -- scopeKey is the identity of `profile`
-  const writeConfigCache = useMemo(() => hermesConfigCacheWriter(profile), [scopeKey])
 
   const { data: schemaResponse } = useQuery({
     queryKey: ['hermes-config-schema'],
@@ -97,6 +92,7 @@ export function VoiceProviderFields({
     }
 
     const timeout = window.setTimeout(() => {
+      const writeConfigCache = hermesConfigCacheWriter(profile)
       void saveHermesConfigRecord(diffConfig(baseline ?? {}, config), profile)
         .then(() => {
           setBaseline(config)
@@ -107,7 +103,7 @@ export function VoiceProviderFields({
 
     return () => window.clearTimeout(timeout)
     // eslint-disable-next-line react-hooks/exhaustive-deps -- copy is stable; `profile` is keyed by scopeKey; avoid re-scheduling autosave on locale change
-  }, [config, scopeKey, saveVersion, writeConfigCache])
+  }, [config, scopeKey, saveVersion])
 
   // ElevenLabs cloned/library voices from the live account, when available —
   // mirrors the Settings → Voice dynamic voice list.

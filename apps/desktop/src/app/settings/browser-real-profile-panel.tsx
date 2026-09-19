@@ -42,8 +42,8 @@ export function readUseRealProfile(record: Record<string, unknown> | undefined):
 export function BrowserRealProfilePanel({ profile }: BrowserRealProfilePanelProps) {
   const { t } = useI18n()
   const copy = t.settings.toolsets.browserRealProfile
-  const { data: config } = useHermesConfigRecord(profile)
-  const setConfig = hermesConfigCacheWriter(profile)
+  const { data: config, scope: configScope } = useHermesConfigRecord(profile)
+  const setConfig = hermesConfigCacheWriter(configScope)
   const [busy, setBusy] = useState(false)
 
   const enabled = readUseRealProfile(config)

@@ -50,8 +50,8 @@ export function RealProfileConsentDialog({ tabId }: RealProfileConsentDialogProp
   const dismissed = useStore($realProfilePromptDismissed)
   const muted = useStore($realProfilePromptMuted)
   const claim = useStore($realProfilePromptClaim)
-  const { data: config } = useHermesConfigRecord()
-  const setConfig = hermesConfigCacheWriter()
+  const { data: config, scope: configScope } = useHermesConfigRecord()
+  const setConfig = hermesConfigCacheWriter(configScope)
   const [busy, setBusy] = useState(false)
 
   useEffect(() => {

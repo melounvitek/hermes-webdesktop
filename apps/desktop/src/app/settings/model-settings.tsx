@@ -239,8 +239,8 @@ export function ModelSettings({ onMainModelChanged, scopeProfile }: ModelSetting
   const [newMoaPresetName, setNewMoaPresetName] = useState('')
   // agent.* defaults round-trip through the shared config cache (read → write
   // back the whole record), so a save here shows in the MCP/model surfaces.
-  const { data: config } = useHermesConfigRecord(scopeProfile)
-  const setConfig = useMemo(() => hermesConfigCacheWriter(scopeProfile), [scopeProfile])
+  const { data: config, scope: configScope } = useHermesConfigRecord(scopeProfile)
+  const setConfig = hermesConfigCacheWriter(configScope)
   const [applying, setApplying] = useState(false)
   const [editingAuxTask, setEditingAuxTask] = useState<null | string>(null)
 
@@ -333,8 +333,13 @@ export function ModelSettings({ onMainModelChanged, scopeProfile }: ModelSetting
     [m.loadFailed, scopeProfile, setCaughtError]
   )
 
+  // eslint-disable-next-line no-restricted-syntax -- retire pending operations when this editor is replaced
   useEffect(() => {
     void refresh()
+
+    return () => {
+      profileEpoch.current += 1
+    }
   }, [refresh])
 
   // A profile switch swaps the backend under the mounted panel — reload for the

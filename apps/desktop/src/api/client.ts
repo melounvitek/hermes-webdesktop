@@ -155,7 +155,17 @@ export function hermesApi<T>(request: HermesApiRequest): Promise<T> {
 //     remote/cloud/ssh gateway: the v1 fallback route treats a remote registry
 //     primary as global-remote, so the explicit pin is the ONLY way back to
 //     this machine (see apiRequestRegistryConnectionId in Electron main).
-export type ProfileScope = undefined | null | string | { connectionId?: null | string; profile?: null | string }
+export type ProfileScope =
+  | undefined
+  | null
+  | string
+  | {
+      connectionId?: null | string
+      profile?: null | string
+      // Captured ambient ownership must not promote background work to foreground.
+      // Absent means an explicit selector pin; present-but-undefined stays background.
+      priority?: 'foreground'
+    }
 
 export function capabilityScoped(scope?: ProfileScope): {
   connectionId?: string
@@ -169,7 +179,7 @@ export function capabilityScoped(scope?: ProfileScope): {
     return {
       ...(profile ? { profile } : {}),
       ...(connectionId ? { connectionId } : {}),
-      priority: 'foreground'
+      priority: 'priority' in scope ? scope.priority : 'foreground'
     }
   }
 

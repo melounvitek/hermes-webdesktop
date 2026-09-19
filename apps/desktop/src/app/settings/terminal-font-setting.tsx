@@ -13,9 +13,8 @@ import { useI18n } from '@/i18n'
 import { notifyError } from '@/store/notifications'
 import type { HermesConfigRecord } from '@/types/hermes'
 
-import { setHermesConfigCache, useHermesConfigRecord } from '../hooks/use-config-record'
+import { hermesConfigCacheWriter, useHermesConfigRecord } from '../hooks/use-config-record'
 import { useOnProfileSwitch } from '../hooks/use-on-profile-switch'
-import { useProfileSwitchLatch } from '../hooks/use-profile-switch-latch'
 
 import { getNested, setNested } from './helpers'
 import { ListRow } from './primitives'
@@ -29,15 +28,8 @@ function fontFamilyFromConfig(config: HermesConfigRecord): string {
 export function TerminalFontSetting() {
   const { t } = useI18n()
   const copy = t.settings.appearance
-  const { data: loadedConfig, dataUpdatedAt } = useHermesConfigRecord()
-  // draft === null ⇔ unseeded: nothing painted yet for this profile. The
-  // profile-switch handler keeps it unseeded until a config refetch completes;
-  // the timestamp is the freshness proof because React Query can reuse the
-  // same config object when the next profile has identical settings.
+  const { data: loadedConfig } = useHermesConfigRecord()
   const [draft, setDraft] = useState<string | null>(null)
-  // The seed effect refuses to reseed while the query still carries the
-  // previous profile's stamp.
-  const { arm: armProfileLatch, pending: profilePending } = useProfileSwitchLatch({ dataUpdatedAt })
   const [saveVersion, setSaveVersion] = useState(0)
   const saveVersionRef = useRef(0)
 
@@ -48,19 +40,19 @@ export function TerminalFontSetting() {
   }
 
   useEffect(() => {
-    if (!loadedConfig || draft !== null || profilePending) {
+    // Cached seeds may be stale; follow revalidation until the user edits.
+    if (!loadedConfig || (draft !== null && saveVersion !== 0)) {
       return
     }
 
     const value = fontFamilyFromConfig(loadedConfig)
     setDraft(value)
     setTerminalFontFamilyFromConfig(value)
-  }, [draft, loadedConfig, profilePending])
+  }, [draft, loadedConfig, saveVersion])
 
   useOnProfileSwitch(() => {
     saveVersionRef.current += 1
     setDraft(null)
-    armProfileLatch()
     setSaveVersion(0)
     // Do not show the previous profile's font while the new profile loads.
     setTerminalFontFamilyFromConfig('')
@@ -82,12 +74,13 @@ export function TerminalFontSetting() {
     }
 
     // The last successfully saved value IS what the shared config cache
-    // holds — successful saves write it back via setHermesConfigCache, so
+    // holds — successful saves write it back through the captured cache writer, so
     // rollback re-derives from there instead of mirroring into a ref.
     const rollback = fontFamilyFromConfig(loadedConfig)
 
     const timeout = window.setTimeout(() => {
       const next = setNested(loadedConfig, 'terminal.font_family', value)
+      const writeConfigCache = hermesConfigCacheWriter()
 
       // Sparse patch: PUT /api/config deep-merges, and echoing the cached
       // snapshot would overwrite keys other surfaces changed since it loaded.
@@ -101,7 +94,7 @@ export function TerminalFontSetting() {
             return
           }
 
-          setHermesConfigCache(next)
+          writeConfigCache(next)
         })
         .catch(error => {
           if (saveVersionRef.current !== version) {
