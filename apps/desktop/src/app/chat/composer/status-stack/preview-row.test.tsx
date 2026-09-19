@@ -17,6 +17,7 @@ describe('PreviewStatusRow', () => {
     $connection.set(null)
     closeRightRail()
     vi.restoreAllMocks()
+    vi.unstubAllGlobals()
   })
 
   it('keeps the full path and hint in one portaled bubble beside the label', async () => {
@@ -41,6 +42,34 @@ describe('PreviewStatusRow', () => {
     expect(label?.querySelector('br')).not.toBeNull()
     expect(content?.querySelector('[data-slot="tooltip-arrow"]')).not.toBeNull()
   })
+
+  it.each([false, true])(
+    'opens browser-client URL clicks synchronously without native normalization (modifier=%s)',
+    async modified => {
+      const openExternal = vi.fn()
+      const normalizePreviewTarget = vi.fn()
+      vi.stubGlobal('hermesDesktop', {
+        browser: { authRequired: false, signIn: vi.fn() },
+        openExternal,
+        normalizePreviewTarget
+      })
+      render(
+        <PreviewStatusRow
+          item={{ cwd: '', id: 'url', label: 'Status link', target: 'https://example.invalid/status' }}
+          onDismiss={() => {}}
+        />
+      )
+      fireEvent.click(screen.getByText('Status link'), { ctrlKey: modified })
+      try {
+        expect(openExternal).toHaveBeenCalledExactlyOnceWith('https://example.invalid/status')
+        expect(normalizePreviewTarget).not.toHaveBeenCalled()
+        expect($previewTabs.get()).toHaveLength(0)
+      } finally {
+        // Let the old async path settle before this fixture's bridge is removed.
+        await new Promise(resolve => setTimeout(resolve, 0))
+      }
+    }
+  )
 
   it('opens remote non-HTML file artifacts in the in-app preview instead of the local browser bridge', async () => {
     const remotePath = '/home/agent/report.pdf'

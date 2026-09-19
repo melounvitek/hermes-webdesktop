@@ -933,14 +933,18 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
             label: cc.reloadWindow,
             run: () => window.location.reload()
           },
-          {
-            action: 'view.showBrowser',
-            icon: codiconIcon('globe'),
-            id: 'cc-open-browser',
-            keywords: ['browser', 'web', 'url', 'address', 'open', 'navigate', 'internet', 'site'],
-            label: cc.openBrowser,
-            run: () => openBrowserTab()
-          }
+          ...(!isBrowserClient()
+            ? [
+                {
+                  action: 'view.showBrowser' as const,
+                  icon: codiconIcon('globe'),
+                  id: 'cc-open-browser',
+                  keywords: ['browser', 'web', 'url', 'address', 'open', 'navigate', 'internet', 'site'],
+                  label: cc.openBrowser,
+                  run: () => openBrowserTab()
+                }
+              ]
+            : [])
         ]
       },
       {

@@ -96,7 +96,7 @@ describe('observeActiveTerminalResize', () => {
     expect(onFit).not.toHaveBeenCalled()
   })
 
-  it('absorbs a real browser-style initial resize delivered after activation', () => {
+  it('fits a changed host on the first resize delivery after activation', () => {
     const raf = installRaf()
     const resize = { current: null as ResizeObserverCallback | null }
 
@@ -113,47 +113,45 @@ describe('observeActiveTerminalResize', () => {
       } as unknown as typeof ResizeObserver
     )
 
-    const onFit = vi.fn()
-    observeActiveTerminalResize(document.createElement('div'), { onActivate: vi.fn(), onFit })
+    const host = document.createElement('div')
+    let width = 300
+    let fittedWidth = 0
+    Object.defineProperty(host, 'clientWidth', { get: () => width })
+    const onFit = vi.fn(() => { fittedWidth = host.clientWidth })
+    observeActiveTerminalResize(host, { onActivate: vi.fn(), onFit })
 
     raf.flush()
-    expect(onFit).toHaveBeenCalledTimes(1)
+    expect(fittedWidth).toBe(300)
 
-    // Browser initial delivery: the activation fit already covered this size.
-    resize.current?.([], {} as ResizeObserver)
-    expect(raf.pending()).toBe(0)
-
-    // A later real resize schedules exactly one fit.
+    // The first browser delivery may describe a different box than activation.
+    width = 200
     resize.current?.([], {} as ResizeObserver)
     expect(raf.pending()).toBe(1)
     raf.flush()
+    expect(fittedWidth).toBe(200)
     expect(onFit).toHaveBeenCalledTimes(2)
   })
 
-  it('reuses a first-mount fit without fitting again on activation', () => {
+  it('cancels a queued resize and ignores deliveries after disposal', () => {
     const raf = installRaf()
-
-    vi.stubGlobal(
-      'ResizeObserver',
-      class {
-        disconnect = vi.fn()
-        observe = vi.fn()
-        unobserve = vi.fn()
-      } as unknown as typeof ResizeObserver
-    )
-
-    const onActivate = vi.fn()
-    const onFit = vi.fn()
-
-    observeActiveTerminalResize(document.createElement('div'), {
-      fitOnActivate: false,
-      onActivate,
-      onFit
+    let deliverResize!: () => void
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: ResizeObserverCallback) {
+        deliverResize = () => callback([], this as unknown as ResizeObserver)
+      }
+      disconnect = vi.fn()
+      observe = vi.fn()
     })
-
+    const onFit = vi.fn()
+    const dispose = observeActiveTerminalResize(document.createElement('div'), { onActivate: vi.fn(), onFit })
     raf.flush()
-
-    expect(onActivate).toHaveBeenCalledOnce()
-    expect(onFit).not.toHaveBeenCalled()
+    expect(onFit).toHaveBeenCalledOnce()
+    deliverResize()
+    expect(raf.pending()).toBe(1)
+    dispose()
+    deliverResize()
+    raf.flush()
+    expect(onFit).toHaveBeenCalledOnce()
+    expect(raf.pending()).toBe(0)
   })
 })

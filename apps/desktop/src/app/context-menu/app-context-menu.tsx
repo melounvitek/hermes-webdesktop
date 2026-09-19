@@ -140,7 +140,7 @@ function domSections(open: Extract<OpenContextMenu, { kind: 'dom' }>, t: Transla
   const linkUrl = target.linkUrl ? normalizeExternalUrl(target.linkUrl) : ''
   const linkIsWeb = isWebUrl(linkUrl)
   const imageIsWeb = isWebUrl(target.imageUrl)
-  const openInApp = !hudForcesNativeLinks()
+  const openInApp = !isBrowserClient() && !hudForcesNativeLinks()
   const showResolvedCopy = linkIsWeb && isRemoteGateway() && isLoopbackUrl(linkUrl)
 
   // The edit verbs and spell-check actions act on the sender's FOCUSED
@@ -390,7 +390,7 @@ function guestSections(open: Extract<OpenContextMenu, { kind: 'guest' }>, t: Tra
   const sections: ReactNode[][] = []
   const linkUrl = params.linkURL
   const imageUrl = params.srcURL
-  const openInApp = !hudForcesNativeLinks()
+  const openInApp = !isBrowserClient() && !hudForcesNativeLinks()
 
   // Same trap-timing rule as the dom side: dispatch AFTER the menu closes,
   // so the webview's focus() is not stolen back by the radix content.

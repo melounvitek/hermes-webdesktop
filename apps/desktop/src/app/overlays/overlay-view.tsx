@@ -1,11 +1,14 @@
 import { type CSSProperties, type ReactNode, useEffect } from 'react'
 
+import { SIDEBAR_COLLAPSE_MEDIA_QUERY } from '@/app/layout-constants'
 import { TITLEBAR_HEIGHT } from '@/app/shell/titlebar'
 import { TitlebarIcon } from '@/app/shell/titlebar-icon'
 import { Button } from '@/components/ui/button'
+import { useMediaQuery } from '@/hooks/use-media-query'
 import { translateNow } from '@/i18n'
 import { ESCAPE_PRIORITY, isTopEscapeLayer, pushEscapeLayer } from '@/lib/escape-layers'
 import { triggerHaptic } from '@/lib/haptics'
+import { isBrowserClient } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 
 // Shared top clearance for overlay content that sits *beside* the floating
@@ -42,6 +45,8 @@ export function OverlayView({
   rootClassName,
   titlebarActions
 }: OverlayViewProps) {
+  const narrow = useMediaQuery(SIDEBAR_COLLAPSE_MEDIA_QUERY)
+
   const closeOverlay = () => {
     triggerHaptic('close')
     onClose()
@@ -75,12 +80,13 @@ export function OverlayView({
     <div
       className={cn(
         'fixed inset-0 z-50 bg-black/22 backdrop-blur-[0.125rem]',
-        // Equidistant inset on every side. The top value is driven by the
+        // Native/wide windows keep an equidistant inset. The top value is driven by the
         // titlebar height so the card clears the OS traffic-lights vertically;
         // since the card top already sits below them, the left needs no extra
         // inset — keeping all sides equal so the card is ~full-width at any size.
-        'p-[calc(var(--titlebar-height)+0.625rem)]',
-        'sm:p-[calc(var(--titlebar-height)+0.875rem)]'
+        isBrowserClient() && narrow
+          ? 'p-3 pt-6' // Keep space above the card for the straddling search badge.
+          : 'p-[calc(var(--titlebar-height)+0.625rem)] sm:p-[calc(var(--titlebar-height)+0.875rem)]'
       )}
       // Every OverlayView-based overlay (settings, command-center, agents, cron,
       // profiles, star map, …) covers the chat while the composer stays mounted

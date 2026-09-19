@@ -1,5 +1,5 @@
 import { useStore } from '@nanostores/react'
-import { atom } from 'nanostores'
+import { atom, computed } from 'nanostores'
 import { type CSSProperties, useEffect, useLayoutEffect, useRef, useState } from 'react'
 
 import { isElementInHiddenPane, PANE_HIDDEN_ATTR } from '@/components/pane-shell/pane-visibility'
@@ -10,7 +10,7 @@ import { $paneStates } from '@/store/panes'
 
 import { $terminalTakeover } from '../store'
 
-import { ensureTerminal } from './terminals'
+import { $terminals, ensureTerminal } from './terminals'
 import { TerminalWorkspace } from './workspace'
 
 /**
@@ -21,6 +21,7 @@ import { TerminalWorkspace } from './workspace'
  */
 
 const $slot = atom<HTMLElement | null>(null)
+const $hasTerminalRail = computed($terminals, terminals => terminals.length > 0)
 
 const SLOT_CLASS = 'relative flex min-h-0 min-w-0 flex-1 flex-col'
 
@@ -64,6 +65,8 @@ const sameRect = (a: Rect | null, b: Rect) =>
 export function PersistentTerminal({ onAddSelectionToChat }: PersistentTerminalProps) {
   const slot = useStore($slot)
   const terminalTakeover = useStore($terminalTakeover)
+  const hasTerminalRail = useStore($hasTerminalRail)
+  const measureNowRef = useRef<(() => void) | null>(null)
   const [rect, setRect] = useState<Rect | null>(null)
   const [ready, setReady] = useState(false)
 
@@ -217,6 +220,12 @@ export function PersistentTerminal({ onAddSelectionToChat }: PersistentTerminalP
 
     pauseController = createRendererLoopPauseController(handleVisibilityChange, { pauseWhenUnfocused: true })
 
+    measureNowRef.current = () => {
+      if (measure('terminal-chrome')) {
+        scheduleMeasure('settle')
+      }
+    }
+
     if (measure('initial')) {
       scheduleMeasure('settle')
     }
@@ -254,6 +263,7 @@ export function PersistentTerminal({ onAddSelectionToChat }: PersistentTerminalP
 
     return () => {
       stopped = true
+      measureNowRef.current = null
       cancelFrame()
       observer?.disconnect()
       positionObserver?.disconnect()
@@ -264,6 +274,12 @@ export function PersistentTerminal({ onAddSelectionToChat }: PersistentTerminalP
       pauseController?.dispose()
     }
   }, [slot])
+
+  // A cached-font terminal can start before the next observer frame. Reconcile
+  // the committed pane/rail geometry before its first fit and shell creation.
+  useLayoutEffect(() => {
+    measureNowRef.current?.()
+  }, [hasTerminalRail, terminalTakeover])
 
   const visible = Boolean(rect && !rect.hidden && rect.width > 0 && rect.height > 0)
 
