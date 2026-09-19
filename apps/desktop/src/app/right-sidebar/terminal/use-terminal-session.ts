@@ -433,7 +433,6 @@ export function useTerminalSession({
   // Re-fit on activation: a tab hidden via display:none has a 0×0 host, so its
   // last fit is stale by the time it's shown again.
   const fitRef = useRef<((visible: boolean) => void) | null>(null)
-  const initialActiveFitRef = useRef(false)
   const { latestFontFamilyRef, mountedRef } = useTerminalFontController({ fitRef, termRef, webglRef })
   const [status, setStatus] = useState<TerminalStatus>('starting')
   const [selection, setSelection] = useState('')
@@ -1003,7 +1002,6 @@ export function useTerminalSession({
       }
 
       fitAndResize(initialActiveRef.current)
-      initialActiveFitRef.current = initialActiveRef.current
       startSession()
     }
 
@@ -1082,13 +1080,8 @@ export function useTerminalSession({
   // Only the active terminal observes its host. Every terminal stays mounted
   // (PTY + scrollback preserved), but hidden tabs do no FitAddon/layout work.
   // Re-activation owns one fit + atlas rebuild + redraw.
-  // eslint-disable-next-line no-restricted-syntax -- lifecycle flag prevents a duplicate first-mount fit
   useEffect(() => {
     if (!active || status !== 'open') {
-      if (!active) {
-        initialActiveFitRef.current = false
-      }
-
       return
     }
 
@@ -1098,11 +1091,7 @@ export function useTerminalSession({
       return
     }
 
-    const fitOnActivate = !initialActiveFitRef.current
-    initialActiveFitRef.current = false
-
     return observeActiveTerminalResize(host, {
-      fitOnActivate,
       onFit: () => fitRef.current?.(true),
       onActivate: () => {
         const term = termRef.current

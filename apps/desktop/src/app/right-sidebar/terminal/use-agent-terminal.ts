@@ -38,7 +38,6 @@ export function useAgentTerminal({
   const termRef = useRef<Terminal | null>(null)
   const webglRef = useRef<WebglAddon | null>(null)
   const fitRef = useRef<((visible: boolean) => void) | null>(null)
-  const initialActiveFitRef = useRef(false)
   const { latestFontFamilyRef, mountedRef } = useTerminalFontController({ fitRef, termRef, webglRef })
 
   const surfaceTheme = () => {
@@ -159,7 +158,6 @@ export function useAgentTerminal({
       }
 
       fitRef.current?.(active)
-      initialActiveFitRef.current = active
 
       // Stream live output straight into the terminal (replays backlog on attach).
       unregister = registerAgentTerminalWriter(procId, chunk => term.write(chunk), profile)
@@ -211,11 +209,8 @@ export function useAgentTerminal({
 
   // Keep inactive agent terminals mounted for their backlog, but do not observe
   // or fit them until they become the visible tab.
-  // eslint-disable-next-line no-restricted-syntax -- lifecycle flag prevents a duplicate first-mount fit
   useEffect(() => {
     if (!active) {
-      initialActiveFitRef.current = false
-
       return
     }
 
@@ -225,11 +220,7 @@ export function useAgentTerminal({
       return
     }
 
-    const fitOnActivate = !initialActiveFitRef.current
-    initialActiveFitRef.current = false
-
     return observeActiveTerminalResize(host, {
-      fitOnActivate,
       onFit: () => fitRef.current?.(true),
       onActivate: () => {
         const term = termRef.current

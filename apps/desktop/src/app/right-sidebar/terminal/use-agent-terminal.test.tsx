@@ -8,6 +8,7 @@ const xterm = vi.hoisted(() => ({
   clearSelection: vi.fn(),
   dispose: vi.fn(),
   focus: vi.fn(),
+  fit: vi.fn(),
   getSelection: vi.fn(() => ''),
   loadAddon: vi.fn(),
   onSelectionChange: vi.fn(() => ({ dispose: vi.fn() })),
@@ -48,7 +49,7 @@ vi.mock('@xterm/xterm', () => ({
 
 vi.mock('@xterm/addon-fit', () => ({
   FitAddon: class {
-    fit = vi.fn()
+    fit = xterm.fit
   }
 }))
 
@@ -93,8 +94,8 @@ vi.mock('./buffer', () => ({
   registerTerminalReader: terminalRegistrations.registerReader
 }))
 
-function Harness({ profile }: { profile?: string }) {
-  const { hostRef } = useAgentTerminal({ active: false, id: 'agent-tab', procId: 'proc-1', profile })
+function Harness({ profile, active = false }: { profile?: string; active?: boolean }) {
+  const { hostRef } = useAgentTerminal({ active, id: 'agent-tab', procId: 'proc-1', profile })
 
   return <div ref={hostRef} />
 }
@@ -130,9 +131,67 @@ describe('useAgentTerminal', () => {
 
   afterEach(() => {
     vi.clearAllMocks()
+    xterm.fit.mockReset()
+    vi.restoreAllMocks()
     vi.unstubAllGlobals()
     vi.unstubAllEnvs()
     Reflect.deleteProperty(globalThis.document, 'fonts')
+  })
+
+  it.each(['0', '1'])('fits an active mirror when the first resize arrives after activation (browser=%s)', async browser => {
+    vi.stubEnv('VITE_BROWSER', browser)
+    let width = 300
+    let fittedWidth = 0
+    vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(() => width)
+    vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(100)
+    xterm.fit.mockImplementation(() => { fittedWidth = width })
+    const frames = new Map<number, FrameRequestCallback>()
+    let nextFrame = 0
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.set(++nextFrame, callback)
+
+      return nextFrame
+    })
+    vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id))
+
+    const flush = () => act(() => {
+      const pending = [...frames.values()]
+      frames.clear()
+      pending.forEach(callback => callback(0))
+    })
+
+    let deliverResize!: () => void
+    vi.stubGlobal('ResizeObserver', class {
+      constructor(callback: ResizeObserverCallback) {
+        deliverResize = () => callback([], this as unknown as ResizeObserver)
+      }
+      observe() {}
+      disconnect() {}
+    })
+    const view = render(<Harness active />)
+    await act(async () => resolveFontLoad([]))
+    flush()
+    expect(fittedWidth).toBe(300)
+    const focusCount = xterm.focus.mock.calls.length
+    width = 200
+    act(() => deliverResize())
+    flush()
+    expect(fittedWidth).toBe(200)
+    expect(xterm.focus).toHaveBeenCalledTimes(focusCount)
+    expect(xterm.open).toHaveBeenCalledOnce()
+
+    view.rerender(<Harness active={false} />)
+    width = 400
+    act(() => deliverResize())
+    flush()
+    expect(fittedWidth).toBe(200)
+    expect(xterm.dispose).not.toHaveBeenCalled()
+    view.rerender(<Harness active />)
+    flush()
+    expect(fittedWidth).toBe(400)
+    expect(xterm.open).toHaveBeenCalledOnce()
+    view.unmount()
+    expect(xterm.dispose).toHaveBeenCalledOnce()
   })
 
   it('subscribes a hidden browser mirror to its captured owner, not the foreground profile', async () => {

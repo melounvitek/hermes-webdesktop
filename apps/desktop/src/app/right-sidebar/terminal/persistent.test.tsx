@@ -1,4 +1,5 @@
-import { act } from 'react'
+import { useStore } from '@nanostores/react'
+import { act, useEffect, useRef } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { hiddenPaneProps, PANE_HIDDEN_ATTR } from '@/components/pane-shell/pane-visibility'
@@ -8,18 +9,46 @@ import { reactRoot } from '@/test/react-root'
 import { installWindowStateBridge, setDocumentHidden, type WindowStateBridge } from '../../../test/window-state'
 import { $terminalTakeover } from '../store'
 
+import { TerminalPaneChrome } from './chrome'
 import { PersistentTerminal, TerminalSlot } from './persistent'
+import { $terminals } from './terminals'
 
 vi.mock('../store', async () => ({
   $terminalTakeover: (await import('nanostores')).atom(false)
 }))
 
-vi.mock('./terminals', () => ({
+vi.mock('./terminals', async () => ({
+  $terminals: (await import('nanostores')).atom([]),
   ensureTerminal: vi.fn()
 }))
 
+const starts = vi.hoisted(() => vi.fn())
+
+function StartingTerminal({ id }: { id: string }) {
+  const ref = useRef<HTMLDivElement>(null)
+  useEffect(() => {
+    let closed = false
+    // Cached font preparation still yields a microtask before open/fit/start.
+    void Promise.resolve().then(() => {
+      if (!closed) {
+        const overlay = ref.current!.closest<HTMLElement>('[data-persistent-terminal]')!
+        starts({ id, width: parseFloat(overlay.style.width) })
+      }
+    })
+
+    return () => { closed = true }
+  }, [id])
+
+  return <div ref={ref} />
+}
+
+vi.mock('./rail', () => ({ TerminalRail: () => <div data-testid="terminal-rail" /> }))
 vi.mock('./workspace', () => ({
-  TerminalWorkspace: () => <div data-testid="terminal-workspace" />
+  TerminalWorkspace: () => {
+    const terminals = useStore($terminals)
+
+    return <div data-testid="terminal-workspace">{terminals.map(term => <StartingTerminal id={term.id} key={term.id} />)}</div>
+  }
 }))
 
 let resizeObserverCallback: ResizeObserverCallback | null = null
@@ -138,6 +167,8 @@ describe('PersistentTerminal rect tracking', () => {
   afterEach(() => {
     mount.unmount()
     $terminalTakeover.set(false)
+    $terminals.set([])
+    starts.mockClear()
     vi.unstubAllGlobals()
     vi.unstubAllEnvs()
     document.documentElement.style.removeProperty('zoom')
@@ -181,6 +212,39 @@ describe('PersistentTerminal rect tracking', () => {
       act(() => raf.runNext())
       expect(raf.pending()).toBe(0)
     }
+  })
+
+  it('measures reopened pane and conditional rail space before cached-font terminals start', async () => {
+    const raf = installRaf()
+    let paneWidth = 400
+    const slotWidth = () => paneWidth - (mount.container?.querySelector('[data-testid="terminal-rail"]') ? 36 : 0)
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => rect(10, 20, slotWidth(), 100))
+    $terminalTakeover.set(true)
+    mount.render(<><TerminalPaneChrome /><PersistentTerminal onAddSelectionToChat={() => undefined} /></>)
+    const overlay = mount.container!.querySelector<HTMLElement>('[data-persistent-terminal]')!
+    const workspace = mount.container!.querySelector('[data-testid="terminal-workspace"]')
+
+    for (const [index, width] of [400, 300, 500].entries()) {
+      paneWidth = width
+      act(() => $terminalTakeover.set(true))
+      expect(parseFloat(overlay.style.width)).toBe(slotWidth())
+      const terminal = { id: `tab-${index}`, auto: true, title: 'Terminal', cwd: '/', kind: 'user' as const }
+      await act(async () => { $terminals.set([terminal]) })
+      expect(starts).toHaveBeenLastCalledWith({ id: terminal.id, width: slotWidth() })
+      expect(mount.container!.querySelector('[data-testid="terminal-workspace"]')).toBe(workspace)
+      act(() => raf.runNext())
+      expect(raf.pending()).toBe(0)
+      expect(parseFloat(overlay.style.width)).toBe(slotWidth())
+      // Retaining another tab changes no rail geometry and starts no replacement.
+      await act(async () => { $terminals.set([terminal, { ...terminal, id: `${terminal.id}-second` }]) })
+      expect(starts).toHaveBeenLastCalledWith({ id: `${terminal.id}-second`, width: slotWidth() })
+      expect(starts).toHaveBeenCalledTimes((index + 1) * 2)
+      act(() => { $terminals.set([]); $terminalTakeover.set(false) })
+      expect(parseFloat(overlay.style.width)).toBe(slotWidth())
+    }
+
+    mount.unmount()
+    expect(raf.pending()).toBe(0)
   })
 
   it('settles after rect changes instead of polling forever', () => {
@@ -330,6 +394,24 @@ describe('PersistentTerminal rect tracking', () => {
       resizeObserverCallback?.([], {} as ResizeObserver)
       mutationObserverCallback?.([], {} as MutationObserver)
     })
+    expect(raf.pending()).toBe(0)
+  })
+
+  it('updates visibility without layout work when the rail changes while paused', () => {
+    const raf = installRaf()
+    const measure = vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(rect(10, 20, 200, 100))
+    $terminalTakeover.set(true)
+    mount.render(<HiddenPaneHarness hidden={false} />)
+    const overlay = mount.container!.querySelector<HTMLElement>('[data-persistent-terminal]')!
+    act(() => window.dispatchEvent(new Event('blur')))
+    measure.mockClear()
+
+    // No MutationObserver delivery: the rail-presence layout effect owns this wake.
+    act(() => mount.root!.render(<HiddenPaneHarness hidden />))
+    act(() => $terminals.set([{ id: 'paused', auto: true, title: 'Terminal', cwd: '/', kind: 'user' }]))
+    expect(overlay.style.visibility).toBe('hidden')
+    expect(overlay.style.pointerEvents).toBe('none')
+    expect(measure).not.toHaveBeenCalled()
     expect(raf.pending()).toBe(0)
   })
 
