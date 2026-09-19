@@ -97,6 +97,14 @@ describe('resolveDomTarget', () => {
 })
 
 describe('AppContextMenu', () => {
+  it.each([true, false])('only offers the shell updater outside browser mode (%s)', async browser => {
+    installBridge(browser ? { browser: { authRequired: true, signIn: vi.fn() } } : {})
+    mountMenu()
+    fireEvent.contextMenu(document.body)
+    await screen.findByRole('menu')
+    expect(Boolean(screen.queryByRole('menuitem', { name: 'Update Hermes' }))).toBe(!browser)
+  })
+
   it('opens the link menu on a chat link right-click', async () => {
     installBridge()
     mountMenu()

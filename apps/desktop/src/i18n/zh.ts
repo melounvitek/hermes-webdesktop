@@ -233,6 +233,8 @@ export const zh = defineLocale({
     copyDetail: '复制详情',
     copyDetailFailed: '无法复制通知详情',
     backendOutOfDateTitle: '后端版本过旧',
+    browserBackendOutOfDateMessage:
+      '此后端未报告当前浏览器构建所需的功能。部分功能可能无法正常工作。无法在此更新后端。',
     backendOutOfDateMessage: '你的 Hermes 后端早于当前桌面构建，可能无法正常工作。请更新以保持一致。',
     installMethodUnsupportedTitle: '不受支持的安装方式',
     updateHermes: '更新 Hermes',

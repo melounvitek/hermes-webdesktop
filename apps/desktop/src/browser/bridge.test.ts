@@ -1,6 +1,7 @@
 import { resolveGatewayWsUrl } from '@hermes/shared'
 import { afterEach, expect, it, vi } from 'vitest'
 
+import { updateHermes } from '@/api/system'
 import { mediaExternalUrl } from '@/lib/media'
 import { $connection } from '@/store/session'
 
@@ -24,6 +25,30 @@ it('routes REST to the same backend, preserving explicit profile and rejecting o
   await expect(bridge.api({ path: 'https://elsewhere.invalid/api/config' })).rejects.toThrow('same-origin')
   await expect(bridge.api({ path: '/api/config', connectionId: 'other' })).rejects.toThrow('connection')
   expect(fetch).toHaveBeenCalledTimes(2)
+})
+
+it('blocks updater requests before transport, including the direct frontend API path', async () => {
+  const fetch = vi.fn().mockImplementation(async () => new Response('{"ok":true}'))
+  vi.stubGlobal('fetch', fetch)
+  const bridge = createBrowserBridge({ token: '', authRequired: true })
+  vi.stubGlobal('hermesDesktop', bridge)
+
+  await expect(updateHermes()).rejects.toThrow(/updates.*unavailable/i)
+
+  for (const path of [
+    '/api/hermes/update?profile=alpha',
+    '/api/hermes/update/',
+    '/api/hermes/%75pdate',
+    `${window.location.origin}/api/hermes/update`,
+    '/api/other/../hermes/./update'
+  ]) {
+    await expect(bridge.api({ method: 'POST', path })).rejects.toThrow(/updates.*unavailable/i)
+  }
+
+  expect(fetch).not.toHaveBeenCalled()
+
+  await bridge.api({ path: '/api/hermes/update/check' })
+  expect(fetch).toHaveBeenCalledOnce()
 })
 
 it('mints a new cookie-authenticated ticket for each dial and surfaces rejection', async () => {

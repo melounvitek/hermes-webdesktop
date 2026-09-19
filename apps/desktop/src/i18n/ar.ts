@@ -215,6 +215,8 @@ export const ar = defineLocale({
     copyDetail: 'نسخ التفاصيل',
     copyDetailFailed: 'تعذر نسخ تفاصيل الإشعار',
     backendOutOfDateTitle: 'الخلفية قديمة',
+    browserBackendOutOfDateMessage:
+      'لا تُبلغ هذه الخلفية عن الإمكانات المطلوبة لإصدار المتصفح هذا. قد لا تعمل بعض الميزات. تحديثات الخلفية غير متاحة هنا.',
     backendOutOfDateMessage: 'خلفية Hermes أقدم من إصدار سطح المكتب الحالي وقد لا تعمل كما يجب. حدثهما ليتوافقا.',
     updateHermes: 'تحديث Hermes',
     updateReadyTitle: 'التحديث جاهز',

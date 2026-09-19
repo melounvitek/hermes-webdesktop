@@ -91,6 +91,7 @@ const {
   applyEverythingUpdate,
   hasMultipleUpdateTargets,
   openUpdatesWindow,
+  openUpdateOverlayFor,
   startActiveUpdate,
   $updateApply,
   $updateEverything,
@@ -287,7 +288,7 @@ describe('checkBackendUpdates', () => {
 
     const result = await checkBackendUpdates()
 
-    expect(result?.behind).toBe(0)
+    expect(result?.behind).toBeNull()
     expect(result?.updateAvailable).toBe(true)
     expect(result?.targetSha).toBe('backend:0.16.0')
   })
@@ -310,10 +311,111 @@ describe('checkBackendUpdates', () => {
     expect(result?.message).toBe('Docker images are immutable.')
   })
 
+  it.each([null, -1, undefined])('does not report an unsuccessful check (%s) as current', async behind => {
+    setRemote(true)
+    checkHermesUpdateSpy.mockResolvedValue({
+      current_version: 'fixture',
+      behind,
+      update_available: false,
+      can_apply: true,
+      message: 'Could not reach the update source.'
+    })
+
+    const result = await checkBackendUpdates()
+
+    expect(result).toMatchObject({ error: 'check-failed', behind: null, message: 'Could not reach the update source.' })
+    expect(notifySpy).not.toHaveBeenCalled()
+  })
+
+  it.each([0, null])('distinguishes a confirmed current version from an uncountable update (%s)', async behind => {
+    setRemote(true)
+    checkHermesUpdateSpy.mockResolvedValue({
+      current_version: 'fixture',
+      behind,
+      update_available: behind === null,
+      can_apply: true,
+      message: null
+    })
+
+    const result = await checkBackendUpdates()
+
+    expect(result?.error).toBeUndefined()
+    expect(result?.behind).toBe(behind)
+    expect(result?.updateAvailable).toBe(behind === null)
+  })
+
   it('is a no-op in local mode (backend check only runs when remote)', async () => {
     setRemote(false)
     await checkBackendUpdates()
     expect(checkHermesUpdateSpy).not.toHaveBeenCalled()
+  })
+})
+
+describe('browser update policy', () => {
+  const applyClient = vi.fn()
+  const fanOut = vi.fn()
+
+  beforeEach(() => {
+    storage.clear()
+    notifySpy.mockClear()
+    applyClient.mockReset().mockResolvedValue({ ok: false })
+    fanOut.mockReset().mockResolvedValue({ results: [] })
+    updateHermesSpy.mockReset().mockResolvedValue({ ok: false })
+    checkHermesUpdateSpy.mockReset().mockResolvedValue({ behind: 0, can_apply: true, update_available: false })
+    resetUpdateApplyState()
+    $updateOverlayOpen.set(false)
+    $updateStatus.set(status())
+    $backendUpdateStatus.set(status())
+    $mockConnectionsRegistry.set(registryOf(['local', 'remote', 'other']))
+    vi.stubGlobal('window', {
+      hermesDesktop: {
+        browser: { authRequired: true, signIn: vi.fn() },
+        updates: { apply: applyClient, check: vi.fn().mockResolvedValue(status()) },
+        connections: { updateAll: fanOut }
+      }
+    })
+    setRemote(true)
+  })
+
+  afterEach(async () => {
+    await vi.waitFor(() => expect($updateEverything.get().running).toBe(false))
+    vi.unstubAllGlobals()
+    $mockConnectionsRegistry.set(null)
+    resetUpdateApplyState()
+    $updateOverlayOpen.set(false)
+    setRemote(false)
+  })
+
+  it('refuses shared update entry points even with stale update offers and native capabilities', async () => {
+    openUpdateOverlayFor('backend')
+    openUpdatesWindow('client')
+    requestActiveUpdate()
+    startActiveUpdate('backend')
+    startActiveUpdate('client')
+    await applyUpdates()
+    await applyBackendUpdate()
+    await applyEverythingUpdate()
+
+    expect(updateHermesSpy).not.toHaveBeenCalled()
+    expect(applyClient).not.toHaveBeenCalled()
+    expect(fanOut).not.toHaveBeenCalled()
+    expect(checkHermesUpdateSpy).not.toHaveBeenCalled()
+    expect($updateOverlayOpen.get()).toBe(false)
+    expect($updateApply.get().applying).toBe(false)
+    expect($backendUpdateApply.get().applying).toBe(false)
+  })
+
+  it('keeps contract warnings but offers neither backend alignment nor update toasts', () => {
+    reportBackendContract(undefined)
+    expect(notifySpy).toHaveBeenCalledOnce()
+    expect(notifySpy.mock.calls[0][0]).toMatchObject({ kind: 'warning' })
+    expect(notifySpy.mock.calls[0][0].action).toBeUndefined()
+    expect(notifySpy.mock.calls[0][0].message).not.toContain('Update to align')
+    notifySpy.mockClear()
+    maybeNotifyUpdateAvailable(status(), 'backend')
+    maybeNotifyUpdateAvailable(status(), 'client')
+    expect(notifySpy).not.toHaveBeenCalled()
+    expect(updateHermesSpy).not.toHaveBeenCalled()
   })
 })
 

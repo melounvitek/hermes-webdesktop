@@ -29,6 +29,7 @@ import {
   Terminal,
   Zap
 } from '@/lib/icons'
+import { isBrowserClient } from '@/lib/platform'
 import { runtimeReadinessDisplay, type RuntimeReadinessResult } from '@/lib/runtime-readiness'
 import { cacheHitLabel, contextBarLabel, LiveDuration, tokensPerSecondLabel, usageContextLabel } from '@/lib/statusbar'
 import { useStoreSelector } from '@/lib/use-session-slice'
@@ -362,7 +363,7 @@ export function useStatusbarItems({
     return {
       className: status.hasUpdate ? 'text-primary hover:text-primary' : undefined,
       detail: status.detail,
-      hidden: status.unknown,
+      hidden: isBrowserClient() || status.unknown,
       icon: applying ? <Loader2 className="size-3 animate-spin" /> : <Hash className="size-3" />,
       id: 'version-client',
       label: status.label,
@@ -392,17 +393,18 @@ export function useStatusbarItems({
       return null
     }
 
-    const applying = backendUpdateApply.applying || backendUpdateApply.stage === 'restart'
+    const browser = isBrowserClient()
+    const applying = !browser && (backendUpdateApply.applying || backendUpdateApply.stage === 'restart')
 
     const status = resolveVersionStatus({
       applying,
       applyMessage: backendUpdateApply.message,
-      behind: backendUpdateStatus?.behind ?? 0,
+      behind: browser ? 0 : (backendUpdateStatus?.behind ?? 0),
       copy,
       remote: true,
-      restarting: backendUpdateApply.stage === 'restart',
+      restarting: !browser && backendUpdateApply.stage === 'restart',
       target: 'backend',
-      updateAvailable: backendUpdateStatus?.updateAvailable,
+      updateAvailable: !browser && backendUpdateStatus?.updateAvailable,
       version: statusSnapshot?.version
     })
 
@@ -413,10 +415,10 @@ export function useStatusbarItems({
       id: 'version-backend',
       label: status.label,
       lockedVisible: true,
-      onSelect: () => openUpdateOverlayFor('backend'),
+      onSelect: browser ? undefined : () => openUpdateOverlayFor('backend'),
       title: status.tooltip,
       toggleLabel: copy.toggleBackendVersion,
-      variant: 'action'
+      variant: browser ? 'text' : 'action'
     }
   }, [
     connection?.mode,

@@ -259,6 +259,8 @@ export const en: Translations = {
     copyDetail: 'Copy detail',
     copyDetailFailed: 'Could not copy notification detail',
     backendOutOfDateTitle: 'Backend out of date',
+    browserBackendOutOfDateMessage:
+      'This backend does not report the capabilities required by this browser build. Some features may not work. Backend updates are unavailable here.',
     backendOutOfDateMessage:
       'Your Hermes backend is older than this desktop build and may not work correctly. Update to align them.',
     installMethodUnsupportedTitle: 'Unsupported install method',

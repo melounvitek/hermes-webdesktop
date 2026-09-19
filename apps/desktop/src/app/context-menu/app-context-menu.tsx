@@ -20,6 +20,7 @@ import { type Translations, useI18n } from '@/i18n'
 import { hostPathLabel, hudForcesNativeLinks, normalizeExternalUrl, openExternalLink } from '@/lib/external-link'
 import { formatCombo } from '@/lib/keybinds/combo'
 import { isRemoteGateway } from '@/lib/media'
+import { isBrowserClient } from '@/lib/platform'
 import { reachablePreviewUrl } from '@/lib/preview-reach'
 import { openCommandPalette } from '@/store/command-palette'
 import { notifyError } from '@/store/notifications'
@@ -605,14 +606,18 @@ function shellSections({ navigate, t }: ShellVerbs): ReactNode[][] {
         onSelect={() => navigateToWorkspacePage(navigate, SETTINGS_ROUTE)}
       />
     ],
-    [
-      <Item
-        icon="cloud-download"
-        key="shell-update"
-        label={t.commandCenter.updateHermes}
-        onSelect={requestActiveUpdate}
-      />
-    ]
+    ...(isBrowserClient()
+      ? []
+      : [
+          [
+            <Item
+              icon="cloud-download"
+              key="shell-update"
+              label={t.commandCenter.updateHermes}
+              onSelect={requestActiveUpdate}
+            />
+          ]
+        ])
   ]
 }
 

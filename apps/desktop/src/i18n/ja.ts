@@ -210,6 +210,8 @@ export const ja = defineLocale({
     copyDetail: '詳細をコピー',
     copyDetailFailed: '通知の詳細をコピーできませんでした',
     backendOutOfDateTitle: 'バックエンドが古いです',
+    browserBackendOutOfDateMessage:
+      'このバックエンドは、このブラウザービルドに必要な機能を報告していません。一部の機能が動作しない可能性があります。ここからバックエンドを更新することはできません。',
     backendOutOfDateMessage:
       'Hermes バックエンドがこのデスクトップビルドより古く、正常に動作しない場合があります。更新して揃えてください。',
     installMethodUnsupportedTitle: 'サポート対象外のインストール方法',
