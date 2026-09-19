@@ -403,11 +403,15 @@ _PASSWORD_FORM_SCRIPT = """\
       var btn = form.querySelector('button[type=submit]');
       if (err) { err.hidden = true; err.textContent = ''; }
       if (btn) { btn.disabled = true; }
+      var next = (form.querySelector('input[name=next]') || {}).value || '/';
+      // The HTTP redirect cannot see the fragment carried onto this login page.
+      // Send it through the existing server validation before navigating.
+      if (next.indexOf('#') === -1) { next += window.location.hash; }
       var body = {
         provider: form.getAttribute('data-provider') || '',
         username: (form.querySelector('input[name=username]') || {}).value || '',
         password: (form.querySelector('input[name=password]') || {}).value || '',
-        next: (form.querySelector('input[name=next]') || {}).value || ''
+        next: next
       };
       fetch('/auth/password-login', {
         method: 'POST',

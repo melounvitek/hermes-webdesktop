@@ -607,8 +607,10 @@ try {
     'fresh-cookie-login-hash',
     async ({ page, context, submit, retained, followup, expireCookies, login }) => {
       const turn = await submit('spike: fresh-cookie-login-hash')
-      const target = page.url()
-      assert.ok(new URL(target).hash.includes(turn.stored), 'Start from the durable session deep link')
+      const link = new URL(page.url())
+      link.searchParams.set('view', 'chat')
+      const target = link.href
+      assert.ok(link.hash.includes(turn.stored), 'Start from the durable session deep link')
       await page.goto('about:blank') // Avoid a same-document hash navigation.
       await expireCookies()
       // Reopen the deep link without any remembered route/session. A cache restore
@@ -623,6 +625,14 @@ try {
       await expect.poll(() => page.url()).toBe(target)
       await retained(turn)
       await followup(turn)
+
+      // An explicit next fragment (as used by in-app re-login) remains authoritative.
+      await expireCookies()
+      const next = link.pathname + link.search + link.hash
+      await page.goto(`${cookie.origin}/login?${new URLSearchParams({ next })}#/ignored`)
+      await login()
+      await expect.poll(() => page.url()).toBe(target)
+      await retained(turn)
     }
   )
   await check(
