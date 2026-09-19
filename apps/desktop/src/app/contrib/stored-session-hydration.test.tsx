@@ -136,33 +136,30 @@ it.each(['busy', 'awaitingResponse', 'interrupted'] as const)(
   }
 )
 
-it('rejects a held response after runtime rebinding or todo-only live progress', async () => {
-  for (const change of ['owner', 'todo']) {
-    let deliver!: (value: unknown) => void
-    vi.mocked(getLatestSessionMessages).mockReturnValueOnce(
-      new Promise(resolve => {
-        deliver = resolve
-      }) as never
-    )
-    const h = mount()
-    h.complete()
-    const before = h.state().messages
+it.each(['owner', 'todo'])('rejects a held response after %s changes', async change => {
+  let deliver!: (value: unknown) => void
+  vi.mocked(getLatestSessionMessages).mockReturnValueOnce(
+    new Promise(resolve => {
+      deliver = resolve
+    }) as never
+  )
+  const h = mount()
+  h.complete()
+  const before = h.state().messages
 
-    if (change === 'owner') {
-      h.update(SID, s => ({ ...s, storedSessionId: 'different-stored' }))
-    } else {
-      setSessionTodos(SID, todos)
-    }
-
-    const beforeTodos = $todosBySession.get()[SID]
-    await act(async () => {
-      deliver(rows(['stale', 'stale reply']))
-      await h.invoked.mock.results[0].value
-    })
-    expect(h.state().messages).toBe(before)
-    expect($todosBySession.get()[SID]).toBe(beforeTodos)
-    cleanup()
+  if (change === 'owner') {
+    h.update(SID, s => ({ ...s, storedSessionId: 'different-stored' }))
+  } else {
+    setSessionTodos(SID, todos)
   }
+
+  const beforeTodos = $todosBySession.get()[SID]
+  await act(async () => {
+    deliver(rows(['stale', 'stale reply']))
+    await h.invoked.mock.results[0].value
+  })
+  expect(h.state().messages).toBe(before)
+  expect($todosBySession.get()[SID]).toBe(beforeTodos)
 })
 
 it('preserves older backfill, inline errors and the supplied exact owner on fresh hydration', async () => {

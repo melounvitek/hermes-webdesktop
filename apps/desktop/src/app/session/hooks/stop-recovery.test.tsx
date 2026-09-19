@@ -283,7 +283,7 @@ it.each(['main', 'tile'] as const)(
 )
 
 it.each(['main', 'tile'] as const)(
-  'retires only proven absence on failed %s recovery and keeps retryable replacement work',
+  'retires only proven absence on failed %s recovery',
   async surface => {
     const h = mount(surface)
     h.request.mockRejectedValueOnce(new Error('transport failed'))
