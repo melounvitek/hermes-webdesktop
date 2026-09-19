@@ -8,18 +8,19 @@ import {
 } from '@/hermes'
 import { translateNow } from '@/i18n/runtime'
 import { type ChatMessage, chatMessageText, toChatMessages } from '@/lib/chat-messages'
-import { notify } from '@/store/notifications'
+import { notify, notifyError } from '@/store/notifications'
 import {
   isReadOnlyRuntimeId,
   readOnlyRuntimeIdFor,
   resumeWithStoredTranscriptFallback
 } from '@/store/read-only-transcript'
-import { knownSessionOwner, ownerLookupSessionRows } from '@/store/session'
+import { getSessionOwnerHint, knownSessionOwner, ownerLookupSessionRows } from '@/store/session'
 import { assertSessionOwnerResolved } from '@/store/session-owner-resolution'
 import { requestForSessionProfile, type SessionOwnerScope } from '@/store/session-request-router'
 import {
   $sessionTiles,
   publishSessionState,
+  runtimeSessionOwner,
   sessionTileOwnerRoute,
   setSessionTileDelegate
 } from '@/store/session-states'
@@ -36,6 +37,7 @@ import {
 } from '../../session/hooks/use-session-actions/utils'
 import type { useSessionStateCache } from '../../session/hooks/use-session-state-cache'
 import type { GatewayRequester } from '../types'
+import { resolveSessionRpcOwner } from '../wiring-routing'
 
 type SessionStateCache = ReturnType<typeof useSessionStateCache>
 
@@ -227,6 +229,51 @@ export function useSessionTileDelegate({
 
         if (!cached || (!cached.busy && !cached.awaitingResponse)) {
           return false
+        }
+
+        if (cached.interrupted && cached.busy) {
+          // Reconnect is not settlement. Read this runtime's exact owner on its
+          // socket; the reply follows any older terminal frames on that socket.
+          // Absence also confirms idle after a backend restart, even if no poll
+          // ever saw the old runtime. This covers background owner sockets too.
+          const stored = storedSessionIdForRuntime(runtimeId)
+
+          const read = async () => {
+            const owner = resolveSessionRpcOwner({
+              routingSessionId: stored ?? runtimeId,
+              eventOwner: () => runtimeSessionOwner(runtimeId),
+              sessionOwnerHint: getSessionOwnerHint,
+              sessionRowOwner: id => knownSessionOwner(ownerLookupSessionRows(), id),
+              tileOwnerRoute: sessionTileOwnerRoute
+            })
+
+            assertSessionOwnerResolved(owner, { method: 'session.active_list', sessionId: stored ?? runtimeId })
+
+            return requestForSessionProfile<{ sessions?: Array<{ id: string; status?: string }> }>(
+              owner,
+              requestGateway,
+              'session.active_list',
+              {}
+            )
+          }
+
+          void read()
+            .then(result => {
+              const live = result.sessions?.find(session => session.id === runtimeId)
+
+              if (!Array.isArray(result.sessions) || (live && live.status !== 'idle')) {
+                return
+              }
+
+              updateSessionState(runtimeId, state =>
+                state === cached
+                  ? { ...state, awaitingResponse: false, busy: false, turnLive: false, turnStartedAt: null }
+                  : state
+              )
+            })
+            .catch(error => notifyError(error, 'Could not confirm Stop. Retry Stop or reconnect.'))
+
+          return true
         }
 
         updateSessionState(runtimeId, state => ({ ...state, awaitingResponse: false, busy: false }))

@@ -172,8 +172,12 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
       const guardSessionId = options?.sessionId ?? activeSessionIdRef.current
 
+      const targetState = guardSessionId ? $sessionStates.get()[guardSessionId] : undefined
+
       if (
         !hasSendable ||
+        // Queue drains may bypass a stale busy ref, not an unsettled Stop.
+        (targetState?.interrupted && targetState.busy) ||
         (!options?.fromQueue && isTargetSessionBusy($sessionStates.get(), guardSessionId, busyRef.current))
       ) {
         return false
@@ -391,6 +395,14 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       // Idempotent optimistic insert — re-running with the resolved sessionId
       // after createBackendSessionForSend just overwrites with the same id.
       const seedOptimistic = (sid: string) => {
+        const state = $sessionStates.get()[sid]
+
+        if (state?.interrupted && state.busy) {
+          releaseSubmitLock()
+
+          return false
+        }
+
         // Recents jump on send — not stream start, not turn resolve.
         const activity = bubbleText.trim() ? { preview: bubbleText.trim() } : undefined
         touchSessionActivity(sid, activity)
@@ -437,6 +449,8 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           }),
           targetStoredSessionId
         )
+
+        return true
       }
 
       // After sync rewrites refs, refresh the optimistic message in place so the
@@ -535,7 +549,9 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
       }
 
       if (sessionId) {
-        seedOptimistic(sessionId)
+        if (!seedOptimistic(sessionId)) {
+          return false
+        }
       } else if (targetIsCurrentView()) {
         scope.setMessages(current => [...current, buildUserMessage()])
       }
@@ -583,7 +599,10 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           selectedStoredSessionIdRef.current === routedStoredSessionId
         ) {
           sessionId = recoveredRuntimeId
-          seedOptimistic(sessionId)
+
+          if (!seedOptimistic(sessionId)) {
+            return false
+          }
         }
       }
 
@@ -654,7 +673,9 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           return abortForSessionSwitch(null)
         }
 
-        seedOptimistic(sessionId)
+        if (!seedOptimistic(sessionId)) {
+          return false
+        }
       }
 
       if (!sessionId) {
@@ -720,7 +741,9 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         // to the ambient socket — the fresh-chat owner loss behind #94071.
         targetStoredSessionId = selectedStoredSessionIdRef.current
 
-        seedOptimistic(sessionId)
+        if (!seedOptimistic(sessionId)) {
+          return false
+        }
       }
 
       try {

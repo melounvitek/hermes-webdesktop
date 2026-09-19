@@ -28,6 +28,7 @@ import {
   confirmReconnectSettlesExcept,
   publishSessionState,
   SESSION_WATCHDOG_TIMEOUT_MS,
+  sessionTileDelegate,
   setSessionStalled
 } from '@/store/session-states'
 import { loadArchivedSessions } from '@/store/sidebar-archive'
@@ -61,9 +62,9 @@ export function resolveActiveTranscriptSession(
   storedSessionId: string,
   runtimeSessionId: string
 ): ActiveTranscriptSession | undefined {
-  const verifiedOwner = $sessionTiles.get().find(
-    tile => tile.storedSessionId === storedSessionId && tile.runtimeId === runtimeSessionId
-  )?.ownerRoute
+  const verifiedOwner = $sessionTiles
+    .get()
+    .find(tile => tile.storedSessionId === storedSessionId && tile.runtimeId === runtimeSessionId)?.ownerRoute
 
   if (verifiedOwner) {
     return { ownerRoute: verifiedOwner, profile: verifiedOwner.profile }
@@ -447,7 +448,10 @@ export function rehydrateLiveSessionStatuses(
     // information. The stream path refuses to clear busy in exactly this window
     // (`awaitingResponse && !sawAssistantPayload`); without the same refusal
     // here a poll lands between submit and first token and darkens the row.
-    const busy = working || Boolean(existing?.awaitingResponse && !existing.sawAssistantPayload)
+    const busy =
+      working ||
+      Boolean(existing?.interrupted && existing.busy && session.status !== 'idle') ||
+      Boolean(existing?.awaitingResponse && !existing.sawAssistantPayload)
 
     // Avoid re-arming the watchdog on every poll. Publish only when the
     // authoritative live snapshot differs from the renderer mirror; normal
@@ -458,12 +462,21 @@ export function rehydrateLiveSessionStatuses(
       existing.busy !== busy ||
       existing.needsInput !== needsInput
     ) {
-      publishSessionState(runtimeSessionId, {
+      const next = {
         ...(existing ?? createClientSessionState(storedSessionId)),
         busy,
         needsInput,
         storedSessionId
-      })
+      }
+
+      const delegate = sessionTileDelegate()
+
+      if (existing?.interrupted && existing.busy && !busy && delegate) {
+        // Release the Stop claim in the wiring cache and foreground refs too.
+        delegate.updateSession(runtimeSessionId, () => next)
+      } else {
+        publishSessionState(runtimeSessionId, next)
+      }
     }
 
     if (!working) {
@@ -506,7 +519,7 @@ export function rehydrateLiveSessionStatuses(
       }
 
       if (existing?.busy || existing?.needsInput || existing?.awaitingResponse) {
-        publishSessionState(runtimeSessionId, {
+        const settled = {
           ...existing,
           awaitingResponse: false,
           busy: false,
@@ -519,7 +532,15 @@ export function rehydrateLiveSessionStatuses(
           // idle session. Seal open tool parts the same way the settle path
           // does, so the transcript matches the state.
           messages: sealOpenToolParts(existing.messages)
-        })
+        }
+
+        const delegate = sessionTileDelegate()
+
+        if (existing.interrupted && existing.busy && delegate) {
+          delegate.updateSession(runtimeSessionId, () => settled)
+        } else {
+          publishSessionState(runtimeSessionId, settled)
+        }
       }
     }
   }

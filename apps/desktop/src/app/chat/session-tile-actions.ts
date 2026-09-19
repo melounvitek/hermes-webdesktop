@@ -62,6 +62,7 @@ import {
   markSessionRecentlyInterrupted,
   shouldInterruptBeforeRewind,
   type SubmitTextOptions,
+  waitForStoppedTurn,
   withSessionNotFoundResume
 } from '../session/hooks/use-prompt-actions/utils'
 import { upsertOptimisticSession } from '../session/hooks/use-session-actions/utils'
@@ -327,17 +328,18 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
   const cancelRun = useCallback(async () => {
     const sessionId = runtimeIdRef.current
 
-    // Frontend busy clears immediately; gateway wind-down can lag (#83855).
+    // Interrupt ACK is not settlement; keep the busy claim until stock reports idle.
     markSessionRecentlyInterrupted(sessionId)
 
     update(state => ({
       ...state,
       messages: finalizeInterruptedMessages(state.messages, state.streamId),
-      busy: false,
       awaitingResponse: false,
       streamId: null,
       pendingBranchGroup: null,
       needsInput: false,
+      turnLive: false,
+      turnStartedAt: null,
       interrupted: true
     }))
 
@@ -375,6 +377,10 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
         return false
       }
 
+      const state = $sessionStates.get()[sessionId]
+
+      if (state?.interrupted && state.busy) {return false}
+
       try {
         const { result } = await withSessionNotFoundResume(
           sessionId,
@@ -400,6 +406,12 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
       const sessionId = runtimeIdRef.current
 
       if (!text || !sessionId) {
+        return false
+      }
+
+      const state = $sessionStates.get()[sessionId]
+
+      if (state?.interrupted && state.busy) {
         return false
       }
 
@@ -574,6 +586,12 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
   const restoreToMessage = useCallback(
     async (messageId: string, target?: { text?: string; userOrdinal?: number | null }) => {
       const sessionId = runtimeIdRef.current
+      await waitForStoppedTurn(sessionId)
+
+      if (runtimeIdRef.current !== sessionId) {
+        return
+      }
+
       const messages = readMessages()
       const plan = planRestore(messages, messageId, target)
 
@@ -617,14 +635,19 @@ export function useSessionTileActions({ requestGateway, runtimeId, scope, stored
 
   const editMessage = useCallback(
     async (edited: AppendMessage) => {
+      const sessionId = runtimeIdRef.current
+      await waitForStoppedTurn(sessionId)
+
+      if (runtimeIdRef.current !== sessionId) {
+        return
+      }
+
       const messages = readMessages()
       const plan = planEdit(messages, edited)
 
       if (!plan) {
         return
       }
-
-      const sessionId = runtimeIdRef.current
 
       clearSessionTodos(sessionId)
       resetSessionBackground(sessionId)

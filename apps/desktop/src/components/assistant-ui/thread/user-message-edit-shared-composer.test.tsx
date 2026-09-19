@@ -8,12 +8,15 @@
 import { AssistantRuntimeProvider, ExportedMessageRepository, type ThreadMessage } from '@assistant-ui/react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { useState } from 'react'
-import { afterEach, beforeAll, describe, expect, it } from 'vitest'
+import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { FloatingComposerSurface } from '@/app/chat/composer/floating-surface'
 import { ComposerScopeProvider, ComposerSurfaceProvider, MAIN_COMPOSER_SCOPE } from '@/app/chat/composer/scope'
 import { PaneGroupContext, PaneVisibleContext } from '@/components/pane-shell/pane-visibility'
+import { createClientSessionState } from '@/lib/chat-runtime'
 import { useIncrementalExternalStoreRuntime } from '@/lib/incremental-external-store-runtime'
+import { $notifications, clearNotifications } from '@/store/notifications'
+import { clearAllSessionStates, publishSessionState } from '@/store/session-states'
 
 import { assistantMessage, stubThreadEnvironment, stubThreadViewportSize, userMessage } from '../test-utils'
 
@@ -38,9 +41,14 @@ beforeAll(() => {
 
 afterEach(() => {
   cleanup()
+  clearAllSessionStates()
+  clearNotifications()
+  onEdit.mockClear()
+  vi.useRealTimers()
 })
 
 const noopAsync = async () => {}
+const onEdit = vi.fn(noopAsync)
 const EDIT_ROOT = '[data-slot="aui_edit-composer-root"]'
 
 // Mirrors chat/index.tsx: the transcript and the pane's composer share one
@@ -53,7 +61,7 @@ function Harness() {
     isRunning: false,
     setMessages: () => {},
     onNew: noopAsync,
-    onEdit: noopAsync,
+    onEdit,
     onCancel: noopAsync,
     onReload: noopAsync
   })
@@ -105,6 +113,30 @@ const settleBlurGuard = () =>
   })
 
 describe('inline edit inside a shared composer surface', () => {
+  it('keeps an edit draft open across Stop timeout and submits once after confirmed idle', async () => {
+    const { editor, container } = await openEdit()
+    const stopping = { ...createClientSessionState('stored'), busy: true, interrupted: true }
+    publishSessionState('session-1', stopping)
+    editor.textContent = 'retained edit'
+    fireEvent.input(editor)
+    vi.useFakeTimers()
+    await act(async () => {
+      fireEvent.keyDown(editor, { key: 'Enter' })
+    })
+    expect(onEdit).not.toHaveBeenCalled()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000)
+    })
+    expect(container.querySelector(EDIT_ROOT)).toBeTruthy()
+    expect(editor.textContent).toBe('retained edit')
+    expect($notifications.get().some(n => n.message.includes('Retry Stop or reconnect'))).toBe(true)
+    publishSessionState('session-1', { ...stopping, busy: false })
+    await act(async () => {
+      fireEvent.keyDown(editor, { key: 'Enter' })
+    })
+    expect(onEdit).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps the edit composer open and focused after the bubble click', async () => {
     const { container, editor } = await openEdit()
 

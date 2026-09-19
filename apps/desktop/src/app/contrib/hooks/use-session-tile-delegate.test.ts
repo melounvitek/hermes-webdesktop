@@ -3,7 +3,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import type * as HermesModule from '@/hermes'
 import { setSessionOwnerHint, setSessions } from '@/store/session'
-import { $sessionTiles, sessionTileDelegate } from '@/store/session-states'
+import {
+  $sessionTiles,
+  clearAllSessionStates,
+  recordSessionEventScope,
+  sessionTileDelegate
+} from '@/store/session-states'
 import type { SessionInfo } from '@/types/hermes'
 
 import { useSessionTileDelegate } from './use-session-tile-delegate'
@@ -468,6 +473,96 @@ describe('useSessionTileDelegate resumeTile', () => {
 })
 
 describe('useSessionTileDelegate retireBusyClaim', () => {
+  it('uses the runtime exact owner over a same-named profile row before trusting absence', async () => {
+    setSessions([row({ id: 'exact-stop-owner', profile: 'shared-profile' })])
+    recordSessionEventScope({
+      session_id: 'exact-stop-runtime',
+      connectionId: 'other-backend',
+      profile: 'shared-profile'
+    })
+
+    const state = {
+      busy: true,
+      interrupted: true,
+      awaitingResponse: false,
+      messages: [],
+      storedSessionId: 'exact-stop-owner'
+    }
+
+    const update = vi.fn()
+    const ambient = vi.fn()
+    vi.mocked(requestGatewayForAgent).mockResolvedValueOnce({ sessions: [] })
+    vi.mocked(requestGatewayForProfile).mockClear()
+    renderTile(ambient, {
+      sessionStateByRuntimeIdRef: { current: new Map([['exact-stop-runtime', state]]) },
+      updateSessionState: update
+    })
+    sessionTileDelegate()!.retireBusyClaim!('exact-stop-runtime')
+    await vi.waitFor(() => expect(update).toHaveBeenCalled())
+    expect(requestGatewayForAgent).toHaveBeenCalledWith(
+      'other-backend',
+      'shared-profile',
+      'session.active_list',
+      {}
+    )
+    expect(requestGatewayForProfile).not.toHaveBeenCalled()
+    expect(ambient).not.toHaveBeenCalled()
+    clearAllSessionStates()
+    setSessions([])
+  })
+
+  it.each(['starting', 'idle', 'absent'])(
+    'confirms an interrupted background runtime from its owner, status=%s',
+    async status => {
+      setSessions([row({ id: 'stopped-owner', profile: 'stop-profile' })])
+
+      let state = {
+        busy: true,
+        interrupted: true,
+        awaitingResponse: false,
+        messages: [{ id: 'partial' }],
+        storedSessionId: 'stopped-owner'
+      }
+
+      const request = vi.fn()
+
+      const update = vi.fn((_id, updater) => {
+        state = updater(state)
+
+        return state
+      })
+
+      vi.mocked(requestGatewayForProfile).mockResolvedValueOnce({
+        sessions: status === 'absent' ? [] : [{ id: 'stopped-runtime', status }]
+      })
+      renderTile(request, {
+        sessionStateByRuntimeIdRef: { current: new Map([['stopped-runtime', state]]) },
+        updateSessionState: update
+      })
+      sessionTileDelegate()!.retireBusyClaim!('stopped-runtime')
+      expect(state.busy).toBe(true)
+      await vi.waitFor(() =>
+        expect(requestGatewayForProfile).toHaveBeenCalledWith(
+          'stop-profile',
+          'session.active_list',
+          {},
+          undefined,
+          undefined
+        )
+      )
+
+      if (status === 'starting') {
+        expect(update).not.toHaveBeenCalled()
+      } else {
+        await vi.waitFor(() => expect(state.busy).toBe(false))
+      }
+
+      expect(state.messages).toEqual([{ id: 'partial' }])
+      expect(request).not.toHaveBeenCalled()
+      setSessions([])
+    }
+  )
+
   it('retires a stale busy claim through the session-state write path (#93059)', () => {
     const busyState = { awaitingResponse: true, busy: true, messages: [{ id: 'm1' }], storedSessionId: 'stored-d' }
     const sessionStateByRuntimeIdRef = { current: new Map([['runtime-dead', busyState]]) }

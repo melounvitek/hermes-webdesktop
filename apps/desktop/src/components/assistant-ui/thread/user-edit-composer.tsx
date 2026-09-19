@@ -57,6 +57,7 @@ import {
   partitionDroppedFiles
 } from '@/app/chat/hooks/use-composer-actions'
 import { uploadComposerAttachment } from '@/app/session/hooks/use-prompt-actions'
+import { waitForStoppedTurn } from '@/app/session/hooks/use-prompt-actions/utils'
 import { hermesDirectiveFormatter } from '@/components/assistant-ui/directive-text'
 import {
   StickyHumanMessageContainer,
@@ -622,7 +623,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
     syncDraftFromEditor(event.currentTarget)
   }
 
-  const submitEdit = (editor: HTMLDivElement) => {
+  const submitEdit = async (editor: HTMLDivElement) => {
     if (composingRef.current) {
       return
     }
@@ -641,6 +642,16 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
     // and leave revert as the only way out (#49903 is the same unguarded-core
     // hazard on the main composer).
     try {
+      // assistant-ui closes its editor before awaiting onEdit. Wait here so a
+      // stalled Stop leaves the editable text available, not an invisible promise.
+      if (sessionId) {
+        await waitForStoppedTurn(sessionId)
+      }
+
+      if (editorRef.current !== editor || !editor.isConnected) {
+        return
+      }
+
       aui.composer().send()
 
       // Clear latch after cooldown to allow re-submission. This prevents rapid
@@ -649,7 +660,8 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
       scheduleTimeout(() => {
         setSubmitting(false)
       }, 200)
-    } catch {
+    } catch (error) {
+      notifyError(error, t.desktop.editFailed)
       setSubmitting(false)
     }
   }
@@ -800,7 +812,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
 
     if (event.key === 'Enter' && !event.shiftKey) {
       event.preventDefault()
-      submitEdit(event.currentTarget)
+      void submitEdit(event.currentTarget)
     }
   }
 
@@ -911,7 +923,7 @@ export const UserEditComposer: FC<UserEditComposerProps> = ({ cwd, gateway, sess
                 const editor = editorRef.current
 
                 if (editor) {
-                  submitEdit(editor)
+                  void submitEdit(editor)
                 }
               }}
               // Keep focus in the editor on click: macOS doesn't focus a button

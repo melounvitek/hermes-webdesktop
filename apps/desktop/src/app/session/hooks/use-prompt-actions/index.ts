@@ -81,6 +81,7 @@ import {
   readImageForRemoteAttach,
   shouldInterruptBeforeRewind,
   type SubmitTextOptions,
+  waitForStoppedTurn,
   withSessionNotFoundResume
 } from './utils'
 
@@ -376,9 +377,9 @@ export function usePromptActions({
         if (inFlight) {
           await inFlight
           attachment =
-            $composerAttachments.get().find(item =>
-              item.id === attachment.id && item.occurrenceId === attachment.occurrenceId
-            ) ?? attachment
+            $composerAttachments
+              .get()
+              .find(item => item.id === attachment.id && item.occurrenceId === attachment.occurrenceId) ?? attachment
         }
 
         // Already-synced or pathless refs (terminal, url, etc.) pass through.
@@ -715,8 +716,8 @@ export function usePromptActions({
       return
     }
 
-    // Frontend busy clears immediately; gateway wind-down can lag. Mark so a
-    // fast edit/resend still interrupt-first instead of racing 4009 (#83855).
+    // Keep the live busy claim until session.info (or a fresh live-status
+    // snapshot) confirms idle. Interrupt ACK precedes partial persistence.
     markSessionRecentlyInterrupted(sessionId)
 
     updateSessionState(sessionId, state => {
@@ -726,7 +727,6 @@ export function usePromptActions({
       return {
         ...state,
         messages,
-        busy: false,
         awaitingResponse: false,
         streamId: null,
         pendingBranchGroup: null,
@@ -761,9 +761,8 @@ export function usePromptActions({
           }
         }
       )
-      releaseBusy()
     } catch (err) {
-      releaseBusy()
+      // Keep Stop retryable and queued intent intact when cancellation fails.
       notifyError(err, copy.stopFailed)
     }
   }, [activeSessionIdRef, busyRef, copy.stopFailed, requestGateway, selectedStoredSessionIdRef, updateSessionState])
@@ -781,6 +780,14 @@ export function usePromptActions({
       const sessionId = activeSessionIdRef.current
 
       if (!text || !sessionId) {
+        return false
+      }
+
+      // The busy composer's default Enter path redirects instead of submitting.
+      // After Stop it must fall back to the local queue, not revive the old turn.
+      const state = $sessionStates.get()[sessionId]
+
+      if (state?.interrupted && state.busy) {
         return false
       }
 
@@ -873,6 +880,10 @@ export function usePromptActions({
       if (!text || !sessionId) {
         return false
       }
+
+      const state = $sessionStates.get()[sessionId]
+
+      if (state?.interrupted && state.busy) {return false}
 
       const send = async (id: string): Promise<boolean> => {
         const response = await requestGateway<SessionRedirectResponse>('session.steer', { session_id: id, text })
@@ -1018,6 +1029,12 @@ export function usePromptActions({
         throw new Error('No active session to restore.')
       }
 
+      await waitForStoppedTurn(sessionId)
+
+      if (activeSessionIdRef.current !== sessionId) {
+        return
+      }
+
       const messages = $messages.get()
       const plan = planRestore(messages, messageId, target)
 
@@ -1081,10 +1098,21 @@ export function usePromptActions({
       // Ref, not the closure-captured prop — an edit rewinds and resubmits, so
       // a stale target rewrites the wrong session's history.
       const sessionId = activeSessionIdRef.current
-      const messages = $messages.get()
-      const plan = sessionId ? planEdit(messages, edited) : null
 
-      if (!sessionId || !plan) {
+      if (!sessionId) {
+        return
+      }
+
+      await waitForStoppedTurn(sessionId)
+
+      if (activeSessionIdRef.current !== sessionId) {
+        return
+      }
+
+      const messages = $messages.get()
+      const plan = planEdit(messages, edited)
+
+      if (!plan) {
         return
       }
 

@@ -713,6 +713,11 @@ export function reconcileBusyStatesOnReconnect(scope?: string) {
       // Re-read — the write path may have republished (and released) this entry.
       const published = $sessionStates.get()[runtimeId]
 
+      if (published?.interrupted && published.busy) {
+        // The delegate confirms this Stop with an owner-scoped status read.
+        continue
+      }
+
       if (published?.busy || published?.awaitingResponse) {
         publishSessionState(runtimeId, { ...published, awaitingResponse: false, busy: false })
       }
@@ -722,7 +727,8 @@ export function reconcileBusyStatesOnReconnect(scope?: string) {
   }
 
   if (scope === undefined) {
-    setBusy(false)
+    const active = $sessionStates.get()[$activeSessionId.get() ?? '']
+    setBusy(Boolean(active?.interrupted && active.busy))
     setAwaitingResponse(false)
   }
 }
@@ -2058,7 +2064,10 @@ export function migrateTilesForProfile(oldProfile: string, newProfile: string): 
 
   if (moved) {
     delete tilesByProfile[from]
-    tilesByProfile[to] = [...(tilesByProfile[to] ?? []), ...moved.map(tile => ({ ...tile, ownerRoute: renamedOwner(tile.ownerRoute) }))]
+    tilesByProfile[to] = [
+      ...(tilesByProfile[to] ?? []),
+      ...moved.map(tile => ({ ...tile, ownerRoute: renamedOwner(tile.ownerRoute) }))
+    ]
   }
 
   const botTiles = tilesByProfile[BOTS_TILE_BUCKET]

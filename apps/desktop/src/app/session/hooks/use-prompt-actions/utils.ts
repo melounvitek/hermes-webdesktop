@@ -6,10 +6,36 @@ import type { ChatMessage } from '@/lib/chat-messages'
 import { type CommandsCatalogLike, filterDesktopCommandsCatalog } from '@/lib/desktop-slash-commands'
 import { isProviderSetupErrorMessage } from '@/lib/provider-setup-errors'
 import type { ComposerAttachment } from '@/store/composer'
+import { $sessionStates } from '@/store/session-states'
 
 import { registerRecoveredRuntime, singleFlightSessionResume, takeRecoveredRuntime } from './single-flight-resume'
 
 export type GatewayRequest = <T>(method: string, params?: Record<string, unknown>, timeoutMs?: number) => Promise<T>
+
+// Edits/restores can bypass the composer's queue. Wait before they replace
+// optimistic turn ownership, with a bounded failure that leaves the draft intact.
+export async function waitForStoppedTurn(sessionId: string): Promise<void> {
+  const state = $sessionStates.get()[sessionId]
+
+  if (!state?.interrupted || !state.busy) {
+    return
+  }
+
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      unsubscribe()
+      reject(new Error('The previous turn is still stopping. Retry Stop or reconnect before sending again.'))
+    }, 15_000)
+
+    const unsubscribe = $sessionStates.listen(states => {
+      if (states[sessionId] && !states[sessionId].busy) {
+        clearTimeout(timer)
+        unsubscribe()
+        resolve()
+      }
+    })
+  })
+}
 
 export function delay(ms: number): Promise<void> {
   return new Promise(resolve => setTimeout(resolve, ms))

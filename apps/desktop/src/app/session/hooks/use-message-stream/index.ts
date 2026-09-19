@@ -604,12 +604,12 @@ export function useMessageStream({
         // Late completion from an already-cancelled turn: cancelRun has
         // already finalized the bubble (kept the partial text, dropped it if
         // empty). Re-running the dedupe below would replace the partial with
-        // the just-cancelled full text, so we settle and bail instead.
+        // the just-cancelled full text. Completion precedes the stock idle
+        // bookend too: retain the busy claim so a new send cannot own this turn.
         if (state.interrupted) {
           return {
             ...state,
             awaitingResponse: false,
-            busy: false,
             needsInput: false,
             pendingBranchGroup: null,
             streamId: null,
