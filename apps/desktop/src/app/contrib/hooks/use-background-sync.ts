@@ -187,6 +187,7 @@ export async function reconcileTileTranscripts({
     try {
       // Passive: a hidden tile's refresh must never cold-start its owner
       // backend or hold a pool slot (#103375); no warm backend = retry next tick.
+      const messagesAtRequest = $sessionStates.get()[runtimeSessionId]?.messages
       const latest = await getLatestSessionMessages(storedSessionId, profileScope, { passive: true })
 
       if (
@@ -199,6 +200,11 @@ export async function reconcileTileTranscripts({
         // for the app's lifetime (#94255 review point 3).
         signatureRef.current.delete(signatureKey)
 
+        continue
+      }
+
+      // A whole local turn can finish during this read, leaving the tile idle again.
+      if ($sessionStates.get()[runtimeSessionId]?.messages !== messagesAtRequest) {
         continue
       }
 
@@ -257,13 +263,16 @@ export async function reconcileActiveTranscript({
   try {
     const profileScope: ProfileScope = profileScopeForTranscriptSession(stored)
 
+    const messagesAtRequest = $sessionStates.get()[runtimeSessionId]?.messages
     const latest = await getLatestSessionMessages(storedSessionId, profileScope)
 
     if (
       requestId !== requestSequenceRef.current ||
       busyRef.current ||
       selectedStoredSessionIdRef.current !== storedSessionId ||
-      activeSessionIdRef.current !== runtimeSessionId
+      activeSessionIdRef.current !== runtimeSessionId ||
+      // Current busy alone misses an idle → busy → idle transition during the read.
+      $sessionStates.get()[runtimeSessionId]?.messages !== messagesAtRequest
     ) {
       return
     }

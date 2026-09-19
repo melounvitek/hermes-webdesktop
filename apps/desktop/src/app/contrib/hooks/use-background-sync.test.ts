@@ -1,6 +1,7 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { toChatMessages } from '@/lib/chat-messages'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { sessionMessagesSignature } from '@/lib/session-signatures'
 import { $changeEventsAvailable, notifySessionsChanged, resetLiveSync } from '@/store/live-sync'
@@ -16,6 +17,7 @@ import {
 } from '@/store/session'
 import {
   $attentionSessionIds,
+  $sessionStates,
   $sessionTiles,
   $stalledSessionIds,
   $workingSessionIds,
@@ -54,7 +56,10 @@ const { refreshProjectTree } = await import('@/store/projects')
 const ACTIVE_RUNTIME_ID = 'runtime-active'
 const ACTIVE_STORED_ID = 'stored-active'
 
-function transcript(answer: string, sessionId = ACTIVE_STORED_ID): Awaited<ReturnType<typeof getLatestSessionMessages>> {
+function transcript(
+  answer: string,
+  sessionId = ACTIVE_STORED_ID
+): Awaited<ReturnType<typeof getLatestSessionMessages>> {
   return {
     messages: [
       { content: 'question', role: 'user', timestamp: 1 },
@@ -222,6 +227,90 @@ describe('resolveActiveTranscriptSession', () => {
     $sessionTiles.set([{ storedSessionId: 'shared', runtimeId: 'active-runtime' }])
 
     expect(resolveActiveTranscriptSession('shared', 'active-runtime')).toEqual({ profile: 'default' })
+  })
+})
+
+describe.each(['active', 'tile'] as const)('%s transcript freshness', surface => {
+  it('rejects a read spanning a complete local turn but accepts a later authoritative correction', async () => {
+    $sessionTiles.set([{ storedSessionId: ACTIVE_STORED_ID, runtimeId: ACTIVE_RUNTIME_ID }])
+    $activeSessionId.set(surface === 'active' ? ACTIVE_RUNTIME_ID : null)
+    const busyRef = { current: false }
+    const requestSequenceRef = { current: 0 }
+    const signatureRef = { current: new Map<string, string>() }
+    const initial = transcript('partial answer')
+    const state = { ...createClientSessionState(ACTIVE_STORED_ID), messages: toChatMessages(initial.messages) }
+    publishSessionState(ACTIVE_RUNTIME_ID, state)
+
+    const updateSessionState: ActiveTranscriptRefreshDeps['updateSessionState'] = (id, updater) => {
+      const next = updater($sessionStates.get()[id])
+      publishSessionState(id, next)
+
+      return next
+    }
+
+    const refresh = () =>
+      surface === 'active'
+        ? reconcileActiveTranscript({
+            activeSessionIdRef: { current: ACTIVE_RUNTIME_ID },
+            selectedStoredSessionIdRef: { current: ACTIVE_STORED_ID },
+            busyRef,
+            requestSequenceRef,
+            signatureRef,
+            resolveSession: () => ({ profile: 'default' }),
+            updateSessionState
+          })
+        : reconcileTileTranscriptsForTest({ requestSequenceRef, signatureRef, updateSessionState })
+
+    let release!: (value: typeof initial) => void
+    vi.mocked(getLatestSessionMessages).mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          release = resolve
+        })
+    )
+    const pending = refresh()
+    const followup = { content: 'follow-up question', role: 'user' as const, timestamp: 3 }
+    busyRef.current = true
+    updateSessionState(ACTIVE_RUNTIME_ID, current => ({
+      ...current,
+      busy: true,
+      awaitingResponse: true,
+      messages: toChatMessages([...initial.messages, followup])
+    }))
+    const completed = toChatMessages([
+      ...initial.messages,
+      followup,
+      { content: 'follow-up answer', role: 'assistant', timestamp: 4 }
+    ])
+    updateSessionState(ACTIVE_RUNTIME_ID, current => ({
+      ...current,
+      busy: false,
+      awaitingResponse: false,
+      messages: completed
+    }))
+    busyRef.current = false
+    release(initial)
+    await pending
+
+    expect($sessionStates.get()[ACTIVE_RUNTIME_ID].messages).toEqual(completed)
+    expect(signatureRef.current.size).toBe(0)
+
+    // The same server payload can be a later intentional correction. A rejected
+    // read must neither poison its signature nor force an unconditional union.
+    vi.mocked(getLatestSessionMessages).mockImplementationOnce(
+      () =>
+        new Promise(resolve => {
+          release = resolve
+        })
+    )
+    const fresh = refresh()
+    updateSessionState(ACTIVE_RUNTIME_ID, current => ({ ...current, needsInput: false }))
+    publishSessionState('unrelated-runtime', createClientSessionState('unrelated-stored'))
+    release(initial)
+    await fresh
+
+    expect($sessionStates.get()[ACTIVE_RUNTIME_ID].messages).toEqual(toChatMessages(initial.messages))
+    expect(signatureRef.current.size).toBe(1)
   })
 })
 
