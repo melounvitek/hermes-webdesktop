@@ -5,6 +5,18 @@ This root file holds only what applies everywhere. Each area has its own `AGENTS
 ~8k chars; `agent/subdirectory_hints.py` delivers up to 32k and truncates head/tail with a warning
 past that); see the **routing table** at the end and read the area file before editing in that area.
 
+## Browser edition: backend is read-only
+
+Never change the Hermes backend for this project. Do not modify backend source
+in this fork or the installed runtime, monkey-patch it, upgrade it, or deploy a
+modified replacement copy. This boundary takes precedence over the general
+upstream development guidance below.
+
+Use stock Hermes APIs for browser features. If a feature requires backend changes,
+leave it unsupported and document the limitation instead. Preserve the already-
+approved optional terminal plugin; it does not authorize backend patches or other
+server changes.
+
 **Never give up on the right solution.**
 
 ## What Hermes Is

@@ -251,27 +251,6 @@ class TestPasswordLoginRoute:
         assert SESSION_AT_COOKIE in set_cookie
         assert SESSION_RT_COOKIE in set_cookie
 
-    @pytest.mark.parametrize("target, expected", [
-        ("/?view=chat#/session-one", "/?view=chat#/session-one"),
-        ("/sessions?q=chat#//outside.invalid", "/sessions?q=chat#//outside.invalid"),
-        ("https://outside.invalid/#/session-one", "/"),
-        ("//outside.invalid/#/session-one", "/"),
-        ("%2F%2Foutside.invalid/#/session-one", "/"),
-        ("/login#/session-one", "/"),
-        ("/auth/password-login#/session-one", "/"),
-        ("/api/config#/session-one", "/"),
-    ])
-    def test_login_validates_destination_including_fragment(self, gated_app, target, expected):
-        response = gated_app.post(
-            "/auth/password-login",
-            json={
-                "provider": "testpw", "username": "admin", "password": "hunter2",
-                "next": target,
-            },
-        )
-        assert response.status_code == 200
-        assert response.json()["next"] == expected
-
     def test_session_cookie_then_grants_authenticated_access(self, gated_app):
         # Log in, then hit an auth-required endpoint with the cookie jar
         # the TestClient retains — proving the minted session is accepted

@@ -451,7 +451,6 @@ async function check(fixture, name, body, { ticket503 = false, shiki503 = false 
       resumed,
       finishHeld,
       ready,
-      login,
       signInAgain,
       expireCookies,
       responses,
@@ -594,7 +593,6 @@ try {
     await followup(turn)
   })
   const cookie = [
-    'fresh-cookie-login-hash',
     'expired-cookie-relogin',
     'cookie-rest401-connected-ws',
     'cookie-backend-restart',
@@ -602,39 +600,6 @@ try {
   ].some(name => selected.test(name))
     ? await startFixture(true)
     : null
-  await check(
-    cookie,
-    'fresh-cookie-login-hash',
-    async ({ page, context, submit, retained, followup, expireCookies, login }) => {
-      const turn = await submit('spike: fresh-cookie-login-hash')
-      const link = new URL(page.url())
-      link.searchParams.set('view', 'chat')
-      const target = link.href
-      assert.ok(link.hash.includes(turn.stored), 'Start from the durable session deep link')
-      await page.goto('about:blank') // Avoid a same-document hash navigation.
-      await expireCookies()
-      // Reopen the deep link without any remembered route/session. A cache restore
-      // must not conceal a login redirect that drops the hash.
-      await context.addInitScript(origin => {
-        if (location.origin !== origin) return
-        localStorage.clear()
-        sessionStorage.clear()
-      }, cookie.origin)
-      await page.goto(target)
-      await login()
-      await expect.poll(() => page.url()).toBe(target)
-      await retained(turn)
-      await followup(turn)
-
-      // An explicit next fragment (as used by in-app re-login) remains authoritative.
-      await expireCookies()
-      const next = link.pathname + link.search + link.hash
-      await page.goto(`${cookie.origin}/login?${new URLSearchParams({ next })}#/ignored`)
-      await login()
-      await expect.poll(() => page.url()).toBe(target)
-      await retained(turn)
-    }
-  )
   await check(
     cookie,
     'expired-cookie-relogin',
