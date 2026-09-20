@@ -10,6 +10,9 @@
  * `os.release()`.
  */
 
+// Browser terminals only mirror agent output; interactive PTYs belong to Electron.
+export const supportsInteractiveTerminal = import.meta.env.VITE_BROWSER !== '1'
+
 export const isBrowserClient = (): boolean => typeof window !== 'undefined' && Boolean(window.hermesDesktop?.browser)
 
 export const isMacPlatform = (): boolean =>

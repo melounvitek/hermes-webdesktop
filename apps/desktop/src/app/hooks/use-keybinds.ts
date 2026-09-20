@@ -262,8 +262,9 @@ export function useKeybinds(deps: KeybindRuntimeDeps): void {
     // Create first so the pane's open-effect ensure sees a non-empty set and
     // doesn't also spawn one — net effect is exactly one fresh terminal.
     'view.newTerminal': () => {
-      createTerminal()
-      setTerminalTakeover(true)
+      if (createTerminal()) {
+        setTerminalTakeover(true)
+      }
     },
     // Switch / close only act while the terminal is actually ON SCREEN — ask
     // the tree, not the toggle store (which stays true behind a stacked

@@ -1,16 +1,16 @@
 import { useStore } from '@nanostores/react'
 import { useEffect } from 'react'
 
-import { Button } from '@/components/ui/button'
 import { EmptyState } from '@/components/ui/empty-state'
 import { useI18n } from '@/i18n'
+import { supportsInteractiveTerminal } from '@/lib/platform'
 import { $backgroundStatusBySession } from '@/store/composer-status'
 import { knownOwnerForSession } from '@/store/session-states'
 
 import { seedAgentTerminalCommand, syncAgentTerminalSnapshot } from './agent-terminal-stream'
 import { setActiveTerminalId } from './buffer'
 import { AgentTerminalInstance, TerminalInstance } from './instance'
-import { $terminals, $visibleActiveTerminalId, createTerminal, ensureAgentTerminal } from './terminals'
+import { $terminals, $visibleActiveTerminalId, ensureAgentTerminal } from './terminals'
 
 interface TerminalWorkspaceProps {
   onAddSelectionToChat: (text: string, label?: string) => void
@@ -57,9 +57,6 @@ export function TerminalWorkspace({ onAddSelectionToChat }: TerminalWorkspacePro
       {import.meta.env.VITE_BROWSER === '1' && !activeId && (
         <div className="grid place-items-center p-4">
           <EmptyState title={t.rightSidebar.terminalEmpty} />
-          <Button onClick={() => createTerminal()} size="sm" variant="secondary">
-            {t.rightSidebar.terminalNew}
-          </Button>
         </div>
       )}
       {terminals.map(term =>
@@ -71,18 +68,17 @@ export function TerminalWorkspace({ onAddSelectionToChat }: TerminalWorkspacePro
             procId={term.procId!}
             profile={term.profile}
           />
-        ) : (
+        ) : supportsInteractiveTerminal ? (
           <TerminalInstance
             active={term.id === activeId}
             cwd={term.cwd}
             id={term.id}
             key={term.id}
             onAddSelectionToChat={onAddSelectionToChat}
-            profile={term.profile}
             restoreCwd={term.restoreCwd}
             reviveBuffer={term.reviveBuffer}
           />
-        )
+        ) : null
       )}
     </>
   )

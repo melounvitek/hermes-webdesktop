@@ -48,7 +48,7 @@ describe('terminal store persistence', () => {
     const { createTerminal, ensureAgentTerminal, renameTerminal, selectTerminal, updateTerminalReviveBuffer } =
       await loadTerminalStore()
 
-    const userId = createTerminal('/repo')
+    const userId = createTerminal('/repo')!
     renameTerminal(userId, 'server')
     updateTerminalReviveBuffer(userId, 'recent scrollback')
     ensureAgentTerminal('proc-1', 'background task')
@@ -75,7 +75,7 @@ describe('terminal store persistence', () => {
   it('tail-trims an oversized revive buffer to stay under the storage budget', async () => {
     const { $terminals, createTerminal, updateTerminalReviveBuffer } = await loadTerminalStore()
 
-    const userId = createTerminal('/repo')
+    const userId = createTerminal('/repo')!
     const huge = 'x'.repeat(60_000)
     updateTerminalReviveBuffer(userId, huge)
 
@@ -117,7 +117,7 @@ describe('terminal store persistence', () => {
   it('never attaches a restore cwd to an agent tab and ignores empty values', async () => {
     const { $terminals, createTerminal, ensureAgentTerminal, updateTerminalRestoreCwd } = await loadTerminalStore()
 
-    const userId = createTerminal('/repo')
+    const userId = createTerminal('/repo')!
     const agentId = ensureAgentTerminal('proc-1', 'background task')!
 
     updateTerminalRestoreCwd(agentId, '/somewhere')
@@ -148,7 +148,7 @@ describe('session cwd → terminal tab linking', () => {
   it('matches the live shell cwd (restoreCwd) over the launch dir', async () => {
     const { $activeTerminalId, $currentCwd, createTerminal, updateTerminalRestoreCwd } = await loadTerminalStore()
 
-    const movedTab = createTerminal('/repo')
+    const movedTab = createTerminal('/repo')!
     updateTerminalRestoreCwd(movedTab, '/repo/packages/api')
     const otherTab = createTerminal('/elsewhere')
     expect($activeTerminalId.get()).toBe(otherTab)
@@ -178,8 +178,8 @@ describe('session cwd → terminal tab linking', () => {
     const { $activeTerminalId, $currentCwd, createTerminal, ensureAgentTerminal, selectTerminal } =
       await loadTerminalStore()
 
-    const first = createTerminal('/repo')
-    const second = createTerminal('/repo')
+    const first = createTerminal('/repo')!
+    const second = createTerminal('/repo')!
     ensureAgentTerminal('proc-1', 'background task')
     selectTerminal(second)
 

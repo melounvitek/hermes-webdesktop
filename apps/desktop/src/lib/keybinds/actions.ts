@@ -7,6 +7,7 @@
 
 import { registry } from '@/contrib/registry'
 import type { Contribution } from '@/contrib/types'
+import { supportsInteractiveTerminal } from '@/lib/platform'
 
 import { IS_MAC } from './combo'
 
@@ -150,7 +151,9 @@ export const KEYBIND_ACTIONS: readonly KeybindActionMeta[] = [
   // every platform. Off macOS `ctrl` folds to `mod` (= Ctrl), so it's unchanged.
   // Toggle reveals the terminal (opening one if none exist); Shift spawns a new one.
   { id: 'view.showTerminal', category: 'view', defaults: ['ctrl+`'] },
-  { id: 'view.newTerminal', category: 'view', defaults: ['ctrl+shift+`'] },
+  ...(supportsInteractiveTerminal
+    ? [{ id: 'view.newTerminal', category: 'view' as const, defaults: ['ctrl+shift+`'] }]
+    : []),
   // Same Ctrl(+Shift) terminal family: arrows walk the (vertical) tab rail, W
   // kills the active one. ⌘W is taken (close preview tab) and ⌘⇧[ ] are profiles,
   // so these stay on `ctrl` — distinct on macOS, folding to Ctrl elsewhere.
@@ -209,7 +212,9 @@ export interface KeybindContribution {
 // React consumers pass their `useContributions(KEYBINDS_AREA)` snapshot in:
 // with React Compiler enabled, an independently-called `contributedKeybinds()`
 // can stay memoized across a late registration the subscription DID deliver.
-export function contributedKeybinds(contributions: readonly Contribution[] = registry.getArea(KEYBINDS_AREA)): KeybindContribution[] {
+export function contributedKeybinds(
+  contributions: readonly Contribution[] = registry.getArea(KEYBINDS_AREA)
+): KeybindContribution[] {
   return contributions
     .map(c => c.data as KeybindContribution)
     .filter(k => Boolean(k?.id && k.label) && typeof k?.run === 'function' && !ACTION_BY_ID.has(k.id))

@@ -23,13 +23,22 @@ it('keeps browser terminals runtime-only and isolates selection and close operat
   )
   const store = await import('./terminals')
   expect(store.$terminals.get()).toEqual([])
-  const a = store.createTerminal()
+  // Restoring an open pane and invoking a stale creation action cannot spawn a shell.
+  store.ensureTerminal()
+  expect(store.$terminals.get()).toEqual([])
+  expect(store.createTerminal()).toBeNull()
+  const { defaultBindings } = await import('@/lib/keybinds/actions')
+  expect(defaultBindings()).not.toHaveProperty('view.newTerminal')
+  const { createBrowserBridge } = await import('@/browser/bridge')
+  expect(createBrowserBridge({ token: '', authRequired: false })).not.toHaveProperty('terminal')
+
+  const a = store.ensureAgentTerminal('proc', 'A job', 'alpha')!
   store.updateTerminalReviveBuffer(a, 'password output')
   expect(store.$terminals.get().find(term => term.id === a)?.profile).toBe('alpha')
   gatewayProfile.set('beta')
   expect(store.$visibleTerminals.get()).toEqual([])
   expect(store.$visibleActiveTerminalId.get()).toBeNull()
-  const b = store.createTerminal()
+  const b = store.ensureAgentTerminal('proc', 'B job', 'beta')!
   expect(store.$visibleTerminals.get().map(term => term.id)).toEqual([b])
   expect(store.$terminals.get().find(term => term.id === b)?.profile).toBe('beta')
   store.selectTerminal(a)
