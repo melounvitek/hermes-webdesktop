@@ -15,25 +15,37 @@ an arbitrary build and describe it as tested.
 
 Users: inspect/install require explicit existing Python, backend and Hermes root,
 profile, and a new install-root whose parent already exists. No backend imports,
-configuration reads, start, repair, update, service or network operations occur.
+configuration reads, repair, update, service or network operations occur in those
+commands. Start runs the stock dashboard in the foreground on loopback; it may
+write profile state and contact configured services. Stop interrupts the owned
+child gracefully; no draining, force-kill or descendant cleanup is promised.
+After a controller crash ownership is unknown; automatic recovery is refused.
 Reference-file matches do not certify dependencies or running backend identity.
 """
 
 import argparse
 import ctypes
+import fcntl
 import gzip
 import hashlib
+import http.client
 import io
 import json
 import os
 from pathlib import Path, PurePosixPath
 import re
+import selectors
 import shutil
+import signal
+import socket
 import stat
+import struct
 import subprocess
 import sys
 import tarfile
 import tempfile
+import time
+from urllib.parse import quote
 
 
 MAX_ARCHIVE = 256 * 1024 * 1024
@@ -575,6 +587,500 @@ def install_or_inspect(args):
     print(f"Installed at {root}. Nothing started.")
 
 
+def control_address(root):
+    # Linux abstract sockets avoid pathname length limits and stale socket files.
+    # Both ends check SO_PEERCRED; only the controller signals its unreaped child.
+    return "\0hermes-browser-" + str(os.getuid()) + "-" + digest(os.fsencode(root))
+
+
+def same_user(connection):
+    _, uid, _ = struct.unpack(
+        "3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
+    )
+    require(uid == os.getuid(), "Foreign lifecycle controller/client")
+
+
+def control_request(root, command):
+    with socket.socket(socket.AF_UNIX) as connection:
+        connection.settimeout(2)
+        connection.connect(control_address(root))
+        same_user(connection)
+        connection.sendall(command.encode() + b"\n")
+        with connection.makefile("rb") as stream:
+            result = load_json(stream.readline(MAX_JSON + 1))
+        require(result["installation"] == str(root), "Controller installation mismatch")
+        return result
+
+
+def write_control(stream, record):
+    stream.seek(0)
+    stream.write(json_bytes(record))
+    stream.truncate()
+    stream.flush()
+    os.fsync(stream.fileno())
+
+
+def read_control(stream, root):
+    stream.seek(0)
+    record = load_json(stream.read(MAX_JSON + 1))
+    keys(record, "owner installation state generation pid")
+    require(
+        record["owner"] == OWNER
+        and record["installation"] == str(root)
+        and record["state"] in ("stopped", "unknown"),
+        "Foreign lifecycle state",
+    )
+    generation, pid = record["generation"], record["pid"]
+    if generation is not None:
+        hex_value(generation, 32)
+    require(
+        pid is None or (type(pid) is int and pid > 1 and generation is not None),
+        "Invalid process diagnostic",
+    )
+    require(
+        record["state"] == "stopped" or generation is not None,
+        "Missing process generation",
+    )
+    return record
+
+
+def open_control(root, create):
+    path = root.with_name(root.name + ".run")
+    try:
+        return os.fdopen(
+            os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK), "r+b"
+        )
+    except FileNotFoundError:
+        if not create:
+            return None
+    # Publish an initialized, already-locked inode, never a visible empty file.
+    # Keep this inode stable for its entire lifetime; contenders can hold it open.
+    with tempfile.TemporaryDirectory(
+        prefix=".hermes-browser-state-", dir=root.parent
+    ) as temp:
+        staged = Path(temp) / "state"
+        stream = staged.open("x+b")
+        try:
+            staged.chmod(0o600)
+            write_control(
+                stream,
+                {
+                    "owner": OWNER,
+                    "installation": str(root),
+                    "state": "stopped",
+                    "generation": None,
+                    "pid": None,
+                },
+            )
+            fcntl.flock(stream, fcntl.LOCK_EX)
+            publish_new(staged, path)
+            return stream
+        except FileExistsError:
+            stream.close()
+            return os.fdopen(
+                os.open(path, os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK), "r+b"
+            )
+        except BaseException:
+            stream.close()
+            raise
+
+
+def startup_configuration(selection, runtime):
+    require(
+        not os.environ.get("HERMES_MANAGED_DIR") and not Path("/etc/hermes").exists(),
+        "Managed configuration is unsupported; nothing started",
+    )
+    home = Path(runtime["profile_home"])
+    require(
+        not os.path.lexists(home / ".container-mode"),
+        "Container routing is unsupported; nothing started",
+    )
+    for path in (
+        home / ".env",
+        home / ".op.env",
+        Path(selection["backend_root"]) / ".env",
+    ):
+        no_links(path)
+        if os.path.lexists(path):
+            text = read_regular(path, MAX_JSON).decode("utf-8-sig")
+            # Stock sanitizes assignments before loading them. Refuse formats
+            # needing a rewrite instead of letting startup edit configuration.
+            require(
+                not text
+                or (
+                    text.endswith("\n")
+                    and "\r" not in text
+                    and all(
+                        not line.strip()
+                        or line.lstrip().startswith("#")
+                        or line == line.strip()
+                        for line in text.split("\n")[:-1]
+                    )
+                ),
+                "Dotenv normalization required; nothing started",
+            )
+            # Deliberately conservative, including comments/values. Do not
+            # reimplement dotenv quoting, interpolation or override precedence.
+            require(
+                "\0" not in text
+                and not re.search(
+                    r"HERMES_(?:HOME|WEB_DIST|DISABLE_LAZY_INSTALLS|LAZY_INSTALL_TARGET|SERVE_HEADLESS|MANAGED_DIR|DESKTOP|PARENT_)|PYTHON",
+                    text,
+                ),
+                "Configuration contains reserved launch controls; nothing started",
+            )
+    path = home / "config.yaml"
+    no_links(path)
+    config = read_regular(path, MAX_JSON) if os.path.lexists(path) else b"{}"
+    # Use the runtime's existing YAML parser, not Hermes loaders (which sanitize
+    # dotenv files and fetch secrets). -S prevents .pth/sitecustomize execution;
+    # add package directories explicitly, keeping the lexical venv prefix.
+    code = """import sys, site
+try:
+    sys.path.extend(site.getsitepackages([sys.argv[1]]) + site.getsitepackages())
+    import yaml
+    value = yaml.safe_load(sys.stdin.buffer.read())
+    if value is not None and not isinstance(value, dict):
+        sys.exit(2)
+    sys.exit(3 if (value or {}).get("secrets") else 0)
+except Exception:
+    sys.exit(2)
+"""
+    result = subprocess.run(
+        [
+            selection["python"],
+            "-I",
+            "-S",
+            "-B",
+            "-c",
+            code,
+            str(Path(selection["python"]).parent.parent),
+        ],
+        input=config,
+        cwd="/",
+        env={
+            "HOME": "/dev/null",
+            "HERMES_HOME": "/dev/null",
+            "PATH": "/usr/bin:/bin",
+            "LANG": "C.UTF-8",
+        },
+        capture_output=True,
+        timeout=10,
+    )
+    require(
+        result.returncode == 0,
+        "External secret sources or unreadable configuration/parser are unsupported; nothing started",
+    )
+
+
+def current_disk(root):
+    try:
+        receipt, manifest = installed(root)
+        return inspect_runtime(receipt["selection"], manifest)
+    except (
+        OSError,
+        ValueError,
+        KeyError,
+        TypeError,
+        subprocess.SubprocessError,
+    ) as error:
+        return {"compatibility": "unavailable", "error": str(error)}
+
+
+def check_ready(port, asset, info):
+    # Direct loopback, no proxy environment, redirects, credentials or auth bypass.
+    for path, limit in (("/api/health", MAX_JSON), ("/" + quote(asset), info["size"])):
+        connection = http.client.HTTPConnection("127.0.0.1", port, timeout=1)
+        try:
+            connection.request("GET", path)
+            response = connection.getresponse()
+            data = response.read(limit + 1)
+            require(
+                response.status == 200 and len(data) <= limit,
+                "Readiness HTTP check failed",
+            )
+            if path == "/api/health":
+                require(
+                    load_json(data).get("ok") is True, "Health response is not ready"
+                )
+            else:
+                require(
+                    len(data) == info["size"] and digest(data) == info["sha256"],
+                    "Served browser asset mismatch",
+                )
+        finally:
+            connection.close()
+
+
+def run_foreground(args, root, stream, record, receipt, manifest, runtime):
+    selection = receipt["selection"]
+    backend = Path(selection["backend_root"])
+    for name in (".update-incomplete", ".lazy-refresh-incomplete"):
+        require(
+            not os.path.lexists(backend / name),
+            "Pending backend repair; refusing startup",
+        )
+    require(
+        runtime["compatibility"] == "reference-match",
+        "Untested backend references; startup unsupported",
+    )
+    require(
+        digest(read_regular(Path(__file__))) == manifest["launcher_sha256"],
+        "Start requires the installed release's trusted launcher",
+    )
+    startup_configuration(selection, runtime)
+    asset = next(
+        (
+            name
+            for name in sorted(manifest["files"])
+            if name.startswith("assets/") and name.endswith(".js")
+        ),
+        None,
+    )
+    require(asset is not None, "No browser JavaScript asset available for readiness")
+    with socket.socket() as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        probe.bind(("127.0.0.1", args.port))
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if not key.startswith(("HERMES_DESKTOP", "HERMES_PARENT_", "PYTHON"))
+        and key not in ("HERMES_SERVE_HEADLESS", "HERMES_LAZY_INSTALL_TARGET")
+    }
+    env.update(
+        HERMES_HOME=selection["hermes_root"],
+        HERMES_WEB_DIST=str(root / "versions" / receipt["archive_sha256"] / "web"),
+        HERMES_DISABLE_LAZY_INSTALLS="1",
+    )
+    command = [
+        selection["python"],
+        "-E",
+        "-s",
+        "-B",
+        "-u",
+        # Match the stock console entry point. `-m hermes_cli.main` also loads
+        # it as __main__; sibling imports then execute profile selection twice.
+        "-c",
+        "from hermes_cli.main import main; main()",
+        "-p",
+        selection["profile"],
+        "dashboard",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        str(args.port),
+        "--isolated",
+        "--skip-build",
+        "--no-open",
+    ]
+    info = {
+        "installation": str(root),
+        "state": "starting",
+        "generation": os.urandom(16).hex(),
+        "pid": None,
+        "url": f"http://127.0.0.1:{args.port}/",
+        "startup": runtime,
+    }
+    child = None
+    requested = False
+    failed = False
+
+    def request_stop(_signum, _frame):
+        nonlocal requested
+        requested = True
+
+    previous = {
+        sig: signal.signal(sig, request_stop)
+        for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+    }
+    try:
+        with (
+            socket.socket(socket.AF_UNIX) as server,
+            selectors.DefaultSelector() as selector,
+        ):
+            server.bind(control_address(root))
+            server.listen(8)
+            selector.register(server, selectors.EVENT_READ)
+            # Persist uncertainty BEFORE spawn. A crash in any subsequent window
+            # can never turn a leftover child into permission to start or kill one.
+            record.update(state="unknown", generation=info["generation"], pid=None)
+            write_control(stream, record)
+            child = subprocess.Popen(
+                command,
+                cwd=backend,
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                start_new_session=True,
+            )
+            info["pid"] = record["pid"] = child.pid
+            write_control(stream, record)
+            os.set_blocking(child.stdout.fileno(), False)
+            selector.register(child.stdout, selectors.EVENT_READ)
+            deadline = time.monotonic() + args.timeout
+            pending = b""
+            print(json.dumps(info), flush=True)
+            while child.poll() is None:
+                if info["state"] == "starting" and time.monotonic() >= deadline:
+                    print(
+                        "Readiness deadline expired; requesting graceful stop",
+                        file=sys.stderr,
+                    )
+                    requested = failed = True
+                if requested and info["state"] != "stopping":
+                    child.terminate()
+                    info["state"] = "stopping"
+                for key, _ in selector.select(0.1):
+                    if key.fileobj is server:
+                        connection, _ = server.accept()
+                        with connection:
+                            connection.settimeout(0.5)
+                            try:
+                                same_user(connection)
+                                with connection.makefile("rb") as request:
+                                    action = request.readline(32)
+                                require(
+                                    action in (b"status\n", b"stop\n"),
+                                    "Invalid control request",
+                                )
+                                if action == b"stop\n":
+                                    requested = True
+                                connection.sendall(json.dumps(info).encode() + b"\n")
+                            except (OSError, ValueError):
+                                # A disconnected/malformed client must not stop the server.
+                                continue
+                    else:
+                        data = os.read(child.stdout.fileno(), 65536)
+                        if not data:
+                            selector.unregister(child.stdout)
+                            continue
+                        sys.stderr.buffer.write(data)
+                        sys.stderr.buffer.flush()
+                        pending += data
+                        lines = pending.split(b"\n")
+                        pending = lines.pop()[-4096:]
+                        if (
+                            info["state"] == "starting"
+                            and f"HERMES_DASHBOARD_READY port={args.port}".encode()
+                            in lines
+                        ):
+                            try:
+                                check_ready(args.port, asset, manifest["files"][asset])
+                                require(
+                                    child.poll() is None,
+                                    "Dashboard exited during readiness",
+                                )
+                                info["state"] = "ready"
+                                print(json.dumps(info), flush=True)
+                            except (
+                                OSError,
+                                ValueError,
+                                http.client.HTTPException,
+                            ) as error:
+                                print(f"Readiness failed: {error}", file=sys.stderr)
+                                requested = failed = True
+            failed = failed or (
+                not requested and (info["state"] != "ready" or child.returncode != 0)
+            )
+    finally:
+        if child is not None:
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    print(
+                        "Child exit unconfirmed; ownership remains unknown. No force-kill.",
+                        file=sys.stderr,
+                    )
+            child.stdout.close()
+        if child is None or child.returncode is not None:
+            record["state"] = "stopped"
+            write_control(stream, record)
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    return 1 if failed else 0
+
+
+def lifecycle(args):
+    root = absolute_path(args.install_root)
+    no_links(root)
+    receipt = manifest = runtime = None
+    if args.command == "start":
+        require(
+            1 <= args.port <= 65535 and 1 <= args.timeout <= 300,
+            "Invalid port/startup timeout",
+        )
+        receipt, manifest = installed(root)
+        safe_destination(root, receipt["selection"])
+        runtime = inspect_runtime(receipt["selection"], manifest)
+    if args.command == "stop":
+        require(1 <= args.timeout <= 300, "Invalid stop timeout")
+    stream = open_control(root, args.command == "start")
+    if stream is None:
+        installed(root)
+        print(json.dumps({"installation": str(root), "state": "stopped"}))
+        return 0
+    with stream:
+        fd = stream.fileno()
+        meta = os.fstat(fd)
+        require(
+            stat.S_ISREG(meta.st_mode)
+            and meta.st_uid == os.getuid()
+            and meta.st_nlink == 1
+            and meta.st_mode & 0o777 == 0o600,
+            "Unsafe lifecycle state file",
+        )
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except BlockingIOError:
+            locked = False
+        if locked:
+            record = read_control(stream, root)
+            if args.command == "start":
+                require(
+                    record["state"] == "stopped",
+                    "Ownership unknown after controller loss; automatic recovery refused",
+                )
+                return run_foreground(
+                    args, root, stream, record, receipt, manifest, runtime
+                )
+            print(json.dumps(record))
+            return int(args.command == "stop" and record["state"] != "stopped")
+        require(
+            args.command != "start", "Installation already has a foreground controller"
+        )
+        try:
+            result = control_request(root, args.command)
+            if args.command == "stop":
+                result["state"] = "stopping"
+                deadline = time.monotonic() + args.timeout
+                while time.monotonic() < deadline:
+                    try:
+                        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        result = read_control(stream, root)
+                        break
+                    except BlockingIOError:
+                        time.sleep(0.1)
+            elif "startup" in result:
+                result["current_disk"] = current_disk(root)
+        except (OSError, ValueError):
+            result = {
+                "installation": str(root),
+                "state": "unknown",
+                "detail": "Controller unavailable; no PID signaling or recovery attempted",
+            }
+            # The controller may have exited between the lock check and connect.
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                result = read_control(stream, root)
+            except (OSError, ValueError):
+                pass
+        print(json.dumps(result))
+        return int(args.command == "stop" and result["state"] != "stopped")
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -597,10 +1103,21 @@ def main():
             "profile",
         ):
             command_parser.add_argument("--" + option)
+    for command in ("start", "status", "stop"):
+        command_parser = sub.add_parser(command)
+        command_parser.add_argument("--install-root", required=True)
+        if command == "start":
+            command_parser.add_argument("--port", type=int, default=9119)
+        if command != "status":
+            command_parser.add_argument(
+                "--timeout", type=float, default=60 if command == "start" else 10
+            )
     args = parser.parse_args()
     try:
         require(sys.platform == "linux", "This increment supports Linux only")
         os.umask(0o077)
+        if args.command in ("start", "status", "stop"):
+            return lifecycle(args)
         pack(args) if args.command == "pack" else install_or_inspect(args)
     except (
         OSError,

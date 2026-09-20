@@ -1,15 +1,21 @@
 """Offline browser distribution: exercise the portable CLI without running Hermes."""
 
 import ctypes
+import fcntl
 import hashlib
 import importlib.util
 import io
 import json
 import os
 from pathlib import Path
+import select
+import signal
+import socket
+import time
 import subprocess
 import sys
 import tarfile
+import textwrap
 
 import pytest
 
@@ -516,6 +522,483 @@ def test_packer_enforces_reader_limits_before_publication(
         )
     assert not output.exists()
     assert not list(tmp_path.glob(".hermes-browser-pack-*"))
+
+
+# This protocol fixture is not Hermes; stock acceptance runs separately in a
+# read-only mount/network namespace with temporary homes and the real backend.
+DASHBOARD_FIXTURE = "def main():\n" + textwrap.indent(
+    """
+import argparse, json, os, signal, sys, time
+from http.server import HTTPServer, SimpleHTTPRequestHandler
+from pathlib import Path
+p = argparse.ArgumentParser()
+p.add_argument('-p')
+p.add_argument('command')
+p.add_argument('--host')
+p.add_argument('--port', type=int)
+for flag in ('isolated', 'skip-build', 'no-open'):
+    p.add_argument('--' + flag, action='store_true')
+a = p.parse_args()
+root = Path(os.environ['HERMES_HOME'])
+home = root if a.p == 'default' else root/'profiles'/a.p
+mode = (root/'mode').read_text() if (root/'mode').exists() else 'normal'
+record = root/('launch-' + str(a.port) + '.json')
+record.with_suffix('.tmp').write_text(json.dumps({'argv': vars(a), 'env': dict(os.environ), 'pid': os.getpid(), 'home': str(home)}))
+record.with_suffix('.tmp').replace(record)
+while not (root/('release-' + str(a.port))).exists():
+    time.sleep(.01)
+(root/'launch.json').write_text(record.read_text())
+if mode == 'exit':
+    sys.exit(7)
+if mode == 'stubborn':
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+class Handler(SimpleHTTPRequestHandler):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, directory=os.environ['HERMES_WEB_DIST'], **kwargs)
+    def do_GET(self):
+        if self.path == '/api/health':
+            self.send_response(200); self.end_headers(); self.wfile.write(b'{"ok":true}')
+        elif mode == 'wrong':
+            self.send_response(200); self.end_headers(); self.wfile.write(b'wrong bytes')
+        else:
+            super().do_GET()
+server = HTTPServer((a.host, a.port), Handler)
+if mode != 'no-sentinel':
+    print('HERMES_DASHBOARD_READY port=' + str(a.port), flush=True)
+server.serve_forever()
+""",
+    "    ",
+)
+
+
+@pytest.fixture
+def dashboard(release):
+    (release["backend"] / "hermes_cli/main.py").write_text(DASHBOARD_FIXTURE)
+    receipt = json.loads(release["receipt"].read_text())
+    receipt["tested_backend"]["reference_files"]["hermes_cli/main.py"] = sha(
+        DASHBOARD_FIXTURE.encode()
+    )
+    release["receipt"].write_text(json.dumps(receipt))
+    release["archive"].unlink()
+    packed = run(
+        "pack",
+        "--web-dir",
+        release["web"],
+        "--receipt",
+        release["receipt"],
+        "--output",
+        release["archive"],
+    )
+    assert packed.returncode == 0, packed.stderr
+    release["args"][3] = sha(release["archive"].read_bytes())
+    release["args"][release["args"].index("--profile") + 1] = "alpha"
+    result = run("install", *release["args"], input="yes\n")
+    assert result.returncode == 0, result.stderr
+    return release
+
+
+def lifecycle(release, command, *args):
+    return run(command, "--install-root", release["dest"], *args)
+
+
+def wait_for(check, timeout=12):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        value = check()
+        if value:
+            return value
+        time.sleep(0.05)
+    raise AssertionError("Timed out waiting for observable lifecycle state")
+
+
+def state_is(release, state):
+    result = lifecycle(release, "status")
+    return result.returncode == 0 and json.loads(result.stdout)["state"] == state
+
+
+def pidfd_open(pid):
+    # The shared standalone Python lacks os.pidfd_open; use the host libc API.
+    libc = ctypes.CDLL(None, use_errno=True)
+    fd = libc.pidfd_open(pid, 0)
+    if fd < 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    return fd
+
+
+def kill_fixture(fd):
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.pidfd_send_signal(fd, signal.SIGKILL, None, 0) < 0:
+        error = ctypes.get_errno()
+        if error != 3:  # The fixture may already have exited.
+            raise OSError(error, os.strerror(error))
+
+
+@pytest.fixture
+def controllers(tmp_path):
+    children = []
+
+    def start(release, mode="normal", env=None, port=None):
+        (release["home"] / "mode").write_text(mode)
+        if port is None:
+            with socket.socket() as probe:
+                probe.bind(("127.0.0.1", 0))
+                port = probe.getsockname()[1]
+        stdout = (tmp_path / f"controller-{len(children)}.stdout").open("w+")
+        stderr = (tmp_path / f"controller-{len(children)}.stderr").open("w+")
+        child = subprocess.Popen(
+            [
+                sys.executable,
+                "-I",
+                "-S",
+                str(CLI),
+                "start",
+                "--install-root",
+                str(release["dest"]),
+                "--port",
+                str(port),
+                "--timeout",
+                "2",
+            ],
+            stdout=stdout,
+            stderr=stderr,
+            env=env,
+        )
+        entry = [child, stdout, stderr, None]
+        children.append(entry)
+        marker = release["home"] / f"launch-{port}.json"
+        wait_for(lambda: marker.exists() or child.poll() is not None)
+        if marker.exists():
+            pid = json.loads(marker.read_text())["pid"]
+            fd = pidfd_open(pid)
+            try:
+                # Pin while the fixture waits for our handshake, then establish
+                # identity. Never acquire kill authority from a stale PID alone.
+                assert os.readlink(f"/proc/{pid}/cwd") == str(release["backend"])
+                proc_stat = (
+                    Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+                )
+                assert int(proc_stat[1]) == child.pid
+                entry[3] = fd
+            except BaseException:
+                os.close(fd)
+                raise
+            (release["home"] / f"release-{port}").touch()
+        child.fixture_pidfd = entry[
+            3
+        ]  # Lifetime/cleanup remains owned by this fixture.
+        return child, port
+
+    yield start
+    for child, stdout, stderr, fd in children:
+        # Retained pidfds remain safe after reaping, controller crash, or PID reuse.
+        if fd is not None:
+            kill_fixture(fd)
+            os.close(fd)
+        if child.poll() is None:
+            child.terminate()
+            try:
+                child.wait(timeout=8)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait()
+        stdout.close()
+        stderr.close()
+
+
+def test_foreground_start_status_stop_and_changed_disk(dashboard, controllers):
+    assert state_is(dashboard, "stopped")
+    env = {
+        **os.environ,
+        "HERMES_HOME": "/wrong",
+        "HERMES_DESKTOP": "1",
+        "HERMES_PARENT_PID": "1",
+        "HERMES_DESKTOP_READY_FILE": "/must-not-write",
+        "HERMES_SERVE_HEADLESS": "1",
+        "HERMES_LAZY_INSTALL_TARGET": "/must-not-install",
+        "HERMES_DASHBOARD_SESSION_TOKEN": "preserved-auth",
+    }
+    (dashboard["home"] / "profiles/alpha/.env").write_text(
+        'HERMES_DASHBOARD_SESSION_TOKEN="ordinary-auth"\n'
+    )
+    (dashboard["home"] / "profiles/beta/.env").write_text("HERMES_HOME=/unselected\n")
+    process, port = controllers(dashboard, env=env)
+    wait_for(lambda: state_is(dashboard, "ready"))
+    launch = json.loads((dashboard["home"] / "launch.json").read_text())
+    assert launch["argv"] == {
+        "p": "alpha",
+        "command": "dashboard",
+        "host": "127.0.0.1",
+        "port": port,
+        "isolated": True,
+        "skip_build": True,
+        "no_open": True,
+    }
+    assert launch["home"] == str(dashboard["home"] / "profiles/alpha")
+    assert launch["env"]["HERMES_WEB_DIST"] == str(
+        next((dashboard["dest"] / "versions").iterdir()) / "web"
+    )
+    assert launch["env"]["HERMES_DISABLE_LAZY_INSTALLS"] == "1"
+    assert launch["env"]["HERMES_DASHBOARD_SESSION_TOKEN"] == "preserved-auth"
+    assert not any(
+        k in launch["env"]
+        for k in (
+            "HERMES_DESKTOP",
+            "HERMES_PARENT_PID",
+            "HERMES_DESKTOP_READY_FILE",
+            "HERMES_SERVE_HEADLESS",
+            "HERMES_LAZY_INSTALL_TARGET",
+        )
+    )
+    # Startup and current disk identity are not conflated; changed UI cannot
+    # prevent stopping the child the controller already owns.
+    (dashboard["backend"] / "hermes_cli/main.py").write_text("changed")
+    status = json.loads(lifecycle(dashboard, "status").stdout)
+    assert status["startup"]["compatibility"] == "reference-match"
+    assert status["current_disk"]["compatibility"] == "untested"
+    (next((dashboard["dest"] / "versions").iterdir()) / "web/index.html").write_text(
+        "changed"
+    )
+    stopped = lifecycle(dashboard, "stop")
+    assert stopped.returncode == 0, stopped.stderr
+    assert json.loads(stopped.stdout)["state"] == "stopped"
+    assert process.wait(timeout=10) == 0
+    assert state_is(dashboard, "stopped")
+
+
+@pytest.mark.parametrize("mode", ["wrong", "no-sentinel", "exit"])
+def test_failed_readiness_is_not_ready_and_cleans_child(dashboard, controllers, mode):
+    process, _ = controllers(dashboard, mode=mode)
+    assert process.wait(timeout=12) != 0
+    assert state_is(dashboard, "stopped")
+    assert select.select([process.fixture_pidfd], [], [], 0)[0]
+
+
+def test_occupied_port_and_duplicate_start_do_not_replace_owners(
+    dashboard, controllers
+):
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        listener.listen()
+        first, _ = controllers(dashboard, port=listener.getsockname()[1])
+        assert first.wait(timeout=10) != 0
+        assert not (dashboard["home"] / "launch.json").exists()
+        assert listener.getsockname()[1] > 0
+    owner, _ = controllers(dashboard)
+    wait_for(lambda: state_is(dashboard, "ready"))
+    duplicate, _ = controllers(dashboard)
+    assert duplicate.wait(timeout=10) != 0
+    assert owner.poll() is None
+    assert lifecycle(dashboard, "stop").returncode == 0
+    assert owner.wait(timeout=10) == 0
+
+
+@pytest.mark.parametrize("sig", [signal.SIGINT, signal.SIGTERM])
+def test_controller_signals_stop_only_owned_child(dashboard, controllers, sig):
+    with subprocess.Popen([
+        sys.executable,
+        "-I",
+        "-S",
+        "-c",
+        "import time; time.sleep(30)",
+    ]) as unrelated:
+        try:
+            owner, _ = controllers(dashboard)
+            wait_for(lambda: state_is(dashboard, "ready"))
+            owner.send_signal(sig)
+            assert owner.wait(timeout=10) == 0
+            assert state_is(dashboard, "stopped")
+            assert unrelated.poll() is None
+        finally:
+            unrelated.terminate()
+            unrelated.wait()
+
+
+def test_crashed_controller_and_stale_pid_never_authorize_kill(dashboard, controllers):
+    owner, _ = controllers(dashboard)
+    wait_for(lambda: state_is(dashboard, "ready"))
+    owner.kill()
+    owner.wait()
+    assert state_is(dashboard, "unknown")
+    assert lifecycle(dashboard, "stop").returncode != 0
+    duplicate, _ = controllers(dashboard)
+    assert duplicate.wait(timeout=10) != 0
+    # The same pinned fixture generation survives the controller's exit.
+    assert not select.select([owner.fixture_pidfd], [], [], 0)[0]
+
+
+def test_uncooperative_child_is_not_force_killed(dashboard, controllers):
+    owner, _ = controllers(dashboard, mode="stubborn")
+    wait_for(lambda: state_is(dashboard, "ready"))
+    result = lifecycle(dashboard, "stop", "--timeout", "2")
+    assert result.returncode != 0
+    assert json.loads(result.stdout)["state"] == "stopping"
+    assert owner.poll() is None
+    assert state_is(dashboard, "stopping")
+
+
+@pytest.mark.parametrize("marker", [".update-incomplete", ".lazy-refresh-incomplete"])
+def test_pending_backend_repair_is_refused(dashboard, controllers, marker):
+    (dashboard["backend"] / marker).write_text("pending")
+    process, _ = controllers(dashboard)
+    assert process.wait(timeout=10) != 0
+    assert not (dashboard["home"] / "launch.json").exists()
+
+
+@pytest.fixture
+def installer_module():
+    spec = importlib.util.spec_from_file_location("browser_installer", CLI)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_stop_revalidates_record_after_controller_disconnect(
+    dashboard, installer_module, monkeypatch, capsys
+):
+    from argparse import Namespace
+
+    path = dashboard["dest"].with_name(dashboard["dest"].name + ".run")
+    path.write_text(
+        json.dumps({
+            "owner": "foreign",
+            "installation": "/another/install",
+            "state": "stopped",
+        })
+    )
+    path.chmod(0o600)
+    with path.open("r+b") as holder:
+        fcntl.flock(holder, fcntl.LOCK_EX)
+
+        def disconnect(*_):
+            fcntl.flock(holder, fcntl.LOCK_UN)
+            raise ConnectionRefusedError()
+
+        monkeypatch.setattr(installer_module, "control_request", disconnect)
+        result = installer_module.lifecycle(
+            Namespace(command="stop", install_root=str(dashboard["dest"]), timeout=2)
+        )
+    assert result != 0
+    assert json.loads(capsys.readouterr().out)["state"] == "unknown"
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        'export HERMES_HOME="/wrong"\n',
+        "'HERMES_DESKTOP'=1\n",
+        "\ufeffHERMES_DISABLE_LAZY_INSTALLS=0\n",
+        "HERMES_PARENT_PID=1\n",
+        "HERMES_LAZY_INSTALL_TARGET=/wrong\n",
+        "HERMES_WEB_DIST=/wrong\n",
+        " SECRET=synthetic \n",
+        "SECRET=synthetic",
+    ],
+)
+@pytest.mark.parametrize("source", ["profile", "op", "backend"])
+def test_configuration_cannot_override_launch_controls(
+    dashboard, controllers, source, content
+):
+    path = (
+        dashboard["backend"] / ".env"
+        if source == "backend"
+        else dashboard["home"]
+        / "profiles/alpha"
+        / (".op.env" if source == "op" else ".env")
+    )
+    path.write_text(content)
+    process, _ = controllers(dashboard)
+    assert process.wait(timeout=12) != 0
+    assert not (dashboard["home"] / "launch.json").exists()
+    assert path.read_text() == content
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        "secrets: {command: {enabled: true}}\n",
+        '"secr\\u0065ts": {command: {enabled: true}}\n',
+        "secrets: {command: {enabled: false}}\n",
+        "base: &s {secrets: {command: {enabled: true}}}\n<<: *s\n",
+    ],
+)
+def test_external_secret_sources_are_unsupported_not_executed(
+    dashboard, controllers, config
+):
+    path = dashboard["home"] / "profiles/alpha/config.yaml"
+    path.write_text(config)
+    process, _ = controllers(dashboard)
+    assert process.wait(timeout=12) != 0
+    assert not (dashboard["home"] / "launch.json").exists()
+    assert path.read_text() == config
+
+
+def test_container_routing_is_refused_before_spawn(dashboard, controllers):
+    marker = dashboard["home"] / "profiles/alpha/.container-mode"
+    marker.write_text('{"runtime":"docker","container_name":"unrelated"}\n')
+    process, _ = controllers(dashboard)
+    assert process.wait(timeout=12) != 0
+    assert not (dashboard["home"] / "launch.json").exists()
+    assert marker.exists()
+
+
+def test_managed_configuration_is_not_silently_bypassed(
+    dashboard, controllers, tmp_path
+):
+    managed = tmp_path / "managed"
+    managed.mkdir()
+    process, _ = controllers(
+        dashboard, env={**os.environ, "HERMES_MANAGED_DIR": str(managed)}
+    )
+    assert process.wait(timeout=12) != 0
+    assert not (dashboard["home"] / "launch.json").exists()
+
+
+def test_concurrent_state_publication_is_initialized_and_locked(
+    dashboard, installer_module
+):
+    from concurrent.futures import ThreadPoolExecutor
+
+    root = dashboard["dest"]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        streams = list(
+            pool.map(lambda _: installer_module.open_control(root, True), range(2))
+        )
+    try:
+        assert len({os.fstat(stream.fileno()).st_ino for stream in streams}) == 1
+        for stream in streams:
+            assert installer_module.read_control(stream, root)["state"] == "stopped"
+        with installer_module.open_control(root, False) as contender:
+            with pytest.raises(BlockingIOError):
+                fcntl.flock(contender, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    finally:
+        for stream in streams:
+            stream.close()
+    assert not list(root.parent.glob(".hermes-browser-state-*"))
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [("pid", True), ("pid", -1), ("generation", "invalid"), ("state", "ready")],
+)
+def test_invalid_record_never_authorizes_stop(
+    dashboard, installer_module, field, value
+):
+    root = dashboard["dest"]
+    record = {
+        "owner": installer_module.OWNER,
+        "installation": str(root),
+        "state": "unknown",
+        "generation": "f" * 32,
+        "pid": 12345,
+    }
+    record[field] = value
+    path = root.with_name(root.name + ".run")
+    path.write_text(json.dumps(record))
+    path.chmod(0o600)
+    result = lifecycle(dashboard, "stop")
+    assert result.returncode != 0
+    assert json.loads(path.read_text()) == record
 
 
 def test_backend_difference_is_not_called_compatible(release):
