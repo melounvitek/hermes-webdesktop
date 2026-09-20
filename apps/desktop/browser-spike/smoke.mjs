@@ -77,6 +77,8 @@ async function send(text) {
   const start = frames.length
   const input = page.getByRole('textbox', { name: 'Message', exact: true })
   await input.fill(text)
+  // The draft is editable while connecting, but Enter is ignored until sending is enabled.
+  await expect(page.getByRole('button', { name: 'Send', exact: true })).toBeEnabled({ timeout: 60000 })
   await input.press('Enter')
   return start
 }
