@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Real dashboard + loopback model fixture. No agent/transport monkeypatches.
 
-Run with --web-dist <built SPA directory>.
+Run with explicit --backend-root, --python and --web-dist paths.
 Every launch gets a fresh home. runtime.json records URLs, PIDs and log paths.
 With --restartable, SIGUSR1 (or a killed child) restarts on the same port/home
 with a new token. 'spike: hold' streams once, then waits for hold-stream removal.
@@ -26,8 +26,23 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, build_opener
 
-ROOT = Path(__file__).resolve().parents[3]
 MODEL = "browser-spike-local"
+
+
+def stock_identity(root):
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-C", str(root), *args], text=True, timeout=15).strip()
+
+    if (root / ".env").exists() or (root / ".env").is_symlink():
+        raise ValueError("checkout .env exists; use a credential-free stock checkout")
+    if Path(git("rev-parse", "--show-toplevel")).resolve() != root:
+        raise ValueError("--backend-root must be the stock git checkout root")
+    if git("status", "--porcelain", "--untracked-files=all"):
+        raise ValueError("a clean stock checkout is required (tracked and untracked changes found)")
+    git("ls-files", "--error-unmatch", "hermes_cli/main.py", "run_agent.py", "tui_gateway/server.py")
+    return {"root": str(root), "revision": git("rev-parse", "HEAD"),
+            "tree": git("rev-parse", "HEAD^{tree}"), "status": "clean"}
 
 
 class ModelFixture(BaseHTTPRequestHandler):
@@ -131,26 +146,38 @@ class ModelFixture(BaseHTTPRequestHandler):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--web-dist", type=Path, required=True)
-    parser.add_argument("--python", type=Path, default=Path.home() / ".hermes/hermes-agent/venv/bin/python")
+    parser.add_argument("--python", type=Path, required=True)
+    parser.add_argument("--backend-root", type=Path, required=True)
+    parser.add_argument("--check-source", action="store_true", help="Validate paths/source only; no application imports or servers")
     parser.add_argument("--port", type=int, default=0)
     parser.add_argument("--restartable", action="store_true", help="Restart child on SIGUSR1 or child exit")
-    parser.add_argument("--public-url", help="HTTPS origin for a tailnet proxy; generates a password login")
+    parser.add_argument("--public-url", help="Loopback HTTPS recovery proxy origin; generates a disposable password login")
     args = parser.parse_args()
     if args.public_url:
         origin = urlsplit(args.public_url)
-        if (origin.scheme != "https" or not origin.hostname or origin.username or origin.password
+        if (origin.scheme != "https" or origin.hostname not in ("127.0.0.1", "localhost", "recovery.localhost") or origin.username or origin.password
                 or origin.path not in ("", "/") or origin.query or origin.fragment):
-            parser.error("--public-url must be an HTTPS origin without a path or credentials")
+            parser.error("--public-url must be a loopback HTTPS origin without a path or credentials")
         args.public_url = args.public_url.rstrip("/")
+    os.umask(0o077)
+    for name in ("python", "backend_root", "web_dist"):
+        if not getattr(args, name).is_absolute():
+            parser.error(f"--{name.replace('_', '-')} must be an explicit absolute path")
+    if not args.python.is_file() or not os.access(args.python, os.X_OK):
+        parser.error("--python must be an executable test interpreter")
     # Keep the venv path: resolving its python symlink would select the bare interpreter.
-    args.python = args.python.expanduser().absolute()
+    root = args.backend_root.resolve()
     web_dist = args.web_dist.expanduser().resolve()
     if not (web_dist / "index.html").is_file():
         parser.error("--web-dist must contain index.html (build is owned by the browser spike)")
-    # The CLI loads project dotenv even with HERMES_HOME set. Refuse rather than
-    # silently inheriting checkout credentials or editing the user's checkout.
-    if (ROOT / ".env").exists():
-        parser.error("checkout .env exists; use a credential-free worktree")
+    # The CLI loads checkout dotenv even with HERMES_HOME set. Never edit it.
+    try:
+        stock = stock_identity(root)
+    except (ValueError, subprocess.SubprocessError) as error:
+        parser.error(str(error))
+    if args.check_source:
+        print(json.dumps(stock))
+        return
     run_dir = Path(tempfile.mkdtemp(prefix="hermes-browser-spike-"))
     home = run_dir / "home"
     hermes_home = home / ".hermes"
@@ -178,7 +205,7 @@ def main():
     env = {
         "HOME": str(home), "HERMES_HOME": str(hermes_home),
         "PATH": f"{args.python.parent}:/usr/bin:/bin", "LANG": "C.UTF-8", "TZ": "UTC",
-        "PYTHONPATH": str(ROOT), "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONPATH": str(root), "PYTHONNOUSERSITE": "1", "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONUNBUFFERED": "1", "HERMES_WEB_DIST": str(web_dist),
         "HERMES_DASHBOARD_SESSION_TOKEN": token,
         "HTTP_PROXY": model_url, "HTTPS_PROXY": model_url, "ALL_PROXY": model_url,
@@ -191,7 +218,7 @@ def main():
             json.dump(login, out)
         hash_code = "import sys; from plugins.dashboard_auth.basic import hash_password; print(hash_password(sys.stdin.read()))"
         password_hash = subprocess.check_output(
-            [str(args.python), "-c", hash_code], input=login["password"], cwd=home, env=env, text=True).strip()
+            [str(args.python), "-c", hash_code], input=login["password"], cwd=home, env=env, text=True, timeout=30).strip()
         # Basic auth otherwise generates a per-process key, intentionally signing
         # everyone out on restart. Keep this disposable home's login valid while
         # the separate loopback/bootstrap token still rotates with each child.
@@ -199,18 +226,27 @@ def main():
             "username": login["username"], "password_hash": password_hash,
             "secret": secrets.token_hex(32)}}
         (hermes_home / "config.yaml").write_text(json.dumps(config, indent=2))
-    # Verify the installed venv resolves application modules from THIS worktree.
-    probe = "import importlib.util,json; print(json.dumps({n:importlib.util.find_spec(n).origin for n in ['hermes_cli.main','run_agent','tui_gateway.server']}))"
-    origins = json.loads(subprocess.check_output([str(args.python), "-c", probe], cwd=home, env=env, text=True))
-    assert all(Path(p).is_relative_to(ROOT) for p in origins.values()), origins
+    # Probe resolution, not agent behavior. Record dependency identity without pip/network.
+    probe = """import importlib.util, importlib.metadata, json, sys
+print(json.dumps({
+    'imports': {n: importlib.util.find_spec(n).origin for n in
+                ['hermes_cli.main', 'run_agent', 'tui_gateway.server']},
+    'python': {'executable': sys.executable, 'version': sys.version},
+    'dependencies': sorted((d.metadata['Name'], d.version) for d in importlib.metadata.distributions())
+}))"""
+    identity = json.loads(subprocess.check_output(
+        [str(args.python), "-c", probe], cwd=home, env=env, text=True, timeout=30))
+    origins = identity["imports"]
+    if not all(p and Path(p).resolve().is_relative_to(root) for p in origins.values()):
+        raise RuntimeError(f"Application imports escaped --backend-root: {origins}")
     command = [str(args.python), "-m", "hermes_cli.main", "dashboard", "--no-open",
-               "--host", "127.0.0.1", "--port", str(args.port), "--skip-build"]
+               "--host", "127.0.0.1", "--port", str(args.port), "--skip-build", "--isolated"]
     log_path = run_dir / "backend.log"
     with log_path.open("w") as log:
         child = subprocess.Popen(command, cwd=home, env=env, stdout=log, stderr=subprocess.STDOUT)
     runtime = {"run_dir": str(run_dir), "home": str(home), "hermes_home": str(hermes_home),
                "harness_pid": os.getpid(), "backend_pid": child.pid, "backend_log": str(log_path),
-               "model_url": model_url + "/v1", "command": command, "imports": origins,
+               "model_url": model_url + "/v1", "command": command, "stock": stock, **identity,
                "public_url": args.public_url}
     print(json.dumps(runtime, indent=2), flush=True)
 
@@ -255,15 +291,15 @@ def main():
                     print("READY " + json.dumps({"url": url, "run_dir": str(run_dir),
                                                 "generation": generation}), flush=True)
                     if not args.restartable:
-                        child.wait()
-                        break
+                        code = child.wait()
+                        raise RuntimeError(f"Backend exited unexpectedly ({code}); inspect {log_path}")
                     while child.poll() is None and not restart.wait(0.1):
                         pass
                     restart.clear()
                     # Abrupt loss is intentional: regression cases must not rely
                     # on a graceful shutdown persisting an interrupted turn.
                     child.kill()
-                    child.wait()
+                    child.wait(timeout=5)
                     command[command.index("--port") + 1] = match.group(1)
                     token = secrets.token_urlsafe(32)
                     env["HERMES_DASHBOARD_SESSION_TOKEN"] = token
@@ -284,7 +320,7 @@ def main():
             child.wait(timeout=15)
         except subprocess.TimeoutExpired:
             child.kill()
-            child.wait()
+            child.wait(timeout=5)
         fixture.shutdown()
         fixture.server_close()
 
