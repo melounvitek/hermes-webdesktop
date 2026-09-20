@@ -84,6 +84,24 @@ afterEach(() => {
 })
 
 describe('createSessionRpcDispatcher: fail closed', () => {
+  it.each([null, 'stored-omar'])(
+    'routes explicit config ownership independently of selected session %s',
+    async selected => {
+      setSessions([makeSessionInfo({ connection_id: 'local', id: 'stored-omar', profile: 'omar' })])
+      const { request, ambientRequest } = dispatcher(undefined, selected)
+      await request('config.get', { key: 'approvals.mode', profile: 'default' })
+      expect(gatewayMocks.requestGatewayForProfile).toHaveBeenCalledWith(
+        'default',
+        'config.get',
+        { key: 'approvals.mode', profile: 'default' },
+        undefined,
+        undefined
+      )
+      expect(gatewayMocks.requestGatewayForAgent).not.toHaveBeenCalled()
+      expect(ambientRequest).not.toHaveBeenCalled()
+    }
+  )
+
   it('rejects with an explicit owner-resolution error instead of riding the ambient socket', async () => {
     const { ambientRequest, request } = dispatcher()
 

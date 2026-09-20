@@ -761,6 +761,7 @@ export interface Translations {
       technicalDesc: string
       themeTitle: string
       themeDesc: string
+      themeSearchLocalPlaceholder: string
       themeSearchPlaceholder: string
       themeProfileNote: (profile: string) => string
       installTitle: string
@@ -3217,6 +3218,8 @@ export interface Translations {
       messagingPlatforms: string
     }
     approvalMode: {
+      loadFailed: string
+      saveFailed: string
       title: string
       ariaLabel: (mode: string) => string
       manual: string

@@ -828,6 +828,7 @@ export const zh = defineLocale({
       technicalDesc: '包含原始工具参数/结果及底层细节。',
       themeTitle: '主题',
       themeDesc: '仅桌面端调色板。所选模式叠加其上。',
+      themeSearchLocalPlaceholder: '搜索内置主题…',
       themeSearchPlaceholder: '搜索本地主题或 VS Code 市场…',
       themeProfileNote: profile => `已为「${profile}」配置文件保存——每个配置文件保留各自的主题。`,
       installTitle: '从 VS Code 安装',
@@ -3778,6 +3779,8 @@ export const zh = defineLocale({
       messagingPlatforms: '消息平台'
     },
     approvalMode: {
+      loadFailed: '无法读取审批模式',
+      saveFailed: '无法保存审批模式',
       title: '审批模式',
       ariaLabel: mode => `审批模式：${mode}`,
       manual: '手动',

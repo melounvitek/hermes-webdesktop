@@ -67,7 +67,7 @@ describe('applyRuntimeInfo approval mode', () => {
     applyRuntimeInfo({ approval_mode: 'smart', desktop_contract: 3 })
 
     expect(approvalModeForProfile('work')).toBe('smart')
-    expect(approvalModeForProfile('default')).toBe('smart')
+    expect(approvalModeForProfile('default')).toBeUndefined()
   })
 })
 

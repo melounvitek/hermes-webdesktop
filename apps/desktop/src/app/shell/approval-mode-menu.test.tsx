@@ -5,6 +5,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from 'vitest'
 import { StatusbarControls } from '@/app/shell/statusbar-controls'
 import { I18nProvider } from '@/i18n'
 import { $approvalModes } from '@/store/approval-mode'
+import { $notifications } from '@/store/notifications'
 import { stubMenuDomApis, stubResizeObserver } from '@/test/jsdom'
 
 import { useApprovalModeStatusbarItem } from './approval-mode-menu'
@@ -17,6 +18,7 @@ beforeAll(() => {
 afterEach(() => {
   cleanup()
   $approvalModes.set({})
+  $notifications.set([])
 })
 
 function Harness({
@@ -41,7 +43,7 @@ describe('approval mode statusbar item', () => {
     render(<Harness requestGateway={vi.fn(() => response)} />)
 
     const statusbar = screen.getByRole('contentinfo')
-    const trigger = within(statusbar).getByRole('button', { name: /smart/i })
+    const trigger = within(statusbar).getByRole('button', { name: /unknown/i })
     expect(within(statusbar).getAllByRole('button')).toHaveLength(1)
 
     fireEvent.pointerDown(trigger, { button: 0 })
@@ -56,24 +58,45 @@ describe('approval mode statusbar item', () => {
     const requestGateway = vi.fn(async (_method, params) => ({ value: params?.value ?? 'smart' }))
     render(<Harness profile="work" requestGateway={requestGateway} />)
 
-    fireEvent.pointerDown(screen.getByRole('button', { name: /smart/i }), { button: 0 })
+    fireEvent.pointerDown(await screen.findByRole('button', { name: /smart/i }), { button: 0 })
     fireEvent.click(await screen.findByRole('menuitemradio', { name: /manual/i }))
 
     await waitFor(() => {
-      expect(requestGateway).toHaveBeenCalledWith('config.set', { key: 'approvals.mode', value: 'manual' })
+      expect(requestGateway).toHaveBeenCalledWith('config.set', {
+        key: 'approvals.mode',
+        value: 'manual',
+        profile: 'work'
+      })
       expect(screen.getByRole('button', { name: /manual/i })).toBeTruthy()
     })
   })
 
+  it('shows failed loads as unknown, allows retry and reports failed writes with rollback', async () => {
+    const request = vi
+      .fn()
+      .mockRejectedValueOnce(new Error('read denied'))
+      .mockResolvedValueOnce({ value: 'off' })
+      .mockRejectedValueOnce(new Error('write denied'))
+
+    render(<Harness profile="failure" requestGateway={request} />)
+    await waitFor(() => expect($notifications.get().at(-1)?.message).toBe('read denied'))
+    fireEvent.pointerDown(screen.getByRole('button', { name: /unknown/i }), { button: 0 })
+    fireEvent.click(await screen.findByRole('menuitem', { name: /retry/i }))
+    fireEvent.pointerDown(await screen.findByRole('button', { name: /^off$/i }), { button: 0 })
+    fireEvent.click(await screen.findByRole('menuitemradio', { name: /manual/i }))
+    await waitFor(() => expect($notifications.get()[0]?.message).toBe('write denied'))
+    expect(screen.getByRole('button', { name: /^off$/i })).toBeTruthy()
+  })
+
   it('renders the shared trigger and menu in the active locale', async () => {
-    const response = new Promise<never>(() => undefined)
+    const response = Promise.resolve({ value: 'smart' })
     render(
       <I18nProvider configClient={null} initialLocale="ja">
         <Harness requestGateway={vi.fn(() => response)} />
       </I18nProvider>
     )
 
-    fireEvent.pointerDown(screen.getByRole('button', { name: 'スマート' }), { button: 0 })
+    fireEvent.pointerDown(await screen.findByRole('button', { name: 'スマート' }), { button: 0 })
 
     expect(await screen.findByText('必要な場合にのみ確認します')).toBeTruthy()
     expect(screen.getByText('承認プロンプトなしで実行します')).toBeTruthy()

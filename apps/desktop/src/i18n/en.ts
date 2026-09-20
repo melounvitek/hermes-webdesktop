@@ -885,6 +885,7 @@ export const en: Translations = {
       technicalDesc: 'Include raw tool args/results and low-level details.',
       themeTitle: 'Theme',
       themeDesc: 'Desktop palettes only. The selected mode is applied on top.',
+      themeSearchLocalPlaceholder: 'Search built-in themes…',
       themeSearchPlaceholder: 'Search your themes or the VS Code Marketplace…',
       themeProfileNote: profile => `Saved for the ${profile} profile — each profile keeps its own theme.`,
       installTitle: 'Install from VS Code',
@@ -3700,6 +3701,8 @@ export const en: Translations = {
       messagingPlatforms: 'Messaging platforms'
     },
     approvalMode: {
+      loadFailed: 'Could not read approval mode',
+      saveFailed: 'Could not save approval mode',
       title: 'Approval mode',
       ariaLabel: mode => `Approval mode: ${mode}`,
       manual: 'Manual',

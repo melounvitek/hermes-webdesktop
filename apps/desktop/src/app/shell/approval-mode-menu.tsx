@@ -3,6 +3,7 @@ import { useEffect, useMemo } from 'react'
 
 import type { StatusbarItem } from '@/app/shell/statusbar-controls'
 import {
+  DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
@@ -17,12 +18,13 @@ import {
   setApprovalModeForProfile,
   syncApprovalModeForProfile
 } from '@/store/approval-mode'
+import { notifyError } from '@/store/notifications'
 
 export function useApprovalModeStatusbarItem(profile: string, requestGateway: ApprovalModeRequester): StatusbarItem {
   const { t } = useI18n()
   const copy = t.shell.approvalMode
   const modes = useStore($approvalModes)
-  const mode = modes[profile.trim() || 'default'] ?? 'smart'
+  const mode = modes[profile.trim() || 'default']
 
   const labels = useMemo<Record<ApprovalMode, string>>(
     () => ({ manual: copy.manual, smart: copy.smart, off: copy.off }),
@@ -39,28 +41,41 @@ export function useApprovalModeStatusbarItem(profile: string, requestGateway: Ap
   )
 
   useEffect(() => {
-    void syncApprovalModeForProfile(requestGateway, profile).catch(() => undefined)
-  }, [profile, requestGateway])
+    void syncApprovalModeForProfile(requestGateway, profile).catch(error => notifyError(error, copy.loadFailed))
+  }, [profile, requestGateway, copy.loadFailed])
 
   return {
     className: mode === 'off' ? 'bg-(--chrome-action-hover) text-foreground' : undefined,
     icon: mode === 'off' ? <ZapFilled className="size-3.5" /> : <Zap className="size-3.5 opacity-70" />,
     id: 'approval-mode',
-    label: labels[mode],
+    label: mode ? labels[mode] : t.shell.statusbar.unknown,
     menuAlign: 'end',
     menuClassName: 'w-72 p-1',
     menuContent: (
       <>
         <DropdownMenuLabel>{copy.title}</DropdownMenuLabel>
         <DropdownMenuSeparator />
+        {!mode && (
+          <DropdownMenuItem
+            onSelect={() =>
+              void syncApprovalModeForProfile(requestGateway, profile).catch(error =>
+                notifyError(error, copy.loadFailed)
+              )
+            }
+          >
+            {t.common.retry}
+          </DropdownMenuItem>
+        )}
         <DropdownMenuRadioGroup
           onValueChange={value => {
-            void setApprovalModeForProfile(requestGateway, profile, value as ApprovalMode).catch(() => undefined)
+            void setApprovalModeForProfile(requestGateway, profile, value as ApprovalMode).catch(error =>
+              notifyError(error, copy.saveFailed)
+            )
           }}
-          value={mode}
+          value={mode ?? ''}
         >
           {(['manual', 'smart', 'off'] as const).map(value => (
-            <DropdownMenuRadioItem className="items-start gap-2" key={value} value={value}>
+            <DropdownMenuRadioItem className="items-start gap-2" disabled={!mode} key={value} value={value}>
               <span className="flex min-w-0 flex-col gap-0.5">
                 <span className="text-xs text-foreground">{labels[value]}</span>
                 <span className="text-[0.6875rem] leading-snug text-(--ui-text-tertiary)">{descriptions[value]}</span>
@@ -70,7 +85,7 @@ export function useApprovalModeStatusbarItem(profile: string, requestGateway: Ap
         </DropdownMenuRadioGroup>
       </>
     ),
-    title: copy.ariaLabel(labels[mode]),
+    title: copy.ariaLabel(mode ? labels[mode] : t.shell.statusbar.unknown),
     variant: 'menu'
   }
 }

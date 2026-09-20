@@ -13,13 +13,13 @@ import {
 describe('profile-scoped approval mode cache', () => {
   beforeEach(() => $approvalModes.set({}))
 
-  it('labels an unread profile Smart by default and adopts backend truth', async () => {
-    expect(approvalModeForProfile('default')).toBe('smart')
+  it('keeps unread policy unknown and reads the explicit owner', async () => {
+    expect(approvalModeForProfile('default')).toBeUndefined()
 
     const request = vi.fn(async () => ({ value: 'manual' }))
     await syncApprovalModeForProfile(request, 'default')
 
-    expect(request).toHaveBeenCalledWith('config.get', { key: 'approvals.mode' })
+    expect(request).toHaveBeenCalledWith('config.get', { key: 'approvals.mode', profile: 'default' })
     expect(approvalModeForProfile('default')).toBe('manual')
   })
 
@@ -35,7 +35,17 @@ describe('profile-scoped approval mode cache', () => {
 
     expect(approvalModeForProfile('work')).toBe('manual')
     expect(approvalModeForProfile('personal')).toBe('off')
-    expect(approvalModeForProfile('default')).toBe('smart')
+    expect(approvalModeForProfile('default')).toBeUndefined()
+  })
+
+  it('does not present stale or malformed reads as authoritative policy', async () => {
+    reconcileApprovalModeForProfile('read-failure', 'off')
+    await expect(
+      syncApprovalModeForProfile(vi.fn().mockRejectedValue(new Error('unavailable')), 'read-failure')
+    ).rejects.toThrow('unavailable')
+    expect(approvalModeForProfile('read-failure')).toBeUndefined()
+    await expect(syncApprovalModeForProfile(vi.fn().mockResolvedValue({}), 'read-failure')).rejects.toThrow()
+    expect(approvalModeForProfile('read-failure')).toBeUndefined()
   })
 
   it('rolls consecutive failed writes back to the last authoritative value', async () => {

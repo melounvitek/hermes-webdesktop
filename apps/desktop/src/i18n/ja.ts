@@ -645,6 +645,7 @@ export const ja = defineLocale({
       technical: 'テクニカル',
       technicalDesc: '生のツール引数、結果、低レベルの詳細を含めます。',
       themeTitle: 'テーマ',
+      themeSearchLocalPlaceholder: '組み込みテーマを検索…',
       themeDesc: 'デスクトップ専用のパレットです。選択したモードの上に適用されます。',
       themeProfileNote: profile =>
         `「${profile}」プロファイルに保存されます。プロファイルごとに個別のテーマを保持します。`,
@@ -3069,6 +3070,8 @@ export const ja = defineLocale({
       messagingPlatforms: 'メッセージングプラットフォーム'
     },
     approvalMode: {
+      loadFailed: '承認モードを読み込めませんでした',
+      saveFailed: '承認モードを保存できませんでした',
       title: '承認モード',
       ariaLabel: mode => `承認モード: ${mode}`,
       manual: '手動',

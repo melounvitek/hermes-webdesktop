@@ -675,6 +675,7 @@ export const ar = defineLocale({
       technical: 'تقني',
       technicalDesc: 'يعرض تفاصيل أكثر عن الأدوات والتنفيذ.',
       themeTitle: 'الثيم',
+      themeSearchLocalPlaceholder: 'البحث في السمات المضمنة…',
       themeDesc: 'اختر ثيم سطح المكتب.',
       themeProfileNote: profile => `سيطبق هذا الثيم على الملف الشخصي ${profile}.`,
       installTitle: 'تثبيت ثيم',
@@ -2614,6 +2615,10 @@ export const ar = defineLocale({
     addProvider: 'إضافة مزوّد…'
   },
   shell: {
+    approvalMode: {
+      loadFailed: 'تعذرت قراءة وضع الموافقة',
+      saveFailed: 'تعذر حفظ وضع الموافقة'
+    },
     windowControls: 'تحكم النافذة',
     paneControls: 'تحكم اللوحات',
     appControls: 'تحكم التطبيق',
