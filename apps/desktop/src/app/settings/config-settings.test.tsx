@@ -61,6 +61,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  vi.unstubAllGlobals()
 })
 
 function renderConfigSettings(activeSectionId = 'safety') {
@@ -79,6 +80,15 @@ function renderConfigSettings(activeSectionId = 'safety') {
 }
 
 describe('ConfigSettings autosave', () => {
+  it.each([true, false])('only offers native power and devtools preferences outside browser=%s', async browser => {
+    vi.stubGlobal('hermesDesktop', { browser })
+    getHermesConfigRecord.mockResolvedValue({})
+    renderConfigSettings('advanced')
+    await screen.findByText('Nothing to configure')
+    expect(Boolean(screen.queryByText('Keep computer awake'))).toBe(!browser)
+    expect(Boolean(screen.queryByText('Disable F12 DevTools'))).toBe(!browser)
+  })
+
   it('renders and saves the Codex compression auto-raise setting', async () => {
     getHermesConfigRecord.mockResolvedValue({
       compression: { codex_gpt55_autoraise: true }

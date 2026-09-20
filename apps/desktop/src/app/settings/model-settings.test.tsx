@@ -695,7 +695,8 @@ describe('ModelSettings code-skew 503', () => {
     delete (window as unknown as { hermesDesktop?: unknown }).hermesDesktop
   })
 
-  it('unwraps the stale-backend 503 instead of dumping IPC JSON', async () => {
+  it.each([true, false])('unwraps code skew and only offers a supported restart (native=%s)', async native => {
+    window.hermesDesktop = { recycleBackend: native ? vi.fn() : undefined } as never
     getGlobalModelOptions.mockRejectedValueOnce(skewError)
 
     await renderModelSettings()
@@ -703,7 +704,7 @@ describe('ModelSettings code-skew 503', () => {
     await waitFor(() => {
       expect(screen.getByText(/running old code after an update/i)).toBeTruthy()
     })
-    expect(screen.getByRole('button', { name: 'Restart backend' })).toBeTruthy()
+    expect(Boolean(screen.queryByRole('button', { name: 'Restart backend' }))).toBe(native)
     expect(screen.queryByText(/hermes:api/)).toBeNull()
     expect(screen.queryByText(/systemctl/)).toBeNull()
   })

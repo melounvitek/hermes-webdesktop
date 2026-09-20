@@ -975,7 +975,7 @@ export function ModelSettings({ onMainModelChanged, scopeProfile }: ModelSetting
         {error && (
           <div className="mt-2 flex flex-wrap items-center gap-2 text-xs text-destructive">
             <span>{error}</span>
-            {skewRestart && (
+            {skewRestart && window.hermesDesktop?.recycleBackend && (
               <Button
                 disabled={restartingBackend}
                 onClick={() => void recycleStaleBackend()}

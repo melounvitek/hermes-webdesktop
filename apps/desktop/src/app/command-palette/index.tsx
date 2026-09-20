@@ -1335,15 +1335,17 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
         groups: [
           // Pinned at the top: drills into the Marketplace browser.
           {
-            items: [
-              {
-                icon: Download,
-                id: 'theme-install',
-                keywords: ['install', 'marketplace', 'vscode', 'vs code', 'download', 'new', 'color'],
-                label: t.commandCenter.installTheme.title,
-                to: 'install-theme'
-              }
-            ]
+            items: window.hermesDesktop?.themes
+              ? [
+                  {
+                    icon: Download,
+                    id: 'theme-install',
+                    keywords: ['install', 'marketplace', 'vscode', 'vs code', 'download', 'new', 'color'],
+                    label: t.commandCenter.installTheme.title,
+                    to: 'install-theme'
+                  }
+                ]
+              : []
           },
           // Brightness lives with the palettes: one mode toggle for the whole
           // list instead of splitting every theme across a Light and a Dark group.
@@ -1602,7 +1604,9 @@ function CommandPaletteBody({ onExited }: { onExited: () => void }) {
                 search={search}
               />
             ) : page === 'install-theme' ? (
-              <MarketplaceThemePage onPickTheme={setTheme} search={search} />
+              window.hermesDesktop?.themes ? (
+                <MarketplaceThemePage onPickTheme={setTheme} search={search} />
+              ) : null
             ) : (
               <PaletteGroups
                 bindings={bindings}

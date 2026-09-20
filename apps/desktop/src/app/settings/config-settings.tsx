@@ -10,6 +10,7 @@ import { getElevenLabsVoices, getHermesConfigSchema, profileScopeKey, saveHermes
 import { useI18n } from '@/i18n'
 import { triggerHaptic } from '@/lib/haptics'
 import { isSubmitEnter } from '@/lib/ime'
+import { isBrowserClient } from '@/lib/platform'
 import { confirm } from '@/store/confirm'
 import {
   $dataUrlReadMaxMb,
@@ -388,18 +389,22 @@ function ConfigSettingsInner({
           power-user, this-computer-only knobs. */}
       {activeSectionId === 'advanced' && (
         <>
-          <ToggleRow
-            checked={keepAwake}
-            description={c.keepAwakeDesc}
-            label={c.keepAwakeTitle}
-            onChange={setKeepAwake}
-          />
-          <ToggleRow
-            checked={disableF12}
-            description={c.disableF12Desc}
-            label={c.disableF12Title}
-            onChange={setDisableF12}
-          />
+          {!isBrowserClient() && (
+            <>
+              <ToggleRow
+                checked={keepAwake}
+                description={c.keepAwakeDesc}
+                label={c.keepAwakeTitle}
+                onChange={setKeepAwake}
+              />
+              <ToggleRow
+                checked={disableF12}
+                description={c.disableF12Desc}
+                label={c.disableF12Title}
+                onChange={setDisableF12}
+              />
+            </>
+          )}
           <PoolLimitsSetting />
           <QuickEntrySettings />
         </>

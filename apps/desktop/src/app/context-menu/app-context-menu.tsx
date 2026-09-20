@@ -109,7 +109,7 @@ function terminalSections(open: Extract<OpenContextMenu, { kind: 'terminal' }>, 
           icon="copy"
           key="terminal-copy"
           label={t.common.copy}
-          onSelect={() => void writeClipboardText(selection)}
+          onSelect={() => void writeClipboardText(selection).catch(error => notifyError(error, t.common.copyFailed))}
         />
       ) : null,
       terminal.paste ? (
@@ -119,7 +119,10 @@ function terminalSections(open: Extract<OpenContextMenu, { kind: 'terminal' }>, 
           key="terminal-paste"
           label={t.contextMenu.edit.paste}
           onSelect={() =>
-            void window.hermesDesktop?.readClipboard().then(text => (text ? terminal.paste?.(text) : undefined))
+            void window.hermesDesktop
+              ?.readClipboard()
+              .then(text => (text ? terminal.paste?.(text) : undefined))
+              .catch(error => notifyError(error, t.desktop.clipboardPasteFailed))
           }
         />
       ) : null,
@@ -221,14 +224,18 @@ function domSections(open: Extract<OpenContextMenu, { kind: 'dom' }>, t: Transla
           icon="copy"
           key="link-copy"
           label={copy.link.copyUrl}
-          onSelect={() => void writeClipboardText(linkUrl)}
+          onSelect={() => void writeClipboardText(linkUrl).catch(error => notifyError(error, t.common.copyFailed))}
         />,
         showResolvedCopy ? (
           <Item
             icon="copy"
             key="link-copy-resolved"
             label={copy.link.copyResolvedUrl}
-            onSelect={() => void reachablePreviewUrl(linkUrl).then(writeClipboardText)}
+            onSelect={() =>
+              void reachablePreviewUrl(linkUrl)
+                .then(writeClipboardText)
+                .catch(error => notifyError(error, t.common.copyFailed))
+            }
           />
         ) : null
       ].filter(Boolean)
@@ -259,21 +266,25 @@ function domSections(open: Extract<OpenContextMenu, { kind: 'dom' }>, t: Transla
             onSelect={() => openExternalLink(target.imageUrl)}
           />
         ) : null,
-        <Item
-          icon="file-media"
-          key="image-copy"
-          label={copy.image.copyImage}
-          onSelect={() => void window.hermesDesktop?.contextMenuCopyImage?.()}
-        />,
+        !isBrowserClient() ? (
+          <Item
+            icon="file-media"
+            key="image-copy"
+            label={copy.image.copyImage}
+            onSelect={() => void window.hermesDesktop?.contextMenuCopyImage?.()}
+          />
+        ) : null,
         target.imageUrl ? (
           <Item
             icon="copy"
             key="image-copy-address"
             label={copy.image.copyImageAddress}
-            onSelect={() => void writeClipboardText(target.imageUrl)}
+            onSelect={() =>
+              void writeClipboardText(target.imageUrl).catch(error => notifyError(error, t.common.copyFailed))
+            }
           />
         ) : null,
-        target.imageUrl ? (
+        target.imageUrl && !isBrowserClient() ? (
           <Item
             icon="save"
             key="image-save"
@@ -290,7 +301,7 @@ function domSections(open: Extract<OpenContextMenu, { kind: 'dom' }>, t: Transla
   }
 
   if (target.editable) {
-    if (spellcheck) {
+    if (spellcheck && !isBrowserClient()) {
       sections.push([
         ...spellcheck.suggestions
           .slice(0, 5)
@@ -335,28 +346,30 @@ function domSections(open: Extract<OpenContextMenu, { kind: 'dom' }>, t: Transla
       ? (formField.selectionStart ?? 0) !== (formField.selectionEnd ?? 0)
       : target.selectionText.length > 0
 
-    sections.push([
-      <Item
-        disabled={!canCutCopy}
-        key="edit-cut"
-        label={copy.edit.cut}
-        onSelect={() => editableCommand('cut')}
-        shortcut={EDIT_SHORTCUTS.cut}
-      />,
-      <Item
-        disabled={!canCutCopy}
-        key="edit-copy"
-        label={t.common.copy}
-        onSelect={() => editableCommand('copy')}
-        shortcut={EDIT_SHORTCUTS.copy}
-      />,
-      <Item
-        key="edit-paste"
-        label={copy.edit.paste}
-        onSelect={() => editableCommand('paste')}
-        shortcut={EDIT_SHORTCUTS.paste}
-      />
-    ])
+    if (!isBrowserClient())
+      {sections.push([
+        <Item
+          disabled={!canCutCopy}
+          key="edit-cut"
+          label={copy.edit.cut}
+          onSelect={() => editableCommand('cut')}
+          shortcut={EDIT_SHORTCUTS.cut}
+        />,
+        <Item
+          disabled={!canCutCopy}
+          key="edit-copy"
+          label={t.common.copy}
+          onSelect={() => editableCommand('copy')}
+          shortcut={EDIT_SHORTCUTS.copy}
+        />,
+        <Item
+          key="edit-paste"
+          label={copy.edit.paste}
+          onSelect={() => editableCommand('paste')}
+          shortcut={EDIT_SHORTCUTS.paste}
+        />
+      ])}
+
     sections.push([
       <Item
         disabled={!hasFieldText}
@@ -372,7 +385,9 @@ function domSections(open: Extract<OpenContextMenu, { kind: 'dom' }>, t: Transla
         icon="copy"
         key="selection-copy"
         label={t.common.copy}
-        onSelect={() => void writeClipboardText(target.selectionText)}
+        onSelect={() =>
+          void writeClipboardText(target.selectionText).catch(error => notifyError(error, t.common.copyFailed))
+        }
       />
     ])
   }
@@ -425,7 +440,7 @@ function guestSections(open: Extract<OpenContextMenu, { kind: 'guest' }>, t: Tra
           icon="copy"
           key="guest-link-copy"
           label={copy.link.copyUrl}
-          onSelect={() => void writeClipboardText(linkUrl)}
+          onSelect={() => void writeClipboardText(linkUrl).catch(error => notifyError(error, t.common.copyFailed))}
         />
       ].filter(Boolean)
     )
@@ -450,7 +465,7 @@ function guestSections(open: Extract<OpenContextMenu, { kind: 'guest' }>, t: Tra
             icon="copy"
             key="guest-image-copy-address"
             label={copy.image.copyImageAddress}
-            onSelect={() => void writeClipboardText(imageUrl)}
+            onSelect={() => void writeClipboardText(imageUrl).catch(error => notifyError(error, t.common.copyFailed))}
           />
         ) : null,
         imageUrl ? (

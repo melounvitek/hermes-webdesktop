@@ -80,7 +80,7 @@ describe('desktop filesystem facade', () => {
   })
 
   it('rejects browser saves before any filesystem request', async () => {
-    window.hermesDesktop!.browser = true
+    window.hermesDesktop!.browser = { authRequired: false, signIn: vi.fn() }
     $connection.set({ mode: 'remote', profile: 'a' } as never)
 
     await expect(writeDesktopFileText('/work/file.txt', 'changed')).rejects.toThrow('read-only')

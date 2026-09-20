@@ -601,7 +601,9 @@ export function AppearanceSettings() {
                       })}
                     </div>
                   )}
-                  <MarketplaceThemeResults installs={installs} onInstalled={name => setTheme(name)} query={query} />
+                  {window.hermesDesktop?.themes && (
+                    <MarketplaceThemeResults installs={installs} onInstalled={name => setTheme(name)} query={query} />
+                  )}
                 </div>
                 {showProfileNote && (
                   <p className="mt-3 text-[length:var(--conversation-caption-font-size)] leading-(--conversation-caption-line-height) text-(--ui-text-tertiary)">

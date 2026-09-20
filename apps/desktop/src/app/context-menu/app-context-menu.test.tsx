@@ -97,6 +97,37 @@ describe('resolveDomTarget', () => {
 })
 
 describe('AppContextMenu', () => {
+  it('does not offer native image or edit operations in browser menus', async () => {
+    installBridge({ browser: { authRequired: false, signIn: vi.fn() } })
+    mountMenu()
+    const host = attach('<img src="https://example.invalid/pic.png"><textarea>draft</textarea>')
+    fireEvent.contextMenu(host.querySelector('img')!)
+    await screen.findByText('Copy image address')
+    expect(screen.queryByText('Copy image')).toBeNull()
+    expect(screen.queryByText('Save image as…')).toBeNull()
+    fireEvent.keyDown(document, { key: 'Escape' })
+    fireEvent.contextMenu(host.querySelector('textarea')!)
+    await screen.findByText('Select all')
+    expect(screen.queryByText('Cut')).toBeNull()
+    expect(screen.queryByText('Paste')).toBeNull()
+  })
+
+  it.each(['Copy URL', 'Copy image address'])('reports denied %s without an unhandled rejection', async label => {
+    installBridge({
+      browser: { authRequired: false, signIn: vi.fn() },
+      writeClipboard: vi.fn().mockRejectedValue(new Error('clipboard denied'))
+    })
+    mountMenu()
+    const host = attach('<a href="https://example.invalid"><img src="https://example.invalid/pic.png"></a>')
+    fireEvent.contextMenu(host.querySelector('img')!)
+    fireEvent.click(await screen.findByText(label))
+    await waitFor(() =>
+      expect($notifications.get()).toEqual([
+        expect.objectContaining({ kind: 'error', message: expect.stringContaining('clipboard denied') })
+      ])
+    )
+  })
+
   it.each([true, false])('only offers the shell updater outside browser mode (%s)', async browser => {
     installBridge(browser ? { browser: { authRequired: true, signIn: vi.fn() } } : {})
     mountMenu()
@@ -499,6 +530,33 @@ describe('AppContextMenu', () => {
     expect(screen.getByText('Paste')).toBeTruthy()
     expect(screen.getByText('Select all')).toBeTruthy()
     unregister()
+  })
+
+  it('reports a denied terminal clipboard read without pasting', async () => {
+    const readClipboard = vi.fn().mockResolvedValueOnce('probe').mockRejectedValue(new Error('read denied'))
+    installBridge({ readClipboard })
+    mountMenu()
+    const host = attach('<div data-terminal=""><canvas></canvas></div>')
+    const paste = vi.fn()
+
+    const unregister = registerTerminalContextMenu(host.firstElementChild as HTMLElement, {
+      getSelection: () => '',
+      paste,
+      selectAll: vi.fn()
+    })
+
+    try {
+      fireEvent.contextMenu(host.querySelector('canvas')!)
+      const item = await screen.findByText('Paste')
+      await waitFor(() => expect(item.closest('[role="menuitem"]')?.getAttribute('data-disabled')).toBeNull())
+      fireEvent.click(item)
+      await waitFor(() =>
+        expect($notifications.get()).toEqual([expect.objectContaining({ kind: 'error', message: 'read denied' })])
+      )
+      expect(paste).not.toHaveBeenCalled()
+    } finally {
+      unregister()
+    }
   })
 
   it('hides paste on the read-only agent terminal', async () => {

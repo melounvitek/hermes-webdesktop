@@ -117,7 +117,7 @@ export function SessionsSettings() {
 
   return (
     <SettingsContent>
-      <DefaultProjectDirSetting />
+      {window.hermesDesktop?.settings && <DefaultProjectDirSetting />}
 
       <AutoArchiveSetting />
 

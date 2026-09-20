@@ -523,12 +523,16 @@ export function useStatusbarItems({
                 onSelect: () => void copyFilePath(currentCwd),
                 title: displayPath(currentCwd)
               },
-              {
-                id: 'reveal-workspace-finder',
-                label: fileMenu.revealFileManager,
-                onSelect: () => void revealFile(currentCwd),
-                title: displayPath(currentCwd)
-              },
+              ...(window.hermesDesktop?.revealPath
+                ? [
+                    {
+                      id: 'reveal-workspace-finder',
+                      label: fileMenu.revealFileManager,
+                      onSelect: () => void revealFile(currentCwd),
+                      title: displayPath(currentCwd)
+                    }
+                  ]
+                : []),
               {
                 id: 'reveal-workspace-sidebar',
                 label: fileMenu.revealInSidebar,
