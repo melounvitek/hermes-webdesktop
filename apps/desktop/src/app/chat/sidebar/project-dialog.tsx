@@ -18,6 +18,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { Tip } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
 import { isSubmitEnter } from '@/lib/ime'
+import { isBrowserClient } from '@/lib/platform'
 import { type ProjectIdeaTemplate, randomIdeaTemplates } from '@/lib/project-idea-templates'
 import { cn } from '@/lib/utils'
 import { notifyError } from '@/store/notifications'
@@ -258,7 +259,7 @@ export function ProjectDialog() {
           </div>
         )}
 
-        {mode === 'create' && (
+        {mode === 'create' && !isBrowserClient() && (
           <div className="flex flex-col gap-1.5">
             <span className="text-[0.6875rem] font-medium text-(--ui-text-tertiary)">{p.ideaLabel}</span>
             <div className="relative">

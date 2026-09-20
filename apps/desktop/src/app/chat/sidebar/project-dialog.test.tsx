@@ -4,7 +4,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { ProjectDialog } from './project-dialog'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
 
 vi.mock('@/i18n', () => ({
   useI18n: () => ({
@@ -88,6 +91,22 @@ async function fillCreateForm() {
 }
 
 describe('ProjectDialog', () => {
+  it('creates ordinary browser projects without offering an unsavable idea or generators', async () => {
+    vi.stubGlobal('hermesDesktop', { browser: { authRequired: false, signIn: vi.fn() } })
+    const { createProject } = vi.mocked(await import('@/store/projects'))
+    createProject.mockClear()
+    render(<ProjectDialog />)
+    expect(screen.queryByPlaceholderText('What are you building?')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Generate' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Shuffle ideas' })).toBeNull()
+    expect(screen.queryByRole('button', { name: /Rocket tracker/ })).toBeNull()
+    await fillCreateForm()
+    await waitFor(() => expect(createProject).toHaveBeenCalledWith(expect.objectContaining({
+      name: 'Skunkworks', folders: ['/Users/test/my-folder'], idea: undefined
+    })))
+    createProject.mockClear()
+  })
+
   it('wraps the "shuffle idea" button in a Tip', () => {
     render(<ProjectDialog />)
 

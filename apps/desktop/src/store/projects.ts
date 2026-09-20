@@ -1,3 +1,4 @@
+import { isBrowserClient } from '@/lib/platform'
 import { atom, computed } from 'nanostores'
 
 import type { NewSessionPlacement } from '@/app/chat/new-session-drag'
@@ -806,6 +807,10 @@ export interface CreateProjectInput {
 // session's model when one exists). Returns "" on failure so the caller can just
 // leave the field untouched. The "🎲" affordance in the new-project dialog.
 export async function generateProjectIdea(name: string): Promise<string> {
+  if (isBrowserClient()) {
+    throw new Error('Project ideas are unavailable in the browser: server files are read-only')
+  }
+
   try {
     const res = await gatewayRequest<{ text: string }>('llm.oneshot', {
       instructions:
@@ -895,6 +900,10 @@ function projectInfoToTreeNode(project: ProjectInfo): SidebarProjectTree {
 }
 
 export async function createProject(input: CreateProjectInput): Promise<ProjectInfo | null> {
+  if (isBrowserClient() && input.idea?.trim()) {
+    throw new Error('Project ideas are unavailable in the browser: server files are read-only')
+  }
+
   if ($projectsRpcAvailable.get() === false) {
     throw projectsStaleBackendError()
   }
