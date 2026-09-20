@@ -45,6 +45,7 @@ export function reconcileApprovalModeForProfile(profile: string, value: unknown)
   if (mode) {
     confirmedModes.set(key, mode)
   }
+
   cacheApprovalMode(key, mode)
 
   return mode
@@ -57,7 +58,7 @@ export async function syncApprovalModeForProfile(
   const key = profileKey(profile)
   const revision = nextRevision(key)
   cacheApprovalMode(key, undefined)
-  const result = (await requestGateway('config.get', { key: 'approvals.mode', profile: key })) as { value?: string }
+  const result = (await requestGateway('config.get', { key: 'approvals.mode' })) as { value?: string }
   const mode = normalizeApprovalMode(result?.value)
 
   if (!mode) {
@@ -84,7 +85,6 @@ export async function setApprovalModeForProfile(
   try {
     const result = (await requestGateway('config.set', {
       key: 'approvals.mode',
-      profile: key,
       value: mode
     })) as { value?: string }
 

@@ -13,13 +13,13 @@ import {
 describe('profile-scoped approval mode cache', () => {
   beforeEach(() => $approvalModes.set({}))
 
-  it('keeps unread policy unknown and reads the explicit owner', async () => {
+  it('keeps unread policy unknown and reads through its owner-bound requester', async () => {
     expect(approvalModeForProfile('default')).toBeUndefined()
 
     const request = vi.fn(async () => ({ value: 'manual' }))
     await syncApprovalModeForProfile(request, 'default')
 
-    expect(request).toHaveBeenCalledWith('config.get', { key: 'approvals.mode', profile: 'default' })
+    expect(request).toHaveBeenCalledWith('config.get', { key: 'approvals.mode' })
     expect(approvalModeForProfile('default')).toBe('manual')
   })
 

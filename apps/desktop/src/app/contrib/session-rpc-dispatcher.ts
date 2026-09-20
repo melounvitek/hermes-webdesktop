@@ -68,15 +68,6 @@ export function createSessionRpcDispatcher(deps: SessionRpcDispatcherDeps): Ambi
   return async <T>(method: string, params?: Record<string, unknown>, timeoutMs?: number, signal?: AbortSignal) => {
     const paramSessionId = typeof params?.session_id === 'string' && params.session_id ? params.session_id : undefined
 
-    // Explicit config ownership is not the focused tile's session ownership.
-    if (
-      !paramSessionId &&
-      (method === 'config.get' || method === 'config.set') &&
-      typeof params?.profile === 'string'
-    ) {
-      return requestForSessionProfile<T>(params.profile, ambientRequest, method, params, timeoutMs, signal)
-    }
-
     const routingSessionId = resolveRoutingSessionId({
       focusedStoredSessionId: $focusedStoredSessionId.get(),
       paramSessionId,

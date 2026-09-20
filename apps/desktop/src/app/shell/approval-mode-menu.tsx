@@ -1,5 +1,5 @@
 import { useStore } from '@nanostores/react'
-import { useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo } from 'react'
 
 import type { StatusbarItem } from '@/app/shell/statusbar-controls'
 import {
@@ -11,6 +11,8 @@ import {
 } from '@/components/ui/dropdown-menu'
 import { useI18n } from '@/i18n'
 import { Zap, ZapFilled } from '@/lib/icons'
+import { isBrowserClient } from '@/lib/platform'
+import { requestGatewayForProfile } from '@/store/gateway'
 import {
   $approvalModes,
   type ApprovalMode,
@@ -25,6 +27,13 @@ export function useApprovalModeStatusbarItem(profile: string, requestGateway: Ap
   const copy = t.shell.approvalMode
   const modes = useStore($approvalModes)
   const mode = modes[profile.trim() || 'default']
+  // The browser shares one backend; Electron must retain its exact device/session route.
+  const requestApprovalMode = useCallback<ApprovalModeRequester>(
+    (method, params) => isBrowserClient()
+      ? requestGatewayForProfile(profile, method, params)
+      : requestGateway(method, params),
+    [profile, requestGateway]
+  )
 
   const labels = useMemo<Record<ApprovalMode, string>>(
     () => ({ manual: copy.manual, smart: copy.smart, off: copy.off }),
@@ -41,8 +50,8 @@ export function useApprovalModeStatusbarItem(profile: string, requestGateway: Ap
   )
 
   useEffect(() => {
-    void syncApprovalModeForProfile(requestGateway, profile).catch(error => notifyError(error, copy.loadFailed))
-  }, [profile, requestGateway, copy.loadFailed])
+    void syncApprovalModeForProfile(requestApprovalMode, profile).catch(error => notifyError(error, copy.loadFailed))
+  }, [profile, requestApprovalMode, copy.loadFailed])
 
   return {
     className: mode === 'off' ? 'bg-(--chrome-action-hover) text-foreground' : undefined,
@@ -58,7 +67,7 @@ export function useApprovalModeStatusbarItem(profile: string, requestGateway: Ap
         {!mode && (
           <DropdownMenuItem
             onSelect={() =>
-              void syncApprovalModeForProfile(requestGateway, profile).catch(error =>
+              void syncApprovalModeForProfile(requestApprovalMode, profile).catch(error =>
                 notifyError(error, copy.loadFailed)
               )
             }
@@ -68,7 +77,7 @@ export function useApprovalModeStatusbarItem(profile: string, requestGateway: Ap
         )}
         <DropdownMenuRadioGroup
           onValueChange={value => {
-            void setApprovalModeForProfile(requestGateway, profile, value as ApprovalMode).catch(error =>
+            void setApprovalModeForProfile(requestApprovalMode, profile, value as ApprovalMode).catch(error =>
               notifyError(error, copy.saveFailed)
             )
           }}
