@@ -85,7 +85,17 @@ function Item({
   shortcut?: string
 }) {
   return (
-    <DropdownMenuItem disabled={disabled} onSelect={onSelect}>
+    <DropdownMenuItem
+      disabled={disabled}
+      onPointerUp={event => {
+        // Radix turns a release without an item press into a click. In the
+        // browser, the opening right-button release can land on this new item.
+        if (isBrowserClient() && event.button === 2) {
+          event.preventDefault()
+        }
+      }}
+      onSelect={onSelect}
+    >
       {icon ? <Codicon name={icon} size="0.875rem" /> : null}
       <span>{label}</span>
       {shortcut ? <DropdownMenuShortcut>{shortcut}</DropdownMenuShortcut> : null}

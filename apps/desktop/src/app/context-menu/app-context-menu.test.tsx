@@ -153,6 +153,48 @@ describe('AppContextMenu', () => {
     expect($previewTabs.get()).toHaveLength(0)
   })
 
+  it('ignores the browser opening release but permits later primary and keyboard selection', async () => {
+    const openExternal = vi.fn().mockResolvedValue(undefined)
+    installBridge({ browser: { authRequired: false, signIn: vi.fn() }, openExternal })
+    mountMenu()
+    const host = attach('<a href="https://example.invalid/releases">Release notes</a>')
+    const link = host.querySelector('a')!
+    const secondary = { button: 2, buttons: 2, pointerType: 'mouse' }
+    const primary = { button: 0, buttons: 1, pointerType: 'mouse' }
+
+    for (const selection of ['primary', 'keyboard']) {
+      openExternal.mockClear()
+      fireEvent.pointerDown(link, secondary)
+      fireEvent.mouseDown(link, secondary)
+      fireEvent.contextMenu(link, secondary)
+      const item = await screen.findByRole('menuitem', { name: 'Open in external browser' })
+
+      // Replay the recorded release over the newly mounted item. Radix itself
+      // synthesizes the unwanted click; the test must not dispatch that click.
+      fireEvent.pointerUp(item, { ...secondary, buttons: 0 })
+      fireEvent.mouseUp(item, { ...secondary, buttons: 0 })
+      fireEvent(item, new MouseEvent('auxclick', { bubbles: true, button: 2 }))
+
+      expect(openExternal).not.toHaveBeenCalled()
+      expect(screen.getByRole('menuitem', { name: 'Open in external browser' })).toBe(item)
+
+      if (selection === 'primary') {
+        fireEvent.pointerDown(item, primary)
+        fireEvent.mouseDown(item, primary)
+        fireEvent.pointerUp(item, { ...primary, buttons: 0 })
+        fireEvent.mouseUp(item, { ...primary, buttons: 0 })
+        fireEvent.click(item, { button: 0 })
+      } else {
+        fireEvent.keyDown(screen.getByRole('menu'), { key: 'ArrowDown' })
+        await waitFor(() => expect(document.activeElement).toBe(item))
+        fireEvent.keyDown(item, { key: 'Enter' })
+      }
+
+      expect(openExternal).toHaveBeenCalledExactlyOnceWith('https://example.invalid/releases')
+      expect(screen.queryByRole('menu')).toBeNull()
+    }
+  })
+
   it('opens the link menu on a chat link right-click', async () => {
     installBridge()
     mountMenu()
@@ -264,7 +306,8 @@ describe('AppContextMenu', () => {
     mountMenu()
     const host = attach('<textarea></textarea>')
 
-    fireEvent.contextMenu(host.querySelector('textarea')!)
+    // Electron must still receive the uncancelled gesture for native facts.
+    expect(fireEvent.contextMenu(host.querySelector('textarea')!, { button: 2 })).toBe(true)
 
     expect(await screen.findByText('Select all')).toBeTruthy()
     expect(screen.getByText('Paste')).toBeTruthy()
