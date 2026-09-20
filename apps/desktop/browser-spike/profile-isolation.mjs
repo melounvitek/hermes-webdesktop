@@ -182,10 +182,13 @@ async function readConfig(context, profile) {
   return response.json()
 }
 const maxTurns = page => page.locator('[data-tour="field-agent.max_turns"] input')
-async function openSettings(page) {
+async function openSettings(page, waitForField = true) {
   await page.getByRole('button', { name: 'Open settings', exact: true }).click()
-  await page.getByRole('button', { name: 'Advanced', exact: true }).click()
-  await expect(maxTurns(page)).toBeVisible()
+  await page.getByRole('button', { name: 'Advanced', exact: true }).first().click()
+  // Newer upstream separates agent limits from desktop/startup settings.
+  const limits = page.getByRole('button', { name: 'Agent limits', exact: true })
+  if (await limits.count()) await limits.click()
+  if (waitForField) await expect(maxTurns(page)).toBeVisible()
 }
 
 try {
@@ -282,8 +285,7 @@ try {
     })
     try {
       await selectProfile(page, profiles[1])
-      await page.getByRole('button', { name: 'Open settings', exact: true }).click()
-      await page.getByRole('button', { name: 'Advanced', exact: true }).click()
+      await openSettings(page, false)
       await expect.poll(() => new URLSearchParams(new URL(page.url()).hash.split('?')[1]).get('tab')).toBe('config:advanced')
       await expect(maxTurns(page).or(page.locator('[data-slot="skeleton"]')).first()).toBeVisible()
       await expect.poll(() => held.length).toBeGreaterThan(0)
