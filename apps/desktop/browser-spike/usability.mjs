@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, realpath, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { chromium, expect } from '@playwright/test'
@@ -31,7 +31,10 @@ const frames = [],
   errors = [],
   blocked = [],
   results = [],
-  downloads = []
+  downloads = [],
+  boundaryAttempts = [],
+  boundaryHttpFailures = [],
+  boundaryRequestFailures = []
 let nextSocketId = 0
 const headers = { 'X-Hermes-Session-Token': runtime.token }
 const profiles = ['usability-a', 'usability-b']
@@ -48,19 +51,47 @@ const eventsSince = start =>
     .filter(f => f.direction === 'received' && f.method === 'event')
     .map(f => f.params)
 
-async function newPage() {
+// These are renderer-policy tripwires, not a claim that stock APIs deny writes.
+// Agent tools and ordinary project/config RPCs remain stock and are not mocked.
+function forbiddenBoundaryPath(url, method) {
+  const pathname = decodeURIComponent(new URL(url).pathname)
+  return (
+    /^\/api\/hermes\/update(?:\/|$)/.test(pathname) ||
+    /^\/api\/plugins\/browser-terminal(?:\/|$)/.test(pathname) ||
+    /^\/api\/fs\/write-text(?:\/|$)/.test(pathname) ||
+    (pathname.startsWith('/api/fs/') && !['GET', 'HEAD'].includes(method))
+  )
+}
+
+async function newPage(boundary = false) {
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, acceptDownloads: true })
   await context.grantPermissions(['clipboard-read', 'clipboard-write'], { origin: runtime.url })
   await context.route('**/*', route => {
     const url = new URL(route.request().url())
+    if (boundary && forbiddenBoundaryPath(url.href, route.request().method())) {
+      boundaryAttempts.push({ url: url.href, method: route.request().method() })
+      return route.abort('blockedbyclient')
+    }
     if (url.origin === runtime.url || ['data:', 'blob:'].includes(url.protocol)) return route.continue()
     blocked.push({ url: url.href, resourceType: route.request().resourceType() })
     return route.abort('blockedbyclient')
   })
   await context.routeWebSocket('**/*', ws => {
     const url = new URL(ws.url())
-    if (url.origin === runtime.url.replace('http:', 'ws:')) ws.connectToServer()
-    else {
+    if (boundary && forbiddenBoundaryPath(url.href, 'GET')) {
+      boundaryAttempts.push({ url: url.href, method: 'websocket' })
+      ws.close()
+    } else if (url.origin === runtime.url.replace('http:', 'ws:')) {
+      const server = ws.connectToServer()
+      if (boundary)
+        ws.onMessage(payload => {
+          const message = JSON.parse(String(payload))
+          if (/^(?:terminal|pty)\.(?:create|open|start|spawn)$/.test(message.method || '')) {
+            boundaryAttempts.push({ url: url.href, method: message.method })
+            ws.close()
+          } else server.send(payload)
+        })
+    } else {
       blocked.push({ url: ws.url(), resourceType: 'websocket' })
       ws.close()
     }
@@ -68,7 +99,14 @@ async function newPage() {
   const page = await context.newPage()
   page.setDefaultTimeout(15000)
   page.on('pageerror', error => errors.push(error.stack))
+  if (boundary)
+    page.on('requestfailed', request => {
+      boundaryRequestFailures.push({ url: request.url(), error: request.failure()?.errorText })
+    })
   page.on('response', response => {
+    if (boundary && response.status() >= 400) {
+      boundaryHttpFailures.push({ url: response.url(), status: response.status() })
+    }
     if (new URL(response.url()).pathname === '/api/fs/download') {
       downloads.push({
         url: response.url(),
@@ -108,11 +146,21 @@ async function newPage() {
   return page
 }
 
-async function check(name, body) {
+async function check(name, body, { boundary = false } = {}) {
   let page
+  const attemptsStart = boundaryAttempts.length
+  const failuresStart = boundaryHttpFailures.length
   try {
-    page = await newPage()
+    page = await newPage(boundary)
     await body(page)
+    if (boundary) {
+      assert.deepEqual(boundaryAttempts.slice(attemptsStart), [], 'Forbidden browser-boundary requests (blocked)')
+      assert.deepEqual(
+        boundaryHttpFailures.slice(failuresStart).filter(f => new URL(f.url).pathname.startsWith('/api/fs/')),
+        [],
+        'Read-only filesystem HTTP failures (other optional API failures are recorded separately)'
+      )
+    }
     results.push({ name, status: 'PASS' })
     console.log(`PASS: ${name}`)
   } catch (error) {
@@ -159,6 +207,24 @@ function sessionRow(page, marker) {
     .locator('[data-tree-group="grp-sessions"]')
     .getByRole('button', { name: new RegExp(marker) })
     .first()
+}
+
+async function openPalette(page) {
+  await page.getByRole('contentinfo').click({ button: 'right' })
+  await page.getByRole('menuitem', { name: 'Command palette', exact: true }).click()
+  const palette = page.getByRole('dialog', { name: 'Command palette', exact: true })
+  await expect(palette.getByRole('combobox')).toBeVisible()
+  return palette
+}
+
+async function openSettingsSection(page, section, subpage) {
+  await page.getByRole('button', { name: 'Open settings', exact: true }).click()
+  await page.getByRole('button', { name: section, exact: true }).click()
+  // Upstream splits some settings into subpages; do not encode route URLs.
+  if (subpage) {
+    const button = page.getByRole('button', { name: subpage, exact: true })
+    if (await button.isVisible()) await button.click()
+  }
 }
 
 async function menuClick(page) {
@@ -255,8 +321,7 @@ try {
     const baseline = await geometry(page, 90)
     const measurements = [{ percent: 90, ...baseline }]
     for (const percent of [100, 125]) {
-      await page.getByRole('button', { name: 'Open settings', exact: true }).click()
-      await page.getByRole('button', { name: 'Appearance', exact: true }).click()
+      await openSettingsSection(page, 'Appearance', 'Layout')
       await page.getByRole('button', { name: `${percent}%`, exact: true }).click()
       await page.getByRole('button', { name: 'Close settings', exact: true }).click()
       const measured = await geometry(page, percent)
@@ -659,6 +724,184 @@ try {
       await readFile(path.join(runtime.hermes_home, 'profiles', profiles[1], 'workspace', filename))
     )
   })
+  await check(
+    'read-only-server-files',
+    async page => {
+      // Run after the attachment/download cases: creating a project establishes a
+      // workspace and must not change their deliberately workspace-less drafts.
+      const profile = profiles[1]
+      const workspace = path.join(runtime.hermes_home, 'profiles', profile, 'workspace')
+      const files = [
+        { name: 'boundary résumé.txt', bytes: Buffer.from('Read-only boundary — žluťoučký 🐚\n'), mode: 0o640 },
+        { name: 'boundary raw.bin', bytes: Buffer.from([0, 255, 128, 1, 13, 10, 254]), mode: 0o444 }
+      ]
+      for (const file of files) {
+        file.path = path.join(workspace, file.name)
+        await writeFile(file.path, file.bytes)
+        await chmod(file.path, file.mode)
+      }
+      try {
+        await selectProfile(page, profile)
+        await page.getByRole('button', { name: 'Filters', exact: true }).click()
+        await page.getByRole('menuitem', { name: /^Grouping/ }).hover()
+        await page.getByRole('menuitemradio', { name: 'Project', exact: true }).click()
+        await page.keyboard.press('Escape')
+        await page.keyboard.press('Escape')
+        await page.getByRole('button', { name: 'New project', exact: true }).click()
+        const dialog = page.getByRole('dialog', { name: 'New project', exact: true })
+        const projectName = `Read-only boundary ${Date.now()}`
+        await dialog.getByRole('textbox').fill(projectName)
+        await expect(dialog.getByPlaceholder(/saved to IDEA\.md/)).toHaveCount(0)
+        await expect(dialog.getByRole('button', { name: /Generate idea|Shuffle/ })).toHaveCount(0)
+        await dialog.getByRole('button', { name: 'Add folder', exact: true }).click()
+        const picker = page.getByRole('dialog', { name: 'Choose remote folder', exact: true })
+        await expect(picker).toBeVisible()
+        await picker.getByRole('button', { name: 'workspace', exact: true }).click()
+        await picker.getByRole('button', { name: 'Select folder', exact: true }).click()
+        await expect(dialog).toContainText(workspace)
+        const created = frames.length
+        await dialog.getByRole('button', { name: 'Create', exact: true }).click()
+        await expect(dialog).not.toBeVisible()
+        const createRequest = requestFrames(created).find(f => f.method === 'projects.create')
+        assert.ok(createRequest, 'Ordinary project creation must reach the stock API')
+        await expect
+          .poll(
+            () =>
+              frames.find(
+                f => f.direction === 'received' && f.socket === createRequest.socket && f.id === createRequest.id
+              )?.result
+          )
+          .toBeTruthy()
+        await page.reload()
+        await selectProfile(page, profile)
+        const showProjects = page.getByRole('button', { name: 'Show projects', exact: true })
+        if (await showProjects.isVisible()) await showProjects.click()
+        await page
+          .getByRole('button', { name: new RegExp(projectName) })
+          .first()
+          .click()
+        const tree = page.getByRole('complementary', { name: 'Right sidebar', exact: true })
+        if (!(await tree.isVisible())) {
+          await page.getByRole('button', { name: 'Show right sidebar', exact: true }).click()
+        }
+        await expect(tree).toBeVisible()
+        for (const [index, file] of files.entries()) {
+          const row = tree.getByText(file.name, { exact: true })
+          await expect(row).toBeVisible()
+          await row.dblclick()
+          await expect(page.getByRole('tab', { name: new RegExp(file.name) })).toBeVisible()
+          if (index === 0) {
+            const content = page.getByText(file.bytes.toString().trim(), { exact: true })
+            await expect(content).toBeVisible()
+            // Exercise the preview's edit shortcut as well as its absent toolbar.
+            await content.click()
+            await page.keyboard.press('e')
+            await expect(content).toBeVisible()
+          } else {
+            await expect(page.getByText('This looks like a binary file', { exact: true })).toBeVisible()
+          }
+          await expect(page.getByRole('button', { name: /^(Edit|Save|Overwrite)$/ })).toHaveCount(0)
+          assert.equal(
+            await page.getByRole('textbox').count(),
+            await page.getByRole('textbox', { name: 'Message', exact: true }).count(),
+            'Only chat composers, not file editors, may be editable'
+          )
+          await row.click({ button: 'right' })
+          await expect(
+            page.getByRole('menuitem', {
+              name: /^(Rename|Delete|Reveal in Finder|Reveal in File Explorer|Open containing folder)$/
+            })
+          ).toHaveCount(0)
+          await expect(page.getByRole('menuitem', { name: 'Copy path', exact: true })).toBeVisible()
+          const [download] = await Promise.all([
+            page.waitForEvent('download'),
+            page.getByRole('menuitem', { name: /^Download/ }).click()
+          ])
+          assert.equal(download.suggestedFilename(), file.name)
+          const destination = path.join(artifacts, file.name)
+          await download.saveAs(destination)
+          assert.deepEqual(await readFile(destination), file.bytes)
+          await page.screenshot({ path: path.join(artifacts, `read-only-boundary-${index}.png`) })
+        }
+        assert.equal(
+          requestFrames(created).some(f => f.method === 'prompt.submit'),
+          false,
+          'An empty-idea project must not generate an idea or start a model turn'
+        )
+      } finally {
+        for (const file of files) {
+          assert.deepEqual(await readFile(file.path), file.bytes, `${file.name}: source bytes changed`)
+          assert.equal((await stat(file.path)).mode & 0o7777, file.mode, `${file.name}: source mode changed`)
+        }
+      }
+    },
+    { boundary: true }
+  )
+
+  await check(
+    'unsupported-native-actions',
+    async page => {
+      await openSettingsSection(page, 'Appearance', /^Themes?$/)
+      const themes = page.getByPlaceholder('Search built-in themes…', { exact: true })
+      await expect(themes).toBeVisible()
+      await themes.fill('boundary-no-such-theme')
+      await expect(page.getByText(/No installed themes match/)).toBeVisible()
+      await expect(page.getByRole('button', { name: /^Install/ })).toHaveCount(0)
+      await themes.fill('')
+      await page.getByRole('button', { name: 'Close settings', exact: true }).click()
+      for (const section of ['Advanced', 'Sessions', 'About']) {
+        await openSettingsSection(page, section)
+        // Negative assertions only count after the real section has loaded.
+        if (section === 'Advanced') await expect(page.getByText(/^Changes on this page apply to/)).toBeVisible()
+        if (section === 'Sessions') await expect(page.getByText('Archived sessions', { exact: true })).toBeVisible()
+        if (section === 'About')
+          await expect(page.getByRole('link', { name: 'Release notes', exact: true })).toBeVisible()
+        for (const label of ['Keep computer awake', 'Disable F12 DevTools', 'Default project directory']) {
+          await expect(page.getByText(label, { exact: true })).toHaveCount(0)
+        }
+        await expect(
+          page.getByRole('button', {
+            name: /^(Check now|Check for updates|Update now|Update Hermes|Install update|Restart Hermes|Restart backend|Uninstall Hermes)$/i
+          })
+        ).toHaveCount(0)
+        await expect(page.getByRole('link', { name: /^(Get the installer|Install Hermes locally)$/ })).toHaveCount(0)
+        if (section === 'About') {
+          const link = page.getByRole('link', { name: 'Release notes', exact: true })
+          await expect(link).toBeVisible()
+          await link.click({ button: 'right' })
+          await expect(page.getByRole('menuitem', { name: 'Open in external browser', exact: true })).toBeVisible()
+          await expect(page.getByRole('menuitem', { name: /Open in in-app browser|Inspect element/ })).toHaveCount(0)
+          await page.keyboard.press('Escape')
+          await page.screenshot({ path: path.join(artifacts, 'native-boundary-about.png') })
+        }
+        await page.getByRole('button', { name: 'Close settings', exact: true }).click()
+      }
+      const palette = await openPalette(page)
+      await expect(palette.getByRole('option', { name: /^Reload window/ })).toBeVisible()
+      await expect(
+        palette.getByRole('option', {
+          name: /^(Update Hermes|Install theme|Open browser|New terminal|Restart backend|Uninstall Hermes)/
+        })
+      ).toHaveCount(0)
+      await palette.getByRole('combobox').fill('Toggle terminal')
+      await palette.getByRole('option', { name: /^Toggle terminal/ }).click()
+      await expect(page.getByText('No terminal in this profile', { exact: true })).toBeVisible()
+      await expect(page.getByRole('button', { name: 'New terminal', exact: true })).toHaveCount(0)
+      await expect(page.getByRole('textbox', { name: /Terminal input/i })).toHaveCount(0)
+      await expect(
+        page.getByRole('contentinfo').getByRole('button', { name: /Update Hermes|Install update/ })
+      ).toHaveCount(0)
+      await page.screenshot({ path: path.join(artifacts, 'native-boundary-terminal.png') })
+      const reloadPalette = await openPalette(page)
+      await reloadPalette.getByRole('combobox').fill('Reload window')
+      await Promise.all([
+        page.waitForEvent('domcontentloaded'),
+        reloadPalette.getByRole('option', { name: /^Reload window/ }).click()
+      ])
+      await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible({ timeout: 60000 })
+    },
+    { boundary: true }
+  )
   assert.deepEqual(errors, [], 'Chromium page errors')
   // Optional remote font styles are deliberately unavailable in this isolated run.
   assert.deepEqual(
@@ -669,7 +912,11 @@ try {
 } finally {
   await writeFile(
     path.join(artifacts, 'results.json'),
-    JSON.stringify({ results, errors, blocked, downloads }, null, 2)
+    JSON.stringify(
+      { results, errors, blocked, downloads, boundaryAttempts, boundaryHttpFailures, boundaryRequestFailures },
+      null,
+      2
+    )
   )
   await writeFile(path.join(artifacts, 'frames.json'), JSON.stringify(frames, null, 2))
   await browser.close()
