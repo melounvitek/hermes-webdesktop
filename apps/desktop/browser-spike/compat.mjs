@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
-import { execFileSync } from 'node:child_process'
+import { execFileSync, spawn } from 'node:child_process'
 import { createHash } from 'node:crypto'
 import { constants } from 'node:fs'
-import { access, lstat, mkdir, readFile, readdir, realpath, writeFile } from 'node:fs/promises'
+import { access, lstat, mkdir, mkdtemp, readFile, readdir, realpath, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { parseArgs } from 'node:util'
@@ -16,7 +16,7 @@ export function options(argv) {
   const names = ['backend-root', 'python', 'chrome', 'web-dist', 'evidence']
   const { values } = parseArgs({ args: argv, options: Object.fromEntries(names.map(name => [name, { type: 'string' }])) })
   for (const name of names) assert.ok(values[name] && path.isAbsolute(values[name]), `Explicit absolute --${name} required\n${usage}`)
-  assert.equal(process.platform, 'linux', 'This harness currently requires Linux /proc process ownership checks')
+  assert.equal(process.platform, 'linux', 'This harness requires Linux and working unprivileged Bubblewrap PID/network namespaces')
   return values
 }
 
@@ -25,7 +25,7 @@ export function childEnvironment(home, inputs) {
     PATH: '/usr/bin:/bin', HOME: home, LANG: 'C.UTF-8', TZ: 'UTC',
     PYTHONDONTWRITEBYTECODE: '1', PYTHONNOUSERSITE: '1',
     SPIKE_PYTHON: inputs.python, SPIKE_BACKEND_ROOT: inputs['backend-root'], CHROME_PATH: inputs.chrome,
-    // Browser routing and this failing proxy are guardrails, not an OS egress sandbox.
+    // Additional guardrails inside the whole gate's loopback-only network namespace.
     HTTP_PROXY: 'http://127.0.0.1:1', HTTPS_PROXY: 'http://127.0.0.1:1', ALL_PROXY: 'http://127.0.0.1:1',
     NO_PROXY: '127.0.0.1,localhost,::1,recovery.localhost', HF_HUB_OFFLINE: '1'
   }
@@ -49,16 +49,115 @@ async function bundleIdentity(root) {
   return { sha256: createHash('sha256').update(JSON.stringify(files)).digest('hex'), files }
 }
 
+function initialSummary(inputs) {
+  return { inputs, started: new Date().toISOString(), status: 'FAIL',
+    limitations: ['Existing five scripts only; no additional boundary/auth matrix coverage',
+      'Group receipts confirm direct-child termination only; detached descendants are killed at whole-gate namespace exit',
+      'Read-only host files remain visible; this is not a confidentiality sandbox',
+      'UI upstream revision is not inferred from a built bundle; local git identity and bundle digest are recorded'],
+    groups: groups.map(name => ({ name, status: 'SKIP' })) }
+}
+
+export async function namespaceArguments(inputs, temporary) {
+  // /tmp is private, but explicit inputs (including a symlinked venv interpreter)
+  // may themselves live in the host /tmp. Restore them read-only at their original paths.
+  const readOnly = [...new Set(await Promise.all([
+    path.resolve(here, '../../..'), inputs['backend-root'], inputs['web-dist'],
+    path.dirname(path.dirname(inputs.python)), inputs.python, inputs.chrome, process.execPath
+  ].map(file => realpath(file))))]
+  const evidence = await realpath(inputs.evidence)
+  for (const root of readOnly) {
+    assert.ok(!['/', '/tmp', '/proc', '/dev'].includes(root), `Input must not replace a namespace mount: ${root}`)
+    assert.ok(evidence !== root && !evidence.startsWith(root + '/') && !root.startsWith(evidence + '/'),
+      `Evidence must not overlap read-only input: ${root}`)
+  }
+  return ['--unshare-pid', '--unshare-net', '--unshare-ipc', '--die-with-parent',
+    '--ro-bind', '/', '/', '--bind', temporary, '/tmp', '--dev', '/dev', '--proc', '/proc',
+    ...readOnly.flatMap(root => ['--ro-bind', root, root]), '--bind', evidence, evidence,
+    '--chdir', evidence, '--cap-drop', 'ALL', '--json-status-fd', '3']
+}
+
 export async function run(inputs) {
   process.umask(0o077)
   // Refuse reuse, symlinks and stale receipts; never chmod or overwrite a caller's existing directory.
   await mkdir(inputs.evidence, { mode: 0o700 })
-  const evidence = await realpath(inputs.evidence)
-  const summary = { inputs, started: new Date().toISOString(), status: 'FAIL',
-    limitations: ['Existing five scripts only; no additional boundary/auth matrix coverage',
-      'Not an OS network sandbox; use an externally supplied loopback-only egress sandbox for strict offline execution',
-      'UI upstream revision is not inferred from a built bundle; local git identity and bundle digest are recorded'],
-    groups: groups.map(name => ({ name, status: 'SKIP' })) }
+  inputs = { ...inputs, evidence: await realpath(inputs.evidence) }
+  let summary = initialSummary(inputs)
+  const receipt = path.join(inputs.evidence, 'summary.json')
+  await writeFile(receipt, JSON.stringify(summary, null, 2))
+  let interrupted, namespacePid, child, timer
+  const stop = signal => {
+    interrupted = signal
+    // Kill namespace init, not the host bwrap supervisor: its wait is the cleanup proof.
+    // Linux kills/reaps every member, including fast double-fork/setsid descendants.
+    if (namespacePid && child?.exitCode === null && child.signalCode === null) {
+      try { process.kill(namespacePid, 'SIGKILL') }
+      catch (error) { if (error.code !== 'ESRCH') throw error }
+    } else if (!namespacePid) child?.kill('SIGKILL')
+  }
+  process.on('SIGINT', stop)
+  process.on('SIGTERM', stop)
+  try {
+    inputs = { ...inputs,
+      'backend-root': await realpath(inputs['backend-root']), 'web-dist': await realpath(inputs['web-dist']),
+      chrome: await realpath(inputs.chrome),
+      // Resolve directory aliases without replacing a venv's symlinked executable with bare Python.
+      python: path.join(await realpath(path.dirname(inputs.python)), path.basename(inputs.python)) }
+    const temporary = await mkdtemp(path.join(inputs.evidence, 'tmp-'))
+    const args = await namespaceArguments(inputs, temporary)
+    const entry = `import { runGate } from ${JSON.stringify(import.meta.url)}; process.exitCode = (await runGate(JSON.parse(process.argv[1]))).status === 'AWAITING_NAMESPACE_EXIT' ? 0 : 1`
+    assert.ok(!interrupted, `Interrupted by ${interrupted}`)
+    child = spawn('/usr/bin/bwrap', [...args, process.execPath, '--input-type=module', '-e', entry, JSON.stringify(inputs)], {
+      cwd: inputs.evidence, env: childEnvironment(inputs.evidence, inputs), detached: true,
+      stdio: ['ignore', 'inherit', 'inherit', 'pipe']
+    })
+    let pending = ''
+    child.stdio[3].on('data', bytes => {
+      pending += bytes
+      const lines = pending.split('\n')
+      pending = lines.pop()
+      for (const line of lines.filter(Boolean)) {
+        const status = JSON.parse(line)
+        if (status['child-pid']) {
+          namespacePid = status['child-pid']
+          if (interrupted) stop(interrupted)
+        }
+      }
+    })
+    // Five sequential groups have a 20-minute bound each; leave room for fixture setup/teardown.
+    timer = setTimeout(() => stop('whole-gate timeout'), 110 * 60 * 1000)
+    const exit = await new Promise((resolve, reject) => {
+      child.once('error', reject)
+      child.once('exit', (code, signal) => resolve({ code, signal }))
+    })
+    summary = JSON.parse(await readFile(receipt, 'utf8'))
+    summary.isolation = { network: 'private-loopback', temporaryRoot: temporary, namespaceTmp: '/tmp' }
+    summary.cleanup = { scope: 'whole-gate-pid-namespace', confirmed: Boolean(namespacePid) && exit.signal === null,
+      forced: Boolean(interrupted), ...exit }
+    assert.ok(summary.cleanup.confirmed, 'Namespace exit could not be confirmed')
+    assert.ok(!interrupted, `Interrupted by ${interrupted}`)
+    assert.equal(exit.code, 0, `Namespaced gate exited ${exit.code}`)
+    assert.equal(summary.status, 'AWAITING_NAMESPACE_EXIT', 'Missing successful scenario receipt')
+    summary.status = 'PASS'
+  } catch (error) {
+    summary.status = 'FAIL'
+    summary.error = [summary.error, error.stack].filter(Boolean).join('\n')
+  } finally {
+    clearTimeout(timer)
+    process.off('SIGINT', stop)
+    process.off('SIGTERM', stop)
+    summary.finished = new Date().toISOString()
+    await writeFile(receipt, JSON.stringify(summary, null, 2))
+  }
+  console.log(`${summary.status}; private evidence: ${inputs.evidence}`)
+  return summary
+}
+
+// Only the outer run() publishes whole-gate cleanup after the kernel namespace has exited.
+export async function runGate(inputs) {
+  process.umask(0o077)
+  const evidence = inputs.evidence
+  const summary = initialSummary(inputs)
   let interrupted
   const onSignal = signal => { interrupted = signal }
   process.on('SIGINT', onSignal)
@@ -148,7 +247,7 @@ export async function run(inputs) {
     }))
     assert.deepEqual(stockAfter, summary.stock, 'Stock source changed during gate')
     checkSignal()
-    summary.status = 'PASS'
+    summary.status = 'AWAITING_NAMESPACE_EXIT'
   } catch (error) {
     summary.error = error.stack
   } finally {
@@ -157,7 +256,6 @@ export async function run(inputs) {
     summary.finished = new Date().toISOString()
     await writeFile(path.join(evidence, 'summary.json'), JSON.stringify(summary, null, 2))
   }
-  console.log(`${summary.status}; private evidence: ${evidence}`)
   return summary
 }
 

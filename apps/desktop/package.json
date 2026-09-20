@@ -64,6 +64,7 @@
     "fix": "npm run lint:fix && npm run fmt",
     "test:ui": "vitest run --project ui",
     "test:browser-compat": "node browser-spike/compat.mjs",
+    "test:browser-compat:harness": "node --test browser-spike/backend.test.mjs browser-spike/compat.test.mjs",
     "test:task-scroll": "node --test scripts/tasks-scroll.test.mjs",
     "test:desktop:platforms": "vitest run --project electron",
     "test:find-in-page-native": "electron electron/find-in-page-native-fixture",

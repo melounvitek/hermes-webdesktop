@@ -89,10 +89,6 @@ async function startFixture(cookie = false) {
     )
     server = https.createServer({ key: await readFile(key), cert: await readFile(cert) }, handler)
   } else server = http.createServer(handler)
-  server.on('connection', socket => {
-    sockets.add(socket)
-    socket.on('close', () => sockets.delete(socket))
-  })
   server.on('upgrade', (request, socket, head) => {
     if (!target) {
       socket.destroy()
@@ -126,7 +122,7 @@ async function startFixture(cookie = false) {
   const owned = startProcess(python, args, {
     cwd: artifacts,
     env: { PATH: '/usr/bin:/bin', HOME: artifacts, LANG: 'C.UTF-8', PYTHONDONTWRITEBYTECODE: '1' },
-    logPath: path.join(artifacts, `${name}-fixture.log`), announce: true
+    logPath: path.join(artifacts, `${name}-fixture.log`)
   })
   const child = owned.child
   const fixture = { child, owned, server, sockets, cookie, origin }
