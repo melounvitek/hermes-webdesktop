@@ -6,6 +6,7 @@ import type {
   HermesSelectPathsOptions
 } from '@/global'
 import { $connection } from '@/store/session'
+import { isBrowserClient } from '@/lib/platform'
 
 export interface DesktopFsRemotePicker {
   selectPaths: (options?: HermesSelectPathsOptions) => Promise<string[]>
@@ -87,11 +88,13 @@ export async function readDesktopFileText(path: string): Promise<HermesReadFileT
   return remoteFsApi<HermesReadFileTextResult>(fsPath('read-text', path))
 }
 
-// Save UTF-8 text back to a file. Local writes go through the hardened Electron
-// IPC; remote writes hit the dashboard's POST /api/fs/write-text (same path
-// hardening, parent-must-exist, size cap) so the editor behaves identically in
-// both modes. Stale-on-disk detection is the caller's job (re-read before save).
+// Browser files are read-only: stock saves do not preserve bytes or metadata.
+// This is frontend product policy, not authorization around the stock API.
 export async function writeDesktopFileText(path: string, content: string): Promise<{ path: string }> {
+  if (isBrowserClient()) {
+    throw new Error('Server files are read-only in the browser')
+  }
+
   const desktop = bridge()
 
   if (!isDesktopFsRemoteMode()) {

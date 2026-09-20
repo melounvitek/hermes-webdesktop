@@ -13,7 +13,8 @@ import {
   readDesktopFileDataUrlLocalFirst,
   readDesktopFileText,
   selectDesktopPaths,
-  setDesktopFsRemotePicker
+  setDesktopFsRemotePicker,
+  writeDesktopFileText
 } from './desktop-fs'
 
 const readDir = vi.fn(async () => ({ entries: [{ name: 'local', path: '/local', isDirectory: true }] }))
@@ -76,6 +77,21 @@ describe('desktop filesystem facade', () => {
     $connection.set(null)
     setApiRequestConnection(null)
     setDesktopFsRemotePicker(null)
+  })
+
+  it('rejects browser saves before any filesystem request', async () => {
+    window.hermesDesktop!.browser = true
+    $connection.set({ mode: 'remote', profile: 'a' } as never)
+
+    await expect(writeDesktopFileText('/work/file.txt', 'changed')).rejects.toThrow('read-only')
+    expect(api).not.toHaveBeenCalled()
+  })
+
+  it('preserves Electron file saves', async () => {
+    const writeTextFile = vi.fn(async (path: string) => ({ path }))
+    window.hermesDesktop!.writeTextFile = writeTextFile
+    await expect(writeDesktopFileText('/work/file.txt', 'changed')).resolves.toEqual({ path: '/work/file.txt' })
+    expect(writeTextFile).toHaveBeenCalledWith('/work/file.txt', 'changed')
   })
 
   it('uses local Electron filesystem methods in local mode', async () => {
