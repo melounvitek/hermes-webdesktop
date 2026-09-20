@@ -12,7 +12,6 @@ import {
 import { useI18n } from '@/i18n'
 import { Zap, ZapFilled } from '@/lib/icons'
 import { isBrowserClient } from '@/lib/platform'
-import { requestGatewayForProfile } from '@/store/gateway'
 import {
   $approvalModes,
   type ApprovalMode,
@@ -20,6 +19,7 @@ import {
   setApprovalModeForProfile,
   syncApprovalModeForProfile
 } from '@/store/approval-mode'
+import { requestGatewayForProfile } from '@/store/gateway'
 import { notifyError } from '@/store/notifications'
 
 export function useApprovalModeStatusbarItem(profile: string, requestGateway: ApprovalModeRequester): StatusbarItem {
@@ -27,11 +27,11 @@ export function useApprovalModeStatusbarItem(profile: string, requestGateway: Ap
   const copy = t.shell.approvalMode
   const modes = useStore($approvalModes)
   const mode = modes[profile.trim() || 'default']
+
   // The browser shares one backend; Electron must retain its exact device/session route.
   const requestApprovalMode = useCallback<ApprovalModeRequester>(
-    (method, params) => isBrowserClient()
-      ? requestGatewayForProfile(profile, method, params)
-      : requestGateway(method, params),
+    (method, params) =>
+      isBrowserClient() ? requestGatewayForProfile(profile, method, params) : requestGateway(method, params),
     [profile, requestGateway]
   )
 

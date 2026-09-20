@@ -12,7 +12,7 @@ import { useApprovalModeStatusbarItem } from './approval-mode-menu'
 
 const profileRequest = vi.hoisted(() => vi.fn())
 vi.mock('@/store/gateway', async original => ({
-  ...await original<Record<string, unknown>>(),
+  ...(await original<Record<string, unknown>>()),
   requestGatewayForProfile: profileRequest
 }))
 
@@ -50,14 +50,17 @@ describe('approval mode statusbar item', () => {
     vi.stubGlobal('hermesDesktop', { browser: { authRequired: false, signIn: vi.fn() } })
     const policies: Record<string, string> = { a: 'manual', b: 'off' }
     profileRequest.mockImplementation(async (profile, method, params) => {
-      if (method === 'config.set') policies[profile] = params.value
+      if (method === 'config.set') {
+        policies[profile] = params.value
+      }
+
       return { value: policies[profile] }
     })
     const sessionRequest = vi.fn().mockRejectedValue(new Error('Wrong session route'))
     const view = render(<Harness profile="a" requestGateway={sessionRequest} />)
-    await screen.findByRole('button', { name: 'Manual', exact: true })
+    await screen.findByRole('button', { name: 'Manual' })
     view.rerender(<Harness profile="b" requestGateway={sessionRequest} />)
-    fireEvent.pointerDown(await screen.findByRole('button', { name: 'Off', exact: true }), { button: 0 })
+    fireEvent.pointerDown(await screen.findByRole('button', { name: 'Off' }), { button: 0 })
     fireEvent.click(await screen.findByRole('menuitemradio', { name: /smart/i }))
     await waitFor(() => expect(policies).toEqual({ a: 'manual', b: 'smart' }))
     expect(sessionRequest).not.toHaveBeenCalled()

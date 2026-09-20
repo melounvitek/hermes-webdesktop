@@ -101,9 +101,15 @@ describe('ProjectDialog', () => {
     expect(screen.queryByRole('button', { name: 'Shuffle ideas' })).toBeNull()
     expect(screen.queryByRole('button', { name: /Rocket tracker/ })).toBeNull()
     await fillCreateForm()
-    await waitFor(() => expect(createProject).toHaveBeenCalledWith(expect.objectContaining({
-      name: 'Skunkworks', folders: ['/Users/test/my-folder'], idea: undefined
-    })))
+    await waitFor(() =>
+      expect(createProject).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: 'Skunkworks',
+          folders: ['/Users/test/my-folder'],
+          idea: undefined
+        })
+      )
+    )
     createProject.mockClear()
   })
 

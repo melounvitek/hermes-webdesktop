@@ -433,7 +433,9 @@ describe('createProject', () => {
     vi.stubGlobal('hermesDesktop', { browser: { authRequired: false, signIn: vi.fn() } })
     const request = vi.fn().mockResolvedValue({ project: { id: 'p_new', primary_path: '/srv/demo' } })
     activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
-    await expect(createProject({ name: 'Demo', folders: ['/srv/demo'], idea: 'Must not disappear' })).rejects.toThrow(/read-only/)
+    await expect(createProject({ name: 'Demo', folders: ['/srv/demo'], idea: 'Must not disappear' })).rejects.toThrow(
+      /read-only/
+    )
     await expect(generateProjectIdea('Demo')).rejects.toThrow(/read-only/)
     expect(request).not.toHaveBeenCalled()
     expect(fs.writeDesktopFileText).not.toHaveBeenCalled()
@@ -444,10 +446,19 @@ describe('createProject', () => {
     const created = { id: 'p_new', name: 'Demo', primary_path: '/srv/demo', folders: [] }
     const request = vi.fn().mockResolvedValue({ project: created, projects: [created] })
     activeGateway.mockReturnValue({ connectionState: 'open', request } as never)
-    await expect(createProject({ name: 'Demo', folders: ['/srv/demo'], idea: browser ? undefined : 'An idea' })).resolves.toEqual(created)
-    expect(request).toHaveBeenCalledWith('projects.create', expect.objectContaining({ name: 'Demo', folders: ['/srv/demo'] }))
-    if (browser) expect(fs.writeDesktopFileText).not.toHaveBeenCalled()
-    else expect(fs.writeDesktopFileText).toHaveBeenCalledWith('/srv/demo/IDEA.md', 'An idea\n')
+    await expect(
+      createProject({ name: 'Demo', folders: ['/srv/demo'], idea: browser ? undefined : 'An idea' })
+    ).resolves.toEqual(created)
+    expect(request).toHaveBeenCalledWith(
+      'projects.create',
+      expect.objectContaining({ name: 'Demo', folders: ['/srv/demo'] })
+    )
+
+    if (browser) {
+      expect(fs.writeDesktopFileText).not.toHaveBeenCalled()
+    } else {
+      expect(fs.writeDesktopFileText).toHaveBeenCalledWith('/srv/demo/IDEA.md', 'An idea\n')
+    }
   })
 
   it.each(['default', 'coder'])('creates in the active %s profile without leaving All profiles', async profile => {

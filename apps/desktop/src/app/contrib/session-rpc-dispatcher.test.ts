@@ -97,8 +97,13 @@ describe('createSessionRpcDispatcher: fail closed', () => {
     await expect(syncApprovalModeForProfile(request, 'default')).resolves.toBe('off')
     gatewayMocks.requestGatewayForAgent.mockResolvedValueOnce({ value: 'smart' } as never)
     await expect(setApprovalModeForProfile(request, 'default', 'smart')).resolves.toBe('smart')
-    expect(gatewayMocks.requestGatewayForAgent).toHaveBeenCalledWith('secondary', 'default', 'config.get', { key: 'approvals.mode' })
-    expect(gatewayMocks.requestGatewayForAgent).toHaveBeenCalledWith('secondary', 'default', 'config.set', { key: 'approvals.mode', value: 'smart' })
+    expect(gatewayMocks.requestGatewayForAgent).toHaveBeenCalledWith('secondary', 'default', 'config.get', {
+      key: 'approvals.mode'
+    })
+    expect(gatewayMocks.requestGatewayForAgent).toHaveBeenCalledWith('secondary', 'default', 'config.set', {
+      key: 'approvals.mode',
+      value: 'smart'
+    })
     expect(gatewayMocks.requestGatewayForProfile).not.toHaveBeenCalled()
   })
 
