@@ -34,24 +34,27 @@ Use any model you want — [Nous Portal](https://portal.nousresearch.com), OpenR
 
 ## Browser edition — local project status
 
-This checkout also builds the official desktop renderer for a browser, using
-stock Hermes APIs rather than a separate UI or backend. The browser bundle is
-running against an existing Hermes installation behind password-gated Tailscale
-Serve. The user confirmed the deployed fixes work in real use.
+This checkout builds the official desktop React UI for a browser. A small
+browser adapter uses stock Hermes APIs; the backend is not patched. The goal is
+to follow upstream's desktop UI, not maintain a separate interface.
 
-- [x] Browser chat, streaming, session reload/resume, approvals and clarification.
-- [x] Password-authenticated, tailnet-only access to real Hermes.
-- [x] File picker, drag/drop and image paste, with image and file submit/resume.
-- [x] Authenticated downloads with profile/session ownership and useful filenames.
-- [x] Persistent Appearance → UI Scale; browser-native zoom shortcuts unchanged.
-- [x] 311 focused tests, 15 Chromium usability checks, typecheck, browser/Electron
-      builds and independent review.
-- [x] Deploy the fixes (`652a4df9cc`) and confirm them in real use.
+Supported workflows include chat, streaming, sessions, approvals, clarification,
+profile switching, attachments, authenticated downloads and UI Scale. Server
+file browsing/preview is read-only. Native-only operations remain unavailable.
+Interactive browser shells have been removed; read-only agent output, Hermes's
+own terminal tools and Electron terminals remain. The preserved optional terminal
+plugin is no longer required by the browser; it has not been uninstalled.
 
-This is not a finished release. Reconnect/authentication edge cases, remaining
-native-only controls, general server file editing, installation/releases and
-upstream-sync automation are still pending. No GitHub fork or push has been made.
-See [the project plan](plan.md) for evidence, limitations and the deployment handoff.
+For local compatibility checks, build the browser bundle and run
+`npm run test:browser-compat` from `apps/desktop` with explicit stock-source,
+test-Python, Chromium, bundle and evidence paths. The gate requires Linux and
+Bubblewrap, uses fresh homes and a loopback model fixture, and does not upgrade
+Hermes. `npm run test:browser-compat -- --help` prints the arguments.
+
+These changes are local and **not deployed**. The last recorded live bundle is
+`098720bb67`; its terminal behavior has not changed. No GitHub fork or push has
+been made. See [the project plan](plan.md) for patch decisions, upstream rehearsal
+results, exact tested versions, limitations and deployment history.
 
 ## Quick Install
 
