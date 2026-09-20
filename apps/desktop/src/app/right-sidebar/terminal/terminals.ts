@@ -182,7 +182,8 @@ const newId = () =>
   globalThis.crypto?.randomUUID?.() ?? `term-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
 
 /** Append a fresh terminal and focus it. Captures the current cwd once (its only
- *  tie to session/project state); pass an explicit cwd to override. Returns the id. */
+ *  tie to session/project state); pass an explicit cwd to override.
+ *  Returns null when this client has no interactive terminal capability. */
 export function createTerminal(cwd: string = $currentCwd.get()): string | null {
   if (!supportsInteractiveTerminal) {
     return null

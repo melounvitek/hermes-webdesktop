@@ -1,7 +1,6 @@
 import { atom } from 'nanostores'
 
 import type { TerminalMenuHandle } from '@/app/right-sidebar/terminal/terminal-context-menu'
-import { isBrowserClient } from '@/lib/platform'
 
 import type { ContextMenuDomTarget } from './target'
 
@@ -109,8 +108,7 @@ export function openTerminalContextMenu(x: number, y: number, terminal: Terminal
 
   $contextMenu.set(opened)
 
-  // Browser clipboard permission belongs to the Paste gesture, not opening a menu.
-  if (terminal.paste && !isBrowserClient()) {
+  if (terminal.paste) {
     probeClipboard(opened)
   }
 }

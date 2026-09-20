@@ -27,8 +27,9 @@ it('keeps browser terminals runtime-only and isolates selection and close operat
   store.ensureTerminal()
   expect(store.$terminals.get()).toEqual([])
   expect(store.createTerminal()).toBeNull()
-  const { defaultBindings } = await import('@/lib/keybinds/actions')
-  expect(defaultBindings()).not.toHaveProperty('view.newTerminal')
+  localStorage.setItem('hermes.desktop.keybinds', JSON.stringify({ 'view.newTerminal': ['mod+shift+t'] }))
+  const { $comboIndex } = await import('@/store/keybinds')
+  expect([...$comboIndex.get().values()]).not.toContain('view.newTerminal')
   const { createBrowserBridge } = await import('@/browser/bridge')
   expect(createBrowserBridge({ token: '', authRequired: false })).not.toHaveProperty('terminal')
 

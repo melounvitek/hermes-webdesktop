@@ -1,14 +1,12 @@
 import '@xterm/xterm/css/xterm.css'
 
 import { Button } from '@/components/ui/button'
-import { ErrorState } from '@/components/ui/error-state'
 import { KbdCombo } from '@/components/ui/kbd'
 import { Loader } from '@/components/ui/loader'
-import { ScrollArea } from '@/components/ui/scroll-area'
 import { useI18n } from '@/i18n'
 import { cn } from '@/lib/utils'
 
-import { closeTerminal, reportTerminalShell } from './terminals'
+import { reportTerminalShell } from './terminals'
 import { useAgentTerminal } from './use-agent-terminal'
 import { useTerminalSession } from './use-terminal-session'
 
@@ -25,7 +23,6 @@ const HOST_CLASS =
 interface TerminalInstanceProps {
   id: string
   cwd: string
-  profile?: string
   active: boolean
   onAddSelectionToChat: (text: string, label?: string) => void
   restoreCwd?: string
@@ -40,22 +37,19 @@ export function TerminalInstance({
   cwd,
   onAddSelectionToChat,
   restoreCwd,
-  reviveBuffer,
-  profile
+  reviveBuffer
 }: TerminalInstanceProps) {
   const { t } = useI18n()
 
-  const { addSelectionToChat, hostRef, selection, selectionStyle, status, connectionStatus, retry } =
-    useTerminalSession({
-      id,
-      cwd,
-      profile,
-      active,
-      onAddSelectionToChat,
-      restoreCwd,
-      reviveBuffer,
-      onShell: shell => reportTerminalShell(id, shell)
-    })
+  const { addSelectionToChat, hostRef, selection, selectionStyle, status } = useTerminalSession({
+    id,
+    cwd,
+    active,
+    onAddSelectionToChat,
+    restoreCwd,
+    reviveBuffer,
+    onShell: shell => reportTerminalShell(id, shell)
+  })
 
   return (
     <div
@@ -71,32 +65,7 @@ export function TerminalInstance({
             strokeScale={0.68}
             type="spiral-search"
           />
-          {import.meta.env.VITE_BROWSER === '1' && connectionStatus.state === 'reconnecting' && (
-            <span className="text-sm text-(--ui-text-secondary)" role="status">
-              {t.rightSidebar.terminalReconnecting}
-            </span>
-          )}
         </div>
-      )}
-      {import.meta.env.VITE_BROWSER === '1' && connectionStatus.state === 'disconnected' && (
-        <ScrollArea className="absolute inset-0 z-10 bg-(--ui-terminal-surface-background)" role="status">
-          <div className="p-4">
-            <ErrorState
-              description={t.rightSidebar.terminalErrors[connectionStatus.reason ?? 'connection']}
-              title={t.rightSidebar.terminalDisconnected}
-            >
-              {connectionStatus.reason === 'missing-session' ? (
-                <Button onClick={() => closeTerminal(id)} size="sm" variant="secondary">
-                  {t.common.close}
-                </Button>
-              ) : (
-                <Button onClick={retry} size="sm" variant="secondary">
-                  {t.common.retry}
-                </Button>
-              )}
-            </ErrorState>
-          </div>
-        </ScrollArea>
       )}
       {selection.trim() && (
         <div className="absolute z-50 flex items-center gap-1" style={selectionStyle ?? { right: 12, top: 8 }}>

@@ -1,10 +1,7 @@
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 
-import type { HermesTerminalStatus } from '@/global'
-
 import { TerminalInstance } from './instance'
-import { closeTerminal } from './terminals'
 
 const mocks = vi.hoisted(() => ({ write: vi.fn(), dispose: vi.fn(), focus: vi.fn(), fit: vi.fn() }))
 vi.mock('@xterm/xterm', () => ({
@@ -91,82 +88,7 @@ afterEach(() => {
   vi.clearAllMocks()
 })
 
-it('shows actionable start errors and reconnect state, retries the owned session, and keeps it alive while hidden', async () => {
-  vi.stubEnv('VITE_BROWSER', '1')
-  let status!: (value: HermesTerminalStatus) => void
-
-  const start = vi
-    .fn()
-    .mockRejectedValueOnce(Object.assign(new Error('HTTP 404'), { reason: 'missing-plugin' }))
-    .mockResolvedValue({ id: 'owned', cwd: '/repo', shell: 'bash' })
-
-  const attach = vi.fn(async () => {
-    status({ state: 'open' })
-
-    return true
-  })
-
-  const dispose = vi.fn(async () => true)
-  vi.stubGlobal(
-    'ResizeObserver',
-    class {
-      observe() {}
-      disconnect() {}
-    }
-  )
-  window.hermesDesktop = {
-    ...window.hermesDesktop,
-    terminal: {
-      start,
-      attach,
-      dispose,
-      cwd: async () => null,
-      write: async () => true,
-      resize: async () => true,
-      onData: () => () => {},
-      onExit: () => () => {},
-      onStatus: (_id, callback) => {
-        status = callback
-
-        return () => {}
-      }
-    }
-  }
-  const props = { id: 'tab', cwd: '/repo', profile: 'alpha', active: true, onAddSelectionToChat: vi.fn() }
-  const view = render(<TerminalInstance {...props} />)
-  expect(await screen.findByText(/Install and enable browser-terminal/)).toBeTruthy()
-  fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
-  await waitFor(() => expect(attach).toHaveBeenCalledTimes(1))
-  expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ profile: 'alpha' }))
-  const composer = document.createElement('textarea')
-  document.body.append(composer)
-  composer.focus()
-  mocks.focus.mockClear()
-  act(() => status({ state: 'reconnecting' }))
-  expect(screen.getByText(/Reconnecting to terminal/)).toBeTruthy()
-  act(() => status({ state: 'open' }))
-  await act(async () => new Promise<void>(resolve => requestAnimationFrame(() => resolve())))
-  expect(mocks.focus).not.toHaveBeenCalled()
-  expect(document.activeElement).toBe(composer)
-  view.rerender(<TerminalInstance {...props} active={false} />)
-  view.rerender(<TerminalInstance {...props} active />)
-  await waitFor(() => expect(mocks.focus).toHaveBeenCalled())
-  composer.remove()
-  act(() => status({ state: 'disconnected', reason: 'missing-session' }))
-  expect(screen.getByText(/server no longer has this terminal/)).toBeTruthy()
-  expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
-  fireEvent.click(screen.getByRole('button', { name: 'Close' }))
-  expect(closeTerminal).toHaveBeenCalledWith('tab')
-  expect(attach).toHaveBeenCalledTimes(1)
-  expect(start).toHaveBeenCalledTimes(2) // no invisible replacement shell
-  view.rerender(<TerminalInstance {...props} active={false} />)
-  expect(dispose).not.toHaveBeenCalled()
-  view.unmount()
-  expect(dispose).toHaveBeenCalledExactlyOnceWith('owned')
-})
-
 it('deletes a shell whose start response arrives after the tab was closed, without attaching', async () => {
-  vi.stubEnv('VITE_BROWSER', '1')
   let resolveStart!: (session: { id: string; shell: string; cwd: string }) => void
   const start = vi.fn(
     () =>
@@ -178,11 +100,18 @@ it('deletes a shell whose start response arrives after the tab was closed, witho
   const dispose = vi.fn(async () => true)
   window.hermesDesktop = {
     ...window.hermesDesktop,
-    terminal: { ...window.hermesDesktop.terminal, start, attach, dispose }
+    terminal: {
+      start,
+      attach,
+      dispose,
+      cwd: async () => null,
+      write: async () => true,
+      resize: async () => true,
+      onData: () => () => {},
+      onExit: () => () => {}
+    }
   }
-  const view = render(
-    <TerminalInstance active={false} cwd="/repo" id="closed-tab" onAddSelectionToChat={vi.fn()} profile="alpha" />
-  )
+  const view = render(<TerminalInstance active={false} cwd="/repo" id="closed-tab" onAddSelectionToChat={vi.fn()} />)
   await waitFor(() => expect(start).toHaveBeenCalledOnce())
   view.unmount()
   await act(async () => resolveStart({ id: 'late-owned', shell: 'bash', cwd: '/repo' }))
@@ -190,8 +119,7 @@ it('deletes a shell whose start response arrives after the tab was closed, witho
   expect(dispose).toHaveBeenCalledExactlyOnceWith('late-owned')
 })
 
-it.each(['0', '1'])('reconciles a host that settles before the shell opens without session or focus churn (browser=%s)', async browser => {
-  vi.stubEnv('VITE_BROWSER', browser)
+it('reconciles a host that settles before the shell opens without session or focus churn', async () => {
   let width = 300
   vi.spyOn(HTMLElement.prototype, 'clientWidth', 'get').mockImplementation(() => width)
   vi.spyOn(HTMLElement.prototype, 'clientHeight', 'get').mockReturnValue(100)
@@ -204,32 +132,46 @@ it.each(['0', '1'])('reconciles a host that settles before the shell opens witho
   })
   vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id))
 
-  const flush = () => act(() => {
-    const pending = [...frames.values()]
-    frames.clear()
-    pending.forEach(callback => callback(0))
-  })
+  const flush = () =>
+    act(() => {
+      const pending = [...frames.values()]
+      frames.clear()
+      pending.forEach(callback => callback(0))
+    })
 
   let deliverResize!: () => void
   const disconnect = vi.fn()
-  vi.stubGlobal('ResizeObserver', class {
-    constructor(callback: ResizeObserverCallback) {
-      deliverResize = () => callback([], this as unknown as ResizeObserver)
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      constructor(callback: ResizeObserverCallback) {
+        deliverResize = () => callback([], this as unknown as ResizeObserver)
+      }
+      observe() {}
+      disconnect = disconnect
     }
-    observe() {}
-    disconnect = disconnect
-  })
+  )
   let opened!: (attached: boolean) => void
   const start = vi.fn(async () => ({ id: 'owned-fit', cwd: '/repo', shell: 'bash' }))
-  const attach = vi.fn(() => new Promise<boolean>(resolve => { opened = resolve }))
+  const attach = vi.fn(
+    () =>
+      new Promise<boolean>(resolve => {
+        opened = resolve
+      })
+  )
   const resize = vi.fn(async () => true)
   const dispose = vi.fn(async () => true)
   window.hermesDesktop = {
     ...window.hermesDesktop,
     terminal: {
-      start, attach, resize, dispose,
-      cwd: async () => null, write: async () => true,
-      onData: () => () => {}, onExit: () => () => {}
+      start,
+      attach,
+      resize,
+      dispose,
+      cwd: async () => null,
+      write: async () => true,
+      onData: () => () => {},
+      onExit: () => () => {}
     }
   }
   const props = { id: 'fit-tab', cwd: '/repo', active: true, onAddSelectionToChat: vi.fn() }
