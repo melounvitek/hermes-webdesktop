@@ -51,7 +51,7 @@ async function bundleIdentity(root) {
 
 function initialSummary(inputs) {
   return { inputs, started: new Date().toISOString(), status: 'FAIL',
-    limitations: ['Existing five scripts only; no additional boundary/auth matrix coverage',
+    limitations: ['Five scripts including read-only/native-action checks; not a comprehensive boundary/auth matrix',
       'Group receipts confirm direct-child termination only; detached descendants are killed at whole-gate namespace exit',
       'Read-only host files remain visible; this is not a confidentiality sandbox',
       'UI upstream revision is not inferred from a built bundle; local git identity and bundle digest are recorded'],
