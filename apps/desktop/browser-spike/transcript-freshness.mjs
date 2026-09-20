@@ -121,10 +121,12 @@ try {
     stopping = true
     await page.getByRole('button', { name: 'Stop', exact: true }).first().click()
     await expect.poll(() => held?.body, { timeout: 15000 }).toBeTruthy()
-    assert.deepEqual(
-      held.body.messages.map(m => [m.role, m.content]),
-      [['user', original]]
-    )
+    // Stock versions differ on whether the interrupted partial is persisted
+    // before this read. The held snapshot must still predate the follow-up turn.
+    assert.deepEqual(held.body.messages.filter(m => m.role === 'user').map(m => m.content), [original])
+    const partials = held.body.messages.filter(m => m.role === 'assistant')
+    assert.ok(partials.length <= 1)
+    assert.ok(held.body.messages.every(m => m.role === 'user' || (m.role === 'assistant' && m.content === 'Spike tu')))
     await rm(holdFile, { force: true })
     // Isolate freshness from the separate old-completion/new-submit race.
     await expect
