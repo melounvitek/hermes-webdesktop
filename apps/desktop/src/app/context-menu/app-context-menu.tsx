@@ -114,7 +114,7 @@ function terminalSections(open: Extract<OpenContextMenu, { kind: 'terminal' }>, 
       ) : null,
       terminal.paste ? (
         <Item
-          disabled={!open.clipboardHasText}
+          disabled={!isBrowserClient() && !open.clipboardHasText}
           icon="clippy"
           key="terminal-paste"
           label={t.contextMenu.edit.paste}
@@ -300,7 +300,7 @@ function domSections(open: Extract<OpenContextMenu, { kind: 'dom' }>, t: Transla
     )
   }
 
-  if (target.editable && !isBrowserClient()) {
+  if (target.editable) {
     if (spellcheck) {
       sections.push([
         ...spellcheck.suggestions
@@ -684,6 +684,7 @@ export function AppContextMenu() {
       if (isBrowserClient() && target.editable) {
         return
       }
+
       const owned = Boolean(target.linkUrl || target.onImage || target.editable || target.selectionText)
 
       // The reaction bubble owns bare right-clicks; a link inside it still

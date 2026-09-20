@@ -532,9 +532,9 @@ describe('AppContextMenu', () => {
     unregister()
   })
 
-  it('reports a denied terminal clipboard read without pasting', async () => {
-    const readClipboard = vi.fn().mockResolvedValueOnce('probe').mockRejectedValue(new Error('read denied'))
-    installBridge({ readClipboard })
+  it.each(['read denied', 'Clipboard API unavailable'])('reports the first browser terminal clipboard failure: %s', async message => {
+    const readClipboard = vi.fn().mockRejectedValue(new Error(message))
+    installBridge({ browser: { authRequired: false, signIn: vi.fn() }, readClipboard })
     mountMenu()
     const host = attach('<div data-terminal=""><canvas></canvas></div>')
     const paste = vi.fn()
@@ -548,15 +548,37 @@ describe('AppContextMenu', () => {
     try {
       fireEvent.contextMenu(host.querySelector('canvas')!)
       const item = await screen.findByText('Paste')
-      await waitFor(() => expect(item.closest('[role="menuitem"]')?.getAttribute('data-disabled')).toBeNull())
+      expect(readClipboard).not.toHaveBeenCalled()
+      expect(item.closest('[role="menuitem"]')?.getAttribute('data-disabled')).toBeNull()
       fireEvent.click(item)
       await waitFor(() =>
-        expect($notifications.get()).toEqual([expect.objectContaining({ kind: 'error', message: 'read denied' })])
+        expect($notifications.get()).toEqual([expect.objectContaining({ kind: 'error', message })])
       )
+      expect(readClipboard).toHaveBeenCalledOnce()
       expect(paste).not.toHaveBeenCalled()
     } finally {
       unregister()
     }
+  })
+
+  it('preserves Electron clipboard probing before enabling terminal Paste', async () => {
+    const readClipboard = vi.fn().mockResolvedValue('native text')
+    installBridge({ readClipboard })
+    mountMenu()
+    const host = attach('<div data-terminal=""><canvas></canvas></div>')
+    const paste = vi.fn()
+    const unregister = registerTerminalContextMenu(host.firstElementChild as HTMLElement, {
+      getSelection: () => '', paste, selectAll: vi.fn()
+    })
+    try {
+      fireEvent.contextMenu(host.querySelector('canvas')!)
+      const item = await screen.findByText('Paste')
+      await waitFor(() => expect(item.closest('[role="menuitem"]')?.getAttribute('data-disabled')).toBeNull())
+      expect(readClipboard).toHaveBeenCalledOnce()
+      fireEvent.click(item)
+      await waitFor(() => expect(paste).toHaveBeenCalledWith('native text'))
+      expect(readClipboard).toHaveBeenCalledTimes(2)
+    } finally { unregister() }
   })
 
   it('hides paste on the read-only agent terminal', async () => {
