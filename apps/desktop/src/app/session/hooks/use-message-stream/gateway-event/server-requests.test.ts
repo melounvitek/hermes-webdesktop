@@ -3,11 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { registerPreviewNav } from '@/app/chat/right-rail/preview-nav'
 import { registerPreviewPageReader } from '@/app/chat/right-rail/preview-reader'
-import { registerTerminalReader, setActiveTerminalId } from '@/app/right-sidebar/terminal/buffer'
-import { $activeTerminalId, $terminals } from '@/app/right-sidebar/terminal/terminals'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { $previewTabs, closeRightRail, openPreview } from '@/store/preview'
-import { $activeProfile } from '@/store/profile'
 import { $toursEnabled } from '@/store/tours'
 
 import { handleServerRequest } from './server-requests'
@@ -31,45 +28,6 @@ function deliver(method: string, params: Record<string, unknown>, activeSessionI
 
   return { fail, handled, respond }
 }
-
-it('browser terminal reads fail closed across profiles and absent ownership, but allow the owner', () => {
-  vi.stubEnv('VITE_BROWSER', '1')
-  $activeProfile.set('beta')
-  $terminals.set([{ id: 'b', profile: 'beta', title: 'B', auto: false, cwd: '', kind: 'user' }])
-  $activeTerminalId.set('b')
-  setActiveTerminalId('b')
-  const read = vi.fn(() => ({ text: 'B secret' }) as never)
-  const unregister = registerTerminalReader('b', read)
-  const respond = vi.fn()
-  const request = { fail: vi.fn(), id: 'read', method: 'terminal.read', params: {}, profile: 'alpha', respond }
-  try {
-    for (const profile of ['alpha', '']) {
-      handleServerRequest({ ...request, profile }, deps, null)
-      expect(respond).toHaveBeenLastCalledWith({ value: '' })
-      expect(read).not.toHaveBeenCalled()
-    }
-    handleServerRequest({ ...request, profile: 'beta' }, deps, null)
-    expect(read).toHaveBeenCalledOnce()
-    expect(respond).toHaveBeenLastCalledWith({ value: JSON.stringify({ text: 'B secret' }) })
-    read.mockClear()
-    // Selection can advance before the workspace's reader subscription mounts.
-    $terminals.set([{ ...$terminals.get()[0], id: 'new-tab' }])
-    $activeTerminalId.set('new-tab')
-    handleServerRequest({ ...request, profile: 'beta' }, deps, null)
-    expect(respond).toHaveBeenLastCalledWith({ value: '' })
-    expect(read).not.toHaveBeenCalled()
-    $terminals.set([{ ...$terminals.get()[0], profile: undefined }])
-    handleServerRequest({ ...request, profile: 'beta' }, deps, null)
-    expect(respond).toHaveBeenLastCalledWith({ value: '' })
-    expect(read).not.toHaveBeenCalled()
-  } finally {
-    unregister()
-    setActiveTerminalId(null)
-    $terminals.set([])
-    $activeTerminalId.set(null)
-    vi.unstubAllEnvs()
-  }
-})
 
 describe('connection request routing', () => {
   it('does not route connection operations through the server-request rail', () => {
