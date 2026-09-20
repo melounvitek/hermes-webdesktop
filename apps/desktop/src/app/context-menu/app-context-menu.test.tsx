@@ -101,7 +101,7 @@ describe('AppContextMenu', () => {
     installBridge({ browser: { authRequired: false, signIn: vi.fn() } })
     mountMenu()
     const host = attach('<img src="https://example.invalid/pic.png"><textarea>draft</textarea>')
-    expect(fireEvent.contextMenu(host.querySelector('img')!)).toBe(false)
+    expect(fireEvent.contextMenu(host.querySelector('img')!)).toBe(true)
     await screen.findByText('Copy image address')
     expect(screen.queryByText('Copy image')).toBeNull()
     expect(screen.queryByText('Save image as…')).toBeNull()

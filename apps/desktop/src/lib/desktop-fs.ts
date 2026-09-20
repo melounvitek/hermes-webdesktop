@@ -5,8 +5,8 @@ import type {
   HermesReadFileTextResult,
   HermesSelectPathsOptions
 } from '@/global'
-import { $connection } from '@/store/session'
 import { isBrowserClient } from '@/lib/platform'
+import { $connection } from '@/store/session'
 
 export interface DesktopFsRemotePicker {
   selectPaths: (options?: HermesSelectPathsOptions) => Promise<string[]>

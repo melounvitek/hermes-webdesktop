@@ -9,6 +9,23 @@ import { createBrowserBridge } from './bridge'
 
 afterEach(() => vi.unstubAllGlobals())
 
+it.each([false, true])(
+  'reports clipboard unavailable/denied (available=%s) without touching the OS',
+  async available => {
+    vi.stubGlobal('navigator', {
+      clipboard: available
+        ? {
+            readText: vi.fn().mockRejectedValue(new Error('read denied')),
+            writeText: vi.fn().mockRejectedValue(new Error('write denied'))
+          }
+        : undefined
+    })
+    const bridge = createBrowserBridge({ token: '', authRequired: false })
+    await expect(bridge.readClipboard()).rejects.toThrow(available ? 'read denied' : /clipboard/i)
+    await expect(bridge.writeClipboard('fixture')).rejects.toThrow(available ? 'write denied' : /clipboard/i)
+  }
+)
+
 it('routes REST to the same backend, preserving explicit profile and rejecting other origins', async () => {
   const fetch = vi.fn().mockImplementation(async () => new Response('{"ok":true}'))
   vi.stubGlobal('fetch', fetch)

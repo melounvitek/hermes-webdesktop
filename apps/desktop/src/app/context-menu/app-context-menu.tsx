@@ -300,8 +300,8 @@ function domSections(open: Extract<OpenContextMenu, { kind: 'dom' }>, t: Transla
     )
   }
 
-  if (target.editable) {
-    if (spellcheck && !isBrowserClient()) {
+  if (target.editable && !isBrowserClient()) {
+    if (spellcheck) {
       sections.push([
         ...spellcheck.suggestions
           .slice(0, 5)
@@ -346,29 +346,28 @@ function domSections(open: Extract<OpenContextMenu, { kind: 'dom' }>, t: Transla
       ? (formField.selectionStart ?? 0) !== (formField.selectionEnd ?? 0)
       : target.selectionText.length > 0
 
-    if (!isBrowserClient())
-      {sections.push([
-        <Item
-          disabled={!canCutCopy}
-          key="edit-cut"
-          label={copy.edit.cut}
-          onSelect={() => editableCommand('cut')}
-          shortcut={EDIT_SHORTCUTS.cut}
-        />,
-        <Item
-          disabled={!canCutCopy}
-          key="edit-copy"
-          label={t.common.copy}
-          onSelect={() => editableCommand('copy')}
-          shortcut={EDIT_SHORTCUTS.copy}
-        />,
-        <Item
-          key="edit-paste"
-          label={copy.edit.paste}
-          onSelect={() => editableCommand('paste')}
-          shortcut={EDIT_SHORTCUTS.paste}
-        />
-      ])}
+    sections.push([
+      <Item
+        disabled={!canCutCopy}
+        key="edit-cut"
+        label={copy.edit.cut}
+        onSelect={() => editableCommand('cut')}
+        shortcut={EDIT_SHORTCUTS.cut}
+      />,
+      <Item
+        disabled={!canCutCopy}
+        key="edit-copy"
+        label={t.common.copy}
+        onSelect={() => editableCommand('copy')}
+        shortcut={EDIT_SHORTCUTS.copy}
+      />,
+      <Item
+        key="edit-paste"
+        label={copy.edit.paste}
+        onSelect={() => editableCommand('paste')}
+        shortcut={EDIT_SHORTCUTS.paste}
+      />
+    ])
 
     sections.push([
       <Item
@@ -654,8 +653,8 @@ export function AppContextMenu() {
   const open = useStore($contextMenu)
 
   useEffect(() => {
-    // Electron needs the unprevented gesture for native spellcheck/image facts.
-    // Browsers need preventDefault or their native menu steals the app menu.
+    // Electron needs unprevented gestures for native spellcheck/image facts.
+    // Keep the browser-native menu available as a fallback too.
     const onContextMenu = (event: MouseEvent) => {
       const element = event.target instanceof Element ? event.target : null
 
@@ -673,7 +672,6 @@ export function AppContextMenu() {
       const terminal = terminalMenuHandleFor(element)
 
       if (terminal) {
-        if (isBrowserClient()) event.preventDefault()
         event.stopPropagation()
         openTerminalContextMenu(event.clientX, event.clientY, terminal)
 
@@ -681,8 +679,11 @@ export function AppContextMenu() {
       }
 
       const target = resolveDomTarget(element)
+
       // Let the browser own text editing, including its permission-aware paste.
-      if (isBrowserClient() && target.editable) return
+      if (isBrowserClient() && target.editable) {
+        return
+      }
       const owned = Boolean(target.linkUrl || target.onImage || target.editable || target.selectionText)
 
       // The reaction bubble owns bare right-clicks; a link inside it still
@@ -691,7 +692,6 @@ export function AppContextMenu() {
         return
       }
 
-      if (isBrowserClient()) event.preventDefault()
       event.stopPropagation()
       openDomContextMenu(event.clientX, event.clientY, target)
     }
