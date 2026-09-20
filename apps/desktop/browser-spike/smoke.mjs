@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
-import { access, mkdir, readFile, writeFile } from 'node:fs/promises'
+import { access, mkdir, readFile, realpath, writeFile } from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import { chromium, expect } from '@playwright/test'
 
@@ -7,7 +8,13 @@ const runtimePath = process.argv[2]
 if (!runtimePath) throw new Error('Usage: node browser-spike/smoke.mjs <harness runtime.json> [artifact directory]')
 const runtime = JSON.parse(await readFile(runtimePath, 'utf8'))
 assert.equal(new URL(runtime.url).hostname, '127.0.0.1')
-const url = runtime.public_url || runtime.url
+assert.equal(runtime.public_url, null, 'Use a private loopback fixture, not a public or live service')
+assert.equal(new URL(runtime.url).protocol, 'http:')
+assert.equal(path.dirname(runtime.run_dir), os.tmpdir())
+assert.ok(path.basename(runtime.run_dir).startsWith('hermes-browser-spike-'))
+assert.equal(await realpath(runtime.run_dir), runtime.run_dir)
+assert.equal(runtime.home, path.join(runtime.run_dir, 'home'))
+const url = runtime.url
 assert.equal(new URL(runtime.model_url).hostname, '127.0.0.1')
 assert.equal(path.resolve(runtimePath), path.join(runtime.run_dir, 'runtime.json'))
 assert.equal(runtime.hermes_home, path.join(runtime.run_dir, 'home', '.hermes'))
@@ -17,16 +24,32 @@ assert.equal(config.model.provider, 'custom')
 assert.equal(config.model.base_url, runtime.model_url)
 const target = path.join(runtime.home, 'approval-target')
 const artifacts = process.argv[3] || '/tmp/hermes-browser-evidence'
+process.umask(0o077)
 await mkdir(artifacts, { recursive: true })
+const browserHome = path.join(artifacts, 'chromium-home')
+await mkdir(browserHome)
 const browser = await chromium.launch({
   executablePath: process.env.CHROME_PATH || '/usr/bin/google-chrome',
-  headless: true
+  headless: true,
+  env: { PATH: '/usr/bin:/bin', HOME: browserHome, LANG: 'C.UTF-8', TZ: 'UTC' }
 })
-const page = await browser.newPage({ viewport: { width: 1440, height: 1000 } })
+const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, serviceWorkers: 'block' })
+const page = await context.newPage()
 const frames = [],
+  blocked = [],
   errors = [],
   httpErrors = [],
   assetErrors = []
+await context.route('**/*', route => {
+  const request = new URL(route.request().url())
+  if (request.origin === url || ['data:', 'blob:'].includes(request.protocol)) return route.continue()
+  blocked.push({ url: request.href, type: route.request().resourceType() })
+  return route.abort('blockedbyclient')
+})
+await context.routeWebSocket('**/*', ws => {
+  if (new URL(ws.url()).origin === url.replace(/^http/, 'ws')) ws.connectToServer()
+  else { blocked.push({ url: ws.url(), type: 'websocket' }); ws.close() }
+})
 page.on('pageerror', error => errors.push(error.stack))
 page.on('response', response => {
   if (response.status() >= 400) httpErrors.push({ status: response.status(), url: response.url() })
@@ -77,18 +100,8 @@ async function complete(start, text) {
 try {
   // Verify fixture credentials and the live model before opening the renderer,
   // which can itself submit background prompts.
-  const headers = runtime.public_url ? {} : { 'X-Hermes-Session-Token': runtime.token }
-  if (runtime.public_url) {
-    assert.equal(runtime.public_url, config.dashboard.public_url)
-    assert.equal((await page.request.get(new URL('/api/config', url).href)).status(), 401)
-    const login = JSON.parse(await readFile(path.join(runtime.run_dir, 'login.json'), 'utf8'))
-    const response = await page.request.post(new URL('/auth/password-login', url).href, {
-      data: { provider: 'basic', ...login },
-      headers: { Origin: url }
-    })
-    assert.equal(response.status(), 200)
-  }
-  const response = await page.request.get(new URL('/api/config', url).href, { headers })
+  const headers = { 'X-Hermes-Session-Token': runtime.token }
+  const response = await page.request.get(new URL('/api/config', url).href, { headers, maxRedirects: 0 })
   assert.equal(response.status(), 200)
   assert.equal((await response.json()).model, config.model.default)
   await page.goto(url)
@@ -115,10 +128,11 @@ try {
   await assert.rejects(access(target), { code: 'ENOENT' })
 
   // Exercise a non-assets/ resource emitted by the existing Vite configuration.
-  const emoji = await page.request.get(new URL('/emojibase/en/data.json', url).href)
+  const emoji = await page.request.get(new URL('/emojibase/en/data.json', url).href, { maxRedirects: 0 })
   assert.equal(emoji.status(), 200)
   assert.match(emoji.headers()['content-type'], /application\/json/)
   assert.ok(Array.isArray(await emoji.json()))
+  assert.deepEqual(blocked.filter(request => !['font', 'stylesheet'].includes(request.type)), [])
   assert.deepEqual(assetErrors, [])
   assert.deepEqual(errors, [])
   console.log(
@@ -126,8 +140,9 @@ try {
   )
   console.log(`HTTP errors: ${JSON.stringify(httpErrors)}`)
 } finally {
-  await page.screenshot({ path: `${artifacts}/browser.png`, fullPage: true })
-  await writeFile(`${artifacts}/frames.json`, JSON.stringify(frames, null, 2))
-  await writeFile(`${artifacts}/errors.json`, JSON.stringify({ errors, httpErrors, assetErrors }, null, 2))
-  await browser.close()
+  try {
+    await page.screenshot({ path: `${artifacts}/browser.png`, fullPage: true })
+    await writeFile(`${artifacts}/frames.json`, JSON.stringify(frames, null, 2))
+    await writeFile(`${artifacts}/errors.json`, JSON.stringify({ errors, httpErrors, assetErrors, blocked }, null, 2))
+  } finally { await browser.close() }
 }

@@ -1,6 +1,5 @@
 import assert from 'node:assert/strict'
-import { spawn, execFileSync } from 'node:child_process'
-import { createWriteStream } from 'node:fs'
+import { execFileSync } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import https from 'node:https'
@@ -9,13 +8,18 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { chromium, expect } from '@playwright/test'
+import { startProcess, stopProcess, waitFor } from './processes.mjs'
 
 // node browser-spike/recovery.mjs <web-dist> [evidence directory] [case-name regex]
 // Owns disposable fixture processes, not an existing dashboard. No live services.
 const selected = new RegExp(process.argv[4] || '.')
 const dist = path.resolve(process.argv[2] || 'dist-browser')
 const artifacts = path.resolve(process.argv[3] || (await mkdtemp(path.join(os.tmpdir(), 'hermes-recovery-'))))
-const python = process.env.SPIKE_PYTHON || path.join(os.homedir(), '.hermes/hermes-agent/venv/bin/python')
+const python = process.env.SPIKE_PYTHON
+const backendRoot = process.env.SPIKE_BACKEND_ROOT
+assert.ok(python && path.isAbsolute(python), 'Explicit SPIKE_PYTHON test interpreter required')
+assert.ok(backendRoot && path.isAbsolute(backendRoot), 'Explicit SPIKE_BACKEND_ROOT stock checkout required')
+process.umask(0o077)
 const here = path.dirname(fileURLToPath(import.meta.url))
 await mkdir(artifacts, { recursive: true })
 const browserHome = await mkdtemp(path.join(artifacts, 'chromium-home-'))
@@ -29,6 +33,7 @@ const browser = await chromium.launch({
 })
 
 async function startFixture(cookie = false) {
+  assert.ok(!cleanupPromise, 'Recovery is shutting down')
   const name = cookie ? 'cookie' : 'token'
   let target
   const sockets = new Set()
@@ -84,6 +89,10 @@ async function startFixture(cookie = false) {
     )
     server = https.createServer({ key: await readFile(key), cert: await readFile(cert) }, handler)
   } else server = http.createServer(handler)
+  server.on('connection', socket => {
+    sockets.add(socket)
+    socket.on('close', () => sockets.delete(socket))
+  })
   server.on('upgrade', (request, socket, head) => {
     if (!target) {
       socket.destroy()
@@ -112,35 +121,34 @@ async function startFixture(cookie = false) {
   })
   await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
   const origin = `${cookie ? 'https://recovery.localhost' : 'http://127.0.0.1'}:${server.address().port}`
-  const args = [path.join(here, 'backend.py'), '--web-dist', dist, '--python', python, '--restartable']
+  const args = [path.join(here, 'backend.py'), '--backend-root', backendRoot, '--web-dist', dist, '--python', python, '--restartable']
   if (cookie) args.push('--public-url', origin)
-  const child = spawn(python, args, {
+  const owned = startProcess(python, args, {
     cwd: artifacts,
     env: { PATH: '/usr/bin:/bin', HOME: artifacts, LANG: 'C.UTF-8', PYTHONDONTWRITEBYTECODE: '1' },
-    stdio: ['ignore', 'pipe', 'pipe']
+    logPath: path.join(artifacts, `${name}-fixture.log`), announce: true
   })
-  const log = createWriteStream(path.join(artifacts, `${name}-fixture.log`))
-  child.stdout.pipe(log)
-  child.stderr.pipe(log, { end: false })
-  let output = ''
-  child.stdout.on('data', bytes => {
-    output += bytes
-  })
-  const fixture = { child, server, sockets, cookie, origin }
+  const child = owned.child
+  const fixture = { child, owned, server, sockets, cookie, origin }
   fixtures.push(fixture)
+  await owned.ready
   await expect
     .poll(
       () => {
-        assert.equal(child.exitCode, null, output)
-        return output.match(/^READY (.+)$/m)?.[1]
+        if (owned.failure) throw owned.failure
+        assert.ok(!owned.closed && child.exitCode === null && !child.signalCode, owned.output)
+        return owned.output.match(/^READY (.+)$/m)?.[1]
       },
       { timeout: 100000 }
     )
     .toBeTruthy()
-  const ready = JSON.parse(output.match(/^READY (.+)$/m)[1])
+  const ready = JSON.parse(owned.output.match(/^READY (.+)$/m)[1])
   fixture.runtimePath = path.join(ready.run_dir, 'runtime.json')
   fixture.runtime = JSON.parse(await readFile(fixture.runtimePath, 'utf8'))
   const runtime = fixture.runtime
+  await writeFile(path.join(artifacts, `${name}-runtime.json`), JSON.stringify(runtime, null, 2))
+  assert.equal(runtime.harness_pid, child.pid)
+  assert.equal(runtime.stock.root, await realpath(backendRoot))
   assert.equal(new URL(runtime.url).hostname, '127.0.0.1')
   assert.equal(new URL(runtime.model_url).hostname, '127.0.0.1')
   assert.equal(path.dirname(runtime.run_dir), os.tmpdir())
@@ -195,6 +203,7 @@ const occurrences = (text, original) => text.split(original).length - 1
 const normalize = text => text.replace(/\s+/g, ' ').trim()
 
 async function check(fixture, name, body, { ticket503 = false, shiki503 = false } = {}) {
+  assert.ok(!cleanupPromise, 'Recovery is shutting down')
   if (!selected.test(name)) return
   const context = await browser.newContext({ viewport: { width: 1440, height: 1000 }, ignoreHTTPSErrors: true })
   const frames = [],
@@ -514,6 +523,41 @@ async function check(fixture, name, body, { ticket503 = false, shiki503 = false 
   }
 }
 
+let failure
+let cleanupPromise
+async function cleanup() {
+  return cleanupPromise ||= (async () => {
+    const cleanupResults = []
+    try { await Promise.race([browser.close(), new Promise((_, reject) => {
+      const timer = setTimeout(() => reject(new Error('Browser close timed out')), 10000)
+      timer.unref()
+    })]) } catch (error) { cleanupResults.push({ confirmed: false, error: error.stack }) }
+    for (const fixture of fixtures) {
+      try { cleanupResults.push(await stopProcess(fixture.owned)) }
+      catch (error) { cleanupResults.push({ confirmed: false, error: error.stack }) }
+      let closed = false
+      fixture.server.close(() => { closed = true })
+      for (const socket of fixture.sockets) socket.destroy()
+      fixture.server.closeAllConnections()
+      try { await waitFor(() => closed, 5000, 'recovery proxy shutdown') }
+      catch (error) { cleanupResults.push({ confirmed: false, error: error.stack }) }
+    }
+    const confirmed = cleanupResults.every(result => result.confirmed)
+    await writeFile(path.join(artifacts, 'results.json'), JSON.stringify({
+      dist, backendRoot, results, failure, cleanup: cleanupResults,
+      status: !failure && confirmed && results.length && results.every(result => result.status === 'PASS') ? 'PASS' : 'FAIL'
+    }, null, 2))
+    console.log(`Evidence: ${artifacts}`)
+    if (!confirmed) throw new Error('Recovery cleanup could not be confirmed; inspect results.json')
+  })()
+}
+function interrupted(signal) {
+  failure = `Interrupted by ${signal}`
+  void cleanup().catch(error => console.error(error.message)).finally(() => process.exit(1))
+}
+process.on('SIGINT', interrupted)
+process.on('SIGTERM', interrupted)
+
 try {
   const token = [
     'shiki503',
@@ -687,28 +731,11 @@ try {
     { ticket503: true }
   )
   assert.ok(results.length, 'No recovery cases matched the filter')
+} catch (error) {
+  failure = error.stack
+  throw error
 } finally {
-  await browser.close()
-  for (const fixture of fixtures) {
-    fixture.child.kill('SIGTERM')
-    await new Promise(resolve => {
-      if (fixture.child.exitCode !== null) {
-        resolve()
-        return
-      }
-      const timer = setTimeout(() => {
-        fixture.child.kill('SIGKILL')
-        resolve()
-      }, 20000)
-      fixture.child.once('exit', () => {
-        clearTimeout(timer)
-        resolve()
-      })
-    })
-    for (const socket of fixture.sockets) socket.destroy()
-    fixture.server.closeAllConnections()
-    await new Promise(resolve => fixture.server.close(resolve))
-  }
-  await writeFile(path.join(artifacts, 'results.json'), JSON.stringify({ dist, results }, null, 2))
-  console.log(`Evidence: ${artifacts}`)
+  await cleanup()
+  process.off('SIGINT', interrupted)
+  process.off('SIGTERM', interrupted)
 }

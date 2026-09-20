@@ -39,7 +39,7 @@ for (const [i, profile] of profiles.entries()) {
   }))
 }
 const browser = await chromium.launch({
-  executablePath: '/usr/bin/google-chrome', headless: true,
+  executablePath: process.env.CHROME_PATH || '/usr/bin/google-chrome', headless: true,
   env: { PATH: '/usr/bin:/bin', HOME: artifacts, LANG: 'C.UTF-8', TZ: 'UTC' }
 })
 const results = []
