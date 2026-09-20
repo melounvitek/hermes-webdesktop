@@ -210,19 +210,23 @@ function sessionRow(page, marker) {
 }
 
 async function openPalette(page) {
-  await page.getByRole('contentinfo').click({ button: 'right' })
-  await page.getByRole('menuitem', { name: 'Command palette', exact: true }).click()
   const palette = page.getByRole('dialog', { name: 'Command palette', exact: true })
+  // Toggle actions can keep it open. The shortcut works on both layouts;
+  // the newer status-bar context menu only configures visibility.
+  if (!(await palette.isVisible())) await page.keyboard.press('Control+k')
   await expect(palette.getByRole('combobox')).toBeVisible()
+  // Keyboard-first lists ignore pointers until mouse movement. Enter through
+  // the input before Playwright checks option hit targets for its clicks.
+  await palette.getByRole('combobox').hover()
   return palette
 }
 
 async function openSettingsSection(page, section, subpage) {
   await page.getByRole('button', { name: 'Open settings', exact: true }).click()
-  await page.getByRole('button', { name: section, exact: true }).click()
+  await page.getByRole('complementary').getByRole('button', { name: section, exact: true }).click()
   // Upstream splits some settings into subpages; do not encode route URLs.
   if (subpage) {
-    const button = page.getByRole('button', { name: subpage, exact: true })
+    const button = page.getByRole('complementary').getByRole('button', { name: subpage, exact: true })
     if (await button.isVisible()) await button.click()
   }
 }
@@ -266,6 +270,8 @@ async function pick(page, files, images = false) {
 
 async function dropFiles(page, files) {
   const input = page.getByRole('textbox', { name: 'Message', exact: true })
+  // DOM dispatch alone skips the pointer entry that selects the receiving pane.
+  await input.hover()
   // Browser DataTransfer carries real Files, not fabricated server paths.
   // This exercises DOM drag handlers, not OS file-manager drag integration.
   await input.evaluate(
@@ -321,7 +327,7 @@ try {
     const baseline = await geometry(page, 90)
     const measurements = [{ percent: 90, ...baseline }]
     for (const percent of [100, 125]) {
-      await openSettingsSection(page, 'Appearance', 'Layout')
+      await openSettingsSection(page, 'Appearance', 'Typography')
       await page.getByRole('button', { name: `${percent}%`, exact: true }).click()
       await page.getByRole('button', { name: 'Close settings', exact: true }).click()
       const measured = await geometry(page, percent)
@@ -465,10 +471,25 @@ try {
       const profile = profiles[index % 2]
       await selectProfile(page, profile)
       const seed = profile === profiles[0] ? 'picker' : 'drop'
-      // Open a saved sidebar session into MAIN, not its fresh-draft tile.
+      // Cached transcript paint can precede resume. Existing-session attachment
+      // checks need the live recipient, not a still-hydrating draft.
+      const resumeStart = frames.length
       await sessionRow(page, `usability-${seed}-`).click()
+      await expect
+        .poll(
+          () => {
+            const request = requestFrames(resumeStart).find(f => f.method === 'session.resume' && f.profile === profile)
+            if (!request) return null
+            return frames.find(
+              f => f.direction === 'received' && f.socket === request.socket && f.id === request.id
+            )?.result?.session_id
+          },
+          { timeout: 60000 }
+        )
+        .toBeTruthy()
       const main = page.locator('[data-session-anchor="workspace"]')
       await expect(main.getByRole('button', { name: 'Edit message', exact: true }).first()).toBeVisible()
+      await expect(main.getByRole('textbox', { name: 'Message', exact: true })).toBeEditable()
       const marker = `existing-${method}-${Date.now()}`
       const text = Buffer.from(`${marker}: eager file bytes\n`)
       const files = [
@@ -756,7 +777,11 @@ try {
         await dialog.getByRole('button', { name: 'Add folder', exact: true }).click()
         const picker = page.getByRole('dialog', { name: 'Choose remote folder', exact: true })
         await expect(picker).toBeVisible()
-        await picker.getByRole('button', { name: 'workspace', exact: true }).click()
+        // Start from a known breadcrumb, not an assumed profile working directory.
+        await picker.getByRole('button', { name: '/', exact: true }).click()
+        for (const part of workspace.split(path.sep).filter(Boolean)) {
+          await picker.getByRole('button', { name: part, exact: true }).click()
+        }
         await picker.getByRole('button', { name: 'Select folder', exact: true }).click()
         await expect(dialog).toContainText(workspace)
         const created = frames.length
@@ -775,11 +800,14 @@ try {
         await page.reload()
         await selectProfile(page, profile)
         const showProjects = page.getByRole('button', { name: 'Show projects', exact: true })
-        if (await showProjects.isVisible()) await showProjects.click()
-        await page
+        const projectRow = page
+          .locator('[data-tree-group="grp-sessions"]')
           .getByRole('button', { name: new RegExp(projectName) })
           .first()
-          .click()
+        // The status-bar project button opens a menu, not the sidebar project.
+        await expect(showProjects.or(projectRow).first()).toBeVisible()
+        if (await showProjects.isVisible()) await showProjects.click()
+        await projectRow.click()
         const tree = page.getByRole('complementary', { name: 'Right sidebar', exact: true })
         if (!(await tree.isVisible())) {
           await page.getByRole('button', { name: 'Show right sidebar', exact: true }).click()
@@ -789,7 +817,10 @@ try {
           const row = tree.getByText(file.name, { exact: true })
           await expect(row).toBeVisible()
           await row.dblclick()
-          await expect(page.getByRole('tab', { name: new RegExp(file.name) })).toBeVisible()
+          const tab = page.getByRole('tab', { name: new RegExp(file.name) })
+          await expect(tab).toBeVisible()
+          const preview = page.locator('[data-tree-group]').filter({ has: tab })
+          await expect(preview).toBeVisible()
           if (index === 0) {
             const content = page.getByText(file.bytes.toString().trim(), { exact: true })
             await expect(content).toBeVisible()
@@ -801,11 +832,8 @@ try {
             await expect(page.getByText('This looks like a binary file', { exact: true })).toBeVisible()
           }
           await expect(page.getByRole('button', { name: /^(Edit|Save|Overwrite)$/ })).toHaveCount(0)
-          assert.equal(
-            await page.getByRole('textbox').count(),
-            await page.getByRole('textbox', { name: 'Message', exact: true }).count(),
-            'Only chat composers, not file editors, may be editable'
-          )
+          // Sidebar search is editable; the file preview must not be.
+          await expect(preview.getByRole('textbox')).toHaveCount(0)
           await row.click({ button: 'right' })
           await expect(
             page.getByRole('menuitem', {
@@ -850,9 +878,9 @@ try {
       await themes.fill('')
       await page.getByRole('button', { name: 'Close settings', exact: true }).click()
       for (const section of ['Advanced', 'Sessions', 'About']) {
-        await openSettingsSection(page, section)
+        await openSettingsSection(page, section === 'Sessions' ? /^(Sessions|Archived Chats)$/ : section)
         // Negative assertions only count after the real section has loaded.
-        if (section === 'Advanced') await expect(page.getByText(/^Changes on this page apply to/)).toBeVisible()
+        if (section === 'Advanced') await expect(page.getByText('Applies to', { exact: true })).toBeVisible()
         if (section === 'Sessions') await expect(page.getByText('Archived sessions', { exact: true })).toBeVisible()
         if (section === 'About')
           await expect(page.getByRole('link', { name: 'Release notes', exact: true })).toBeVisible()
@@ -865,15 +893,6 @@ try {
           })
         ).toHaveCount(0)
         await expect(page.getByRole('link', { name: /^(Get the installer|Install Hermes locally)$/ })).toHaveCount(0)
-        if (section === 'About') {
-          const link = page.getByRole('link', { name: 'Release notes', exact: true })
-          await expect(link).toBeVisible()
-          await link.click({ button: 'right' })
-          await expect(page.getByRole('menuitem', { name: 'Open in external browser', exact: true })).toBeVisible()
-          await expect(page.getByRole('menuitem', { name: /Open in in-app browser|Inspect element/ })).toHaveCount(0)
-          await page.keyboard.press('Escape')
-          await page.screenshot({ path: path.join(artifacts, 'native-boundary-about.png') })
-        }
         await page.getByRole('button', { name: 'Close settings', exact: true }).click()
       }
       const palette = await openPalette(page)
@@ -899,6 +918,20 @@ try {
         reloadPalette.getByRole('option', { name: /^Reload window/ }).click()
       ])
       await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible({ timeout: 60000 })
+    },
+    { boundary: true }
+  )
+  await check(
+    'native-link-context-menu',
+    async page => {
+      await openSettingsSection(page, 'About')
+      const link = page.getByRole('link', { name: 'Release notes', exact: true })
+      await expect(link).toBeVisible()
+      await link.click({ button: 'right' })
+      await expect(page.getByRole('menuitem', { name: 'Open in external browser', exact: true })).toBeVisible()
+      await expect(page.getByRole('menuitem', { name: /Open in in-app browser|Inspect element/ })).toHaveCount(0)
+      await page.keyboard.press('Escape')
+      await page.screenshot({ path: path.join(artifacts, 'native-boundary-about.png') })
     },
     { boundary: true }
   )
