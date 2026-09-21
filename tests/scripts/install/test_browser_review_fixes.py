@@ -1,5 +1,6 @@
 """Review regressions using only owned PTYs, HTTPS and disposable fake Hermes."""
 
+import argparse
 import importlib.util
 import json
 import os
@@ -269,3 +270,69 @@ def test_update_help_names_asset_only_scope(installed):
     result = command(installed, "update", "--help")
     assert result.returncode == 0
     assert "assets" in result.stdout and "controller" in result.stdout
+
+
+@pytest.mark.parametrize("interloper", ["engine", "history"])
+def test_uninstall_serializes_controller_cleanup(
+    installed, release, monkeypatch, interloper
+):
+    d = installed
+    spec = importlib.util.spec_from_file_location(
+        "cleanup_install", SCRIPTS / "browser_install.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setattr(module, "confirm", lambda preview: True)
+    root = d["base"] / "installation"
+    controls = snapshot(d["base"] / "control")
+    command_bytes = d["command"].read_bytes()
+    owner = json.loads((d["base"] / "control/owner.json").read_bytes())
+    cleanup = module.remove_controller
+    maintenance = module.E.maintenance
+    interleaved = []
+
+    def concurrent_engine(base, command_path, *args):
+        # A separate open file description models another current-engine command;
+        # unlike the friendly CLI it does not participate in command.lock.
+        try:
+            with module.E.stopped_control(root):
+                pass
+        except ValueError:
+            return cleanup(base, command_path, *args)
+        selection = {**owner["selection"], "profile": "beta"}
+        module.E.install_or_inspect(
+            argparse.Namespace(
+                command="install",
+                install_root=str(root),
+                archive=str(release["archive"]),
+                sha256=module.E.digest(release["archive"].read_bytes()),
+                launcher=str(SCRIPTS / "hermes-browser.py"),
+                **selection,
+            ),
+            confirm=lambda preview: True,
+            validate=module.preflight,
+        )
+        with module.E.stopped_control(root):
+            interleaved.append(module.E.installed(root)[0]["selection"])
+            cleanup(base, command_path, *args)
+
+    def history_after_uninstall(*args, **kwargs):
+        maintenance(*args, **kwargs)
+        history = root.with_name(root.name + ".history")
+        history.mkdir()
+        (history / "foreign").write_text("Do not remove")
+
+    if interloper == "engine":
+        monkeypatch.setattr(module, "remove_controller", concurrent_engine)
+        module.manage(argparse.Namespace(command="uninstall"))
+        assert not interleaved, "Controller cleanup allowed an intervening engine owner"
+        assert not root.exists() and not d["command"].exists()
+    else:
+        monkeypatch.setattr(module.E, "maintenance", history_after_uninstall)
+        with pytest.raises(ValueError, match="Installation/history appeared"):
+            module.manage(argparse.Namespace(command="uninstall"))
+        assert snapshot(d["base"] / "control") == controls
+        assert d["command"].read_bytes() == command_bytes
+        assert (
+            root.with_name(root.name + ".history") / "foreign"
+        ).read_text() == "Do not remove"

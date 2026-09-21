@@ -401,18 +401,7 @@ def manage(args):
                 ):
                     print("Cancelled; controller preserved.")
                     return 0
-                locations()
-                namespace(base)
-                E.require(
-                    not os.path.lexists(root)
-                    and not os.path.lexists(base / "installation.history"),
-                    "Installation/history appeared during confirmation",
-                )
-                E.require(
-                    owned_control(base, command)[0] == owner,
-                    "Controller changed during confirmation",
-                )
-                remove_controller(base, command)
+                remove_controller(base, command, owner)
             return 0
         receipt, manifest = E.installed(root)
         E.require(
@@ -469,13 +458,28 @@ def manage(args):
             )
             args.to, (_, target) = next(iter(choices.items()))
         E.maintenance(args, confirm=confirmation, validate=preflight)
-        if args.command == "uninstall" and not root.exists():
-            remove_controller(base, command)
+        if args.command == "uninstall" and not os.path.lexists(root):
+            # The offline engine does not participate in command.lock. Reacquire
+            # its stable lock and recheck absence before removing the controller.
+            with E.stopped_control(root):
+                remove_controller(base, command, owner)
     return 0
 
 
-def remove_controller(base, command):
-    owned_control(base, command)
+def remove_controller(base, command, owner):
+    # Both callers hold command.lock and installation.run through these unlinks.
+    locations()
+    namespace(base)
+    E.safe_destination(base / "installation", owner["selection"])
+    E.require(
+        not os.path.lexists(base / "installation")
+        and not os.path.lexists(base / "installation.history"),
+        "Installation/history appeared before controller cleanup; inspect and retry",
+    )
+    E.require(
+        owned_control(base, command)[0] == owner,
+        "Controller changed during confirmation",
+    )
     if command.exists():
         command.unlink()
         E.sync_directory(command.parent)
