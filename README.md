@@ -12,11 +12,13 @@ t=$(mktemp) && (trap 'rm -f "$t"' EXIT; status=$(curl -q --fail --silent --show-
 
 Run `hermes-browser start`, then open **http://127.0.0.1:9119/**. Press Ctrl-C to stop.
 
-## Using Cloudflare Tunnel
+## Remote access
 
-You can point Cloudflare Tunnel at `http://127.0.0.1:<port>`, where the browser launcher runs Hermes. No separate `hermes serve` is needed.
+**Tailscale Serve is the recommended option:** it keeps access within your tailnet rather than exposing Hermes publicly. Use Serve, not Funnel.
 
-**Set up authentication before exposing it.** HTTPS encrypts traffic; it doesn’t restrict who can use your agent.
+Cloudflare Tunnel is an alternative if you need a public URL. Both can forward to `http://127.0.0.1:9119`; no separate `hermes serve` is needed.
+
+We recommend a Hermes password with either option. Don’t expose a public endpoint without authentication.
 
 In your Hermes profile’s `config.yaml`, merge these settings into the existing `dashboard` section:
 
@@ -29,7 +31,7 @@ dashboard:
     secret: "<generated secret>"
 ```
 
-Use your actual Cloudflare hostname. Generate the hash and secret from your Hermes installation directory, with its Python environment activated:
+Use your actual Tailscale or Cloudflare HTTPS URL. Generate the hash and secret from your Hermes installation directory, with its Python environment activated:
 
 ```bash
 python -c 'from getpass import getpass; from plugins.dashboard_auth.basic import hash_password; print(hash_password(getpass("Password: ")))'
