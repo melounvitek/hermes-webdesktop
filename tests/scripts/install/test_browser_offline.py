@@ -545,7 +545,7 @@ for flag in ('isolated', 'skip-build', 'no-open'):
 a, unknown = p.parse_known_args()
 home = root if a.p == 'default' else root/'profiles'/a.p
 record = root/('launch-' + str(a.port) + '.json')
-record.with_suffix('.tmp').write_text(json.dumps({'argv': vars(a), 'env': dict(os.environ), 'pid': os.getpid(), 'home': str(home)}))
+record.with_suffix('.tmp').write_text(json.dumps({'argv': vars(a), 'env': dict(os.environ), 'pid': os.getpid(), 'home': str(home), 'cwd': os.getcwd(), 'module': __file__}))
 record.with_suffix('.tmp').replace(record)
 while not (root/('release-' + str(a.port))).exists():
     time.sleep(.01)
@@ -644,7 +644,7 @@ def kill_fixture(fd):
 def controllers(tmp_path):
     children = []
 
-    def start(release, mode="normal", env=None, port=None):
+    def start(release, mode="normal", env=None, port=None, cwd=None):
         (release["home"] / "mode").write_text(mode)
         if port is None:
             with socket.socket() as probe:
@@ -669,6 +669,7 @@ def controllers(tmp_path):
             stdout=stdout,
             stderr=stderr,
             env=env,
+            cwd=cwd,
         )
         entry = [child, stdout, stderr, None]
         children.append(entry)
@@ -680,7 +681,9 @@ def controllers(tmp_path):
             try:
                 # Pin while the fixture waits for our handshake, then establish
                 # identity. Never acquire kill authority from a stale PID alone.
-                assert os.readlink(f"/proc/{pid}/cwd") == str(release["backend"])
+                assert json.loads(marker.read_text())["module"] == str(
+                    release["backend"] / "hermes_cli/main.py"
+                )
                 proc_stat = (
                     Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
                 )
@@ -710,6 +713,34 @@ def controllers(tmp_path):
                 child.wait()
         stdout.close()
         stderr.close()
+
+
+@pytest.mark.parametrize("workspace", ["home", "project with spaces"])
+def test_start_uses_caller_workspace_without_importing_from_it(
+    dashboard, controllers, tmp_path, workspace
+):
+    cwd = tmp_path / workspace
+    cwd.mkdir()
+    # Neither the entry point nor later dependency imports may come from the
+    # workspace. The selected backend is a namespace package in this fixture.
+    (cwd / "hermes_cli").mkdir()
+    (cwd / "hermes_cli/__init__.py").write_text(
+        "raise RuntimeError('workspace entry point imported')\n"
+    )
+    (cwd / "http.py").write_text(
+        "raise RuntimeError('workspace dependency imported')\n"
+    )
+    env = dict(os.environ)
+    env.pop("TERMINAL_CWD", None)
+    if workspace != "home":
+        env["TERMINAL_CWD"] = str(tmp_path / "configured")
+    process, port = controllers(dashboard, cwd=cwd, env=env)
+    wait_for(lambda: state_is(dashboard, "ready"))
+    launch = json.loads((dashboard["home"] / "launch.json").read_text())
+    assert launch["cwd"] == str(cwd)
+    assert launch["env"].get("TERMINAL_CWD") == env.get("TERMINAL_CWD")
+    assert lifecycle(dashboard, "stop").returncode == 0
+    assert process.wait(timeout=10) == 0
 
 
 def test_foreground_start_status_stop_and_changed_disk(dashboard, controllers):

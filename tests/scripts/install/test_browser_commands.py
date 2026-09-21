@@ -233,6 +233,7 @@ def test_current_controller_runs_restored_launcher_and_stop_survives_changed_ui(
         process = subprocess.Popen(
             [str(d["command"]), "start", "--port", str(port)],
             env=d["env"],
+            cwd=d["home"],
             stdout=out,
             stderr=err,
         )
@@ -242,7 +243,7 @@ def test_current_controller_runs_restored_launcher_and_stop_survives_changed_ui(
             assert launch.exists(), stderr.read_text()
             pid = json.loads(launch.read_text())["pid"]
             pidfd = pidfd_open(pid)
-            assert os.readlink(f"/proc/{pid}/cwd") == str(backend)
+            assert os.readlink(f"/proc/{pid}/cwd") == str(d["home"])
             assert (
                 int(Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[1])
                 == process.pid

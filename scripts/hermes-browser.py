@@ -890,7 +890,11 @@ def run_foreground(args, root, stream, record, receipt, manifest, runtime):
         # Match the stock console entry point. `-m hermes_cli.main` also loads
         # it as __main__; sibling imports then execute profile selection twice.
         "-c",
+        # Pin imports to the selected backend before switching to the caller's
+        # workspace; Python's default empty sys.path entry would follow chdir.
+        "import os, sys; sys.path[0] = os.getcwd(); os.chdir(sys.argv.pop(1)); "
         "from hermes_cli.main import main; main()",
+        os.getcwd(),
         "-p",
         selection["profile"],
         "dashboard",
