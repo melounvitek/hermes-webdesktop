@@ -959,7 +959,9 @@ def test_concurrent_state_publication_is_initialized_and_locked(
 ):
     from concurrent.futures import ThreadPoolExecutor
 
-    root = dashboard["dest"]
+    # Installation now creates its own control file. Exercise publication in a
+    # fresh namespace, rather than opening that existing, unlocked inode.
+    root = dashboard["dest"].with_name("unpublished")
     with ThreadPoolExecutor(max_workers=2) as pool:
         streams = list(
             pool.map(lambda _: installer_module.open_control(root, True), range(2))

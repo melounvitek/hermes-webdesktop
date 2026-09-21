@@ -21,9 +21,21 @@ write profile state and contact configured services. Stop interrupts the owned
 child gracefully; no draining, force-kill or descendant cleanup is promised.
 After a controller crash ownership is unknown; automatic recovery is refused.
 Reference-file matches do not certify dependencies or running backend identity.
+
+Update/rollback/uninstall require stopped, known ownership and confirmation. They
+never stop or start Hermes. Previous complete installations are retained in the
+sibling .history directory; the sibling .run lock survives uninstall. Update may
+accept a separately trusted --launcher paired with its archive; it is copied,
+not executed. Rollback --to takes a full retained archive SHA-256 (listed by
+inspect). Keep using this current trusted tool after rollback: older launchers
+cannot coordinate with maintenance and are fenced from starting. Concurrent
+legacy installer commands are unsupported. Interrupted cleanup can leave private
+staging directories or partial removal; inspect manually, never delete unknown
+remnants automatically. Runtime, data and pre-existing plugins are not removed.
 """
 
 import argparse
+from contextlib import contextmanager
 import ctypes
 import fcntl
 import gzip
@@ -54,6 +66,8 @@ MAX_FILE = 128 * 1024 * 1024
 MAX_FILES = 10000
 MAX_JSON = 8 * 1024 * 1024
 OWNER = "hermes-browser-offline-v1"
+CONTROL_OWNER = "hermes-browser-control-v2"
+HISTORY_OWNER = "hermes-browser-history-v1"
 SELECTION = ("python", "backend_root", "hermes_root", "profile")
 
 
@@ -201,11 +215,15 @@ def validate_manifest(value, packed=True):
     return value
 
 
-def tree_files(root):
+def tree_files(root, strict_dirs=False):
     no_links(root)
     require(root.is_dir(), f"Missing directory: {root}")
     files = set()
+    directories = set()
     for parent, dirs, names in os.walk(root, followlinks=False):
+        directories.update(
+            (Path(parent) / name).relative_to(root).as_posix() for name in dirs
+        )
         for name in dirs + names:
             path = Path(parent) / name
             require(not path.is_symlink(), f"Symlink refused: {path}")
@@ -214,6 +232,14 @@ def tree_files(root):
             require(stat.S_ISREG(path.lstat().st_mode), f"Special file refused: {path}")
             files.add(path.relative_to(root).as_posix())
         require(len(files) <= MAX_FILES + 4, "Too many files")
+    if strict_dirs:
+        expected = {
+            str(parent)
+            for name in files
+            for parent in PurePosixPath(name).parents
+            if str(parent) != "."
+        }
+        require(directories == expected, "Foreign installation directories")
     return files
 
 
@@ -268,7 +294,7 @@ def pack(args):
                     "Expanded archive exceeds size limit",
                 )
         sha = digest(read_regular(staged, MAX_ARCHIVE))
-        publish_new(staged, output)
+        atomic_rename(staged, output)
     print(
         json.dumps(
             {
@@ -281,7 +307,7 @@ def pack(args):
     )
 
 
-def archive_payload(path, expected):
+def archive_payload(path, expected, launcher):
     hex_value(expected)
     raw = read_regular(absolute_path(path), MAX_ARCHIVE)
     require(digest(raw) == expected, "Archive SHA-256 mismatch")
@@ -319,7 +345,7 @@ def archive_payload(path, expected):
             f"Archive file mismatch: {name}",
         )
     require(
-        manifest["launcher_sha256"] == digest(read_regular(Path(__file__))),
+        manifest["launcher_sha256"] == digest(launcher),
         "Archive requires a different trusted launcher",
     )
     return manifest, payload
@@ -424,12 +450,18 @@ def safe_destination(root, selection):
         protected.append(python.parent.parent)
     if os.environ.get("XDG_DATA_HOME"):
         protected.append(absolute_path(os.environ["XDG_DATA_HOME"]) / "hermes-browser")
-    for other in protected:
-        other = other.resolve()
-        require(
-            not (root.is_relative_to(other) or other.is_relative_to(root)),
-            f"Install destination overlaps protected path: {other}",
-        )
+    for owned in (
+        root,
+        root.with_name(root.name + ".run"),
+        root.with_name(root.name + ".history"),
+    ):
+        no_links(owned)
+        for other in protected:
+            other = other.resolve()
+            require(
+                not (owned.is_relative_to(other) or other.is_relative_to(owned)),
+                f"Browser namespace overlaps protected path: {other}",
+            )
 
 
 def installed(root):
@@ -453,7 +485,10 @@ def installed(root):
         prefix + "manifest.json",
         *(prefix + "web/" + name for name in manifest["files"]),
     }
-    require(tree_files(root) == expected, "Foreign/incomplete installation files")
+    require(
+        tree_files(root, strict_dirs=True) == expected,
+        "Foreign/incomplete installation files",
+    )
     require(
         digest(read_regular(root / "hermes-browser.py")) == manifest["launcher_sha256"],
         "Installed launcher modified",
@@ -464,9 +499,9 @@ def installed(root):
     return receipt, manifest
 
 
-def publish_new(stage, root):
-    # Linux RENAME_NOREPLACE closes the check/rename race even for an empty foreign
-    # directory. Ordinary os.rename would silently replace that directory.
+def atomic_rename(stage, root, exchange=False):
+    # Linux NOREPLACE refuses even empty foreign destinations. EXCHANGE switches
+    # two complete installations without an absent-root or mixed-file window.
     libc = ctypes.CDLL(None, use_errno=True)
     rename = libc.renameat2
     rename.argtypes = [
@@ -477,7 +512,10 @@ def publish_new(stage, root):
         ctypes.c_uint,
     ]
     rename.restype = ctypes.c_int
-    if rename(-100, os.fsencode(stage), -100, os.fsencode(root), 1) != 0:
+    if (
+        rename(-100, os.fsencode(stage), -100, os.fsencode(root), 2 if exchange else 1)
+        != 0
+    ):
         error = ctypes.get_errno()
         raise OSError(error, os.strerror(error), str(root))
 
@@ -487,7 +525,10 @@ def install_or_inspect(args):
     if not args.archive:
         require(
             args.command == "inspect"
-            and all(getattr(args, name) is None for name in (*SELECTION, "sha256")),
+            and all(
+                getattr(args, name) is None
+                for name in (*SELECTION, "sha256", "launcher")
+            ),
             "Supply archive and all selection options",
         )
         receipt, manifest = installed(root)
@@ -498,6 +539,10 @@ def install_or_inspect(args):
                     "installation": str(root),
                     "release": manifest["release"],
                     "runtime": inspect_runtime(receipt["selection"], manifest),
+                    "retained_versions": {
+                        sha: item[1]["release"]
+                        for sha, item in retained(root, receipt["selection"]).items()
+                    },
                 },
                 indent=2,
             )
@@ -512,26 +557,18 @@ def install_or_inspect(args):
     for name in SELECTION[:-1]:
         selection[name] = str(absolute_path(selection[name]))
     safe_destination(root, selection)
-    manifest, payload = archive_payload(args.archive, args.sha256)
+    launcher = read_regular(
+        absolute_path(args.launcher) if args.launcher else Path(__file__)
+    )
+    manifest, payload = archive_payload(args.archive, args.sha256, launcher)
     runtime = inspect_runtime(selection, manifest)
-    receipt = {
-        "owner": OWNER,
-        "archive_sha256": args.sha256,
-        "manifest_sha256": digest(payload["manifest.json"]),
-        "selection": selection,
-    }
-    prefix = "versions/" + args.sha256 + "/"
-    files = {
-        "installation.json": json_bytes(receipt),
-        "hermes-browser.py": read_regular(Path(__file__)),
-        **{prefix + name: data for name, data in payload.items()},
-    }
+    receipt, files = installation_files(args.sha256, selection, payload, launcher)
     exists = root.exists()
     if exists:
         previous, _ = installed(root)
         require(
             previous == receipt,
-            "Different release or runtime/profile selection; maintenance is not supported yet",
+            "Different release or runtime/profile selection; use explicit stopped-only maintenance",
         )
     print(
         json.dumps(
@@ -562,28 +599,30 @@ def install_or_inspect(args):
     if answer.strip() != "yes":
         print("Cancelled; no installation writes.")
         return
-    safe_destination(root, selection)
-    require(
-        not os.path.lexists(root),
-        "Destination appeared during confirmation; inspect again",
-    )
-    require(
-        inspect_runtime(selection, manifest) == runtime,
-        "Runtime changed during confirmation; inspect again",
-    )
-    stage = Path(tempfile.mkdtemp(prefix=".hermes-browser-stage-", dir=root.parent))
-    try:
-        for name, data in files.items():
-            path = stage / name
-            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            with path.open("xb") as stream:
-                stream.write(data)
-            path.chmod(0o600)
-        installed(stage)
-        publish_new(stage, root)
-    finally:
-        if stage.exists():
-            shutil.rmtree(stage)
+    with stopped_control(root) as control:
+        safe_destination(root, selection)
+        require(
+            not os.path.lexists(root),
+            "Destination appeared during confirmation; inspect again",
+        )
+        require(
+            inspect_runtime(selection, manifest) == runtime,
+            "Runtime changed during confirmation; inspect again",
+        )
+        # A leftover history from interrupted removal must not be silently adopted.
+        require(
+            not os.path.lexists(root.with_name(root.name + ".history")),
+            "Existing history requires manual inspection before reinstall",
+        )
+        fence_control(*control)
+        stage = Path(tempfile.mkdtemp(prefix=".hermes-browser-stage-", dir=root.parent))
+        try:
+            write_installation(stage, files)
+            atomic_rename(stage, root)
+            sync_directory(root.parent)
+        finally:
+            if stage.exists():
+                shutil.rmtree(stage)
     print(f"Installed at {root}. Nothing started.")
 
 
@@ -625,7 +664,7 @@ def read_control(stream, root):
     record = load_json(stream.read(MAX_JSON + 1))
     keys(record, "owner installation state generation pid")
     require(
-        record["owner"] == OWNER
+        record["owner"] in (OWNER, CONTROL_OWNER)
         and record["installation"] == str(root)
         and record["state"] in ("stopped", "unknown"),
         "Foreign lifecycle state",
@@ -644,7 +683,7 @@ def read_control(stream, root):
     return record
 
 
-def open_control(root, create):
+def open_control(root, create, owner=CONTROL_OWNER):
     path = root.with_name(root.name + ".run")
     try:
         return os.fdopen(
@@ -665,7 +704,7 @@ def open_control(root, create):
             write_control(
                 stream,
                 {
-                    "owner": OWNER,
+                    "owner": owner,
                     "installation": str(root),
                     "state": "stopped",
                     "generation": None,
@@ -673,7 +712,8 @@ def open_control(root, create):
                 },
             )
             fcntl.flock(stream, fcntl.LOCK_EX)
-            publish_new(staged, path)
+            atomic_rename(staged, path)
+            sync_directory(root.parent)
             return stream
         except FileExistsError:
             stream.close()
@@ -823,10 +863,6 @@ def run_foreground(args, root, stream, record, receipt, manifest, runtime):
     require(
         runtime["compatibility"] == "reference-match",
         "Untested backend references; startup unsupported",
-    )
-    require(
-        digest(read_regular(Path(__file__))) == manifest["launcher_sha256"],
-        "Start requires the installed release's trusted launcher",
     )
     startup_configuration(selection, runtime)
     asset = next(
@@ -1002,6 +1038,301 @@ def run_foreground(args, root, stream, record, receipt, manifest, runtime):
     return 1 if failed else 0
 
 
+def acquire_control(stream):
+    meta = os.fstat(stream.fileno())
+    require(
+        stat.S_ISREG(meta.st_mode)
+        and meta.st_uid == os.getuid()
+        and meta.st_nlink == 1
+        and meta.st_mode & 0o777 == 0o600,
+        "Unsafe lifecycle state file",
+    )
+    try:
+        fcntl.flock(stream, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except BlockingIOError:
+        return False
+
+
+def fence_control(stream, record):
+    require(
+        record["state"] == "stopped",
+        "Ownership unknown after controller loss; automatic recovery refused",
+    )
+    if record["owner"] != CONTROL_OWNER:
+        # Same inode, upgraded under its lock. Legacy start validates the old
+        # owner after locking, so it cannot launch a pre-maintenance selection.
+        record["owner"] = CONTROL_OWNER
+        write_control(stream, record)
+
+
+@contextmanager
+def stopped_control(root):
+    # A declined/invalid operation must leave legacy startup usable. Install and
+    # maintenance fence this same inode only after confirmation and revalidation.
+    with open_control(root, True, owner=OWNER) as stream:
+        require(
+            acquire_control(stream),
+            "Controller or maintenance is active; refusing mutation",
+        )
+        record = read_control(stream, root)
+        require(record["state"] == "stopped", "Ownership unknown; refusing mutation")
+        yield stream, record
+
+
+def installation_files(sha, selection, payload, launcher):
+    receipt = {
+        "owner": OWNER,
+        "archive_sha256": sha,
+        "manifest_sha256": digest(payload["manifest.json"]),
+        "selection": selection,
+    }
+    prefix = "versions/" + sha + "/"
+    return receipt, {
+        "installation.json": json_bytes(receipt),
+        "hermes-browser.py": launcher,
+        **{prefix + name: data for name, data in payload.items()},
+    }
+
+
+def sync_directory(path):
+    fd = os.open(path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+
+
+def sync_installation(root):
+    for name in tree_files(root, strict_dirs=True):
+        with (root / name).open("rb") as stream:
+            os.fsync(stream.fileno())
+    for path in sorted(
+        (p for p in root.rglob("*") if p.is_dir()),
+        key=lambda p: len(p.parts),
+        reverse=True,
+    ):
+        sync_directory(path)
+    sync_directory(root)
+
+
+def write_installation(root, files):
+    root.mkdir(mode=0o700, exist_ok=True)
+    for name, data in files.items():
+        path = root / name
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        with path.open("xb") as stream:
+            stream.write(data)
+        path.chmod(0o600)
+    installed(root)
+    sync_installation(root)
+
+
+def retained(root, selection):
+    history = root.with_name(root.name + ".history")
+    no_links(history)
+    if not os.path.lexists(history):
+        return {}
+    require(history.is_dir(), "Foreign history path")
+    marker = load_json(read_regular(history / "owner.json", MAX_JSON))
+    require(
+        marker == {"owner": HISTORY_OWNER, "installation": str(root)},
+        "Foreign history owner",
+    )
+    entries = {}
+    for path in history.iterdir():
+        if path.name == "owner.json":
+            continue
+        sha = hex_value(path.name)
+        receipt, manifest = installed(path)
+        require(
+            receipt["archive_sha256"] == sha and receipt["selection"] == selection,
+            "Foreign history selection",
+        )
+        entries[sha] = receipt, manifest
+    return entries
+
+
+def retain_current(root, receipt):
+    history = root.with_name(root.name + ".history")
+    entries = retained(root, receipt["selection"])
+    sha = receipt["archive_sha256"]
+    if sha in entries:
+        require(entries[sha][0] == receipt, "Retained installation differs")
+        return
+    if not history.exists():
+        with tempfile.TemporaryDirectory(
+            prefix=".hermes-browser-history-", dir=root.parent
+        ) as temp:
+            staged = Path(temp) / "history"
+            staged.mkdir(mode=0o700)
+            marker = staged / "owner.json"
+            with marker.open("xb") as stream:
+                stream.write(
+                    json_bytes({"owner": HISTORY_OWNER, "installation": str(root)})
+                )
+                stream.flush()
+                os.fsync(stream.fileno())
+            sync_directory(staged)
+            atomic_rename(staged, history)
+            sync_directory(root.parent)
+    with tempfile.TemporaryDirectory(
+        prefix=".hermes-browser-retain-", dir=root.parent
+    ) as temp:
+        staged = Path(temp) / "installation"
+        shutil.copytree(root, staged, symlinks=True)
+        require(installed(staged)[0] == receipt, "Installation changed while retaining")
+        sync_installation(staged)
+        atomic_rename(staged, history / sha)
+        sync_directory(history)
+
+
+def remove_installation(root):
+    installed(root)
+    files = tree_files(root, strict_dirs=True)
+    directories = {
+        root / parent
+        for name in files
+        for parent in PurePosixPath(name).parents
+        if str(parent) != "."
+    }
+    # Delete only validated inventory, not a recursive namespace. A concurrent
+    # foreign addition makes rmdir fail, preserving the foreign entry.
+    for name in sorted(files):
+        (root / name).unlink()
+    for path in sorted(directories, key=lambda p: len(p.parts), reverse=True):
+        path.rmdir()
+    root.rmdir()
+    sync_directory(root.parent)
+
+
+def maintenance(args):
+    root = absolute_path(args.install_root)
+    initial, _ = installed(root)
+    safe_destination(root, initial["selection"])
+    with stopped_control(root) as control:
+        current, _ = installed(root)
+        selection = current["selection"]
+        safe_destination(root, selection)
+        versions = retained(root, selection)
+        history = root.with_name(root.name + ".history")
+        files = target = target_manifest = runtime = None
+        if args.command == "update":
+            launcher = read_regular(
+                absolute_path(args.launcher) if args.launcher else Path(__file__)
+            )
+            target_manifest, payload = archive_payload(
+                args.archive, args.sha256, launcher
+            )
+            target, files = installation_files(
+                args.sha256, selection, payload, launcher
+            )
+        elif args.command == "rollback":
+            sha = hex_value(args.to)
+            if sha == current["archive_sha256"]:
+                print("Already selected; verified without installation changes.")
+                return
+            require(sha in versions, "Requested version is not retained")
+            target, target_manifest = versions[sha]
+        if target is not None:
+            runtime = inspect_runtime(selection, target_manifest)
+            require(
+                runtime["compatibility"] == "reference-match",
+                "Candidate backend references do not match",
+            )
+            if target == current:
+                print("Already selected; verified without installation changes.")
+                return
+        print(
+            json.dumps(
+                {
+                    "command": args.command,
+                    "installation": str(root),
+                    "current": current["archive_sha256"],
+                    "target": target["archive_sha256"] if target else None,
+                    "selection": selection,
+                    "retained_versions": sorted(versions),
+                    "action": "Remove verified installation and all retained snapshots"
+                    if args.command == "uninstall"
+                    else "Retain current installation, then atomically switch complete directories",
+                    "preserved": [
+                        str(root.with_name(root.name + ".run")),
+                        selection["backend_root"],
+                        selection["hermes_root"],
+                    ],
+                    "activation": "None; no processes started or stopped",
+                },
+                indent=2,
+            ),
+            flush=True,
+        )
+        try:
+            answer = input(
+                "Proceed with these owned files only? Type yes to confirm [no]: "
+            )
+        except EOFError:
+            answer = ""
+        if answer != "yes":
+            print("Cancelled; no installation changes.")
+            return
+        safe_destination(root, selection)
+        require(
+            installed(root)[0] == current and retained(root, selection) == versions,
+            "Installation/history changed during confirmation",
+        )
+        if args.command == "uninstall":
+            fence_control(*control)
+            for sha in sorted(versions):
+                remove_installation(history / sha)
+            if history.exists():
+                (history / "owner.json").unlink()
+                history.rmdir()
+                sync_directory(root.parent)
+            remove_installation(root)
+            print(
+                "Uninstalled verified browser files; lifecycle lock, Hermes and data preserved."
+            )
+            return
+        require(
+            inspect_runtime(selection, target_manifest) == runtime,
+            "Runtime changed during confirmation",
+        )
+        fence_control(*control)
+        private = Path(
+            tempfile.mkdtemp(prefix=".hermes-browser-switch-", dir=root.parent)
+        )
+        staged = private / "installation"
+        complete = False
+        try:
+            if files is not None:
+                write_installation(staged, files)
+            else:
+                shutil.copytree(
+                    history / target["archive_sha256"], staged, symlinks=True
+                )
+                sync_installation(staged)
+            require(installed(staged)[0] == target, "Candidate changed during staging")
+            complete = True
+            retain_current(root, current)
+            # Revalidate the active bytes after copying them into history.
+            require(
+                installed(root)[0] == current, "Installation changed before switching"
+            )
+            atomic_rename(staged, root, exchange=True)
+            sync_directory(root.parent)
+            sync_directory(private)
+        finally:
+            if complete:
+                # After exchange this is the displaced installation. Preserve it
+                # if validation fails; never recursively delete unknown contents.
+                remove_installation(staged)
+                private.rmdir()
+                sync_directory(root.parent)
+            else:
+                shutil.rmtree(private)
+        print(f"Selected {target['archive_sha256']}. Nothing started.")
+
+
 def lifecycle(args):
     root = absolute_path(args.install_root)
     no_links(root)
@@ -1013,7 +1344,6 @@ def lifecycle(args):
         )
         receipt, manifest = installed(root)
         safe_destination(root, receipt["selection"])
-        runtime = inspect_runtime(receipt["selection"], manifest)
     if args.command == "stop":
         require(1 <= args.timeout <= 300, "Invalid stop timeout")
     stream = open_control(root, args.command == "start")
@@ -1023,26 +1353,15 @@ def lifecycle(args):
         return 0
     with stream:
         fd = stream.fileno()
-        meta = os.fstat(fd)
-        require(
-            stat.S_ISREG(meta.st_mode)
-            and meta.st_uid == os.getuid()
-            and meta.st_nlink == 1
-            and meta.st_mode & 0o777 == 0o600,
-            "Unsafe lifecycle state file",
-        )
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-            locked = True
-        except BlockingIOError:
-            locked = False
-        if locked:
+        if acquire_control(stream):
             record = read_control(stream, root)
             if args.command == "start":
-                require(
-                    record["state"] == "stopped",
-                    "Ownership unknown after controller loss; automatic recovery refused",
-                )
+                fence_control(stream, record)
+                # The pre-lock check only establishes ownership of the namespace.
+                # Maintenance may have switched it while this command was waiting.
+                receipt, manifest = installed(root)
+                safe_destination(root, receipt["selection"])
+                runtime = inspect_runtime(receipt["selection"], manifest)
                 return run_foreground(
                     args, root, stream, record, receipt, manifest, runtime
                 )
@@ -1097,6 +1416,7 @@ def main():
         for option in (
             "archive",
             "sha256",
+            "launcher",
             "python",
             "backend-root",
             "hermes-root",
@@ -1112,13 +1432,32 @@ def main():
             command_parser.add_argument(
                 "--timeout", type=float, default=60 if command == "start" else 10
             )
+    for command in ("update", "rollback", "uninstall"):
+        command_parser = sub.add_parser(command)
+        command_parser.add_argument("--install-root", required=True)
+        if command == "update":
+            command_parser.add_argument("--archive", required=True)
+            command_parser.add_argument("--sha256", required=True)
+            command_parser.add_argument(
+                "--launcher",
+                help="Separately trusted launcher paired with candidate archive; never executed",
+            )
+        if command == "rollback":
+            command_parser.add_argument(
+                "--to", required=True, help="Full SHA-256 of a retained archive"
+            )
     args = parser.parse_args()
     try:
         require(sys.platform == "linux", "This increment supports Linux only")
         os.umask(0o077)
         if args.command in ("start", "status", "stop"):
             return lifecycle(args)
-        pack(args) if args.command == "pack" else install_or_inspect(args)
+        if args.command in ("update", "rollback", "uninstall"):
+            maintenance(args)
+        elif args.command == "pack":
+            pack(args)
+        else:
+            install_or_inspect(args)
     except (
         OSError,
         ValueError,
