@@ -6,10 +6,13 @@ at packaging time; nothing is uploaded. The default .invalid URL is deliberately
 unusable until a public home is approved. Serve all output files at that URL's
 parent. Trust the HTTPS issuer before running its bootstrap; hashes from that
 same issuer provide integrity, not independent authentication.
+Use https://OWNER.github.io/REPO/CURRENT.json on GitHub Pages or another direct-200
+HTTPS static host. GitHub Release asset URLs redirect and are not supported.
 """
 
 import argparse
 from pathlib import Path
+from urllib.parse import urlsplit
 import shlex
 import sys
 import tempfile
@@ -25,6 +28,12 @@ DEFAULT_SOURCE = "https://hermes-browser.example.invalid/CURRENT.json"
 
 def prepare(args):
     source = source_url(args.source)
+    parsed = urlsplit(source)
+    E.require(
+        not (parsed.hostname == "github.com" and "/releases/" in parsed.path),
+        "GitHub Release assets redirect and are unsupported. Use GitHub Pages: "
+        "https://OWNER.github.io/REPO/CURRENT.json (direct HTTPS 200 for every file).",
+    )
     launcher = E.read_regular(E.absolute_path(args.launcher), 1024 * 1024)
     archive = E.read_regular(E.absolute_path(args.archive), E.MAX_ARCHIVE)
     E.archive_payload(args.archive, args.sha256, launcher)
@@ -69,7 +78,8 @@ command -v curl >/dev/null && command -v sha256sum >/dev/null || { echo 'Existin
 p=''
 home=${HERMES_HOME:-"$HOME/.hermes"}
 case "$home" in */profiles/*) home=${home%/profiles/*};; esac
-for candidate in "$home/hermes-agent/venv/bin/python" "$home/hermes-agent/.venv/bin/python" "$HOME/.hermes/hermes-agent/venv/bin/python" "$HOME/.hermes/hermes-agent/.venv/bin/python"; do
+custom=${HERMES_INSTALL_DIR:-"$home/hermes-agent"}
+for candidate in "$custom/venv/bin/python" "$custom/.venv/bin/python" "$home/hermes-agent/venv/bin/python" "$home/hermes-agent/.venv/bin/python" "$HOME/.hermes/hermes-agent/venv/bin/python" "$HOME/.hermes/hermes-agent/.venv/bin/python"; do
     if [ -x "$candidate" ]; then p=$candidate; break; fi
 done
 if [ -z "$p" ]; then p=$(command -v python3) || { echo 'Existing Python 3.10+ is required; nothing installed.' >&2; exit 1; }; fi
@@ -78,7 +88,7 @@ t=$(mktemp -d)
 trap 'rm -rf "$t"' EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
-status=$(curl --fail --silent --show-error --proto '=https' --max-time 120 --max-filesize 2097152 --write-out '%{http_code}' URL -o "$t/installer.pyz")
+status=$(curl -q --fail --silent --show-error --proto '=https' --max-time 120 --max-filesize 2097152 --write-out '%{http_code}' URL -o "$t/installer.pyz")
 [ "$status" = 200 ] || { echo 'Expected complete HTTPS 200 download; not executed.' >&2; exit 1; }
 printf '%s  %s\\n' DIGEST "$t/installer.pyz" | sha256sum --check --status || { echo 'Installer checksum mismatch; not executed.' >&2; exit 1; }
 "$p" -I -S -B "$t/installer.pyz" "$@"
@@ -96,9 +106,15 @@ printf '%s  %s\\n' DIGEST "$t/installer.pyz" | sha256sum --check --status || { e
         E.atomic_rename(stage, output)
         E.sync_directory(output.parent)
     entry = source.rsplit("/", 1)[0] + "/install.sh"
-    print("Prepared locally; not published. Trust this HTTPS issuer before execution:")
+    print("Prepared locally; not published. Trust this HTTPS issuer before execution.")
     print(
-        't=$(mktemp) && (trap \'rm -f "$t"\' EXIT; status=$(curl --fail --silent --show-error --proto "=https" --max-time 60 --max-filesize 65536 --write-out "%{http_code}" '
+        "Custom selection/recovery: download install.sh over verified HTTPS (direct 200), then run sh ./install.sh --backend-root /ABS/Hermes --python /ABS/venv/bin/python --hermes-home /ABS/data --profile NAME, or sh ./install.sh uninstall."
+    )
+    print(
+        "Do not append flags to the compound command below; normal setup asks about ambiguous choices:"
+    )
+    print(
+        't=$(mktemp) && (trap \'rm -f "$t"\' EXIT; status=$(curl -q --fail --silent --show-error --proto "=https" --max-time 60 --max-filesize 65536 --write-out "%{http_code}" '
         + shlex.quote(entry)
         + ' -o "$t") && [ "$status" = 200 ] && sh "$t")'
     )

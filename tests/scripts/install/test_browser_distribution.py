@@ -137,7 +137,9 @@ def distribution(https, release, layout):
     }
 
 
-def terminal(argv, env, answer="yes\n", prompt="Type yes", stdin_pipe=False):
+def terminal(
+    argv, env, answer="yes\n", prompt="Type yes", stdin_pipe=False, before_answer=None
+):
     pid, fd = pty.fork()
     if pid == 0:
         if stdin_pipe:
@@ -160,6 +162,8 @@ def terminal(argv, env, answer="yes\n", prompt="Type yes", stdin_pipe=False):
                     break
                 output.extend(block)
                 if not sent and prompt.encode() in output:
+                    if before_answer is not None:
+                        before_answer()
                     os.write(fd, answer.encode())
                     sent = True
             done, status = os.waitpid(pid, os.WNOHANG)

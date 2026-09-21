@@ -19,26 +19,50 @@ def engine():
 E = engine()
 
 
-def choose(candidates, option):
+def choose(candidates, option, interactive=False):
     candidates = list(dict.fromkeys(candidates))
     E.require(
         candidates,
         f"Missing existing Hermes {option}; supply --{option}. Nothing will be installed or repaired.",
     )
-    E.require(
-        len(candidates) == 1,
-        f"Ambiguous {option}; select with --{option}: "
-        + ", ".join(map(str, candidates)),
-    )
-    return candidates[0]
+    if len(candidates) == 1:
+        return candidates[0]
+    hint = f"Ambiguous {option}; supply --{option} to the downloaded install.sh or installer.pyz"
+    E.require(interactive, hint)
+    try:
+        fd = os.open("/dev/tty", os.O_RDWR)
+    except OSError as error:
+        raise ValueError(
+            hint + "; an interactive terminal is required to choose"
+        ) from error
+    try:
+        prompt = "\n".join(f"  {i}. {path}" for i, path in enumerate(candidates, 1))
+        os.write(
+            fd,
+            f"{prompt}\nChoose {option} [1-{len(candidates)}, q to cancel]: ".encode(),
+        )
+        # Read only this answer; buffering could consume the next tty answer.
+        answer = bytearray()
+        while len(answer) < 64:
+            char = os.read(fd, 1)
+            if not char or char == b"\n":
+                break
+            answer.extend(char)
+        E.require(
+            answer.isdigit() and 1 <= int(answer) <= len(candidates),
+            "Selection cancelled or invalid; no installation writes",
+        )
+        return candidates[int(answer) - 1]
+    finally:
+        os.close(fd)
 
 
-def detect(args):
+def detect(args, interactive=False):
     # Mirror stock's profile-shaped HERMES_HOME without importing Hermes or .env.
     home = E.absolute_path(
         args.hermes_home
-        or os.environ.get("HERMES_HOME", "").strip()
-        or str(Path.home() / ".hermes")
+        if args.hermes_home is not None
+        else (os.environ.get("HERMES_HOME", "").strip() or str(Path.home() / ".hermes"))
     )
     E.no_links(home)
     root = home.parent.parent if home.parent.name == "profiles" else home
@@ -57,10 +81,13 @@ def detect(args):
                 if os.path.lexists(active)
                 else "default"
             )
-    if args.backend_root:
+    if args.backend_root is not None:
         backend = E.absolute_path(args.backend_root)
     else:
-        candidates = [root / "hermes-agent", Path.home() / ".hermes/hermes-agent"]
+        candidates = []
+        if os.environ.get("HERMES_INSTALL_DIR"):
+            candidates.append(E.absolute_path(os.environ["HERMES_INSTALL_DIR"]))
+        candidates.extend([root / "hermes-agent", Path.home() / ".hermes/hermes-agent"])
         # Only a symlink to a recognized checkout CLI is evidence. Never execute
         # or parse an arbitrary PATH wrapper (including shell/dotenv contents).
         for directory in os.environ.get("PATH", "").split(os.pathsep):
@@ -72,19 +99,22 @@ def detect(args):
         backend = choose(
             [p for p in candidates if (p / "hermes_cli/main.py").is_file()],
             "backend-root",
+            interactive,
         )
     E.no_links(backend)
     E.read_regular(backend / "hermes_cli/main.py")
     python = (
         E.absolute_path(args.python)
-        if args.python
+        if args.python is not None
         else choose(
             [
                 backend / name / "bin/python"
                 for name in ("venv", ".venv")
                 if (backend / name / "bin/python").is_file()
+                and os.access(backend / name / "bin/python", os.X_OK)
             ],
             "python",
+            interactive,
         )
     )
     return dict(
@@ -106,4 +136,5 @@ def preflight(selection, manifest):
         runtime["compatibility"] == "reference-match",
         "Unsupported Hermes backend: bundle reference files do not match. No backend changes will be made.",
     )
+    E.startup_configuration(selection, runtime)
     return runtime

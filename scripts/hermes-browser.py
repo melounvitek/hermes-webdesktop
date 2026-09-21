@@ -521,7 +521,7 @@ def atomic_rename(stage, root, exchange=False):
         raise OSError(error, os.strerror(error), str(root))
 
 
-def install_or_inspect(args):
+def install_or_inspect(args, confirm=None, validate=inspect_runtime):
     root = absolute_path(args.install_root)
     if not args.archive:
         require(
@@ -562,7 +562,7 @@ def install_or_inspect(args):
         absolute_path(args.launcher) if args.launcher else Path(__file__)
     )
     manifest, payload = archive_payload(args.archive, args.sha256, launcher)
-    runtime = inspect_runtime(selection, manifest)
+    runtime = validate(selection, manifest)
     receipt, files = installation_files(args.sha256, selection, payload, launcher)
     exists = root.exists()
     if exists:
@@ -571,33 +571,38 @@ def install_or_inspect(args):
             previous == receipt,
             "Different release or runtime/profile selection; use explicit stopped-only maintenance",
         )
-    print(
-        json.dumps(
-            {
-                "release": manifest["release"],
-                "installation": str(root),
-                "runtime": runtime,
-                "verification": manifest["verification"],
-                "writes": []
-                if exists
-                else [str(root / name) for name in sorted(files)],
-                "temporary_work": "Private sibling staging on confirmed install; runtime probe writes nothing",
-                "activation": "None. No backend or configuration changes.",
-            },
-            indent=2,
-        ),
-        flush=True,
-    )
+    if confirm is None:
+        print(
+            json.dumps(
+                {
+                    "release": manifest["release"],
+                    "installation": str(root),
+                    "runtime": runtime,
+                    "verification": manifest["verification"],
+                    "writes": []
+                    if exists
+                    else [str(root / name) for name in sorted(files)],
+                    "temporary_work": "Private sibling staging on confirmed install; runtime probe writes nothing",
+                    "activation": "None. No backend or configuration changes.",
+                },
+                indent=2,
+            ),
+            flush=True,
+        )
     if args.command == "inspect":
         return
     if exists:
         print("Already installed; verified without changes.")
         return
-    try:
-        answer = input("Install these files only? Type yes to confirm [no]: ")
-    except EOFError:
-        answer = ""
-    if answer.strip() != "yes":
+    if confirm is None:
+        try:
+            answer = input("Install these files only? Type yes to confirm [no]: ")
+        except EOFError:
+            answer = ""
+        accepted = answer.strip() == "yes"
+    else:
+        accepted = confirm(receipt)
+    if not accepted:
         print("Cancelled; no installation writes.")
         return
     with stopped_control(root) as control:
@@ -607,7 +612,7 @@ def install_or_inspect(args):
             "Destination appeared during confirmation; inspect again",
         )
         require(
-            inspect_runtime(selection, manifest) == runtime,
+            validate(selection, manifest) == runtime,
             "Runtime changed during confirmation; inspect again",
         )
         # A leftover history from interrupted removal must not be silently adopted.
@@ -727,6 +732,11 @@ def open_control(root, create, owner=CONTROL_OWNER):
 
 
 def startup_configuration(selection, runtime):
+    for name in (".update-incomplete", ".lazy-refresh-incomplete"):
+        require(
+            not os.path.lexists(Path(selection["backend_root"]) / name),
+            "Pending backend repair; refusing startup",
+        )
     require(
         not os.environ.get("HERMES_MANAGED_DIR") and not Path("/etc/hermes").exists(),
         "Managed configuration is unsupported; nothing started",
@@ -856,11 +866,6 @@ def check_ready(port, asset, info):
 def run_foreground(args, root, stream, record, receipt, manifest, runtime):
     selection = receipt["selection"]
     backend = Path(selection["backend_root"])
-    for name in (".update-incomplete", ".lazy-refresh-incomplete"):
-        require(
-            not os.path.lexists(backend / name),
-            "Pending backend repair; refusing startup",
-        )
     require(
         runtime["compatibility"] == "reference-match",
         "Untested backend references; startup unsupported",
@@ -1212,7 +1217,7 @@ def remove_installation(root):
     sync_directory(root.parent)
 
 
-def maintenance(args, confirm=None):
+def maintenance(args, confirm=None, validate=inspect_runtime):
     root = absolute_path(args.install_root)
     initial, _ = installed(root)
     safe_destination(root, initial["selection"])
@@ -1241,7 +1246,7 @@ def maintenance(args, confirm=None):
             require(sha in versions, "Requested version is not retained")
             target, target_manifest = versions[sha]
         if target is not None:
-            runtime = inspect_runtime(selection, target_manifest)
+            runtime = validate(selection, target_manifest)
             require(
                 runtime["compatibility"] == "reference-match",
                 "Candidate backend references do not match",
@@ -1300,7 +1305,7 @@ def maintenance(args, confirm=None):
             )
             return
         require(
-            inspect_runtime(selection, target_manifest) == runtime,
+            validate(selection, target_manifest) == runtime,
             "Runtime changed during confirmation",
         )
         fence_control(*control)
@@ -1339,7 +1344,12 @@ def maintenance(args, confirm=None):
         print(f"Selected {target['archive_sha256']}. Nothing started.")
 
 
-def lifecycle(args):
+def lifecycle(args, selection=None, report=None):
+    if report is None:
+
+        def report(result):
+            print(json.dumps(result))
+
     root = absolute_path(args.install_root)
     no_links(root)
     receipt = manifest = runtime = None
@@ -1355,7 +1365,7 @@ def lifecycle(args):
     stream = open_control(root, args.command == "start")
     if stream is None:
         installed(root)
-        print(json.dumps({"installation": str(root), "state": "stopped"}))
+        report({"installation": str(root), "state": "stopped"})
         return 0
     with stream:
         fd = stream.fileno()
@@ -1366,12 +1376,16 @@ def lifecycle(args):
                 # The pre-lock check only establishes ownership of the namespace.
                 # Maintenance may have switched it while this command was waiting.
                 receipt, manifest = installed(root)
+                require(
+                    selection is None or receipt["selection"] == selection,
+                    "Installation selection differs from controller",
+                )
                 safe_destination(root, receipt["selection"])
                 runtime = inspect_runtime(receipt["selection"], manifest)
                 return run_foreground(
                     args, root, stream, record, receipt, manifest, runtime
                 )
-            print(json.dumps(record))
+            report(record)
             return int(args.command == "stop" and record["state"] != "stopped")
         require(
             args.command != "start", "Installation already has a foreground controller"
@@ -1402,7 +1416,7 @@ def lifecycle(args):
                 result = read_control(stream, root)
             except (OSError, ValueError):
                 pass
-        print(json.dumps(result))
+        report(result)
         return int(args.command == "stop" and result["state"] != "stopped")
 
 

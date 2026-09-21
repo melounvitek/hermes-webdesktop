@@ -179,27 +179,6 @@ def confirm(preview):
         ) from error
 
 
-def invoke(base, selection, command, *extra):
-    result = subprocess.run(
-        [
-            selection["python"],
-            "-I",
-            "-S",
-            "-B",
-            str(base / "control/hermes-browser.py"),
-            command,
-            "--install-root",
-            str(base / "installation"),
-            *map(str, extra),
-        ],
-        input="yes\n",
-        text=True,
-        capture_output=True,
-    )
-    E.require(result.returncode == 0, result.stderr or result.stdout)
-    return result.stdout
-
-
 def publish_file(path, data, mode):
     E.no_links(path)
     with tempfile.TemporaryDirectory(
@@ -218,29 +197,56 @@ def setup(args):
     base, command = locations()
     namespace(base)
     if (base / "control").exists():
-        with command_lock(base, exclusive=False):
-            owner, _ = owned_control(base, command)
+        with command_lock(base):
+            owner, command_bytes = owned_control(base, command)
             selection = owner["selection"]
             # Ambient active_profile/HERMES_HOME may have changed. Repeat setup
             # verifies the original choice; only explicit options may challenge it.
-            requested = argparse.Namespace(**{
-                "hermes_home" if key == "hermes_root" else key: getattr(
-                    args, "hermes_home" if key == "hermes_root" else key
-                )
-                or value
-                for key, value in selection.items()
-            })
+            requested = argparse.Namespace(**vars(args))
+            for key, value in selection.items():
+                option = "hermes_home" if key == "hermes_root" else key
+                if getattr(requested, option) is None:
+                    if key == "profile" and args.hermes_home is not None:
+                        continue
+                    setattr(requested, option, value)
             E.require(
                 detect(requested) == selection,
                 "Existing selection differs; uninstall explicitly before changing it",
             )
+            E.require(
+                os.path.lexists(base / "installation"),
+                "Owned controller without installation; no pinned archive remains. "
+                "Download the install.sh from the same trusted issuer and run sh install.sh uninstall "
+                "to confirm owned cleanup before a fresh setup. Do not append flags to the compound download command.",
+            )
             receipt, manifest = E.installed(base / "installation")
             E.require(receipt["selection"] == selection, "Existing selection differs")
             preflight(selection, manifest)
-            E.require(
-                command.exists(),
-                "Command publication incomplete; inspect owned paths manually before retrying",
-            )
+            if not command.exists():
+                E.safe_destination(base / "installation", selection)
+                with E.stopped_control(base / "installation"):
+                    if not confirm(
+                        f"Publish missing command {command} for the verified existing browser?\n"
+                        f"Profile: {selection['profile']}. No downloads, controller replacement or installation changes."
+                    ):
+                        print("Cancelled; no command published.")
+                        return
+                    locations()
+                    namespace(base)
+                    E.require(
+                        owned_control(base, command)[0] == owner,
+                        "Controller changed during confirmation",
+                    )
+                    E.require(
+                        E.installed(base / "installation")[0] == receipt,
+                        "Installation changed during confirmation",
+                    )
+                    preflight(selection, manifest)
+                    E.safe_destination(command, selection, parent_required=False)
+                    command.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                    publish_file(command, command_bytes, 0o700)
+                print("Published the missing command. Nothing started.")
+                return
             print(
                 "Already installed; verified without bundle downloads or changes. Use hermes-browser update explicitly."
             )
@@ -253,7 +259,7 @@ def setup(args):
         not os.path.lexists(base / "installation"),
         "Installation without owned controller; inspect manually",
     )
-    selection = detect(args)
+    selection = detect(args, interactive=True)
     source = packaged_source()
     files = {
         name: E.read_regular(Path(__file__).with_name(name)) for name in CONTROL_FILES
@@ -308,17 +314,27 @@ def setup(args):
                     E.sync_directory(base)
             actual, command_bytes = owned_control(base, command)
             E.require(actual == owner, "Controller changed during confirmation")
-            options = [
-                "--archive",
-                str(Path(temp) / "archive"),
-                "--sha256",
-                descriptor["archive"]["sha256"],
-                "--launcher",
-                str(Path(temp) / "launcher"),
-            ]
-            for name, value in selection.items():
-                options.extend(["--" + name.replace("_", "-"), value])
-            invoke(base, selection, "install", *options)
+
+            def approved(receipt):
+                E.require(
+                    receipt["selection"] == selection
+                    and receipt["archive_sha256"] == descriptor["archive"]["sha256"],
+                    "Installation differs from confirmed preview",
+                )
+                return True
+
+            E.install_or_inspect(
+                argparse.Namespace(
+                    command="install",
+                    install_root=str(base / "installation"),
+                    archive=str(Path(temp) / "archive"),
+                    sha256=descriptor["archive"]["sha256"],
+                    launcher=str(Path(temp) / "launcher"),
+                    **selection,
+                ),
+                confirm=approved,
+                validate=preflight,
+            )
             command.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             if not os.path.lexists(command):
                 publish_file(command, command_bytes, 0o700)
@@ -343,28 +359,60 @@ def manage(args):
         root = base / "installation"
         args.install_root = str(root)
         if args.command == "start":
-            E.require(
-                E.installed(root)[0]["selection"] == selection,
-                "Installation selection differs from controller",
-            )
             print(
                 "Starting in the foreground on loopback. Wait for 'Browser ready'; Ctrl-C stops it.",
                 flush=True,
             )
-            return E.lifecycle(args)
+            return E.lifecycle(args, selection=selection)
         if args.command in ("status", "stop"):
-            extra = ["--timeout", args.timeout] if args.command == "stop" else []
-            result = E.load_json(invoke(base, selection, args.command, *extra))
-            print(
-                "Browser "
-                + result["state"]
-                + (": " + result["url"] if result.get("state") == "ready" else "")
-            )
-            if result.get("detail"):
-                print(result["detail"])
-            return 0
+
+            def report(result):
+                print(
+                    "Browser "
+                    + result["state"]
+                    + (": " + result["url"] if result.get("state") == "ready" else "")
+                )
+                if result.get("detail"):
+                    print(result["detail"])
+
+            return E.lifecycle(args, report=report)
         if args.command == "inspect":
-            print(invoke(base, selection, "inspect"), end="")
+            E.install_or_inspect(
+                argparse.Namespace(
+                    command="inspect",
+                    install_root=str(root),
+                    **{
+                        name: None
+                        for name in (*E.SELECTION, "archive", "sha256", "launcher")
+                    },
+                )
+            )
+            return 0
+        if args.command == "uninstall" and not os.path.lexists(root):
+            E.safe_destination(root, selection)
+            with E.stopped_control(root):
+                E.require(
+                    not os.path.lexists(base / "installation.history"),
+                    "Remaining history requires manual inspection; no cleanup attempted",
+                )
+                if not confirm(
+                    f"Remove the verified owned controller and command left by interrupted publication/removal?\n"
+                    f"Profile: {selection['profile']}. No installation exists. Hermes stays untouched; stable locks remain."
+                ):
+                    print("Cancelled; controller preserved.")
+                    return 0
+                locations()
+                namespace(base)
+                E.require(
+                    not os.path.lexists(root)
+                    and not os.path.lexists(base / "installation.history"),
+                    "Installation/history appeared during confirmation",
+                )
+                E.require(
+                    owned_control(base, command)[0] == owner,
+                    "Controller changed during confirmation",
+                )
+                remove_controller(base, command)
             return 0
         receipt, manifest = E.installed(root)
         E.require(
@@ -384,7 +432,7 @@ def manage(args):
                 else f"{args.command.capitalize()} browser {manifest['release']} to {target['release']}"
             )
             accepted = confirm(
-                f"{action}?\nProfile: {selection['profile']}\nHermes, data and plugins stay untouched. Nothing starts or stops automatically.\nStable ownership locks remain after uninstall."
+                f"{action}?\nProfile: {selection['profile']}\nHermes, data and plugins stay untouched. Nothing starts or stops automatically.\nStable ownership locks remain after uninstall.\nUpdates replace browser assets, not the controller; controller replacement requires explicit uninstall/reinstall."
             )
             locations()
             namespace(base)
@@ -402,11 +450,10 @@ def manage(args):
                 pass
             with tempfile.TemporaryDirectory(prefix="hermes-browser-update-") as temp:
                 descriptor, target = current(packaged_source(), Path(temp))
-                preflight(selection, target)
                 args.archive = str(Path(temp) / "archive")
                 args.launcher = str(Path(temp) / "launcher")
                 args.sha256 = descriptor["archive"]["sha256"]
-                E.maintenance(args, confirm=confirmation)
+                E.maintenance(args, confirm=confirmation, validate=preflight)
             return 0
         if args.command == "rollback":
             versions = E.retained(root, selection)
@@ -421,20 +468,24 @@ def manage(args):
                 "Choose a retained version with rollback --to RELEASE (or its full ID); inspect lists retained versions",
             )
             args.to, (_, target) = next(iter(choices.items()))
-        E.maintenance(args, confirm=confirmation)
+        E.maintenance(args, confirm=confirmation, validate=preflight)
         if args.command == "uninstall" and not root.exists():
-            owned_control(base, command)
-            if command.exists():
-                command.unlink()
-                E.sync_directory(command.parent)
-            for name in (*CONTROL_FILES, "owner.json"):
-                (base / "control" / name).unlink()
-            (base / "control").rmdir()
-            E.sync_directory(base)
-            print(
-                "Removed the owned command and controller. Hermes and stable lock files remain."
-            )
+            remove_controller(base, command)
     return 0
+
+
+def remove_controller(base, command):
+    owned_control(base, command)
+    if command.exists():
+        command.unlink()
+        E.sync_directory(command.parent)
+    for name in (*CONTROL_FILES, "owner.json"):
+        (base / "control" / name).unlink()
+    (base / "control").rmdir()
+    E.sync_directory(base)
+    print(
+        "Removed the owned command and controller. Hermes and stable lock files remain."
+    )
 
 
 def main():
@@ -454,7 +505,14 @@ def main():
         "rollback",
         "uninstall",
     ):
-        child = sub.add_parser(name)
+        child = sub.add_parser(
+            name,
+            description=(
+                "Update browser assets only, not the controller. Controller replacement requires explicit uninstall/reinstall."
+                if name == "update"
+                else None
+            ),
+        )
         if name == "start":
             child.add_argument("--port", type=int, default=9119)
         if name in ("start", "stop"):

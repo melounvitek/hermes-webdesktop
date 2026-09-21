@@ -6,6 +6,9 @@ import os
 from pathlib import Path
 import shutil
 import sys
+import subprocess
+
+import yaml
 from types import SimpleNamespace
 
 import pytest
@@ -32,14 +35,27 @@ def layout(release, tmp_path, monkeypatch):
     home.mkdir(mode=0o700)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("HERMES_HOME", raising=False)
+    monkeypatch.delenv("HERMES_INSTALL_DIR", raising=False)
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
     data = home / ".hermes"
     shutil.copytree(release["home"], data)
     (data / "active_profile").unlink()
     backend = data / "hermes-agent"
     shutil.copytree(release["backend"], backend)
-    (backend / "venv/bin").mkdir(parents=True)
-    (backend / "venv/bin/python").symlink_to(sys.executable)
+    subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-B",
+            "-m",
+            "venv",
+            "--without-pip",
+            str(backend / "venv"),
+        ],
+        check=True,
+    )
+    site = next((backend / "venv/lib").glob("python*/site-packages"))
+    (site / "yaml").symlink_to(Path(yaml.__file__).parent, target_is_directory=True)
     return home, data, backend
 
 
