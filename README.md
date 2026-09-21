@@ -13,3 +13,5 @@ t=$(mktemp) && (trap 'rm -f "$t"' EXIT; status=$(curl -q --fail --silent --show-
 ```
 
 Run `hermes-browser start`, then open **http://127.0.0.1:9119/**. Press Ctrl-C to stop.
+
+![Hermes Webdesktop in Chrome with a demo conversation](assets/screenshot.png)
