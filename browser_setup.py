@@ -132,9 +132,5 @@ def preflight(selection, manifest):
         tuple(map(int, runtime["python_version"].split(".")[:2])) >= (3, 10),
         "Existing Python 3.10+ is required; no runtime will be installed",
     )
-    E.require(
-        runtime["compatibility"] == "reference-match",
-        "Unsupported Hermes backend: bundle reference files do not match. No backend changes will be made.",
-    )
     E.startup_configuration(selection, runtime)
     return runtime
