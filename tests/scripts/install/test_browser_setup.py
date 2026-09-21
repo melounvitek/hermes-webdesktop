@@ -29,7 +29,7 @@ def setup_module():
 @pytest.fixture
 def layout(release, tmp_path, monkeypatch):
     home = tmp_path / "user"
-    home.mkdir()
+    home.mkdir(mode=0o700)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("HERMES_HOME", raising=False)
     monkeypatch.setenv("PATH", "/usr/bin:/bin")
