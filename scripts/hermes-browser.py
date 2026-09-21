@@ -435,9 +435,10 @@ def inspect_runtime(selection, manifest):
     }
 
 
-def safe_destination(root, selection):
+def safe_destination(root, selection, *, parent_required=True):
     no_links(root)
-    require(root.parent.is_dir(), "Install parent must already exist")
+    if parent_required:
+        require(root.parent.is_dir(), "Install parent must already exist")
     protected = [
         absolute_path(selection["backend_root"]),
         absolute_path(selection["hermes_root"]),
@@ -1008,6 +1009,11 @@ def run_foreground(args, root, stream, record, receipt, manifest, runtime):
                                 )
                                 info["state"] = "ready"
                                 print(json.dumps(info), flush=True)
+                                print(
+                                    f"Browser ready: {info['url']} (foreground; Ctrl-C to stop)",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
                             except (
                                 OSError,
                                 ValueError,
@@ -1206,7 +1212,7 @@ def remove_installation(root):
     sync_directory(root.parent)
 
 
-def maintenance(args):
+def maintenance(args, confirm=None):
     root = absolute_path(args.install_root)
     initial, _ = installed(root)
     safe_destination(root, initial["selection"])
@@ -1243,36 +1249,36 @@ def maintenance(args):
             if target == current:
                 print("Already selected; verified without installation changes.")
                 return
-        print(
-            json.dumps(
-                {
-                    "command": args.command,
-                    "installation": str(root),
-                    "current": current["archive_sha256"],
-                    "target": target["archive_sha256"] if target else None,
-                    "selection": selection,
-                    "retained_versions": sorted(versions),
-                    "action": "Remove verified installation and all retained snapshots"
-                    if args.command == "uninstall"
-                    else "Retain current installation, then atomically switch complete directories",
-                    "preserved": [
-                        str(root.with_name(root.name + ".run")),
-                        selection["backend_root"],
-                        selection["hermes_root"],
-                    ],
-                    "activation": "None; no processes started or stopped",
-                },
-                indent=2,
-            ),
-            flush=True,
-        )
-        try:
-            answer = input(
-                "Proceed with these owned files only? Type yes to confirm [no]: "
-            )
-        except EOFError:
-            answer = ""
-        if answer != "yes":
+        preview = {
+            "command": args.command,
+            "installation": str(root),
+            "current": current["archive_sha256"],
+            "target": target["archive_sha256"] if target else None,
+            "selection": selection,
+            "retained_versions": sorted(versions),
+            "action": "Remove verified installation and all retained snapshots"
+            if args.command == "uninstall"
+            else "Retain current installation, then atomically switch complete directories",
+            "preserved": [
+                str(root.with_name(root.name + ".run")),
+                selection["backend_root"],
+                selection["hermes_root"],
+            ],
+            "activation": "None; no processes started or stopped",
+        }
+        if confirm is None:
+            print(json.dumps(preview, indent=2), flush=True)
+            try:
+                answer = input(
+                    "Proceed with these owned files only? Type yes to confirm [no]: "
+                )
+            except EOFError:
+                answer = ""
+            accepted = answer == "yes"
+        else:
+            # The friendly entry point prompts on /dev/tty under this same lock.
+            accepted = confirm(preview)
+        if not accepted:
             print("Cancelled; no installation changes.")
             return
         safe_destination(root, selection)

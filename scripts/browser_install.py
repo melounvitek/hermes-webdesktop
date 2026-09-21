@@ -93,6 +93,12 @@ def facade(base, selection, hashes, owner_bytes):
 
 def owned_control(base, command):
     control = base / "control"
+    E.no_links(control)
+    meta = control.stat()
+    E.require(
+        meta.st_uid == os.getuid() and stat.S_IMODE(meta.st_mode) == 0o700,
+        "Unsafe controller directory ownership/mode",
+    )
     E.require(
         E.tree_files(control, strict_dirs=True) == {*CONTROL_FILES, "owner.json"},
         "Foreign/incomplete controller files",
@@ -166,7 +172,7 @@ def confirm(preview):
         ):
             output.write("Type yes to continue [no]: ")
             output.flush()
-            return input.readline().strip() == "yes"
+            return input.readline().rstrip("\r\n") == "yes"
     except OSError as error:
         raise ValueError(
             "An interactive terminal is required. Run the same command in a terminal; piped input cannot confirm installation."
@@ -211,6 +217,42 @@ def publish_file(path, data, mode):
 def setup(args):
     base, command = locations()
     namespace(base)
+    if (base / "control").exists():
+        with command_lock(base, exclusive=False):
+            owner, _ = owned_control(base, command)
+            selection = owner["selection"]
+            # Ambient active_profile/HERMES_HOME may have changed. Repeat setup
+            # verifies the original choice; only explicit options may challenge it.
+            requested = argparse.Namespace(**{
+                "hermes_home" if key == "hermes_root" else key: getattr(
+                    args, "hermes_home" if key == "hermes_root" else key
+                )
+                or value
+                for key, value in selection.items()
+            })
+            E.require(
+                detect(requested) == selection,
+                "Existing selection differs; uninstall explicitly before changing it",
+            )
+            receipt, manifest = E.installed(base / "installation")
+            E.require(receipt["selection"] == selection, "Existing selection differs")
+            preflight(selection, manifest)
+            E.require(
+                command.exists(),
+                "Command publication incomplete; inspect owned paths manually before retrying",
+            )
+            print(
+                "Already installed; verified without bundle downloads or changes. Use hermes-browser update explicitly."
+            )
+        return
+    E.require(
+        not os.path.lexists(command),
+        "Foreign convenience command; choose no overwrite, inspect it manually",
+    )
+    E.require(
+        not os.path.lexists(base / "installation"),
+        "Installation without owned controller; inspect manually",
+    )
     selection = detect(args)
     source = packaged_source()
     files = {
@@ -218,48 +260,11 @@ def setup(args):
     }
     hashes = {name: E.digest(raw) for name, raw in files.items()}
     owner = {"owner": OWNER, "selection": selection, "files": hashes}
-    existing = None
-    if (base / "control").exists():
-        existing, _ = owned_control(base, command)
-        E.require(
-            existing == owner,
-            "Existing selection/controller differs; repeat setup never replaces it. Use the installed command or uninstall explicitly first.",
-        )
-    else:
-        E.require(
-            not os.path.lexists(command),
-            "Foreign convenience command; choose no overwrite, inspect it manually",
-        )
-    if (base / "installation").exists():
-        E.require(
-            existing is not None,
-            "Installation without owned controller; inspect manually",
-        )
-        receipt, manifest = E.installed(base / "installation")
-        E.require(receipt["selection"] == selection, "Existing selection differs")
-        preflight(selection, manifest)
-        E.require(
-            command.exists(),
-            "Installation complete but command publication interrupted; inspect owned paths manually before retrying",
-        )
-        print(
-            "Already installed; verified without downloads or changes. Use hermes-browser update explicitly."
-        )
-        return
     with tempfile.TemporaryDirectory(prefix="hermes-browser-download-") as temp:
         descriptor, manifest = current(source, Path(temp))
         runtime = preflight(selection, manifest)
-        # safe_destination needs an existing parent; validate overlaps against a
-        # hypothetical leaf under the nearest existing parent before mkdir too.
-        protected = [Path(selection[k]) for k in ("backend_root", "hermes_root")]
-        protected.append(Path(selection["python"]).parent.parent)
-        E.require(
-            all(
-                not (base.is_relative_to(p) or p.is_relative_to(base))
-                for p in protected
-            ),
-            "Browser control namespace overlaps Hermes/runtime",
-        )
+        for destination in (base, command):
+            E.safe_destination(destination, selection, parent_required=False)
         if not confirm(
             f"Install browser {manifest['release']} for existing Hermes\n  Backend: {selection['backend_root']}\n  Python: {selection['python']}\n  Profile: {runtime['profile_home']}\n  Files: {base}\n  Command: {command}\nNo Hermes changes. Nothing starts automatically.\nDownloads trust {source}; same-origin hashes check integrity, not independent publisher authentication."
         ):
@@ -271,6 +276,8 @@ def setup(args):
         )
         locations()
         namespace(base)
+        for destination in (base, command):
+            E.safe_destination(destination, selection, parent_required=False)
         if not base.exists():
             base.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
             base.mkdir(mode=0o700)
@@ -280,6 +287,10 @@ def setup(args):
                 0o600,
             )
         with command_lock(base):
+            E.require(
+                not os.path.lexists(command),
+                "Convenience command appeared during confirmation; inspect manually",
+            )
             if not (base / "control").exists():
                 with tempfile.TemporaryDirectory(
                     prefix=".browser-control-", dir=base.parent
@@ -317,30 +328,161 @@ def setup(args):
         )
 
 
+def manage(args):
+    base, command = locations()
+    namespace(base)
+    E.require(
+        (base / "control").exists(),
+        "Browser is not installed; run the setup command first",
+    )
+    with command_lock(
+        base, exclusive=args.command in ("update", "rollback", "uninstall")
+    ):
+        owner, _ = owned_control(base, command)
+        selection = owner["selection"]
+        root = base / "installation"
+        args.install_root = str(root)
+        if args.command == "start":
+            E.require(
+                E.installed(root)[0]["selection"] == selection,
+                "Installation selection differs from controller",
+            )
+            print(
+                "Starting in the foreground on loopback. Wait for 'Browser ready'; Ctrl-C stops it.",
+                flush=True,
+            )
+            return E.lifecycle(args)
+        if args.command in ("status", "stop"):
+            extra = ["--timeout", args.timeout] if args.command == "stop" else []
+            result = E.load_json(invoke(base, selection, args.command, *extra))
+            print(
+                "Browser "
+                + result["state"]
+                + (": " + result["url"] if result.get("state") == "ready" else "")
+            )
+            if result.get("detail"):
+                print(result["detail"])
+            return 0
+        if args.command == "inspect":
+            print(invoke(base, selection, "inspect"), end="")
+            return 0
+        receipt, manifest = E.installed(root)
+        E.require(
+            receipt["selection"] == selection,
+            "Installation selection differs from controller",
+        )
+
+        def confirmation(preview):
+            E.require(
+                preview["current"] == receipt["archive_sha256"]
+                and preview["selection"] == selection,
+                "Installation changed before preview; inspect and retry",
+            )
+            action = (
+                "Remove the browser, all retained versions, and the convenience command"
+                if args.command == "uninstall"
+                else f"{args.command.capitalize()} browser {manifest['release']} to {target['release']}"
+            )
+            accepted = confirm(
+                f"{action}?\nProfile: {selection['profile']}\nHermes, data and plugins stay untouched. Nothing starts or stops automatically.\nStable ownership locks remain after uninstall."
+            )
+            locations()
+            namespace(base)
+            E.require(
+                owned_control(base, command)[0] == owner,
+                "Controller changed during confirmation",
+            )
+            return accepted
+
+        target = None
+        if args.command == "update":
+            # Reject running/unknown ownership before downloading. Maintenance
+            # reacquires this authoritative lock for its preview and publication.
+            with E.stopped_control(root):
+                pass
+            with tempfile.TemporaryDirectory(prefix="hermes-browser-update-") as temp:
+                descriptor, target = current(packaged_source(), Path(temp))
+                preflight(selection, target)
+                args.archive = str(Path(temp) / "archive")
+                args.launcher = str(Path(temp) / "launcher")
+                args.sha256 = descriptor["archive"]["sha256"]
+                E.maintenance(args, confirm=confirmation)
+            return 0
+        if args.command == "rollback":
+            versions = E.retained(root, selection)
+            choices = {
+                sha: item
+                for sha, item in versions.items()
+                if sha != receipt["archive_sha256"]
+                and (args.to is None or args.to in (sha, item[1]["release"]))
+            }
+            E.require(
+                len(choices) == 1,
+                "Choose a retained version with rollback --to RELEASE (or its full ID); inspect lists retained versions",
+            )
+            args.to, (_, target) = next(iter(choices.items()))
+        E.maintenance(args, confirm=confirmation)
+        if args.command == "uninstall" and not root.exists():
+            owned_control(base, command)
+            if command.exists():
+                command.unlink()
+                E.sync_directory(command.parent)
+            for name in (*CONTROL_FILES, "owner.json"):
+                (base / "control" / name).unlink()
+            (base / "control").rmdir()
+            E.sync_directory(base)
+            print(
+                "Removed the owned command and controller. Hermes and stable lock files remain."
+            )
+    return 0
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "command", nargs="?", choices=("setup", "inspect"), default="setup"
+    parser = argparse.ArgumentParser(description=__doc__, prog="hermes-browser")
+    sub = parser.add_subparsers(dest="command", required=True)
+    setup_parser = sub.add_parser(
+        "setup", help="Detect existing Hermes and install the browser only"
     )
     for name in ("backend-root", "python", "hermes-home", "profile"):
-        parser.add_argument("--" + name)
-    args = parser.parse_args()
+        setup_parser.add_argument("--" + name)
+    for name in (
+        "start",
+        "status",
+        "stop",
+        "inspect",
+        "update",
+        "rollback",
+        "uninstall",
+    ):
+        child = sub.add_parser(name)
+        if name == "start":
+            child.add_argument("--port", type=int, default=9119)
+        if name in ("start", "stop"):
+            child.add_argument(
+                "--timeout", type=float, default=60 if name == "start" else 10
+            )
+        if name == "rollback":
+            child.add_argument(
+                "--to",
+                help="Retained release name; only needed if several choices exist",
+            )
+    argv = sys.argv[1:]
+    if not argv or argv[0].startswith("--") and argv[0] != "--help":
+        argv = ["setup", *argv]
+    args = parser.parse_args(argv)
     try:
         os.umask(0o077)
         E.require(sys.platform == "linux", "Only Linux is supported")
         if args.command == "setup":
             setup(args)
         else:
-            base, command = locations()
-            namespace(base)
-            with command_lock(base, exclusive=False):
-                owner, _ = owned_control(base, command)
-                print(invoke(base, owner["selection"], "inspect"), end="")
+            return manage(args)
     except (
         OSError,
         ValueError,
         KeyError,
         TypeError,
+        EOFError,
         tarfile.TarError,
         http.client.HTTPException,
         subprocess.SubprocessError,

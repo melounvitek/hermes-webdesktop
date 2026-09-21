@@ -61,7 +61,9 @@ def fetch(url, limit, expected_size=None):
         result = bytearray()
         while True:
             E.require(time.monotonic() < deadline, "Download deadline exceeded")
-            block = response.read(min(65536, limit + 1 - len(result)))
+            # read1 returns after one socket read, so a slow trickle cannot keep
+            # one large read alive past every deadline check.
+            block = response.read1(min(65536, limit + 1 - len(result)))
             if not block:
                 break
             result.extend(block)

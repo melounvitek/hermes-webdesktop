@@ -182,9 +182,11 @@ def entry(d):
     return ["sh", "-c", d["bootstrap"]]
 
 
-def test_complete_download_then_tty_install_and_verify(distribution):
+def test_complete_download_then_tty_install_and_verify(distribution, record_property):
     d = distribution
+    record_property("local_bootstrap_command", d["bootstrap"])
     code, output = terminal(entry(d), d["env"], stdin_pipe=True)
+    record_property("pty_transcript", output)
     assert code == 0, output
     assert "Nothing started" in output
     assert d["command"].is_file()
@@ -307,10 +309,17 @@ def test_download_failures_never_publish(distribution, fault):
     assert not d["command"].exists()
 
 
-@pytest.mark.parametrize("collision", ["command", "control", "symlink"])
+@pytest.mark.parametrize("collision", ["command", "control", "symlink", "data-overlap"])
 def test_foreign_paths_are_preserved(distribution, collision):
     d = distribution
     target = d["command"] if collision == "command" else d["base"] / "control/foreign"
+    if collision == "data-overlap":
+        d["env"]["XDG_DATA_HOME"] = str(d["base"].parent)
+        code, output = terminal(entry(d), d["env"])
+        assert code == 1, output
+        assert "Type yes" not in output
+        assert not d["base"].exists()
+        return
     target.parent.mkdir(parents=True)
     target.write_text("mine")
     if collision == "symlink":
