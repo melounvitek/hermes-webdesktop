@@ -86,9 +86,13 @@ def candidate(r, tmp_path, label, *, launcher=None, backend_match=True):
         if path.is_file()
     }
     if not backend_match:
-        receipt["tested_backend"]["reference_files"]["hermes_cli/main.py"] = sha(
-            b"another backend"
-        )
+        receipt["tested_backend"] = {
+            "revision": "e" * 40,
+            "reference_files": {
+                "hermes_cli/main.py": sha(b"another backend"),
+                "hermes_cli/historical_helper.py": sha(b"no longer present"),
+            },
+        }
     receipt_path = folder / "receipt.json"
     receipt_path.write_text(json.dumps(receipt))
     archive = folder / "release.tar.gz"
@@ -202,8 +206,11 @@ def test_update_chain_and_rollback_preserve_complete_installations(
     a = sha(r["archive"].read_bytes())
     retained = {a: json.loads(r["receipt"].read_bytes())["release"]}
     snapshots = {a: original}
+    with (r["backend"] / "hermes_cli/main.py").open("a") as source:
+        source.write("# Behavior-preserving backend update.\n")
+    backend = snapshot(r["backend"])
     for label in ("release-B", "release-C"):
-        archive = candidate(r, tmp_path, label)
+        archive = candidate(r, tmp_path, label, backend_match=False)
         result = update(r, archive)
         assert result.returncode == 0, result.stderr
         assert_retained(r, retained)
@@ -234,15 +241,16 @@ def test_update_chain_and_rollback_preserve_complete_installations(
     for digest, expected in snapshots.items():
         assert snapshot(history(root) / digest) == expected
     assert state_is(r, "stopped")
+    assert snapshot(r["backend"]) == backend
     assert not list(r["home"].glob("launch*.json"))
 
 
-@pytest.mark.parametrize("failure", ["digest", "manifest", "backend"])
+@pytest.mark.parametrize("failure", ["digest", "manifest"])
 def test_bad_candidate_leaves_current_and_history_untouched(
     maintained, tmp_path, failure
 ):
     r = maintained
-    archive = candidate(r, tmp_path, "candidate", backend_match=failure != "backend")
+    archive = candidate(r, tmp_path, "candidate")
     if failure == "manifest":
 
         def corrupt(payload):
@@ -603,17 +611,16 @@ def test_unconfirmed_maintenance_does_not_fence_legacy_start(
     assert not history(r["dest"]).exists()
 
 
-def test_rollback_rechecks_candidate_backend_references(release, tmp_path):
+def test_rollback_accepts_historical_backend_provenance(release, tmp_path):
     r = release
-    # Initial inspect/install can record an untested backend; maintenance cannot
-    # activate that old release merely because the retained installation is valid.
     archive = candidate(r, tmp_path, "old-untested", backend_match=False)
     args = r["args"].copy()
     args[1], args[3] = archive, sha(archive.read_bytes())
     result = run("install", *args, input="yes\n")
     assert result.returncode == 0, result.stderr
+    original = snapshot(r["dest"])
     current = candidate(r, tmp_path, "current-tested")
     assert update(r, current).returncode == 0
-    before = snapshot(r["dest"]), snapshot(history(r["dest"]))
-    assert_refused(maintenance(r, "rollback", "--to", sha(archive.read_bytes())))
-    assert (snapshot(r["dest"]), snapshot(history(r["dest"]))) == before
+    result = maintenance(r, "rollback", "--to", sha(archive.read_bytes()))
+    assert result.returncode == 0, result.stderr
+    assert snapshot(r["dest"]) == original

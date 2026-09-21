@@ -79,8 +79,10 @@ def test_detection_is_read_only_and_preserves_profile_and_venv(
         hermes_root=str(data),
         profile="default",
     )
+    with (backend / "hermes_cli/main.py").open("a") as source:
+        source.write("# Behavior-preserving difference from the receipt.\n")
     before = {str(p): p.stat().st_mtime_ns for p in home.rglob("*")}
-    assert m.preflight(selection, manifest)["compatibility"] == "reference-match"
+    assert m.preflight(selection, manifest)["compatibility"] == "not-exercised"
     assert before == {str(p): p.stat().st_mtime_ns for p in home.rglob("*")}
     for name in ("alpha", "beta", "alpha"):
         (data / "active_profile").write_text(name + "\n")
@@ -110,7 +112,6 @@ def test_detection_is_read_only_and_preserves_profile_and_venv(
         "ambiguous-python",
         "active",
         "deleted",
-        "incompatible",
         "wrapper",
     ],
 )
@@ -140,8 +141,6 @@ def test_detection_refuses_without_mutation(
         (data / "active_profile").write_text("alpha\n")
         (data / "profiles/.deleted").mkdir()
         (data / "profiles/.deleted/alpha").touch()
-    else:
-        (backend / "hermes_cli/main.py").write_text("different\n")
     before = {str(p): p.lstat().st_mtime_ns for p in home.rglob("*")}
     with pytest.raises((ValueError, OSError)):
         m.preflight(m.detect(args), manifest)

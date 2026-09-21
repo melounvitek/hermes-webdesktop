@@ -96,10 +96,12 @@ def test_confirmed_update_rollback_uninstall_and_stable_reinstall(
     root = d["base"] / "installation"
     control = snapshot(d["base"] / "control")
     baseline = snapshot(root)
+    with (d["home"] / ".hermes/hermes-agent/hermes_cli/main.py").open("a") as source:
+        source.write("# Compatible fixture update; no receipt refresh.\n")
     preserved = snapshot(d["home"] / ".hermes")
     with (d["base"] / "installation.run").open("rb") as lock:
         inode = os.fstat(lock.fileno()).st_ino
-        serve(d, candidate(release, tmp_path, "next"))
+        serve(d, candidate(release, tmp_path, "next", backend_match=False))
         for answer in ("no\n", "\x04", "\x03"):
             code, output = confirmed(d, "update", answer=answer)
             assert "Type yes" in output
@@ -157,12 +159,10 @@ def test_uninstall_preserves_modified_or_foreign_files(installed, foreign):
     assert path.exists()
 
 
-@pytest.mark.parametrize("state", ["unknown", "no-tty", "incompatible"])
+@pytest.mark.parametrize("state", ["unknown", "no-tty"])
 def test_maintenance_refuses_without_mutation(installed, release, tmp_path, state):
     d = installed
-    archive = candidate(
-        release, tmp_path, "next", backend_match=state != "incompatible"
-    )
+    archive = candidate(release, tmp_path, "next")
     serve(d, archive)
     if state == "unknown":
         path = d["base"] / "installation.run"

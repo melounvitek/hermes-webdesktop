@@ -122,7 +122,8 @@ def test_preview_decline_install_repeat_and_inspect(release):
     r = release
     result = run("inspect", *r["args"])
     assert result.returncode == 0, result.stderr
-    assert "reference-match" in result.stdout and "not exercised" in result.stdout
+    assert json.loads(result.stdout)["runtime"]["compatibility"] == "not-exercised"
+    assert "not exercised" in result.stdout
     assert str(r["home"]) in result.stdout and "web/index.html" in result.stdout
     assert not r["dest"].exists()
     assert run("install", *r["args"], input="no\n").returncode == 0
@@ -155,7 +156,7 @@ def test_preview_decline_install_repeat_and_inspect(release):
         text=True,
     )
     assert result.returncode == 0, result.stderr
-    assert "reference-match" in result.stdout
+    assert json.loads(result.stdout)["runtime"]["compatibility"] == "not-exercised"
 
 
 @pytest.mark.parametrize("profile", ["default", "alpha", "beta"])
@@ -404,7 +405,7 @@ def test_archive_replacement_during_confirmation_cannot_change_payload(release):
 
 
 @pytest.mark.parametrize(
-    "change", ["foreign-destination", "backend", "profile-deleted"]
+    "change", ["foreign-destination", "missing-source-entry", "profile-deleted"]
 )
 def test_confirmation_revalidates_destination_and_runtime(release, change):
     process = pending_install(release)
@@ -412,8 +413,8 @@ def test_confirmation_revalidates_destination_and_runtime(release, change):
         if change == "foreign-destination":
             release["dest"].mkdir()
             (release["dest"] / "keep").write_text("foreign")
-        elif change == "backend":
-            (release["backend"] / "hermes_cli/main.py").write_text("changed")
+        elif change == "missing-source-entry":
+            (release["backend"] / "hermes_cli/main.py").unlink()
         else:
             release["home"].rename(release["home"].with_name("moved-data"))
         _, stderr = process.communicate("yes\n", timeout=15)
@@ -531,23 +532,26 @@ DASHBOARD_FIXTURE = "def main():\n" + textwrap.indent(
 import argparse, json, os, signal, sys, time
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from pathlib import Path
+root = Path(os.environ['HERMES_HOME'])
+mode = (root/'mode').read_text() if (root/'mode').exists() else 'normal'
 p = argparse.ArgumentParser()
 p.add_argument('-p')
 p.add_argument('command')
 p.add_argument('--host')
 p.add_argument('--port', type=int)
 for flag in ('isolated', 'skip-build', 'no-open'):
-    p.add_argument('--' + flag, action='store_true')
-a = p.parse_args()
-root = Path(os.environ['HERMES_HOME'])
+    if mode != 'reject-flags' or flag != 'skip-build':
+        p.add_argument('--' + flag, action='store_true')
+a, unknown = p.parse_known_args()
 home = root if a.p == 'default' else root/'profiles'/a.p
-mode = (root/'mode').read_text() if (root/'mode').exists() else 'normal'
 record = root/('launch-' + str(a.port) + '.json')
 record.with_suffix('.tmp').write_text(json.dumps({'argv': vars(a), 'env': dict(os.environ), 'pid': os.getpid(), 'home': str(home)}))
 record.with_suffix('.tmp').replace(record)
 while not (root/('release-' + str(a.port))).exists():
     time.sleep(.01)
 (root/'launch.json').write_text(record.read_text())
+if unknown:
+    p.error('unrecognized arguments: ' + ' '.join(unknown))
 if mode == 'exit':
     sys.exit(7)
 if mode == 'stubborn':
@@ -557,7 +561,9 @@ class Handler(SimpleHTTPRequestHandler):
         super().__init__(*args, directory=os.environ['HERMES_WEB_DIST'], **kwargs)
     def do_GET(self):
         if self.path == '/api/health':
-            self.send_response(200); self.end_headers(); self.wfile.write(b'{"ok":true}')
+            body = {'bad-health': b'{"ok":false}', 'malformed-health': b'{', 'missing-health': b'{}'}.get(mode, b'{"ok":true}')
+            self.send_response(503 if mode == 'health-error' else 200)
+            self.end_headers(); self.wfile.write(body)
         elif mode == 'wrong':
             self.send_response(200); self.end_headers(); self.wfile.write(b'wrong bytes')
         else:
@@ -707,6 +713,8 @@ def controllers(tmp_path):
 
 
 def test_foreground_start_status_stop_and_changed_disk(dashboard, controllers):
+    with (dashboard["backend"] / "hermes_cli/main.py").open("a") as source:
+        source.write("# Same dashboard protocol, different source bytes.\n")
     assert state_is(dashboard, "stopped")
     env = {
         **os.environ,
@@ -752,10 +760,10 @@ def test_foreground_start_status_stop_and_changed_disk(dashboard, controllers):
     )
     # Startup and current disk identity are not conflated; changed UI cannot
     # prevent stopping the child the controller already owns.
-    (dashboard["backend"] / "hermes_cli/main.py").write_text("changed")
+    (dashboard["backend"] / "hermes_cli/main.py").unlink()
     status = json.loads(lifecycle(dashboard, "status").stdout)
-    assert status["startup"]["compatibility"] == "reference-match"
-    assert status["current_disk"]["compatibility"] == "untested"
+    assert status["startup"]["compatibility"] == "not-exercised"
+    assert status["current_disk"]["compatibility"] == "unavailable"
     (next((dashboard["dest"] / "versions").iterdir()) / "web/index.html").write_text(
         "changed"
     )
@@ -766,7 +774,19 @@ def test_foreground_start_status_stop_and_changed_disk(dashboard, controllers):
     assert state_is(dashboard, "stopped")
 
 
-@pytest.mark.parametrize("mode", ["wrong", "no-sentinel", "exit"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "wrong",
+        "no-sentinel",
+        "exit",
+        "reject-flags",
+        "bad-health",
+        "malformed-health",
+        "missing-health",
+        "health-error",
+    ],
+)
 def test_failed_readiness_is_not_ready_and_cleans_child(dashboard, controllers, mode):
     process, _ = controllers(dashboard, mode=mode)
     assert process.wait(timeout=12) != 0
@@ -1003,8 +1023,20 @@ def test_invalid_record_never_authorizes_stop(
     assert json.loads(path.read_text()) == record
 
 
-def test_backend_difference_is_not_called_compatible(release):
-    (release["backend"] / "hermes_cli/main.py").write_text("changed")
+def test_inspection_reports_prerequisites_not_source_identity_or_api_compatibility(
+    release,
+):
+    before = run("inspect", *release["args"])
+    assert before.returncode == 0, before.stderr
+    with (release["backend"] / "hermes_cli/main.py").open("a") as source:
+        source.write("# Behavior-preserving difference from the receipt.\n")
     result = run("inspect", *release["args"])
     assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout)["runtime"]["compatibility"] == "untested"
+    runtime = json.loads(result.stdout)["runtime"]
+    assert runtime == json.loads(before.stdout)["runtime"]
+    assert runtime["compatibility"] == "not-exercised"
+    assert (
+        runtime["tested_revision"]
+        == json.loads(release["receipt"].read_bytes())["tested_backend"]["revision"]
+    )
+    assert "not exercised" in runtime["limitations"]

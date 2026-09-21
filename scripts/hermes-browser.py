@@ -20,7 +20,9 @@ commands. Start runs the stock dashboard in the foreground on loopback; it may
 write profile state and contact configured services. Stop interrupts the owned
 child gracefully; no draining, force-kill or descendant cleanup is promised.
 After a controller crash ownership is unknown; automatic recovery is refused.
-Reference-file matches do not certify dependencies or running backend identity.
+Tested backend revisions and reference files are provenance, not runtime pins.
+Startup readiness checks the dashboard sentinel, health and a browser asset, not
+comprehensive API compatibility.
 
 Update/rollback/uninstall require stopped, known ownership and confirmation. They
 never stop or start Hermes. Previous complete installations are retained in the
@@ -414,24 +416,13 @@ def inspect_runtime(selection, manifest):
         re.fullmatch(r"Python [0-9]+\.[0-9]+\.[0-9]+[a-z0-9.+-]*", version),
         "Unrecognized Python version output",
     )
-    differences = []
-    for name, sha in manifest["tested_backend"]["reference_files"].items():
-        try:
-            path = backend / name
-            no_links(path)
-            match = digest(read_regular(path)) == sha
-        except (OSError, ValueError):
-            match = False
-        if not match:
-            differences.append(name)
     return {
         **selection,
         "python_version": version.removeprefix("Python "),
         "profile_home": str(home),
-        "compatibility": "untested" if differences else "reference-match",
-        "reference_differences": differences,
+        "compatibility": "not-exercised",
         "tested_revision": manifest["tested_backend"]["revision"],
-        "limitations": "Reference files only; extra source files, dependencies, import resolution and runtime functionality not exercised. Running services not inspected.",
+        "limitations": "Read-only Python, source entry and profile checks passed. Tested backend metadata is provenance only; dependencies, import resolution and API functionality not exercised. Running services not inspected.",
     }
 
 
@@ -866,10 +857,6 @@ def check_ready(port, asset, info):
 def run_foreground(args, root, stream, record, receipt, manifest, runtime):
     selection = receipt["selection"]
     backend = Path(selection["backend_root"])
-    require(
-        runtime["compatibility"] == "reference-match",
-        "Untested backend references; startup unsupported",
-    )
     startup_configuration(selection, runtime)
     asset = next(
         (
@@ -1247,10 +1234,6 @@ def maintenance(args, confirm=None, validate=inspect_runtime):
             target, target_manifest = versions[sha]
         if target is not None:
             runtime = validate(selection, target_manifest)
-            require(
-                runtime["compatibility"] == "reference-match",
-                "Candidate backend references do not match",
-            )
             if target == current:
                 print("Already selected; verified without installation changes.")
                 return
