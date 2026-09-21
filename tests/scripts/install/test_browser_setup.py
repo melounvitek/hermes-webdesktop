@@ -71,6 +71,7 @@ def test_detection_is_read_only_and_preserves_profile_and_venv(
     m = setup_module
     home, data, backend = layout
     manifest = json.loads(release["receipt"].read_bytes())
+    (data / "config.yaml").write_text("secrets: {bitwarden: {enabled: false}}\n")
     args = options()
     selection = m.detect(args)
     assert selection == dict(

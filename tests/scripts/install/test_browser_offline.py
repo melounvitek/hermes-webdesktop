@@ -970,7 +970,15 @@ def test_configuration_cannot_override_launch_controls(
         "secrets: {command: {enabled: true}}\n",
         '"secr\\u0065ts": {command: {enabled: true}}\n',
         "secrets: {command: {enabled: false}}\n",
+        "secrets: {bitwarden: {enabled: true}}\n",
+        'secrets: {bitwarden: {enabled: "false"}}\n',
+        "secrets: {bitwarden: {enabled: 0}}\n",
+        "secrets: {bitwarden: {enabled: null}}\n",
+        "secrets: {bitwarden: {}}\n",
+        "secrets: {bitwarden: false}\n",
+        "secrets: {bitwarden: {enabled: false}, command: {enabled: false}}\n",
         "base: &s {secrets: {command: {enabled: true}}}\n<<: *s\n",
+        "base: &s {secrets: {bitwarden: {enabled: true}}}\n<<: *s\n",
     ],
 )
 def test_external_secret_sources_are_unsupported_not_executed(
@@ -982,6 +990,28 @@ def test_external_secret_sources_are_unsupported_not_executed(
     assert process.wait(timeout=12) != 0
     assert not (dashboard["home"] / "launch.json").exists()
     assert path.read_text() == config
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        "secrets: {bitwarden: {enabled: false, auto_install: true}}\n",
+        "base: &s {secrets: {bitwarden: {enabled: false}}}\n<<: *s\n",
+    ],
+)
+def test_explicitly_disabled_bitwarden_allows_start_without_config_changes(
+    dashboard, controllers, config
+):
+    path = dashboard["home"] / "profiles/alpha/config.yaml"
+    path.write_text(config)
+    process, _ = controllers(dashboard)
+    try:
+        wait_for(lambda: state_is(dashboard, "ready") or process.poll() is not None)
+        assert state_is(dashboard, "ready")
+        assert path.read_text() == config
+    finally:
+        lifecycle(dashboard, "stop")
+    assert process.wait(timeout=10) == 0
 
 
 def test_container_routing_is_refused_before_spawn(dashboard, controllers):

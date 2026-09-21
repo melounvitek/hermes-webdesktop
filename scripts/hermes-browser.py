@@ -784,7 +784,14 @@ try:
     value = yaml.safe_load(sys.stdin.buffer.read())
     if value is not None and not isinstance(value, dict):
         sys.exit(2)
-    sys.exit(3 if (value or {}).get("secrets") else 0)
+    secrets = (value or {}).get("secrets")
+    # Explicitly disabled Bitwarden is a no-op in stock Hermes.
+    disabled_bitwarden = (
+        isinstance(secrets, dict) and set(secrets) == {"bitwarden"}
+        and isinstance(secrets["bitwarden"], dict)
+        and secrets["bitwarden"].get("enabled") is False
+    )
+    sys.exit(3 if secrets and not disabled_bitwarden else 0)
 except Exception:
     sys.exit(2)
 """
