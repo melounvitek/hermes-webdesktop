@@ -11,8 +11,10 @@ import { useStore } from '@nanostores/react'
 import { type ComponentProps, lazy, memo, type ReactNode, Suspense, useMemo } from 'react'
 import { Navigate, Route, Routes, useParams } from 'react-router'
 
+import { PANE_TOGGLE_REVEAL_EVENT } from '@/components/pane-shell'
 import { ContribBoundary, ContribRender } from '@/contrib/react/boundary'
 import { useContributions } from '@/contrib/react/use-contributions'
+import { isBrowserClient } from '@/lib/platform'
 import { $activeConnectionId } from '@/store/connections'
 import { $gateway } from '@/store/gateway'
 import { $activeGatewayProfile } from '@/store/profile'
@@ -54,7 +56,19 @@ export const SidebarSurface = memo(function SidebarSurface({
 }) {
   const latestActions = useMemo(() => latestSidebarActions(actions), [actions])
 
-  return <ChatSidebar currentView={currentView} {...latestActions} />
+  return (
+    <ChatSidebar
+      currentView={currentView}
+      {...latestActions}
+      onResumeSession={(...args) => {
+        if (isBrowserClient()) {
+          window.dispatchEvent(new CustomEvent(PANE_TOGGLE_REVEAL_EVENT, { detail: { id: 'sessions', mode: 'close' } }))
+        }
+
+        return latestActions.onResumeSession(...args)
+      }}
+    />
+  )
 })
 
 export const TerminalSurface = memo(function TerminalSurface() {
