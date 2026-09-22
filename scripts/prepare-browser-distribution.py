@@ -111,12 +111,13 @@ printf '%s  %s\\n' DIGEST "$t/installer.pyz" | sha256sum --check --status || { e
         "Custom selection/recovery: download install.sh over verified HTTPS (direct 200), then run sh ./install.sh --backend-root /ABS/Hermes --python /ABS/venv/bin/python --hermes-home /ABS/data --profile NAME, or sh ./install.sh uninstall."
     )
     print(
-        "Do not append flags to the compound command below; normal setup asks about ambiguous choices:"
+        "Run in a trusted, writable directory. This replaces hermes-browser-install.sh; "
+        "you can remove it after installation. Append installer options to the command below:"
     )
     print(
-        't=$(mktemp) && (trap \'rm -f "$t"\' EXIT; status=$(curl -q --fail --silent --show-error --proto "=https" --max-time 60 --max-filesize 65536 --write-out "%{http_code}" '
+        "curl -qfsS --proto '=https' --max-time 60 --max-filesize 65536 "
         + shlex.quote(entry)
-        + ' -o "$t") && [ "$status" = 200 ] && sh "$t")'
+        + " -o hermes-browser-install.sh && sh ./hermes-browser-install.sh"
     )
 
 

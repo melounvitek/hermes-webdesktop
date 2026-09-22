@@ -95,7 +95,7 @@ def https(tmp_path):
 
 
 @pytest.fixture
-def distribution(https, release, layout):
+def distribution(https, release, layout, monkeypatch):
     result = subprocess.run(
         [
             sys.executable,
@@ -119,6 +119,7 @@ def distribution(https, release, layout):
     for path in (https["root"] / "distribution").iterdir():
         shutil.copy2(path, https["root"] / path.name)
     home, _, _ = layout
+    monkeypatch.chdir(https["root"].parent)
     env = {
         **os.environ,
         "HOME": str(home),
@@ -185,17 +186,23 @@ def terminal(
         os.close(fd)
 
 
-def entry(d):
+def entry(d, shell="sh"):
     # Exercise exactly the command printed by the maintainer preparation tool.
-    return ["sh", "-c", d["bootstrap"]]
+    executable = shutil.which(shell)
+    if executable is None:
+        pytest.skip(f"{shell} is not installed")
+    return [executable, "-c", d["bootstrap"]]
 
 
-def test_complete_download_then_tty_install_and_verify(distribution, record_property):
+@pytest.mark.parametrize("shell", ["sh", "bash", "zsh"])
+def test_complete_download_then_tty_install_and_verify(
+    distribution, record_property, shell
+):
     d = distribution
     record_property("local_bootstrap_command", d["bootstrap"])
     with (d["home"] / ".hermes/hermes-agent/hermes_cli/main.py").open("a") as source:
         source.write("# Compatible fixture differs from the packaged reference.\n")
-    code, output = terminal(entry(d), d["env"], stdin_pipe=True)
+    code, output = terminal(entry(d, shell), d["env"], stdin_pipe=True)
     record_property("pty_transcript", output)
     assert code == 0, output
     assert "Nothing started" in output
@@ -208,6 +215,38 @@ def test_complete_download_then_tty_install_and_verify(distribution, record_prop
     assert inspected.returncode == 0, inspected.stderr
     assert json.loads(inspected.stdout)["runtime"]["compatibility"] == "not-exercised"
     assert "/CURRENT.json" in d["requests"]
+
+
+@pytest.mark.parametrize("shell", ["sh", "bash", "zsh"])
+@pytest.mark.parametrize("fault", ["404", "500", "truncated", "tls", "connection"])
+def test_bootstrap_download_failure_does_not_execute(distribution, shell, fault):
+    d = distribution
+    marker = Path.cwd() / "executed"
+    payload = b"printf executed > executed\n"
+    # A failed retry must not run a previously downloaded installer either.
+    Path("hermes-browser-install.sh").write_bytes(payload)
+    if fault in ("404", "500"):
+        d["faults"]["/install.sh"] = (int(fault), {}, payload)
+    elif fault == "truncated":
+        d["faults"]["/install.sh"] = (
+            200,
+            {"Content-Length": len(payload) + 100},
+            payload,
+        )
+    elif fault == "tls":
+        d["env"].pop("CURL_CA_BUNDLE")
+        d["env"].pop("SSL_CERT_FILE")
+    else:
+        d["bootstrap"] = d["bootstrap"].replace(
+            d["url"].rsplit("/", 1)[0], "https://127.0.0.1:1"
+        )
+    result = subprocess.run(
+        entry(d, shell), env=d["env"], text=True, capture_output=True, timeout=15
+    )
+    assert result.returncode != 0, result.stdout + result.stderr
+    assert not marker.exists()
+    assert "/installer.pyz" not in d["requests"]
+    assert not d["base"].exists()
 
 
 @pytest.mark.parametrize("answer", ["no\n", "\x04", "\x03"])
@@ -341,13 +380,3 @@ def test_foreign_paths_are_preserved(distribution, collision):
     assert not (d["base"] / "installation").exists()
     if collision != "symlink":
         assert target.read_text() == "mine"
-
-
-def test_untrusted_tls_bootstrap_does_not_execute(distribution):
-    d = distribution
-    env = dict(d["env"])
-    env.pop("CURL_CA_BUNDLE")
-    env.pop("SSL_CERT_FILE")
-    code, _ = terminal(entry(d), env)
-    assert code != 0
-    assert not d["base"].exists()
