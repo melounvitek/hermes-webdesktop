@@ -68,7 +68,6 @@ cd source
 ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm ci
 npm run typecheck --workspace apps/desktop
 npm run test:ui --workspace apps/desktop -- src/browser
-npm run test:browser-compat:harness --workspace apps/desktop
 npm run build:browser --workspace apps/desktop
 ```
 
@@ -121,11 +120,14 @@ and reload to check edits; Ctrl-C stops the fixture. Use a development account o
 VM: disposable profiles do not make agent tools a security sandbox. Vite preview
 alone does not provide the backend APIs or authentication setup.
 
-The broader Chromium API checks are `test:browser-compat` in `apps/desktop`.
-Pass `--backend-root`, `--python`, `--chrome`, `--web-dist` and a new `--evidence`
-directory as absolute paths. They require Linux with working Bubblewrap
-namespaces. The currently published release records a known `shiki503` full-gate
-failure; a successful build is not a claim that every compatibility check passes.
+The browser harness needs `/usr/bin/bwrap` with working PID/network namespaces.
+From `source/`, run `npm run test:browser-compat:harness --workspace apps/desktop`
+to check it. For the broader Chromium API checks, run
+`npm run test:browser-compat --workspace apps/desktop --` followed by
+`--backend-root`, `--python`, `--chrome`, `--web-dist` and a new `--evidence`
+directory, all with absolute paths. The currently published release records a
+known `shiki503` full-gate failure; a successful build is not a claim that every
+compatibility check passes.
 
 ### Release files
 

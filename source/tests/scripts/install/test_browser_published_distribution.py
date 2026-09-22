@@ -70,7 +70,9 @@ def test_published_distribution_install_inspect_and_uninstall(
         shutil.copy2(path, https["root"] / path.name)
     bootstrap = prepared.stdout.splitlines()[-1]
     record_property("local_bootstrap_command", bootstrap)
-    code, output = terminal(entry({"bootstrap": bootstrap}, shell), env, stdin_pipe=True)
+    code, output = terminal(
+        entry({"bootstrap": bootstrap}, shell), env, stdin_pipe=True
+    )
     record_property("pty_transcript", output)
     assert code == 0, output
     assert "Nothing started" in output
