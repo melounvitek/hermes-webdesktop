@@ -1,0 +1,14 @@
+{
+  "repository": "https://github.com/NousResearch/hermes-agent.git",
+  "directory": "source",
+  "upstream_base": "26a7a95ceb357ab7462f620f3305e75ecd54bb22",
+  "original_snapshot": "3bffd1e41530bd6288d9477560107906a4763165",
+  "sanitized_snapshot": "949e69a87e9d2214a26155c6012e95a4ebc90cd3",
+  "history": "Main-branch ancestry, imported without squashing. Other development branches and unreachable work are not included.",
+  "sanitization": {
+    "removed_paths": ["plan.md", ".hermes/plans/", "default.tar.gz"],
+    "historical_redactions": ["Token literals in GIF-search documentation", "Private evidence paths in commit messages"],
+    "current_tree_difference": "Only plan.md was removed. All remaining files at import retain their original bytes and modes.",
+    "commit_ids": "Rewritten by git-filter-repo 2.47.0; original signatures cannot be retained. Original history was not changed."
+  }
+}
