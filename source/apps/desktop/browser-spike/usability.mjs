@@ -118,6 +118,7 @@ async function newPage(boundary = false) {
   })
   page.on('websocket', ws => {
     const socket = ++nextSocketId
+    ws.on('close', () => frames.push({ direction: 'closed', socket }))
     const transportProfile = new URL(ws.url()).searchParams.get('profile') || 'default'
     for (const [event, direction] of [
       ['framereceived', 'received'],
@@ -596,6 +597,61 @@ try {
       results.push({ name: `${profile}-download-bytes-filename`, status: 'PASS' })
     }
   })
+  await check('relative-download-no-workspace-visible-error', async page => {
+    await selectProfile(page, profiles[0])
+    const start = frames.length
+    // Keep a fresh tile connected: orphan reap + cold resume can persist the
+    // terminal default cwd, so an earlier session is not a no-workspace fixture.
+    await page
+      .getByRole('button', { name: /^New session Ctrl/ })
+      .dragTo(page.getByRole('textbox', { name: 'Message', exact: true }))
+    const tile = page.locator('[data-session-anchor^="session-tile:"]')
+    await expect(tile.getByRole('textbox', { name: 'Message', exact: true })).toBeEditable()
+    const relative = './workspace/résumé & report.bin'
+    await send(page, `spike: [no workspace download](#media:${encodeURIComponent(relative)})`)
+    const storedId = (await tile.getAttribute('data-session-anchor')).slice('session-tile:'.length)
+    const sessionUrl = `${runtime.url}/api/sessions/${encodeURIComponent(storedId)}?profile=${profiles[0]}`
+    const persisted = await page.request.get(sessionUrl, { headers })
+    assert.equal(persisted.status(), 200)
+    const session = await persisted.json()
+    assert.equal(session.profile, profiles[0])
+    assert.equal(session.cwd, null, 'Negative fixture must have no persisted workspace')
+    const downloadButton = tile.getByRole('button', { name: 'Download', exact: true }).last()
+    const [unavailable] = await Promise.all([
+      page.waitForResponse(response => new URL(response.url()).pathname === '/api/fs/download'),
+      downloadButton.click()
+    ])
+    assert.equal(unavailable.status(), 400)
+    const query = new URL(unavailable.url()).searchParams
+    assert.equal(query.get('path'), relative)
+    assert.equal(query.get('profile'), profiles[0])
+    assert.equal(query.get('session_id'), storedId)
+    const detail = (await unavailable.json()).detail
+    assert.equal(detail, 'Session working directory is unavailable')
+    const alert = page.getByRole('alert').filter({ hasText: 'Download failed' })
+    await expect(alert).toBeVisible()
+    await expect(alert).toContainText(detail)
+    await expect(downloadButton).toBeEnabled()
+    const after = await page.request.get(sessionUrl, { headers })
+    assert.equal(after.status(), 200)
+    assert.equal((await after.json()).cwd, null)
+    assert.equal(
+      frames.slice(start).some(f => f.direction === 'closed'),
+      false,
+      'Negative fixture must stay connected'
+    )
+    assert.equal(
+      requestFrames(start).some(f => f.method === 'session.resume'),
+      false
+    )
+    await page.screenshot({ path: path.join(artifacts, 'relative-download-no-workspace.png') })
+    await writeFile(
+      path.join(artifacts, 'relative-download-no-workspace.json'),
+      JSON.stringify({ ...downloads.at(-1), session, detail, alert: await alert.innerText() }, null, 2)
+    )
+    await alert.getByRole('button', { name: 'Dismiss notification', exact: true }).click()
+    await expect(alert).not.toBeVisible()
+  })
   await check('relative-download-a-tile-b-foreground', async page => {
     const filename = 'résumé & report.bin'
     const relative = `./workspace/${filename}`
@@ -633,28 +689,6 @@ try {
     const foreground = page.getByRole('contentinfo').getByRole('button', { name: profiles[1], exact: true })
     await expect(foreground).toBeVisible()
     const downloadButton = tile.getByRole('button', { name: 'Download', exact: true }).last()
-    // Config's terminal cwd is not a user-chosen session workspace. Prove the
-    // fail-closed response and visible error before explicitly choosing one.
-    const [unavailable] = await Promise.all([
-      page.waitForResponse(response => new URL(response.url()).pathname === '/api/fs/download'),
-      downloadButton.evaluate(button => button.click())
-    ])
-    assert.equal(unavailable.status(), 400)
-    const detail = (await unavailable.json()).detail
-    assert.equal(detail, 'Session working directory is unavailable')
-    const alert = page.getByRole('alert').filter({ hasText: 'Download failed' })
-    await expect(alert).toBeVisible()
-    await expect(alert).toContainText(detail)
-    await expect(downloadButton).toBeEnabled()
-    await expect(foreground).toBeVisible()
-    await page.screenshot({ path: path.join(artifacts, 'relative-download-no-workspace.png') })
-    await writeFile(
-      path.join(artifacts, 'relative-download-no-workspace.json'),
-      JSON.stringify({ ...downloads.at(-1), detail, alert: await alert.innerText() }, null, 2)
-    )
-    await alert.getByRole('button', { name: 'Dismiss notification', exact: true }).click()
-    await expect(alert).not.toBeVisible()
-
     // Projects' folder picker is native in local browser mode. Use the public
     // RPC instead, with A's actual live id (not the stored id used by downloads).
     const owner = frames.findLast(
@@ -704,7 +738,6 @@ try {
     assert.equal(reply.error, undefined, JSON.stringify(reply))
     assert.equal(reply.result.cwd, cwd)
     await expect(foreground).toBeVisible()
-    results.push({ name: 'relative-download-no-workspace-visible-error', status: 'PASS' })
     const start = downloads.length
     // Invoke the real tile button without pointer hover/focus-follow switching
     // the foreground to A first. No bridge, resolver, or transport is mocked.
@@ -721,7 +754,6 @@ try {
     assert.equal(query.get('path'), relative)
     assert.equal(query.get('profile'), profiles[0])
     assert.equal(query.get('session_id'), storedId, 'Relative path must resolve in A’s owning session')
-    assert.equal(request.url, unavailable.url(), 'Choosing a workspace must fix the same download, not retarget it')
     assert.equal(request.requestHeaders['x-hermes-session-token'], runtime.token)
     if (!response.ok()) {
       const detail = await response.text()
