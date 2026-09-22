@@ -1,39 +1,28 @@
 {
-  "name": "hermes-agent",
+  "name": "hermes-webdesktop-source",
   "version": "1.0.0",
-  "description": "An AI agent with advanced tool-calling capabilities, featuring a flexible toolsets system for organizing and managing tools.",
+  "description": "Hermes browser frontend and development tools.",
   "private": true,
   "workspaces": [
-    "apps/*",
-    "ui-tui",
-    "ui-tui/packages/*",
-    "web",
+    "apps/desktop",
+    "apps/shared",
     "tests-js"
   ],
   "scripts": {
-    "postinstall": "echo '\u2705 Node dependencies installed. Run: python run_agent.py --help'",
-    "install:root": "npm install --workspaces=false",
-    "install:web": "npm install --workspace web",
-    "install:tui": "npm install --workspace ui-tui",
-    "install:desktop": "npm install --workspace apps/desktop",
-    "audit:root": "npm audit --workspaces=false",
-    "audit:web": "npm audit --workspace web",
-    "audit:tui": "npm audit --workspace ui-tui",
-    "audit:fix:root": "npm audit fix --workspaces=false",
-    "audit:fix:web": "npm audit fix --workspace web",
-    "audit:fix:tui": "npm audit fix --workspace ui-tui",
-    "check": "npm run --ws check",
-    "fix": "npm run --ws fix"
+    "typecheck": "npm run typecheck --workspace apps/desktop",
+    "test": "npm run test:ui --workspace apps/desktop",
+    "test:contracts": "npm run test --workspace tests-js",
+    "build:browser": "npm run build:browser --workspace apps/desktop"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/NousResearch/Hermes-Agent.git"
+    "url": "git+https://github.com/melounvitek/hermes-webdesktop.git"
   },
   "license": "MIT",
   "bugs": {
-    "url": "https://github.com/NousResearch/Hermes-Agent/issues"
+    "url": "https://github.com/melounvitek/hermes-webdesktop/issues"
   },
-  "homepage": "https://github.com/NousResearch/Hermes-Agent#readme",
+  "homepage": "https://github.com/melounvitek/hermes-webdesktop#readme",
   "devDependencies": {
     "@eslint/js": "9.39.5",
     "typescript-eslint": "8.64.0",

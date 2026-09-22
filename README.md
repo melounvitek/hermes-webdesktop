@@ -53,10 +53,16 @@ A normal clone includes the editable UI, tests and build configuration in
 installer still downloads the prebuilt release; it does not build or install
 anything from `source/`.
 
-The source was imported as a Git subtree with sanitized history. Private plans,
-a historical profile archive and credential examples were removed. See
-`SOURCE_PROVENANCE.json` for the import revisions and exclusions. Older commits
-keep their original root layout; the subtree import places them under `source/`.
+The current tree keeps the desktop/shared frontend, browser tooling and relevant
+tests (including frontend dependency/security checks in `source/tests-js/`);
+it does not contain the Hermes backend or other applications. Electron
+code and the optional terminal plugin are retained. Native application packaging
+is not supported by this repository's release workflow.
+
+The source came from a sanitized Git subtree import. Private plans, a historical
+profile archive and credential examples were removed. See `SOURCE_PROVENANCE.json`.
+Git history was not rewritten during extraction: older commits still contain the
+full sanitized tree, so a normal clone retains that history's disk cost.
 
 ### Build and test
 
@@ -68,27 +74,32 @@ cd source
 ELECTRON_SKIP_BINARY_DOWNLOAD=1 npm ci
 npm run typecheck --workspace apps/desktop
 npm run test:ui --workspace apps/desktop -- src/browser
+npm run test:contracts
 npm run build:browser --workspace apps/desktop
 ```
 
 Edit `source/apps/desktop/src/`; the output is
 `source/apps/desktop/dist-browser/`. Shared frontend code is in `source/apps/shared/`.
-For wider UI coverage, omit `-- src/browser`. The plain `dev` and `build` commands
-are for Electron, not the browser edition.
+For wider UI coverage, omit `-- src/browser`. The full suite currently has inherited
+failures in `voice-prefs.test.ts` and `close-tab.test.ts`; these also fail before
+extraction. The plain desktop-workspace `dev` and `build` commands are for Electron,
+not the browser edition. Generated frontend API contracts stay committed; updating
+them is a separate compatibility task against stock Hermes.
 
 To run the installer tests, from `source/`:
 
 ```bash
-uv sync --locked --python 3.11 --extra dev --extra web --no-install-project
+uv sync --locked --python 3.11
 test_home=$(mktemp -d)
 env -i HOME="$test_home" PATH="$PWD/.venv/bin:/usr/bin:/bin" \
   HERMES_TEST_FILE_RETRIES=0 \
-  bash scripts/run_tests.sh -j 2 tests/scripts/install/test_browser_*.py
+  bash scripts/run_tests.sh -j 2
 ```
 
-The tests use temporary profiles and loopback HTTPS, not your installed Hermes.
-They need OpenSSL, curl and a PTY; install zsh to cover its installer cases too.
-The published-distribution test installs and uninstalls the committed UI archive
+The default suite needs only the small test venv, not backend Python packages.
+Tests use temporary profiles and loopback HTTPS, not your installed Hermes. They
+need OpenSSL, curl and a PTY; install zsh to cover its installer cases too. The
+published-distribution test installs and uninstalls the committed UI archive
 without starting a backend.
 
 ### Try the UI
@@ -128,6 +139,35 @@ to check it. For the broader Chromium API checks, run
 directory, all with absolute paths. The currently published release records a
 known `shiki503` full-gate failure; a successful build is not a claim that every
 compatibility check passes.
+
+### Optional terminal plugin tests
+
+The plugin and terminal UI are unchanged. Their integration suite is separate
+from installer tests because it imports stock server/authentication/PTY modules.
+Using the disposable `scratch`, `stock` and `python` from above, after stopping
+the UI fixture:
+
+```bash
+# From the repository root. Install test clients into the disposable stock venv.
+uv pip install --python "$python" -r source/pyproject.toml --extra plugin
+repo=$PWD
+bwrap --unshare-net --unshare-pid --die-with-parent \
+  --ro-bind / / --tmpfs /tmp --bind "$scratch" "$scratch" \
+  --ro-bind "$stock" "$stock" --ro-bind "$repo" "$repo" \
+  --bind "$repo/source" "$repo/source" --proc /proc --dev /dev \
+  --chdir "$repo" \
+  env -i HOME="$scratch/home" PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+  HERMES_PYTHON="$python" HERMES_TEST_FILE_RETRIES=0 \
+  bash source/scripts/run_tests.sh -j 1 tests/plugins/test_browser_terminal_plugin.py \
+  -- --backend-root="$stock"
+```
+
+This starts disposable loopback servers and shells in a private network/PID
+namespace. It neither installs the plugin into your profile nor changes the
+stock checkout. `HERMES_PYTHON` explicitly selects the integration interpreter
+even when `source/.venv` exists. The backend must be a clean Git checkout with
+no root `.env`; a missing or invalid selection fails rather than using an
+installed runtime. Read-only host files remain visible inside the namespace.
 
 ### Release files
 

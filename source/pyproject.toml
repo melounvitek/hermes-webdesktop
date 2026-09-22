@@ -16,7 +16,7 @@ plugin = ["httpx==0.28.1", "websockets==15.0.1"]
 package = false
 
 [tool.pytest.ini_options]
-testpaths = ["tests/scripts/install/test_browser*.py", "tests/test_browser_test_isolation.py", "tests/plugins"]
+testpaths = ["tests/scripts/install", "tests/test_browser_test_isolation.py"]
 markers = [
     "linux_only: exercises Linux-specific behaviour; skipped on other hosts",
     "macos_only: exercises macOS-specific behaviour; skipped on other hosts",

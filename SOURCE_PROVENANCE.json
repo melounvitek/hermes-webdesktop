@@ -1,6 +1,7 @@
 {
   "repository": "https://github.com/NousResearch/hermes-agent.git",
   "directory": "source",
+  "current_layout": "Frontend-focused selection: desktop/shared workspaces, optional terminal plugin, browser harness, installer tools and their tests. Backend implementations, other applications and unrelated tests were removed after import. Existing Git history was not rewritten.",
   "upstream_base": "26a7a95ceb357ab7462f620f3305e75ecd54bb22",
   "original_snapshot": "3bffd1e41530bd6288d9477560107906a4763165",
   "sanitized_snapshot": "949e69a87e9d2214a26155c6012e95a4ebc90cd3",

@@ -14,10 +14,10 @@
 #   * Explicit HERMES_PYTHON selection, otherwise local .venv or venv
 #
 # Usage:
-#   scripts/run_tests.sh                            # full suite
+#   scripts/run_tests.sh                            # installer and isolation tests
 #   scripts/run_tests.sh -j 4                       # cap parallelism
-#   scripts/run_tests.sh tests/agent/               # discover only here
-#   scripts/run_tests.sh tests/agent/ tests/acp_adapter/    # multiple roots
+#   scripts/run_tests.sh tests/scripts/install/     # discover only here
+#   scripts/run_tests.sh tests/plugins/ -- --backend-root=/ABS/stock  # opt-in integration
 #   scripts/run_tests.sh tests/foo.py               # single file
 #   scripts/run_tests.sh tests/foo.py -q            # path + bare pytest flag
 #   scripts/run_tests.sh tests/foo.py -v --tb=long  # bare flags "just work"
@@ -29,7 +29,7 @@
 # are forwarded to each per-file pytest invocation automatically — no '--'
 # separator required. The explicit '--' form still works and stacks with
 # bare flags. Positional path arguments override the default discovery
-# root (tests/).
+# roots (installer and isolation tests; plugin integration is opt-in).
 
 set -euo pipefail
 

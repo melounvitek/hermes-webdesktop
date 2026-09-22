@@ -60,7 +60,8 @@ from typing import Dict, List, Optional, Tuple
 
 
 # Default test discovery roots.
-_DEFAULT_ROOTS = ["tests"]
+# Backend integration is opt-in and uses a separately selected stock checkout.
+_DEFAULT_ROOTS = ["tests/scripts/install", "tests/test_browser_test_isolation.py"]
 
 # Directories to skip during discovery — these suites require real
 # external services (a model gateway, a docker daemon with a prebuilt
