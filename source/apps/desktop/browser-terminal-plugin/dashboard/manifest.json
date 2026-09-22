@@ -1,0 +1,9 @@
+{
+  "name": "browser-terminal",
+  "label": "Browser Terminal Server",
+  "version": "0.1.0",
+  "description": "Optional authenticated host shells (Linux). Not a sandbox.",
+  "tab": {"path": "/browser-terminal", "hidden": true},
+  "entry": "index.js",
+  "api": "plugin_api.py"
+}
