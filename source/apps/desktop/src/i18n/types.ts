@@ -225,6 +225,7 @@ export interface Translations {
   }
 
   boot: {
+    loadingHermes: string
     ready: string
     desktopBootFailedWithMessage: (message: string) => string
     steps: {

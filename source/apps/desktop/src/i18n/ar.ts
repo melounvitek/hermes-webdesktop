@@ -152,6 +152,7 @@ export const ar = defineLocale({
     pathCopied: 'تم نسخ المسار'
   },
   boot: {
+    loadingHermes: 'جارٍ تحميل Hermes…',
     ready: 'Hermes Desktop جاهز',
     desktopBootFailedWithMessage: message => `فشل تشغيل سطح المكتب: ${message}`,
     steps: {

@@ -165,6 +165,7 @@ export const zh = defineLocale({
   },
 
   boot: {
+    loadingHermes: '正在加载 Hermes…',
     ready: 'Hermes 桌面版已就绪',
     desktopBootFailedWithMessage: message => `桌面启动失败：${message}`,
     steps: {

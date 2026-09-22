@@ -1,7 +1,7 @@
 import { act, cleanup, render, screen } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { $desktopBoot } from '@/store/boot'
+import { $desktopBoot, completeDesktopBoot, failDesktopBoot, setDesktopBootStep } from '@/store/boot'
 import { $gatewaySwitching } from '@/store/gateway-switch'
 import { $desktopOnboarding } from '@/store/onboarding'
 import { setGatewayState } from '@/store/session'
@@ -50,7 +50,10 @@ function resetStores() {
 }
 
 beforeEach(resetStores)
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.unstubAllGlobals()
+})
 
 // The connecting overlay renders "CONN" + a scrambled tail inside one
 // uppercase span; match that node specifically so the recovery overlay's
@@ -60,6 +63,58 @@ const isConnectingShown = () =>
 
 const isRecoveryShown = () =>
   Boolean(screen.queryByText(/use local gateway/i) || screen.queryByText(/retry/i) || screen.queryByText(/sign in/i))
+
+describe('browser startup', () => {
+  beforeEach(() => {
+    vi.stubGlobal('hermesDesktop', { browser: true })
+    $desktopBoot.set({
+      ...$desktopBoot.get(),
+      phase: 'backend.ready'
+    })
+  })
+
+  it('shows loading through backend-ready and socket-open until renderer initialization completes, only on cold boot', () => {
+    render(<GatewayConnectingOverlay />)
+    expect(screen.getByRole('status', { name: 'Loading Hermes…' })).toBeTruthy()
+
+    act(() => {
+      setGatewayState('open')
+      setDesktopBootStep({ phase: 'renderer.config', message: 'Loading settings', progress: 97 })
+    })
+    expect(screen.getByRole('status', { name: 'Loading Hermes…' })).toBeTruthy()
+
+    act(() => completeDesktopBoot())
+    expect(screen.queryByRole('status', { name: 'Loading Hermes…' })).toBeNull()
+
+    act(() => setGatewayState('closed'))
+    expect(screen.queryByRole('status', { name: 'Loading Hermes…' })).toBeNull()
+
+    act(() => {
+      $gatewaySwitching.set(true)
+      setDesktopBootStep({ phase: 'renderer.gateway.connect', message: 'Switching', progress: 4 })
+    })
+    expect(screen.queryByRole('status', { name: 'Loading Hermes…' })).toBeNull()
+    act(() => $gatewaySwitching.set(false))
+    expect(screen.queryByRole('status', { name: 'Loading Hermes…' })).toBeNull()
+  })
+
+  it('yields to boot failure recovery even after the socket opened', () => {
+    render(
+      <>
+        <GatewayConnectingOverlay />
+        <BootFailureOverlay />
+      </>
+    )
+    expect(screen.getByRole('status', { name: 'Loading Hermes…' })).toBeTruthy()
+
+    act(() => {
+      setGatewayState('open')
+      failDesktopBoot('Settings could not be loaded')
+    })
+    expect(screen.queryByRole('status', { name: 'Loading Hermes…' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy()
+  })
+})
 
 describe('connecting overlay vs recovery surface', () => {
   it('hard initial-boot failure surfaces the recovery overlay (the working path)', async () => {

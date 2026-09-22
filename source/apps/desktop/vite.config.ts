@@ -120,10 +120,16 @@ export default defineConfig(({ command }) => ({
     tailwindcss(),
     emojibaseAssets(),
     process.env.VITE_BROWSER === '1' && {
-      name: 'hermes:browser-icon',
+      name: 'hermes:browser-html',
       transformIndexHtml: {
         order: 'pre',
-        handler: html => html.replaceAll('href="/apple-touch-icon.png"', 'href="/src/browser/icon.png?no-inline"')
+        handler: html =>
+          html
+            .replaceAll('href="/apple-touch-icon.png"', 'href="/src/browser/icon.png?no-inline"')
+            .replace(
+              '<div id="root" class="scrollbar-dt"></div>',
+              `<div id="root" class="scrollbar-dt">${fs.readFileSync(path.join(__dirname, 'src/browser/loading.html'), 'utf8')}</div>`
+            )
       }
     }
   ],

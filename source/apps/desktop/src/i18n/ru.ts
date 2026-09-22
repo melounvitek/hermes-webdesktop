@@ -158,6 +158,7 @@ export const ru = defineLocale({
     pathCopied: 'Путь скопирован'
   },
   boot: {
+    loadingHermes: 'Загрузка Hermes…',
     ready: 'Hermes Desktop готов',
     desktopBootFailedWithMessage: message => `Не удалось запустить приложение: ${message}`,
     steps: {

@@ -171,6 +171,7 @@ export const en: Translations = {
   },
 
   boot: {
+    loadingHermes: 'Loading Hermes…',
     ready: 'Hermes Desktop is ready',
     desktopBootFailedWithMessage: message => `Desktop boot failed: ${message}`,
     steps: {

@@ -137,6 +137,7 @@ export const ja = defineLocale({
   },
 
   boot: {
+    loadingHermes: 'Hermes を読み込み中…',
     ready: 'Hermes Desktop の準備ができました',
     desktopBootFailedWithMessage: message => `デスクトップの起動に失敗しました: ${message}`,
     steps: {

@@ -1,8 +1,11 @@
 import { useStore } from '@nanostores/react'
 import { useEffect, useRef, useState } from 'react'
 
+import { PageLoader } from '@/components/page-loader'
 import { DecodeText } from '@/components/ui/decode-text'
-import { prefersReducedMotion } from '@/hooks/use-media-query'
+import { prefersReducedMotion, useMediaQuery } from '@/hooks/use-media-query'
+import { useI18n } from '@/i18n'
+import { isBrowserClient } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 import { $desktopBoot } from '@/store/boot'
 import { $gatewaySwitching } from '@/store/gateway-switch'
@@ -38,6 +41,41 @@ function forcedPreview(): boolean {
 }
 
 export function GatewayConnectingOverlay() {
+  return isBrowserClient() ? <BrowserLoadingOverlay /> : <DesktopConnectingOverlay />
+}
+
+function BrowserLoadingOverlay() {
+  const { t } = useI18n()
+  const reduce = useMediaQuery('(prefers-reduced-motion: reduce)')
+  const boot = useStore($desktopBoot)
+  const gatewaySwitching = useStore($gatewaySwitching)
+  const coldBootDoneRef = useRef(false)
+
+  // The browser bridge reports backend.ready before settings and sessions load.
+  if (boot.phase === 'renderer.ready' && !boot.error) {
+    coldBootDoneRef.current = true
+  }
+
+  if (coldBootDoneRef.current || boot.error || gatewaySwitching) {
+    return null
+  }
+
+  return (
+    <div
+      aria-label={t.boot.loadingHermes}
+      className="fixed inset-0 z-(--z-connecting) grid place-items-center bg-(--ui-chat-surface-background)"
+      data-glass-opaque=""
+      role="status"
+    >
+      <div className="flex flex-col items-center gap-4">
+        {!reduce && <PageLoader aria-hidden="true" className="h-auto" role="presentation" />}
+        <p className="text-sm text-(--ui-text-secondary)">{t.boot.loadingHermes}</p>
+      </div>
+    </div>
+  )
+}
+
+function DesktopConnectingOverlay() {
   const gatewayState = useStore($gatewayState)
   const boot = useStore($desktopBoot)
   const gatewaySwitching = useStore($gatewaySwitching)

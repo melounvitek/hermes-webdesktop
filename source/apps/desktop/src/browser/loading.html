@@ -1,0 +1,52 @@
+<style>
+  #hermes-startup {
+    position: fixed;
+    inset: 0;
+    display: grid;
+    place-content: center;
+    justify-items: center;
+    gap: 1rem;
+    color: CanvasText;
+    font:
+      14px system-ui,
+      sans-serif;
+  }
+  #hermes-startup p {
+    margin: 0;
+  }
+  #hermes-startup .spinner {
+    width: 2.5rem;
+    height: 2.5rem;
+    box-sizing: border-box;
+    border: 3px solid color-mix(in srgb, currentColor 20%, transparent);
+    border-top-color: currentColor;
+    border-radius: 50%;
+    animation: hermes-startup-spin 0.8s linear infinite;
+  }
+  #hermes-startup a {
+    color: inherit;
+  }
+  @keyframes hermes-startup-spin {
+    to {
+      transform: rotate(360deg);
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    #hermes-startup .spinner {
+      animation: none;
+    }
+  }
+</style>
+<div id="hermes-startup" role="status" aria-label="Loading Hermes…">
+  <div class="spinner" aria-hidden="true"></div>
+  <p>Loading Hermes…</p>
+  <a id="hermes-startup-retry" href="" hidden>Reload</a>
+  <noscript>Enable JavaScript to open Hermes.</noscript>
+</div>
+<script>
+  // Keep a way out if the app bundle fails to download or execute.
+  setTimeout(() => {
+    const retry = document.getElementById('hermes-startup-retry')
+    if (retry) retry.hidden = false
+  }, 15000)
+</script>
