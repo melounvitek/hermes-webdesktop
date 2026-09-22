@@ -47,6 +47,12 @@ export function LegacySessionRedirect() {
   return <Navigate replace to={sessionId ? sessionRoute(sessionId) : NEW_CHAT_ROUTE} />
 }
 
+function closeMobileSidebar() {
+  if (isBrowserClient()) {
+    window.dispatchEvent(new CustomEvent(PANE_TOGGLE_REVEAL_EVENT, { detail: { id: 'sessions', mode: 'close' } }))
+  }
+}
+
 export const SidebarSurface = memo(function SidebarSurface({
   actions,
   currentView
@@ -60,10 +66,23 @@ export const SidebarSurface = memo(function SidebarSurface({
     <ChatSidebar
       currentView={currentView}
       {...latestActions}
+      onManageCronJob={(...args) => {
+        closeMobileSidebar()
+
+        return latestActions.onManageCronJob(...args)
+      }}
+      onNavigate={(...args) => {
+        closeMobileSidebar()
+
+        return latestActions.onNavigate(...args)
+      }}
+      onNewSessionInWorkspace={(...args) => {
+        closeMobileSidebar()
+
+        return latestActions.onNewSessionInWorkspace(...args)
+      }}
       onResumeSession={(...args) => {
-        if (isBrowserClient()) {
-          window.dispatchEvent(new CustomEvent(PANE_TOGGLE_REVEAL_EVENT, { detail: { id: 'sessions', mode: 'close' } }))
-        }
+        closeMobileSidebar()
 
         return latestActions.onResumeSession(...args)
       }}
