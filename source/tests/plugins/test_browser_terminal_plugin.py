@@ -7,6 +7,7 @@ import os
 from pathlib import Path
 import shlex
 import shutil
+import signal
 import socket
 import subprocess
 import sys
@@ -25,10 +26,30 @@ ROOT = Path(__file__).resolve().parents[2]
 PLUGIN = ROOT / "apps/desktop/browser-terminal-plugin"
 API = "/api/plugins/browser-terminal"
 TOKEN = "test-browser-terminal-token"
+# Capture before the suite's per-test signal guard: cleanup may need to kill a
+# child after a deliberately broken plugin has orphaned it. Only retained,
+# verified descendant identities may use this narrow cleanup path.
+_kill = os.kill
+
+
+def owned_child(pid):
+    child = psutil.Process(pid)
+    assert os.getpid() in [parent.pid for parent in child.parents()]
+    return child
+
+
+def kill_child(child):
+    if child.is_running():  # psutil also checks creation time, not just PID reuse.
+        with contextlib.suppress(ProcessLookupError):
+            _kill(child.pid, signal.SIGKILL)
+
+
 SERVER = """
 import sys
+from pathlib import Path
 import uvicorn
 from hermes_cli import web_server
+assert Path(web_server.__file__).resolve() == Path(sys.argv[4]) / 'hermes_cli/web_server.py'
 web_server.app.state.bound_host = sys.argv[2]
 web_server.app.state.auth_required = sys.argv[3] == 'gated'
 if web_server.app.state.auth_required:
@@ -50,13 +71,15 @@ def wait_for(predicate, timeout=15):
 
 
 @contextlib.contextmanager
-def server(tmp_path, *, settings=None, installed=True, enabled=True, bound_host="127.0.0.1", gated=False):
+def server(tmp_path, backend, *, settings=None, installed=True, enabled=True, bound_host="127.0.0.1", gated=False):
     home = tmp_path / "home"
     hermes = home / ".hermes"
     hermes.mkdir(parents=True)
     (home / ".zshrc").touch()  # No first-run wizard in the isolated test account home.
     config = {"plugins": {"enabled": ["browser-terminal"] if enabled else [], "entries": {
-        "browser-terminal": {"settings": settings or {}}}}}
+        "browser-terminal": {"settings": settings or {}}}},
+        "model_catalog": {"enabled": False}, "curator": {"enabled": False},
+        "security": {"tirith_enabled": False}}
     config_path = hermes / "config.yaml"
     config_path.write_text(json.dumps(config))
     if installed:
@@ -72,28 +95,34 @@ def server(tmp_path, *, settings=None, installed=True, enabled=True, bound_host=
         sock.bind(("127.0.0.1", 0))
         port = sock.getsockname()[1]
     log_path = tmp_path / "server.log"
-    env = {"PATH": os.environ["PATH"], "HOME": str(home), "HERMES_HOME": str(hermes),
-           "PYTHONPATH": str(ROOT), "LANG": "C.UTF-8", "HERMES_DASHBOARD_SESSION_TOKEN": TOKEN,
+    # backend has already replaced the ambient environment with a safe allowlist.
+    env = {**os.environ, "HOME": str(home), "HERMES_HOME": str(hermes),
+           "PYTHONPATH": str(backend), "HERMES_DASHBOARD_SESSION_TOKEN": TOKEN,
            "OPENAI_API_KEY": "must-not-reach-shell", "UNRELATED_SECRET": "also-not-for-shell"}
+    # This is a disposable runtime, not a nested pytest process. Its HOME is
+    # deliberately also its real platform home; don't activate stock test guards.
+    env.pop("PYTEST_CURRENT_TEST", None)
+    env.pop("PYTEST_VERSION", None)
     with log_path.open("w") as log:
-        process = subprocess.Popen([sys.executable, "-u", "-c", SERVER, str(port), bound_host,
-                                    "gated" if gated else "loopback"],
-                                   cwd=ROOT, env=env, stdout=log, stderr=log)
-        url = f"http://127.0.0.1:{port}"
-        token = user_token("alice") if gated else TOKEN
-        client = httpx.Client(base_url=url, headers={"Authorization": f"Bearer {token}", "Origin": url}, timeout=15)
-        def ready():
-            if process.poll() is not None:
-                raise AssertionError(log_path.read_text())
-            try:
-                return client.get("/api/status").status_code == 200
-            except httpx.TransportError:
-                return False
+        process = subprocess.Popen([sys.executable, "-B", "-u", "-c", SERVER, str(port), bound_host,
+                                    "gated" if gated else "loopback", str(backend)],
+                                   cwd=home, env=env, stdout=log, stderr=log)
         try:
-            wait_for(ready, timeout=60)
-            yield client, url.replace("http:", "ws:"), hermes, config, log_path
+            url = f"http://127.0.0.1:{port}"
+            token = user_token("alice") if gated else TOKEN
+            with httpx.Client(base_url=url, headers={"Authorization": f"Bearer {token}", "Origin": url}, timeout=15) as client:
+                def ready():
+                    if process.poll() is not None:
+                        raise AssertionError(log_path.read_text())
+                    try:
+                        return client.get("/api/status").status_code == 200
+                    except httpx.TransportError:
+                        return False
+                wait_for(ready, timeout=60)
+                yield client, url.replace("http:", "ws:"), hermes, config, log_path
         finally:
-            client.close()
+            # Retain process identities before shutdown can orphan any PTYs.
+            children = psutil.Process(process.pid).children(recursive=True) if process.poll() is None else []
             process.terminate()
             try:
                 process.wait(timeout=20)
@@ -101,6 +130,13 @@ def server(tmp_path, *, settings=None, installed=True, enabled=True, bound_host=
                 process.kill()
                 process.wait()
                 raise AssertionError("Server did not finish lifespan cleanup\n" + log_path.read_text()) from exc
+            finally:
+                # Clean up red runs, but don't hide plugin lifecycle bugs.
+                _, alive = psutil.wait_procs(children, timeout=2)
+                for child in reversed(alive):
+                    kill_child(child)
+                psutil.wait_procs(alive, timeout=2)
+                assert not alive, f"Server left child processes running: {alive}"
 
 
 def user_token(username):
@@ -150,10 +186,10 @@ def shell_pid(ws):
 
 
 @pytest.mark.linux_only
-def test_stock_mount_auth_reconnect_and_process_lifecycle(tmp_path):
+def test_stock_mount_auth_reconnect_and_process_lifecycle(tmp_path, backend):
     pids = []
     values = []
-    with server(tmp_path) as (client, ws_url, hermes, config, log):
+    with server(tmp_path, backend) as (client, ws_url, hermes, config, log):
         assert client.post(f"{API}/sessions", json={}, headers={"Authorization": ""}).status_code == 401
         assert client.post(f"{API}/sessions", json={}, headers={"Origin": "https://evil.invalid"}).status_code == 403
         assert client.post(f"{API}/sessions", json={"env": {"EVIL": "1"}}).status_code == 422
@@ -212,10 +248,10 @@ def test_stock_mount_auth_reconnect_and_process_lifecycle(tmp_path):
 
 
 @pytest.mark.linux_only
-def test_profile_ownership_limits_expiry_and_shutdown(tmp_path):
+def test_profile_ownership_limits_expiry_and_shutdown(tmp_path, backend):
     settings = {"max_sessions": 3, "max_tickets": 2, "ticket_ttl": 1,
                 "detached_ttl": 3, "buffer_bytes": 4096}
-    with server(tmp_path, settings=settings) as (client, ws_url, hermes, config, log):
+    with server(tmp_path, backend, settings=settings) as (client, ws_url, hermes, config, log):
         sessions = []
         sockets = []
         pids = []
@@ -268,16 +304,16 @@ def test_profile_ownership_limits_expiry_and_shutdown(tmp_path):
     ({"bound_host": "0.0.0.0"}, 401),
     ({"settings": {"max_sessions": 0}}, 503),
 ])
-def test_unavailable_deployments_fail_closed(tmp_path, options, status):
-    with server(tmp_path, **options) as (client, ws_url, hermes, config, log):
+def test_unavailable_deployments_fail_closed(tmp_path, backend, options, status):
+    with server(tmp_path, backend, **options) as (client, ws_url, hermes, config, log):
         assert client.post(f"{API}/sessions", json={}).status_code == status
         with pytest.raises(InvalidStatus):
             dial(client, ws_url, "not-a-ticket")
 
 
 @pytest.mark.linux_only
-def test_verified_principals_cannot_take_over_each_others_shells(tmp_path):
-    with server(tmp_path, gated=True) as (client, ws_url, hermes, config, log):
+def test_verified_principals_cannot_take_over_each_others_shells(tmp_path, backend):
+    with server(tmp_path, backend, gated=True) as (client, ws_url, hermes, config, log):
         sid = create(client, "a")
         value = ticket(client, sid, "a")
         alice = client.headers["Authorization"]
@@ -298,13 +334,15 @@ def test_verified_principals_cannot_take_over_each_others_shells(tmp_path):
 
 @pytest.mark.linux_only
 @pytest.mark.parametrize("cleanup", ["delete", "shutdown"])
-def test_cleanup_kills_stubborn_foreground_job(tmp_path, cleanup):
+def test_cleanup_kills_stubborn_foreground_job(tmp_path, backend, cleanup):
     pids = []
+    handles = []
     try:
-        with server(tmp_path) as (client, ws_url, *_):
+        with server(tmp_path, backend) as (client, ws_url, *_):
             sid = create(client)
             with dial(client, ws_url, ticket(client, sid)) as ws:
                 pids.append(shell_pid(ws))
+                handles.append(owned_child(pids[-1]))
                 program = (
                     "import os,signal,time; "
                     "signal.signal(signal.SIGHUP, signal.SIG_IGN); "
@@ -317,6 +355,7 @@ def test_cleanup_kills_stubborn_foreground_job(tmp_path, cleanup):
                     output += ws.recv(timeout=15)
                 child = int(output.split(b"\r\nJOB=")[-1].split(b"\r\n")[0])
                 pids.append(child)
+                handles.append(owned_child(child))
                 assert os.getsid(child) == pids[0]
                 assert os.getpgid(child) != os.getpgid(pids[0])
                 if cleanup == "delete":
@@ -325,13 +364,12 @@ def test_cleanup_kills_stubborn_foreground_job(tmp_path, cleanup):
         wait_for(lambda: all(not psutil.pid_exists(pid) for pid in pids))
     finally:
         # A red run must not leave the deliberately HUP/TERM-immune job running.
-        for pid in reversed(pids):
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(pid, 9)
+        for handle in reversed(handles):
+            kill_child(handle)
 
 
 @pytest.fixture
-def plugin_api(monkeypatch):
+def plugin_api(monkeypatch, backend):
     spec = importlib.util.spec_from_file_location("browser_terminal_lease_test", PLUGIN / "dashboard/plugin_api.py")
     api = importlib.util.module_from_spec(spec)
     monkeypatch.setitem(sys.modules, spec.name, api)
@@ -491,12 +529,11 @@ def test_lease_stops_pty_output_while_other_cleanup_holds_lock(
 
 
 @pytest.mark.linux_only
-@pytest.mark.live_system_guard_bypass  # A failing cleanup can orphan our own foreground job.
 @pytest.mark.parametrize("error", [PermissionError, RuntimeError])
 def test_job_cleanup_skips_only_inaccessible_proc_stats(tmp_path, monkeypatch, plugin_api, error):
     api = plugin_api
     bridge = api.spawn_shell(["/bin/sh", "-i"], cwd=str(tmp_path), env={"PATH": os.defpath})
-    child = None
+    child_process = None
     try:
         program = (
             "import os,signal,time; signal.signal(signal.SIGHUP, signal.SIG_IGN); "
@@ -510,6 +547,7 @@ def test_job_cleanup_skips_only_inaccessible_proc_stats(tmp_path, monkeypatch, p
             return bytes(output).split(b"\r\nJOB=")[-1].split(b"\r\n")[0].isdigit()
         wait_for(job_ready)
         child = int(bytes(output).split(b"\r\nJOB=")[-1].split(b"\r\n")[0])
+        child_process = owned_child(child)
         assert os.getpgid(child) != os.getpgid(bridge.pid)
         inaccessible = Path("/proc/0/stat")
         original_glob, original_read = Path.glob, Path.read_text
@@ -531,15 +569,14 @@ def test_job_cleanup_skips_only_inaccessible_proc_stats(tmp_path, monkeypatch, p
                 with pytest.raises(error, match="unreadable stat"):
                     bridge.close()
     finally:
-        if child is not None:
-            with contextlib.suppress(ProcessLookupError):
-                os.kill(child, 9)
+        if child_process is not None:
+            kill_child(child_process)
         bridge.close()
 
 
 @pytest.mark.linux_only
-def test_cookie_logout_blocks_heartbeat_and_expires_attached_lease(tmp_path):
-    with server(tmp_path, gated=True) as (client, ws_url, *_):
+def test_cookie_logout_blocks_heartbeat_and_expires_attached_lease(tmp_path, backend):
+    with server(tmp_path, backend, gated=True) as (client, ws_url, *_):
         del client.headers["Authorization"]
         def login():
             response = client.post("/auth/password-login", json={
@@ -571,3 +608,21 @@ def test_cookie_logout_blocks_heartbeat_and_expires_attached_lease(tmp_path):
             assert shell_pid(ws) == pid
         assert client.delete(f"{API}/sessions/{sid}?profile=a").status_code == 200
         wait_for(lambda: not psutil.pid_exists(pid))
+
+
+@pytest.mark.linux_only
+def test_harness_cleanup_tracks_only_owned_processes():
+    with pytest.raises(AssertionError):
+        owned_child(os.getpid())
+    with pytest.raises(AssertionError):
+        owned_child(os.getppid())
+    process = subprocess.Popen([sys.executable, "-B", "-c", "import time; time.sleep(60)"])
+    try:
+        child = owned_child(process.pid)
+        kill_child(child)
+        assert process.wait(timeout=5) == -signal.SIGKILL
+        kill_child(child)  # Already reaped; no signal to a reused PID.
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait(timeout=5)
