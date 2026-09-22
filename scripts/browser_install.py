@@ -30,8 +30,10 @@ CONTROL_FILES = (
 
 
 def locations():
-    base = Path.home() / ".local/lib/hermes-browser"
-    command = Path.home() / ".local/bin/hermes-browser"
+    home = Path.home()
+    base = home / ".local/lib/hermes-browser"
+    command = home / ".local/bin/hermes-browser"
+    existing = {}
     for path in (base, command):
         E.absolute_path(str(path))
         E.no_links(path)
@@ -40,12 +42,36 @@ def locations():
             "Unsafe convenience-command path",
         )
         for parent in (path, *path.parents):
-            if parent.exists() and parent.is_relative_to(Path.home()):
-                meta = parent.stat()
-                E.require(
-                    meta.st_uid == os.getuid() and not meta.st_mode & 0o022,
-                    f"Unsafe owned path: {parent}",
-                )
+            if parent.exists() and parent.is_relative_to(home):
+                existing[parent] = parent.stat()
+    foreign = [path for path, meta in existing.items() if meta.st_uid != os.getuid()]
+    E.require(
+        not foreign,
+        "Installation stopped: these paths are not owned by your user:\n"
+        + "\n".join(f"  {path}" for path in foreign)
+        + "\nInspect their ownership with the owner or administrator before retrying."
+        " Changing permissions alone will not fix ownership."
+        "\nNo permissions were changed automatically.",
+    )
+    writable = {
+        path: meta.st_mode & 0o022
+        for path, meta in existing.items()
+        if meta.st_mode & 0o022
+    }
+    if writable:
+        commands = []
+        for path, bits in writable.items():
+            who = ("g" if bits & 0o020 else "") + ("o" if bits & 0o002 else "")
+            commands.append(f"  chmod {who}-w -- {shlex.quote(str(path))}")
+        raise ValueError(
+            "Installation stopped: these paths are writable by other users, who could"
+            " modify files used by the browser launcher:\n"
+            + "\n".join(f"  {path}" for path in writable)
+            + "\n\nIf these paths are not intentionally shared, run:\n\n"
+            + "\n".join(commands)
+            + "\n\nThen rerun the browser installation command from the Hermes Webdesktop README."
+            "\nNo permissions were changed automatically."
+        )
     return base, command
 
 
