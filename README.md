@@ -7,8 +7,10 @@ The [Hermes Desktop](https://hermes-agent.nousresearch.com/desktop), just runnin
 Requires Linux, a configured Hermes installation, and `curl`:
 
 ```sh
-t=$(mktemp) && (trap 'rm -f "$t"' EXIT; status=$(curl -q --fail --silent --show-error --proto "=https" --max-time 60 --max-filesize 65536 --write-out "%{http_code}" https://raw.githubusercontent.com/melounvitek/hermes-webdesktop/main/install.sh -o "$t") && [ "$status" = 200 ] && sh "$t")
+curl -qfsS --proto '=https' --max-time 60 --max-filesize 65536 https://raw.githubusercontent.com/melounvitek/hermes-webdesktop/main/install.sh -o hermes-browser-install.sh && sh ./hermes-browser-install.sh
 ```
+
+Run this in a trusted, writable directory: it replaces `hermes-browser-install.sh`. The script runs only after curl succeeds; you must trust this repository. You can remove the downloaded file afterward.
 
 Run `hermes-browser start`, then open **http://127.0.0.1:9119/**. Press Ctrl-C to stop.
 
