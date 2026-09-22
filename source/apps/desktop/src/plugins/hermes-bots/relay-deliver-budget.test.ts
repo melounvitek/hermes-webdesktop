@@ -1,70 +1,181 @@
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { describe, expect, it } from 'vitest'
+import { startBotRelay, stopBotRelay } from './relay'
+import type { ProfileRoute } from './types'
 
-// #93911 review follow-up: the Desktop deadline for bot_relay.deliver mirrors
-// three backend numbers. Nothing in the type system links a TS constant to a
-// Python default, so this file is the seam: it reads the backend sources and
-// fails when a mirror drifts or the settlement margin stops being positive.
-// Without it, raising the backend turn timeout would silently reintroduce
-// #93911 — the client giving up before a valid typed settlement arrives.
+const { hostMock, clearBotAttentionMock, noteBotAttentionMock } = vi.hoisted(() => ({
+  hostMock: { profileRoutes: vi.fn(), requestProfile: vi.fn() },
+  clearBotAttentionMock: vi.fn(),
+  noteBotAttentionMock: vi.fn()
+}))
 
-const relaySource = readFileSync(join(process.cwd(), 'src/plugins/hermes-bots/relay.ts'), 'utf8')
-const repoRoot = join(process.cwd(), '..', '..')
-const configDefaults = readFileSync(join(repoRoot, 'hermes_cli/config_defaults.py'), 'utf8')
-const relayPlumbing = readFileSync(join(repoRoot, 'tools/bot_relay.py'), 'utf8')
+vi.mock('@hermes/plugin-sdk', async () => ({
+  host: hostMock,
+  LruCache: (await import('../../lib/lru-cache')).LruCache
+}))
 
-function tsConstant(name: string): number {
-  const match = relaySource.match(new RegExp(`const ${name} = ([0-9_]+)`))
-  expect(match, `${name} must stay a literal so this test can read it`).toBeTruthy()
+vi.mock('./data', () => ({
+  botHandle: vi.fn(),
+  clearBotAttention: clearBotAttentionMock,
+  noteBotAttention: noteBotAttentionMock
+}))
 
-  return Number(match![1].replaceAll('_', ''))
+// Chosen default API contract: 120s lock wait + two 600s attempts, then
+// settlement/transport headroom. This does not discover backend defaults or
+// verify every stock version; compatibility belongs in external stock tests.
+const DEFAULT_WORK_BOUND_MS = (120 + 2 * 600) * 1000
+const SETTLEMENT_HEADROOM_MS = 180_000
+
+const sender: ProfileRoute = {
+  connectionId: 'a',
+  mode: 'remote',
+  profile: 'default',
+  targetProfile: 'default'
 }
 
-function pyConstant(name: string): number {
-  const match = relayPlumbing.match(new RegExp(`^${name}\\s*=\\s*(\\d+)`, 'm'))
-  expect(match, `${name} must exist as a literal in tools/bot_relay.py`).toBeTruthy()
+const target: ProfileRoute = { ...sender, connectionId: 'b' }
 
-  return Number(match![1])
+const envelope = {
+  id: 'env-1',
+  message: 'Research this',
+  from_profile: 'research',
+  from_handle: 'researcher',
+  target_connection: 'b',
+  target_profile: 'ops'
 }
 
-describe('bot_relay.deliver budget mirrors', () => {
-  it('mirrors the backend turn-lock default', () => {
-    const lockWaitMatch = configDefaults.match(/"turn_wait_seconds":\s*(\d+)/)
+const backendFailure = Object.assign(new Error('turn exhausted its attempts'), {
+  data: { reason: 'turn_timeout' }
+})
 
-    expect(lockWaitMatch, 'bot_mode.turn_wait_seconds default must exist in config_defaults.py').toBeTruthy()
-    expect(tsConstant('RELAY_TURN_LOCK_WAIT_MS')).toBe(Number(lockWaitMatch![1]) * 1000)
+beforeEach(() => {
+  vi.useFakeTimers()
+  vi.resetAllMocks()
+  hostMock.profileRoutes.mockResolvedValue([sender, target])
+})
+
+afterEach(() => {
+  stopBotRelay()
+  vi.clearAllTimers()
+  vi.useRealTimers()
+})
+
+async function startDelivery(responseAfterMs?: number, failure?: Error) {
+  let queued = true
+  hostMock.requestProfile.mockImplementation(
+    (route: ProfileRoute, method: string, _params: unknown, timeoutMs = 30_000) => {
+      if (method === 'bot_relay.outbox.drain') {
+        const envelopes = route.connectionId === sender.connectionId && queued ? [envelope] : []
+
+        if (envelopes.length) {
+          queued = false
+        }
+
+        return Promise.resolve({ envelopes })
+      }
+
+      if (method === 'bot_relay.deliver') {
+        // Model the host's request deadline, including its generic fallback.
+        // The real relay must supply its longer budget at this seam.
+        return new Promise((resolve, reject) => {
+          const deadline = setTimeout(() => reject(new Error('request timed out')), timeoutMs)
+
+          if (responseAfterMs !== undefined) {
+            setTimeout(() => {
+              clearTimeout(deadline)
+
+              if (failure) {
+                reject(failure)
+              } else {
+                resolve({ reply: 'Research complete' })
+              }
+            }, responseAfterMs)
+          }
+        })
+      }
+
+      return Promise.resolve({})
+    }
+  )
+
+  startBotRelay()
+  await vi.advanceTimersByTimeAsync(30_000)
+
+  const deliveries = hostMock.requestProfile.mock.calls.filter(([, method]) => method === 'bot_relay.deliver')
+  expect(deliveries).toHaveLength(1)
+  const [route, , params, timeoutMs] = deliveries[0]
+  expect(route).toEqual(target)
+  expect(params).toEqual({
+    profile: 'ops',
+    message: envelope.message,
+    from_profile: envelope.from_profile,
+    from_handle: envelope.from_handle,
+    from_connection: 'a'
+  })
+  expect(Number.isFinite(timeoutMs)).toBe(true)
+  expect(timeoutMs).toBeGreaterThanOrEqual(DEFAULT_WORK_BOUND_MS + SETTLEMENT_HEADROOM_MS)
+
+  return timeoutMs as number
+}
+
+function replies() {
+  return hostMock.requestProfile.mock.calls.filter(([, method]) => method === 'bot_relay.reply')
+}
+
+describe('bot_relay.deliver request budget', () => {
+  it.each([
+    {
+      name: 'a long response before the default work bound',
+      delay: DEFAULT_WORK_BOUND_MS - 1,
+      failure: undefined
+    },
+    {
+      name: 'a typed failure during settlement headroom',
+      delay: DEFAULT_WORK_BOUND_MS + SETTLEMENT_HEADROOM_MS - 1,
+      failure: backendFailure
+    }
+  ])('forwards $name instead of a generic client timeout', async ({ delay, failure }) => {
+    const timeoutMs = await startDelivery(delay, failure)
+    await vi.advanceTimersByTimeAsync(delay - 1)
+    expect(replies()).toEqual([])
+    expect(noteBotAttentionMock).not.toHaveBeenCalled()
+    expect(clearBotAttentionMock).not.toHaveBeenCalled()
+
+    await vi.advanceTimersByTimeAsync(1)
+    expect(replies()).toEqual([
+      [
+        sender,
+        'bot_relay.reply',
+        failure
+          ? { id: envelope.id, error: failure.message, reason: 'turn_timeout' }
+          : { id: envelope.id, reply: 'Research complete' }
+      ]
+    ])
+
+    if (failure) {
+      expect(noteBotAttentionMock).toHaveBeenCalledExactlyOnceWith('b::ops', 'turn_timeout')
+      expect(clearBotAttentionMock).not.toHaveBeenCalled()
+    } else {
+      expect(clearBotAttentionMock).toHaveBeenCalledExactlyOnceWith('b::ops')
+      expect(noteBotAttentionMock).not.toHaveBeenCalled()
+    }
+
+    // A settled request must not send a second reply when its deadline passes.
+    await vi.advanceTimersByTimeAsync(timeoutMs - delay)
+    expect(replies()).toHaveLength(1)
   })
 
-  it('mirrors the backend per-attempt turn timeout', () => {
-    // The backend names both numbers explicitly (tools/bot_relay.py) so the mirror is a
-    // constant-to-constant check, not a count of textual subprocess.run(...) call sites.
-    expect(tsConstant('RELAY_TURN_ATTEMPT_MS')).toBe(pyConstant('TURN_ATTEMPT_TIMEOUT_SECONDS') * 1000)
-    expect(tsConstant('RELAY_TURN_MAX_ATTEMPTS')).toBe(pyConstant('TURN_MAX_ATTEMPTS'))
-  })
+  it('posts a timeout to the sender only when the supplied request budget expires', async () => {
+    const timeoutMs = await startDelivery()
+    await vi.advanceTimersByTimeAsync(timeoutMs - 1)
+    expect(replies()).toEqual([])
+    expect(noteBotAttentionMock).not.toHaveBeenCalled()
 
-  it('shares its settlement margin with the sender-side waiter budget', () => {
-    // tests/tools/test_bot_relay.py checks that REPLY_WAIT_SECONDS exceeds the rebuilt sum.
-    expect(tsConstant('RELAY_DELIVER_SETTLEMENT_MARGIN_MS')).toBe(
-      pyConstant('DESKTOP_DELIVER_SETTLEMENT_MARGIN_SECONDS') * 1000
-    )
-  })
-
-  it('keeps the client deadline strictly greater than the backend ceiling', () => {
-    const margin = tsConstant('RELAY_DELIVER_SETTLEMENT_MARGIN_MS')
-
-    // Strictly greater, not equal: a backend that answers at its own limit
-    // still has to serialize and transport that answer.
-    expect(margin, 'settlement margin must be positive').toBeGreaterThan(0)
-
-    // The call site must pass the composed budget, not a bare literal.
-    const drain = relaySource.slice(
-      relaySource.indexOf('async function drainRelayOutboxes'),
-      relaySource.indexOf('export function startBotRelay')
-    )
-
-    expect(drain).toMatch(/'bot_relay\.deliver'[\s\S]{0,400}RELAY_DELIVER_TIMEOUT_MS/)
-    expect(drain).not.toMatch(/'bot_relay\.deliver'[\s\S]{0,400}\d{6,}/)
+    await vi.advanceTimersByTimeAsync(1)
+    expect(replies()).toEqual([
+      [sender, 'bot_relay.reply', { id: envelope.id, error: 'request timed out' }]
+    ])
+    expect(noteBotAttentionMock).toHaveBeenCalledExactlyOnceWith('b::ops', 'request timed out')
+    expect(clearBotAttentionMock).not.toHaveBeenCalled()
   })
 })
