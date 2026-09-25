@@ -3196,6 +3196,10 @@ export const zhHant = defineLocale({
     diskChangedBody: '此檔案自開啟以來已變更。用你的版本覆寫，還是放棄你的編輯並重新載入？',
     overwrite: '覆寫',
     discardReload: '放棄並重新載入',
+    saveToServer: '儲存至伺服器',
+    browserSaveHint: '正在編輯伺服器上的檔案。不會自動儲存。',
+    browserSaveWarning:
+      '儲存會取代伺服器上的檔案，並可能重設權限及其他中繼資料。同時進行的修改仍可能被覆寫。僅支援 UTF-8；換行符號可能會改變。',
     console: {
       deselect: '取消選取項目',
       select: '選取項目',

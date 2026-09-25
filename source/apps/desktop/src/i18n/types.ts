@@ -3405,6 +3405,9 @@ export interface Translations {
     diskChangedBody: string
     overwrite: string
     discardReload: string
+    saveToServer: string
+    browserSaveHint: string
+    browserSaveWarning: string
     console: {
       deselect: string
       select: string

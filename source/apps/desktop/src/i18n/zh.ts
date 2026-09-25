@@ -3966,6 +3966,10 @@ export const zh = defineLocale({
     diskChangedBody: '此文件自打开以来已更改。用你的版本覆盖，还是放弃你的编辑并重新加载？',
     overwrite: '覆盖',
     discardReload: '放弃并重新加载',
+    saveToServer: '保存到服务器',
+    browserSaveHint: '正在编辑服务器上的文件。不会自动保存。',
+    browserSaveWarning:
+      '保存会替换服务器上的文件，并可能重置权限及其他元数据。同时进行的修改仍可能被覆盖。仅支持 UTF-8；换行符可能会改变。',
     console: {
       deselect: '取消选择条目',
       select: '选择条目',

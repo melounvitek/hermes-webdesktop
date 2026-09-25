@@ -5,7 +5,6 @@ import type {
   HermesReadFileTextResult,
   HermesSelectPathsOptions
 } from '@/global'
-import { isBrowserClient } from '@/lib/platform'
 import { $connection } from '@/store/session'
 
 export interface DesktopFsRemotePicker {
@@ -88,13 +87,8 @@ export async function readDesktopFileText(path: string): Promise<HermesReadFileT
   return remoteFsApi<HermesReadFileTextResult>(fsPath('read-text', path))
 }
 
-// Browser files are read-only: stock saves do not preserve bytes or metadata.
-// This is frontend product policy, not authorization around the stock API.
+// Browser editors disclose the stock API's metadata replacement before saving.
 export async function writeDesktopFileText(path: string, content: string): Promise<{ path: string }> {
-  if (isBrowserClient()) {
-    throw new Error('Server files are read-only in the browser')
-  }
-
   const desktop = bridge()
 
   if (!isDesktopFsRemoteMode()) {

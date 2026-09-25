@@ -79,12 +79,18 @@ describe('desktop filesystem facade', () => {
     setDesktopFsRemotePicker(null)
   })
 
-  it('rejects browser saves before any filesystem request', async () => {
+  it('saves browser edits through the stock authenticated API', async () => {
     window.hermesDesktop!.browser = { authRequired: false, signIn: vi.fn() }
     $connection.set({ mode: 'remote', profile: 'a' } as never)
 
-    await expect(writeDesktopFileText('/work/file.txt', 'changed')).rejects.toThrow('read-only')
-    expect(api).not.toHaveBeenCalled()
+    api.mockResolvedValueOnce({ path: '/work/file.txt' } as never)
+    await expect(writeDesktopFileText('/work/file.txt', 'changed')).resolves.toEqual({ path: '/work/file.txt' })
+    expect(api).toHaveBeenCalledWith({
+      path: '/api/fs/write-text',
+      method: 'POST',
+      profile: 'a',
+      body: { path: '/work/file.txt', content: 'changed' }
+    })
   })
 
   it('preserves Electron file saves', async () => {

@@ -3889,6 +3889,10 @@ export const en: Translations = {
       'This file changed since you opened it. Overwrite it with your version, or discard your edits and reload?',
     overwrite: 'Overwrite',
     discardReload: 'Discard & reload',
+    saveToServer: 'Save to server',
+    browserSaveHint: 'Editing a server file. No autosave.',
+    browserSaveWarning:
+      'Saving replaces the server file and may reset permissions and other metadata. Concurrent edits can still be overwritten. UTF-8 only; line endings may change.',
     console: {
       deselect: 'Deselect entry',
       select: 'Select entry',

@@ -516,7 +516,7 @@ function EditControls({
         type="button"
       >
         <Check className="size-3" />
-        {saving ? t.common.saving : t.common.save}
+        {saving ? t.common.saving : isBrowserClient() ? t.preview.saveToServer : t.common.save}
       </button>
     </>
   )
@@ -837,7 +837,7 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
   // Editing is only offered for whole, readable text — never images, binaries,
   // or files we only loaded the first 512 KB of (saving would drop the tail).
   const canEdit =
-    !isBrowserClient() && isText && !isImage && !blockedByTarget && state.text !== undefined && !state.truncated && !state.binary
+    isText && !isImage && !blockedByTarget && state.text !== undefined && !state.truncated && !state.binary
 
   // Per-keystroke: update the draft ref (no render) and only set `dirty` when it
   // actually changes — React bails on an identical value, so a long typing run
@@ -974,6 +974,12 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
           onSelect={() => {}}
           trailing={<EditControls dirty={dirty} onCancel={cancelEdit} onSave={() => void saveEdit()} saving={saving} />}
         />
+        {isBrowserClient() && (
+          <div className="shrink-0 border-b border-(--ui-stroke-tertiary) bg-muted/35 px-3 py-2 text-xs" role="note">
+            <div className="font-semibold">{t.preview.browserSaveHint}</div>
+            <p className="mt-1 text-muted-foreground">{t.preview.browserSaveWarning}</p>
+          </div>
+        )}
         {conflict && (
           <div className="shrink-0 border-b border-amber-400/40 bg-amber-50 px-3 py-2 text-[0.7rem] text-amber-900 dark:border-amber-300/30 dark:bg-amber-300/10 dark:text-amber-100">
             <div className="font-semibold">{t.preview.diskChangedTitle}</div>
