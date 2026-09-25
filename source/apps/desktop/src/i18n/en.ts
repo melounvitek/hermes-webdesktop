@@ -3890,6 +3890,13 @@ export const en: Translations = {
     overwrite: 'Overwrite',
     discardReload: 'Discard & reload',
     saveToServer: 'Save to server',
+    serverSaved: 'Saved to server',
+    browserInvalidText: 'Editing requires a complete UTF-8 text file no larger than 512 KB.',
+    browserOwnerChanged: 'The connection or profile changed. Return to the original file to save your edits.',
+    browserDraftHint: 'Unsaved edits stay in this browser tab when you switch files. Save before reloading or closing the browser.',
+    browserConflict: 'The server file changed. Your draft was kept. Copy any edits you need before discarding and reloading.',
+    discardEditsTitle: 'Discard unsaved edits?',
+    discardEditsBody: 'Your draft will be lost. The server file will not be changed.',
     browserSaveHint: 'Editing a server file. No autosave.',
     browserSaveWarning:
       'Saving replaces the server file and may reset permissions and other metadata. Concurrent edits can still be overwritten. UTF-8 only; line endings may change.',

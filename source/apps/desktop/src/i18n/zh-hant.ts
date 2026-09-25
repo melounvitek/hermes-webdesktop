@@ -3197,6 +3197,13 @@ export const zhHant = defineLocale({
     overwrite: '覆寫',
     discardReload: '放棄並重新載入',
     saveToServer: '儲存至伺服器',
+    serverSaved: '已儲存至伺服器',
+    browserInvalidText: '只能編輯不超過 512 KB 的完整 UTF-8 文字檔案。',
+    browserOwnerChanged: '連線或設定檔已變更。請返回原檔案以儲存編輯內容。',
+    browserDraftHint: '切換檔案時，未儲存的編輯內容會保留在此瀏覽器分頁中。請在重新載入或關閉瀏覽器前儲存。',
+    browserConflict: '伺服器上的檔案已變更。草稿已保留。放棄並重新載入前，請複製需要保留的編輯內容。',
+    discardEditsTitle: '放棄未儲存的編輯？',
+    discardEditsBody: '草稿將遺失。伺服器上的檔案不會變更。',
     browserSaveHint: '正在編輯伺服器上的檔案。不會自動儲存。',
     browserSaveWarning:
       '儲存會取代伺服器上的檔案，並可能重設權限及其他中繼資料。同時進行的修改仍可能被覆寫。僅支援 UTF-8；換行符號可能會改變。',

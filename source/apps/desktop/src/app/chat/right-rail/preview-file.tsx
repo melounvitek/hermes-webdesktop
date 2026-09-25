@@ -21,6 +21,7 @@ import { LazyShiki as ShikiHighlighter } from '@/components/chat/shiki-highlight
 import { PageLoader } from '@/components/page-loader'
 import { Tip } from '@/components/ui/tooltip'
 import { translateNow, useI18n } from '@/i18n'
+import { readBrowserEditorText, validateBrowserEditorText } from '@/lib/browser-file-editor'
 import {
   desktopFileDiff,
   desktopFsCacheKey,
@@ -36,6 +37,14 @@ import { shikiLanguageForFilename } from '@/lib/markdown-code'
 import { normalizeFilePreviewMath } from '@/lib/markdown-preprocess'
 import { isBrowserClient } from '@/lib/platform'
 import { cn } from '@/lib/utils'
+import {
+  clearBrowserFileDraft,
+  getBrowserFileDraft,
+  getBrowserFileSave,
+  saveBrowserFileDraft,
+  setBrowserFileDraft
+} from '@/store/browser-file-drafts'
+import { confirm } from '@/store/confirm'
 import type { PreviewTarget } from '@/store/preview'
 import { setPreviewDirty } from '@/store/preview-edit'
 import { $connection, $currentCwd } from '@/store/session'
@@ -503,6 +512,7 @@ function EditControls({
     <>
       <button
         className="flex items-center gap-1 rounded-md px-1.5 text-[0.625rem] font-bold text-muted-foreground transition-colors hover:bg-accent hover:text-foreground"
+        disabled={saving}
         onClick={onCancel}
         type="button"
       >
@@ -663,7 +673,20 @@ export function SourceView({ filePath, language, text }: { filePath?: string; la
 export type PreviewViewMode = 'diff' | 'rendered' | 'source'
 
 export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; target: PreviewTarget }) {
+  const connection = useStore($connection)
+  const ownerKey = desktopFsCacheKey(connection)
+  const identity = JSON.stringify([ownerKey, filePathForTarget(target)])
+
+  return <FilePreview key={identity} ownerKey={ownerKey} reloadKey={reloadKey} target={target} />
+}
+
+function FilePreview({ ownerKey, reloadKey, target }: { ownerKey: string; reloadKey: number; target: PreviewTarget }) {
   const { t } = useI18n()
+  const browser = isBrowserClient()
+  const filePath = filePathForTarget(target)
+  const draftKey = JSON.stringify([ownerKey, filePath])
+  const initialDraft = browser ? getBrowserFileDraft(draftKey) : undefined
+  const [pendingSave] = useState(() => (browser ? getBrowserFileSave(draftKey) : undefined))
   const [state, setState] = useState<LocalPreviewState>({ loading: true })
   const [forcePreview, setForcePreview] = useState(false)
   const [pdfError, setPdfError] = useState<string>()
@@ -676,12 +699,16 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
   // never re-renders this (large) component — `dirty` is the only render-worthy
   // signal and it flips just once when crossing the clean↔dirty boundary.
   // `selfReload` re-runs the load after a save without the parent.
-  const [editing, setEditing] = useState(false)
-  const draftRef = useRef('')
-  const baselineRef = useRef('')
-  const [dirty, setDirty] = useState(false)
+  const [editing, setEditing] = useState(Boolean(initialDraft || pendingSave))
+  const draftRef = useRef(initialDraft?.text ?? pendingSave?.text ?? '')
+  const baselineRef = useRef(initialDraft?.baseline ?? pendingSave?.text ?? '')
+  const [dirty, setDirty] = useState(Boolean(initialDraft))
   const [editorKey, setEditorKey] = useState(0)
-  const [saving, setSaving] = useState(false)
+  const [saving, setSaving] = useState(Boolean(pendingSave))
+  const savingRef = useRef(Boolean(pendingSave))
+  const [openingEditor, setOpeningEditor] = useState(false)
+  const [saved, setSaved] = useState(false)
+  const mountedRef = useRef(true)
   const [saveError, setSaveError] = useState<null | string>(null)
   const [conflict, setConflict] = useState(false)
   const [selfReload, setSelfReload] = useState(0)
@@ -689,23 +716,68 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
   // hover flag (no state — only the keydown handler reads it).
   const readViewRef = useRef<HTMLDivElement>(null)
   const hoverRef = useRef(false)
-  const connection = useStore($connection)
-  const fsCacheKey = desktopFsCacheKey(connection)
-  const filePath = filePathForTarget(target)
   const isImage = target.previewKind === 'image'
   const isPdf = target.previewKind === 'pdf'
 
-  // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
+  // eslint-disable-next-line no-restricted-syntax -- tracks component lifetime, not reactive state
+  useEffect(() => {
+    mountedRef.current = true
+
+    return () => {
+      mountedRef.current = false
+    }
+  }, [])
+
+  const applySavedText = useCallback(
+    (submitted: string) => {
+      if (!mountedRef.current) {
+        return
+      }
+
+      baselineRef.current = submitted
+      const stillDirty = draftRef.current !== submitted
+      setDirty(stillDirty)
+      setConflict(false)
+      setSaved(!stillDirty)
+
+      if (!browser) {
+        setEditing(false)
+      }
+
+      if (desktopFsCacheKey() === ownerKey) {
+        notifyWorkspaceChanged()
+      }
+
+      setSelfReload(n => n + 1)
+    },
+    [browser, ownerKey]
+  )
+
+  // eslint-disable-next-line no-restricted-syntax -- settles an in-flight write, not reactive state mirroring
+  useEffect(() => {
+    if (!pendingSave) {
+      return
+    }
+
+    void pendingSave.promise
+      .then(applySavedText, error => {
+        if (mountedRef.current) {
+          setSaveError(error instanceof Error ? error.message : String(error))
+        }
+      })
+      .finally(() => {
+        savingRef.current = false
+
+        if (mountedRef.current) {
+          setSaving(false)
+        }
+      })
+  }, [applySavedText, pendingSave])
+
+  // Refreshing a preview must not reset an unsaved editor buffer.
   useEffect(() => {
     setUserMode(null)
-    setEditing(false)
-    setDirty(false)
-    setSaving(false)
-    setSaveError(null)
-    setConflict(false)
-    draftRef.current = ''
-    baselineRef.current = ''
-  }, [filePath, reloadKey])
+  }, [reloadKey])
 
   // HTML files are rendered as source code, not in a webview - so they take
   // the same path as plain text files. `previewKind === 'binary'` arrives
@@ -794,7 +866,7 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
     blockedByTarget,
     filePath,
     forcePreview,
-    fsCacheKey,
+    ownerKey,
     isImage,
     isPdf,
     isText,
@@ -842,11 +914,19 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
   // Per-keystroke: update the draft ref (no render) and only set `dirty` when it
   // actually changes — React bails on an identical value, so a long typing run
   // triggers a single re-render at most.
-  const handleEditorChange = useCallback((value: string) => {
-    draftRef.current = value
-    const next = value !== baselineRef.current
-    setDirty(prev => (prev === next ? prev : next))
-  }, [])
+  const handleEditorChange = useCallback(
+    (value: string) => {
+      draftRef.current = value
+      const next = value !== baselineRef.current
+      setDirty(prev => (prev === next ? prev : next))
+      setSaved(false)
+
+      if (browser) {
+        setBrowserFileDraft(draftKey, { baseline: baselineRef.current, text: value })
+      }
+    },
+    [browser, draftKey]
+  )
 
   // Publish the unsaved state to the rail so the tab can show a modified dot.
   // Keyed by url; cleared on unmount/tab-change so a stale dot never lingers.
@@ -856,16 +936,39 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
     return () => setPreviewDirty(target.url, false)
   }, [target.url, editing, dirty])
 
-  const beginEdit = () => {
-    const text = state.text ?? ''
-    baselineRef.current = text
-    draftRef.current = text
-    setDirty(false)
-    setEditorKey(key => key + 1)
-    setSaving(false)
+  const beginEdit = async () => {
+    if (openingEditor) {
+      return
+    }
+
+    setOpeningEditor(true)
     setSaveError(null)
-    setConflict(false)
-    setEditing(true)
+
+    try {
+      // Preview text is decoded lossily by stock Hermes. Validate original bytes
+      // before making it an editable buffer, rather than saving replacement chars.
+      const text = browser ? await readBrowserEditorText(filePath) : (state.text ?? '')
+
+      if (!mountedRef.current || desktopFsCacheKey() !== ownerKey) {
+        return
+      }
+
+      baselineRef.current = text
+      draftRef.current = text
+      setDirty(false)
+      setEditorKey(key => key + 1)
+      setSaved(false)
+      setConflict(false)
+      setEditing(true)
+    } catch (error) {
+      if (mountedRef.current) {
+        setSaveError(error instanceof Error ? error.message : String(error))
+      }
+    } finally {
+      if (mountedRef.current) {
+        setOpeningEditor(false)
+      }
+    }
   }
 
   // Latest `beginEdit` for the keydown listener, so the listener can stay
@@ -898,7 +1001,7 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
       }
 
       event.preventDefault()
-      beginEditRef.current()
+      void beginEditRef.current()
     }
 
     window.addEventListener('keydown', onKeyDown)
@@ -906,39 +1009,77 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
     return () => window.removeEventListener('keydown', onKeyDown)
   }, [canEdit, editing])
 
-  const cancelEdit = () => {
-    setEditing(false)
-    setSaveError(null)
-    setConflict(false)
-  }
+  const cancelEdit = async () => {
+    if (savingRef.current) {
+      return
+    }
 
-  const discardAndReload = () => {
+    if (browser && draftRef.current !== baselineRef.current) {
+      const discard = await confirm({
+        title: t.preview.discardEditsTitle,
+        description: t.preview.discardEditsBody,
+        confirmLabel: t.preview.discardReload,
+        destructive: true
+      })
+
+      if (!discard || !mountedRef.current) {
+        return
+      }
+    }
+
+    if (browser) {
+      clearBrowserFileDraft(draftKey)
+    }
+
     setEditing(false)
-    setConflict(false)
     setSaveError(null)
+    setConflict(false)
+    setSaved(false)
     setSelfReload(n => n + 1)
   }
 
   const saveEdit = async (force = false) => {
-    if (saving) {
+    if (savingRef.current || draftRef.current === baselineRef.current) {
       return
     }
 
+    savingRef.current = true
+    const submitted = draftRef.current
     setSaving(true)
+    setSaved(false)
     setSaveError(null)
+    setConflict(false)
 
     try {
+      if (browser) {
+        if (desktopFsCacheKey() !== ownerKey) {
+          throw new Error(t.preview.browserOwnerChanged)
+        }
+
+        validateBrowserEditorText(submitted)
+        const current = await readBrowserEditorText(filePath)
+
+        if (!mountedRef.current || desktopFsCacheKey() !== ownerKey) {
+          return
+        }
+
+        if (current !== baselineRef.current) {
+          setConflict(true)
+
+          return
+        }
+      }
+
       // Stale-on-disk guard: re-read what's on disk now and compare to the
       // snapshot the user started from. If something changed underneath (an
       // agent edit, an external save), don't clobber it silently — surface the
       // choice. `force` is the user picking "overwrite" from that banner.
-      if (!force) {
+      if (!browser && !force) {
         try {
           const current = await readTextPreview(filePath)
 
           if (!current.binary && (current.text ?? '') !== baselineRef.current) {
             setConflict(true)
-            setSaving(false)
 
             return
           }
@@ -947,17 +1088,23 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
         }
       }
 
-      await writeDesktopFileText(filePath, draftRef.current)
-      baselineRef.current = draftRef.current
-      setDirty(false)
-      setConflict(false)
-      setEditing(false)
-      notifyWorkspaceChanged()
-      setSelfReload(n => n + 1)
+      if (browser) {
+        await saveBrowserFileDraft(draftKey, submitted, () => writeDesktopFileText(filePath, submitted))
+      } else {
+        await writeDesktopFileText(filePath, submitted)
+      }
+
+      applySavedText(submitted)
     } catch (error) {
-      setSaveError(error instanceof Error ? error.message : String(error))
+      if (mountedRef.current) {
+        setSaveError(error instanceof Error ? error.message : String(error))
+      }
     } finally {
-      setSaving(false)
+      savingRef.current = false
+
+      if (mountedRef.current) {
+        setSaving(false)
+      }
     }
   }
 
@@ -972,29 +1119,50 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
           active="source"
           modes={[]}
           onSelect={() => {}}
-          trailing={<EditControls dirty={dirty} onCancel={cancelEdit} onSave={() => void saveEdit()} saving={saving} />}
+          trailing={
+            <EditControls
+              dirty={dirty}
+              onCancel={() => void cancelEdit()}
+              onSave={() => void saveEdit()}
+              saving={saving}
+            />
+          }
         />
         {isBrowserClient() && (
           <div className="shrink-0 border-b border-(--ui-stroke-tertiary) bg-muted/35 px-3 py-2 text-xs" role="note">
             <div className="font-semibold">{t.preview.browserSaveHint}</div>
             <p className="mt-1 text-muted-foreground">{t.preview.browserSaveWarning}</p>
+            <p className="mt-1 text-muted-foreground">{t.preview.browserDraftHint}</p>
+            <div className="mt-1 font-semibold" role="status">
+              {saving
+                ? t.common.saving
+                : dirty
+                  ? t.preview.unsavedChanges
+                  : saved
+                    ? t.preview.serverSaved
+                    : t.preview.editing}
+            </div>
           </div>
         )}
         {conflict && (
           <div className="shrink-0 border-b border-amber-400/40 bg-amber-50 px-3 py-2 text-[0.7rem] text-amber-900 dark:border-amber-300/30 dark:bg-amber-300/10 dark:text-amber-100">
             <div className="font-semibold">{t.preview.diskChangedTitle}</div>
-            <div className="mt-0.5 leading-relaxed">{t.preview.diskChangedBody}</div>
+            <div className="mt-0.5 leading-relaxed">
+              {browser ? t.preview.browserConflict : t.preview.diskChangedBody}
+            </div>
             <div className="mt-1.5 flex gap-3">
+              {!browser && (
+                <button
+                  className="font-bold underline underline-offset-4 transition-opacity hover:opacity-80"
+                  onClick={() => void saveEdit(true)}
+                  type="button"
+                >
+                  {t.preview.overwrite}
+                </button>
+              )}
               <button
                 className="font-bold underline underline-offset-4 transition-opacity hover:opacity-80"
-                onClick={() => void saveEdit(true)}
-                type="button"
-              >
-                {t.preview.overwrite}
-              </button>
-              <button
-                className="font-bold underline underline-offset-4 transition-opacity hover:opacity-80"
-                onClick={discardAndReload}
+                onClick={() => void cancelEdit()}
                 type="button"
               >
                 {t.preview.discardReload}
@@ -1009,10 +1177,11 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
         )}
         <div className="min-h-0 flex-1 overflow-hidden">
           <CodeEditor
+            disabled={saving}
             filePath={filePath}
-            initialValue={baselineRef.current}
+            initialValue={draftRef.current}
             key={editorKey}
-            onCancel={cancelEdit}
+            onCancel={() => void cancelEdit()}
             onChange={handleEditorChange}
             onSave={() => void saveEdit()}
           />
@@ -1126,16 +1295,22 @@ export function LocalFilePreview({ reloadKey, target }: { reloadKey: number; tar
               <Tip label={`${t.preview.edit} (e)`}>
                 <button
                   className="flex items-center gap-1 text-[0.625rem] font-bold text-muted-foreground underline-offset-4 transition-colors hover:text-foreground"
-                  onClick={beginEdit}
+                  disabled={openingEditor}
+                  onClick={() => void beginEdit()}
                   type="button"
                 >
                   <Pencil className="size-3" />
-                  {t.preview.edit}
+                  {openingEditor ? t.preview.opening : t.preview.edit}
                 </button>
               </Tip>
             ) : null
           }
         />
+        {saveError && (
+          <div className="px-3 py-2 text-xs text-destructive" role="alert">
+            {saveError}
+          </div>
+        )}
         <div className="min-h-0 flex-1 overflow-auto">
           {mode === 'rendered' ? (
             <MarkdownPreview text={state.text} />

@@ -3967,6 +3967,13 @@ export const zh = defineLocale({
     overwrite: '覆盖',
     discardReload: '放弃并重新加载',
     saveToServer: '保存到服务器',
+    serverSaved: '已保存到服务器',
+    browserInvalidText: '只能编辑不超过 512 KB 的完整 UTF-8 文本文件。',
+    browserOwnerChanged: '连接或配置文件已更改。请返回原文件以保存编辑内容。',
+    browserDraftHint: '切换文件时，未保存的编辑内容会保留在此浏览器标签页中。请在重新加载或关闭浏览器前保存。',
+    browserConflict: '服务器上的文件已更改。草稿已保留。放弃并重新加载前，请复制需要保留的编辑内容。',
+    discardEditsTitle: '放弃未保存的编辑？',
+    discardEditsBody: '草稿将丢失。服务器上的文件不会更改。',
     browserSaveHint: '正在编辑服务器上的文件。不会自动保存。',
     browserSaveWarning:
       '保存会替换服务器上的文件，并可能重置权限及其他元数据。同时进行的修改仍可能被覆盖。仅支持 UTF-8；换行符可能会改变。',

@@ -778,7 +778,7 @@ try {
     )
   })
   await check(
-    'read-only-server-files',
+    'server-file-preview-and-downloads',
     async page => {
       // Run after the attachment/download cases: creating a project establishes a
       // workspace and must not change their deliberately workspace-less drafts.
@@ -856,15 +856,25 @@ try {
           if (index === 0) {
             const content = page.getByText(file.bytes.toString().trim(), { exact: true })
             await expect(content).toBeVisible()
-            // Exercise the preview's edit shortcut as well as its absent toolbar.
+            // Enter the real editor, but never change text or explicitly save.
             await content.click()
             await page.keyboard.press('e')
+            const editor = preview.getByRole('textbox')
+            await expect(editor).toBeVisible()
+            await expect(editor).toBeEditable()
+            await expect(editor).toContainText(file.bytes.toString().trim())
+            const warning = preview.getByRole('note')
+            await expect(warning).toBeVisible()
+            await expect(warning).toContainText('No autosave.')
+            await expect(warning).toContainText('may reset permissions and other metadata')
+            await expect(preview.getByRole('button', { name: 'Save to server', exact: true })).toBeDisabled()
+            await preview.getByRole('button', { name: 'Cancel', exact: true }).click()
             await expect(content).toBeVisible()
           } else {
             await expect(page.getByText('This looks like a binary file', { exact: true })).toBeVisible()
+            await expect(preview.getByRole('button', { name: /^(Edit|Save|Save to server|Overwrite)$/ })).toHaveCount(0)
           }
-          await expect(page.getByRole('button', { name: /^(Edit|Save|Overwrite)$/ })).toHaveCount(0)
-          // Sidebar search is editable; the file preview must not be.
+          // After cancel (or for binary files), only the read preview remains.
           await expect(preview.getByRole('textbox')).toHaveCount(0)
           await row.click({ button: 'right' })
           await expect(

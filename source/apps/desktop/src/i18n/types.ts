@@ -3406,6 +3406,13 @@ export interface Translations {
     overwrite: string
     discardReload: string
     saveToServer: string
+    serverSaved: string
+    browserInvalidText: string
+    browserOwnerChanged: string
+    browserDraftHint: string
+    browserConflict: string
+    discardEditsTitle: string
+    discardEditsBody: string
     browserSaveHint: string
     browserSaveWarning: string
     console: {

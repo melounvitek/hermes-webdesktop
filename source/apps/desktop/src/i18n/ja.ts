@@ -3240,6 +3240,13 @@ export const ja = defineLocale({
     overwrite: '上書き',
     discardReload: '破棄して再読み込み',
     saveToServer: 'サーバーに保存',
+    serverSaved: 'サーバーに保存しました',
+    browserInvalidText: '編集には、512 KB 以下の完全な UTF-8 テキストファイルが必要です。',
+    browserOwnerChanged: '接続またはプロファイルが変更されました。編集を保存するには元のファイルに戻ってください。',
+    browserDraftHint: 'ファイルを切り替えても、未保存の編集はこのブラウザタブに残ります。再読み込みやブラウザを閉じる前に保存してください。',
+    browserConflict: 'サーバー上のファイルが変更されました。下書きは保持されています。破棄して再読み込みする前に、必要な編集内容をコピーしてください。',
+    discardEditsTitle: '未保存の編集を破棄しますか？',
+    discardEditsBody: '下書きは失われます。サーバー上のファイルは変更されません。',
     browserSaveHint: 'サーバー上のファイルを編集中です。自動保存はされません。',
     browserSaveWarning:
       '保存するとサーバー上のファイルが置き換わり、アクセス権やその他のメタデータがリセットされる場合があります。同時に行われた編集も上書きされる可能性があります。UTF-8 のみ対応。改行コードが変わる場合があります。',
