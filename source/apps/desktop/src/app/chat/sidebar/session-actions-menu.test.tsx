@@ -256,10 +256,14 @@ describe('SessionActionsMenu', () => {
     fireEvent.click(await screen.findByRole('menuitem', { name: /delete/i }))
 
     const reopened = await screen.findByRole('dialog')
+    const confirm = screen.getByRole('button', { name: 'Delete' })
+    expect(reopened.contains(confirm)).toBe(true)
     // eslint-disable-next-line no-restricted-globals -- asserting real focus requires the live document
-    await waitFor(() => expect(reopened.contains(document.activeElement)).toBe(true))
-    // eslint-disable-next-line no-restricted-globals -- asserting real focus requires the live document
-    fireEvent.keyDown(document.activeElement!, { key: 'Enter' })
+    await waitFor(() => expect(document.activeElement).toBe(confirm))
+    expect(fireEvent.keyDown(confirm, { key: 'Enter' })).toBe(true)
+    expect(onDelete).not.toHaveBeenCalled()
+    // jsdom does not synthesize native button activation from keyDown.
+    fireEvent.click(confirm)
 
     expect(await screen.findByText('Session deleted')).toBeTruthy()
     expect(onDelete).toHaveBeenCalledTimes(1)
