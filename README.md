@@ -59,6 +59,11 @@ it does not contain the Hermes backend or other applications. Electron
 code and the optional terminal plugin are retained. Native application packaging
 is not supported by this repository's release workflow.
 
+The renderer follows upstream `v2026.9.24`, including Simple/Advanced mode,
+custom model entry and additional languages. Native package installation/removal
+and account-wide connector management remain unavailable in the browser.
+Session-based connectors retain compatibility with the tested stock backend.
+
 The source came from a sanitized Git subtree import. Private plans, a historical
 profile archive and credential examples were removed. See `SOURCE_PROVENANCE.json`.
 Git history was not rewritten during extraction: older commits still contain the
@@ -80,9 +85,8 @@ npm run build:browser --workspace apps/desktop
 
 Edit `source/apps/desktop/src/`; the output is
 `source/apps/desktop/dist-browser/`. Shared frontend code is in `source/apps/shared/`.
-For wider UI coverage, omit `-- src/browser`. The full suite currently has inherited
-failures in `voice-prefs.test.ts` and `close-tab.test.ts`; these also fail before
-extraction. The plain desktop-workspace `dev` and `build` commands are for Electron,
+For wider UI coverage, omit `-- src/browser`. The September 24 update passes the
+full UI suite. The plain desktop-workspace `dev` and `build` commands are for Electron,
 not the browser edition. Generated frontend API contracts stay committed; updating
 them is a separate compatibility task against stock Hermes.
 
@@ -136,9 +140,11 @@ From `source/`, run `npm run test:browser-compat:harness --workspace apps/deskto
 to check it. For the broader Chromium API checks, run
 `npm run test:browser-compat --workspace apps/desktop --` followed by
 `--backend-root`, `--python`, `--chrome`, `--web-dist` and a new `--evidence`
-directory, all with absolute paths. The currently published release records a
-known `shiki503` full-gate failure; a successful build is not a claim that every
-compatibility check passes.
+directory, all with absolute paths. The September 24 update passes all five
+Chromium groups against the stock revision above, including syntax-highlighting
+recovery, profile isolation and transcript freshness. File editing, conflict
+handling and draft retention also pass separate Chromium checks. This does not
+certify other backend revisions, physical mobile devices or external providers.
 
 ### Optional terminal plugin tests
 
