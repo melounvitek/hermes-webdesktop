@@ -25,6 +25,22 @@ installer change, edit `source/scripts/` first and keep the root copies in sync.
 Never run tests against real profiles or start/stop the user's server.
 Publication and deployment each need explicit approval.
 
+## Check upstream before adding features
+
+Before planning or implementing any new feature, check the current
+[upstream Hermes project](https://github.com/NousResearch/hermes-agent) for native
+support or equivalent functionality. Use live GitHub API access to inspect
+relevant docs, code, releases and open PRs; do not rely only on this checkout
+or an earlier check.
+
+Report what already exists, with links, and distinguish released support,
+unreleased changes on main and unmerged proposals. Compare it with the requested
+browser behavior. Prefer existing stock functionality over duplicating it here;
+if upstream work overlaps, explain the remaining gap and whether waiting or
+retiring our custom implementation makes more sense. If the check is blocked,
+say so before proceeding. Checking upstream does not authorize backend upgrades,
+patches or deployment.
+
 ## Development
 
 Use the setup and test commands in the root README. Run npm from `source/`, not
