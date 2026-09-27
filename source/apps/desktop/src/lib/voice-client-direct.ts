@@ -1,4 +1,4 @@
-import { profileScoped } from '@/api/client'
+import { type OwnerScope, ownerScoped } from '@/api/client'
 import { getApiRequestConnection, getApiRequestProfile, hermesApi } from '@/hermes'
 
 /**
@@ -27,6 +27,8 @@ export interface DirectSttConfig {
   api_key: string
   model: null | string
   language: null | string
+  /** Seconds the gateway allows one transcription request (`stt.openai.timeout`); absent on older backends. */
+  timeout_s?: null | number
 }
 
 export interface DirectTtsConfig {
@@ -38,6 +40,10 @@ export interface DirectTtsConfig {
   model: null | string
   voice: null | string
   speed: null | number
+  /** tts.streaming.min_len — shortest first sentence (chars) cut on its own; absent on older backends. */
+  min_len?: null | number
+  /** Optional tts.openai fields the server forwards verbatim (lang_code, consent_attestation). */
+  extra_body?: Record<string, unknown>
 }
 
 interface RelayConfig {
@@ -61,8 +67,10 @@ const CONFIG_TTL_MS = 60_000
 let cached: { key: string; at: number; config: VoiceClientConfig } | null = null
 let inflight: { key: string; promise: Promise<null | VoiceClientConfig> } | null = null
 
-function scopeKey(): string {
-  return `${getApiRequestConnection() ?? 'local'}::${getApiRequestProfile() ?? 'default'}`
+// `owner` is the speaking session's (connection, profile) — a Bot chat runs
+// on its own profile, on its own gateway; missing halves → the active scope.
+function scopeKey(owner?: OwnerScope): string {
+  return `${owner?.connectionId || getApiRequestConnection() || 'local'}::${owner?.profile || getApiRequestProfile() || 'default'}`
 }
 
 /** Drop cached credentials (used by tests; scope changes rotate the key). */
@@ -71,8 +79,8 @@ export function clearVoiceClientConfigCache(): void {
   inflight = null
 }
 
-export async function fetchVoiceClientConfig(): Promise<null | VoiceClientConfig> {
-  const key = scopeKey()
+export async function fetchVoiceClientConfig(owner?: OwnerScope): Promise<null | VoiceClientConfig> {
+  const key = scopeKey(owner)
 
   if (cached && cached.key === key && Date.now() - cached.at < CONFIG_TTL_MS) {
     return cached.config
@@ -88,7 +96,7 @@ export async function fetchVoiceClientConfig(): Promise<null | VoiceClientConfig
       // profile — the same routing every relay audio call uses, so the
       // config comes from the backend the user is actually talking to.
       const response = await hermesApi<{ ok: boolean } & VoiceClientConfig>({
-        ...profileScoped(),
+        ...ownerScoped(owner),
         path: '/api/audio/voice-config'
       })
 
@@ -170,6 +178,45 @@ export function transcriptFromOpenAiMultipartBody(body: string): string {
   return trimmed
 }
 
+const DEFAULT_STT_TIMEOUT_S = 60
+
+/** Same budget the gateway's own transcription client uses (`stt.openai.timeout`, default 60 s). */
+export function sttTimeoutSeconds(stt: Pick<DirectSttConfig, 'timeout_s'>): number {
+  const value = Number(stt.timeout_s)
+
+  return Number.isFinite(value) && value > 0 ? value : DEFAULT_STT_TIMEOUT_S
+}
+
+/**
+ * `fetch` with the STT deadline. A slow or wedged endpoint otherwise keeps the
+ * dictation UI in "transcribing" forever — the browser applies no timeout of
+ * its own to a POST that never answers or never finishes its response body.
+ */
+async function sttFetch(
+  stt: DirectSttConfig,
+  url: string,
+  init: RequestInit,
+  consume: (response: Response) => Promise<string>
+): Promise<string> {
+  const seconds = sttTimeoutSeconds(stt)
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), seconds * 1000)
+
+  try {
+    const response = await fetch(url, { ...init, signal: controller.signal })
+
+    return await consume(response)
+  } catch (error) {
+    if (controller.signal.aborted) {
+      throw new Error(`Transcription timed out after ${seconds}s (${stt.provider} did not answer)`)
+    }
+
+    throw error
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
 /**
  * Transcribe provider-direct. Returns the transcript ('' = silence), or null
  * when the profile's provider isn't client-callable — the caller relays.
@@ -199,17 +246,22 @@ export async function transcribeAudioClientDirect(audio: Blob): Promise<null | s
       form.set('language', stt.language)
     }
 
-    const response = await fetch(`${stt.base_url.replace(/\/+$/, '')}/audio/transcriptions`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${stt.api_key}` },
-      body: form
-    })
+    return sttFetch(
+      stt,
+      `${stt.base_url.replace(/\/+$/, '')}/audio/transcriptions`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${stt.api_key}` },
+        body: form
+      },
+      async response => {
+        if (!response.ok) {
+          throw new Error(`${stt.provider} STT error (HTTP ${response.status}): ${await providerErrorText(response)}`)
+        }
 
-    if (!response.ok) {
-      throw new Error(`${stt.provider} STT error (HTTP ${response.status}): ${await providerErrorText(response)}`)
-    }
-
-    return transcriptFromOpenAiMultipartBody(await response.text())
+        return transcriptFromOpenAiMultipartBody(await response.text())
+      }
+    )
   }
 
   if (stt.wire === 'xai-stt') {
@@ -221,19 +273,24 @@ export async function transcribeAudioClientDirect(audio: Blob): Promise<null | s
       form.set('language', stt.language)
     }
 
-    const response = await fetch(`${stt.base_url.replace(/\/+$/, '')}/stt`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${stt.api_key}` },
-      body: form
-    })
+    return sttFetch(
+      stt,
+      `${stt.base_url.replace(/\/+$/, '')}/stt`,
+      {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${stt.api_key}` },
+        body: form
+      },
+      async response => {
+        if (!response.ok) {
+          throw new Error(`xAI STT error (HTTP ${response.status}): ${await providerErrorText(response)}`)
+        }
 
-    if (!response.ok) {
-      throw new Error(`xAI STT error (HTTP ${response.status}): ${await providerErrorText(response)}`)
-    }
+        const result = (await response.json()) as { text?: string }
 
-    const result = (await response.json()) as { text?: string }
-
-    return (result.text || '').trim()
+        return (result.text || '').trim()
+      }
+    )
   }
 
   if (stt.wire === 'elevenlabs-stt') {
@@ -248,19 +305,24 @@ export async function transcribeAudioClientDirect(audio: Blob): Promise<null | s
       form.set('language_code', stt.language)
     }
 
-    const response = await fetch(`${stt.base_url.replace(/\/+$/, '')}/speech-to-text`, {
-      method: 'POST',
-      headers: { 'xi-api-key': stt.api_key },
-      body: form
-    })
+    return sttFetch(
+      stt,
+      `${stt.base_url.replace(/\/+$/, '')}/speech-to-text`,
+      {
+        method: 'POST',
+        headers: { 'xi-api-key': stt.api_key },
+        body: form
+      },
+      async response => {
+        if (!response.ok) {
+          throw new Error(`ElevenLabs STT error (HTTP ${response.status}): ${await providerErrorText(response)}`)
+        }
 
-    if (!response.ok) {
-      throw new Error(`ElevenLabs STT error (HTTP ${response.status}): ${await providerErrorText(response)}`)
-    }
+        const result = (await response.json()) as { text?: string }
 
-    const result = (await response.json()) as { text?: string }
-
-    return (result.text || '').trim()
+        return (result.text || '').trim()
+      }
+    )
   }
 
   return null
@@ -272,8 +334,8 @@ export async function transcribeAudioClientDirect(audio: Blob): Promise<null | s
 // ---------------------------------------------------------------------------
 
 /** Resolve the profile's TTS config when it is client-callable, else null. */
-export async function directTtsConfig(): Promise<DirectTtsConfig | null> {
-  const config = await fetchVoiceClientConfig()
+export async function directTtsConfig(owner?: OwnerScope): Promise<DirectTtsConfig | null> {
+  const config = await fetchVoiceClientConfig(owner)
 
   return config?.tts && config.tts.mode === 'direct' ? config.tts : null
 }
@@ -282,6 +344,7 @@ export async function directTtsConfig(): Promise<DirectTtsConfig | null> {
 export async function synthesizeSpeechClientDirect(tts: DirectTtsConfig, text: string): Promise<ArrayBuffer> {
   if (tts.wire === 'openai-speech') {
     const body: Record<string, unknown> = {
+      ...(tts.extra_body ?? {}),
       model: tts.model,
       voice: tts.voice,
       input: text,
@@ -341,7 +404,14 @@ export async function synthesizeSpeechClientDirect(tts: DirectTtsConfig, text: s
 const SENTENCE_BOUNDARY_RE = /[.!?…。！？]+["'”’)\]]*\s+/g
 const MIN_SENTENCE_CHARS = 24
 
-export function cutSentences(buffer: string, flush: boolean): { sentences: string[]; rest: string } {
+export function cutSentences(
+  buffer: string,
+  flush: boolean,
+  minSentenceChars?: null | number
+): { sentences: string[]; rest: string } {
+  // tts.streaming.min_len when the backend sends it (a 5–7 char CJK opener is a
+  // whole clause); the historical 24 for older backends without the key.
+  const minChars = minSentenceChars ?? MIN_SENTENCE_CHARS
   const sentences: string[] = []
   let rest = buffer
   let start = 0
@@ -356,7 +426,7 @@ export function cutSentences(buffer: string, flush: boolean): { sentences: strin
 
     // Too-short fragments ("e.g. ", "1. ") stay buffered so we don't fire a
     // provider call per abbreviation — unless a later boundary extends them.
-    if (candidate.length >= MIN_SENTENCE_CHARS) {
+    if (candidate.length >= minChars) {
       sentences.push(candidate)
       start = end
     }

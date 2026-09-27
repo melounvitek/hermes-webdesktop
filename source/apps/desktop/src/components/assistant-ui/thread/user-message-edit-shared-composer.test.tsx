@@ -45,6 +45,7 @@ afterEach(() => {
   clearNotifications()
   onEdit.mockClear()
   vi.useRealTimers()
+  vi.restoreAllMocks()
 })
 
 const noopAsync = async () => {}

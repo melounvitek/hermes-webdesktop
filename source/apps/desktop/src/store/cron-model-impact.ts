@@ -1,39 +1,57 @@
-import { getApiRequestProfile, setModelAssignment } from '@/hermes'
+import { getApiRequestProfile } from '@/hermes'
 import { translateNow } from '@/i18n'
-import { requestCronReview } from '@/store/cron'
-import {
-  beginCronModelImpactAssignment,
-  getCronModelImpactScope,
-  invalidateCronModelImpactScopeState,
-  onCronModelImpactScopeInvalidated
-} from '@/store/cron-model-impact-scope'
-import { dismissNotification, notify } from '@/store/notifications'
-import type {
-  CronModelDriftAxis,
-  CronModelImpact,
-  CronModelImpactJob,
-  ModelAssignmentRequest,
-  ModelAssignmentResponse
-} from '@/types/hermes'
+import type { CronModelImpact, CronModelImpactJob } from '@/types/hermes'
 
-export const CRON_MODEL_IMPACT_NOTIFICATION_ID = 'cron-model-impact'
+import { requestCronReview } from './cron'
+import { dismissNotification, notify } from './notifications'
+import { $activeGatewayProfile } from './profile'
+import { $connection } from './session'
 
+const NOTIFICATION_ID = 'cron-model-impact'
 const MAX_JOBS = 50
-const MAX_ID_CODE_POINTS = 256
-const MAX_NAME_CODE_POINTS = 120
-const ALLOWED_AXES = new Set<CronModelDriftAxis>(['provider', 'model'])
+let assignmentGeneration = 0
+let scopeGeneration = 0
 
-function profileIdentity(): string {
-  return getApiRequestProfile()?.trim() || 'default'
+const profileIdentity = () => getApiRequestProfile()?.trim() || 'default'
+
+function connectionIdentity(): string {
+  const connection = $connection.get()
+
+  return JSON.stringify([
+    connection?.connectionId,
+    connection?.mode,
+    connection?.remoteKind,
+    connection?.remoteIdentity || connection?.remoteHost || (connection?.mode === 'remote' ? connection.baseUrl : '')
+  ])
 }
 
-function codePointLength(value: string): number {
-  return [...value].length
+function invalidateScope(): void {
+  assignmentGeneration += 1
+  scopeGeneration += 1
+  dismissNotification(NOTIFICATION_ID)
 }
 
-function hasControlCharacters(value: string): boolean {
-  return /\p{C}/u.test(value)
+let connection = connectionIdentity()
+$activeGatewayProfile.listen(invalidateScope)
+$connection.listen(value => {
+  // Reconnects and reminted websocket tickets do not change ownership.
+  if (!value) {
+    return
+  }
+
+  const next = connectionIdentity()
+
+  if (connection !== next) {
+    connection = next
+    invalidateScope()
+  }
+})
+
+export function beginCronModelImpactAssignment() {
+  return { generation: ++assignmentGeneration, profile: profileIdentity(), scopeGeneration }
 }
+
+type Assignment = ReturnType<typeof beginCronModelImpactAssignment>
 
 function validJob(value: unknown): value is CronModelImpactJob {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -42,30 +60,25 @@ function validJob(value: unknown): value is CronModelImpactJob {
 
   const job = value as Partial<CronModelImpactJob>
 
-  if (
-    typeof job.id !== 'string' ||
-    job.id.trim() !== job.id ||
-    !job.id ||
-    codePointLength(job.id) > MAX_ID_CODE_POINTS ||
-    hasControlCharacters(job.id) ||
-    typeof job.name !== 'string' ||
-    job.name.trim() !== job.name ||
-    !job.name ||
-    codePointLength(job.name) > MAX_NAME_CODE_POINTS ||
-    hasControlCharacters(job.name) ||
-    !Array.isArray(job.drifted_axes) ||
-    job.drifted_axes.length < 1 ||
-    job.drifted_axes.length > 2 ||
-    new Set(job.drifted_axes).size !== job.drifted_axes.length ||
-    !job.drifted_axes.every(axis => ALLOWED_AXES.has(axis))
-  ) {
-    return false
-  }
+  const validText = (text: unknown, max: number): text is string =>
+    typeof text === 'string' &&
+    text.trim() === text &&
+    text.length > 0 &&
+    [...text].length <= max &&
+    !/\p{C}/u.test(text)
 
-  return true
+  return (
+    validText(job.id, 256) &&
+    validText(job.name, 120) &&
+    Array.isArray(job.drifted_axes) &&
+    job.drifted_axes.length > 0 &&
+    job.drifted_axes.length <= 2 &&
+    new Set(job.drifted_axes).size === job.drifted_axes.length &&
+    job.drifted_axes.every(axis => axis === 'model' || axis === 'provider')
+  )
 }
 
-export function parseCronModelImpact(value: unknown): CronModelImpact | null {
+function parseImpact(value: unknown): CronModelImpact | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     return null
   }
@@ -98,166 +111,43 @@ export function parseCronModelImpact(value: unknown): CronModelImpact | null {
   return impact as CronModelImpact
 }
 
-function currentResponseScope(profile: string, connection: string, generation: number): boolean {
-  const scope = getCronModelImpactScope()
+export function publishCronModelImpact(value: unknown, assignment: Assignment): void {
+  const currentScope = () => assignment.profile === profileIdentity() && assignment.scopeGeneration === scopeGeneration
 
-  return profileIdentity() === profile && scope.connection === connection && scope.generation === generation
-}
+  if (!currentScope() || assignment.generation !== assignmentGeneration) {
+    return
+  }
 
-function currentActionScope(profile: string, connection: string): boolean {
-  return profileIdentity() === profile && getCronModelImpactScope().connection === connection
-}
+  const impact = parseImpact(value)
 
-function detailFor(impact: CronModelImpact): string {
-  const visible = impact.jobs.slice(0, 3).map(job => job.name)
-  const remaining = impact.affected_count - visible.length
-
-  return remaining > 0 ? translateNow('cron.modelImpact.detailMore', visible.join(', '), remaining) : visible.join(', ')
-}
-
-function publishImpact(impact: CronModelImpact, profile: string, connection: string, generation: number): void {
-  if (!impact.available) {
+  // Missing/malformed/unavailable is not evidence that an existing warning has gone away.
+  if (!impact?.available) {
     return
   }
 
   if (impact.affected_count === 0) {
-    dismissNotification(CRON_MODEL_IMPACT_NOTIFICATION_ID)
+    dismissNotification(NOTIFICATION_ID)
 
     return
   }
 
-  // Informational: these jobs keep running on the model they were created under; nothing is
-  // skipped. The action is a read-only review so the user can pin or move them deliberately.
+  const visible = impact.jobs.slice(0, 3).map(job => job.name)
+  const remaining = impact.affected_count - visible.length
+
   notify({
-    id: CRON_MODEL_IMPACT_NOTIFICATION_ID,
+    id: NOTIFICATION_ID,
     kind: 'info',
     title: translateNow('cron.modelImpact.title'),
     message: translateNow('cron.modelImpact.message', impact.affected_count),
-    detail: detailFor(impact),
+    detail:
+      remaining > 0 ? translateNow('cron.modelImpact.detailMore', visible.join(', '), remaining) : visible.join(', '),
     action: {
       label: translateNow('cron.modelImpact.review'),
       onClick: () => {
-        if (currentActionScope(profile, connection)) {
+        if (currentScope()) {
           requestCronReview()
         }
       }
     }
-  })
-}
-
-export async function setMainModelAssignment(
-  request: Omit<ModelAssignmentRequest, 'scope'>,
-  scopeProfile?: null | string,
-  options?: { skipConfirmPrompt?: boolean }
-): Promise<ModelAssignmentResponse> {
-  const { connection, generation } = beginCronModelImpactAssignment()
-  const profile = profileIdentity()
-
-  // Only pass the extra arg when a scope override exists, so unscoped callers
-  // keep the exact legacy call shape.
-  const assign = (body: Omit<ModelAssignmentRequest, 'scope'>) =>
-    scopeProfile == null
-      ? setModelAssignment({ ...body, scope: 'main' })
-      : setModelAssignment({ ...body, scope: 'main' }, scopeProfile)
-
-  let result = await assign(request)
-
-  // Backend demands an explicit ack before persisting a model that trips a
-  // selection guard (expensive / data-training tiers like *-contributor).
-  // Settings used to throw confirm_message as a red error, so Apply could
-  // never persist. Prompt, then retry with confirm_expensive_model.
-  if (result.confirm_required) {
-    if (request.confirm_expensive_model || options?.skipConfirmPrompt) {
-      // Already acked, or headless onboarding (nothing mounted to click).
-      // Fail closed instead of recursing / dangling a prompt.
-      throw new Error(result.confirm_message?.trim() || translateNow('cron.modelImpact.saveFailed'))
-    }
-
-    const accepted = await confirmModelWarning(result.confirm_message?.trim() ?? '')
-
-    if (!accepted) {
-      throw new Error(translateNow('cron.modelImpact.declined'))
-    }
-
-    result = await assign({ ...request, confirm_expensive_model: true })
-
-    if (result.confirm_required || result.ok !== true) {
-      throw new Error(result.confirm_message?.trim() || translateNow('cron.modelImpact.saveFailed'))
-    }
-  } else if (result.ok !== true) {
-    throw new Error(result.confirm_message?.trim() || translateNow('cron.modelImpact.saveFailed'))
-  }
-
-  // A scoped assignment targets ANOTHER profile's backend: its cron impact
-  // belongs to that profile, and the review action would open the ACTIVE
-  // profile's cron view — skip the warning rather than mis-route it.
-  if (scopeProfile != null) {
-    return result
-  }
-
-  if (!currentResponseScope(profile, connection, generation)) {
-    return result
-  }
-
-  // Missing means an older backend. It is not evidence that an existing impact
-  // has gone away, so leave the current warning untouched.
-  if (result.cron_model_impact !== undefined) {
-    const impact = parseCronModelImpact(result.cron_model_impact)
-
-    if (impact) {
-      publishImpact(impact, profile, connection, generation)
-    }
-  }
-
-  return result
-}
-
-export function invalidateCronModelImpactScope(options: { clearNotification?: boolean } = {}): void {
-  if (options.clearNotification === false) {
-    beginCronModelImpactAssignment()
-
-    return
-  }
-
-  invalidateCronModelImpactScopeState()
-}
-
-// Scope changes originating outside this module (profile/backend switches)
-// clear any warning that belongs to the old runtime.
-onCronModelImpactScopeInvalidated(() => dismissNotification(CRON_MODEL_IMPACT_NOTIFICATION_ID))
-
-/**
- * Selection-guard warning as a confirm toast. Resolves true on Confirm, false
- * on dismiss. The desktop has no blocking confirm API; this is the same
- * notify-with-action pattern the in-session model picker uses.
- */
-function confirmModelWarning(message: string): Promise<boolean> {
-  const id = `model-warning-confirm-${Date.now()}`
-
-  return new Promise(resolve => {
-    let settled = false
-
-    const finish = (value: boolean) => {
-      if (settled) {
-        return
-      }
-
-      settled = true
-      dismissNotification(id)
-      resolve(value)
-    }
-
-    notify({
-      id,
-      kind: 'warning',
-      title: translateNow('cron.modelImpact.confirmTitle'),
-      message: message || translateNow('cron.modelImpact.confirmDetail'),
-      detail: translateNow('cron.modelImpact.confirmDetail'),
-      action: {
-        label: translateNow('cron.modelImpact.confirmAction'),
-        onClick: () => finish(true)
-      },
-      onDismiss: () => finish(false)
-    })
   })
 }

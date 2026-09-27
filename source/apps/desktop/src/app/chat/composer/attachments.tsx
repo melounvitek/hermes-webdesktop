@@ -60,8 +60,7 @@ function AttachmentPill({ attachment, onRemove }: { attachment: ComposerAttachme
     !isUploading &&
     !(attachment.kind === 'file' && attachment.blob && !attachment.refText)
 
-  const detail =
-    attachment.detail && attachment.detail !== attachment.label ? attachment.detail : undefined
+  const detail = attachment.detail && attachment.detail !== attachment.label ? attachment.detail : undefined
 
   // Read the full path/blob source only when clicked; previewUrl remains a
   // compatibility fallback for older drafts.
@@ -139,7 +138,7 @@ function AttachmentPill({ attachment, onRemove }: { attachment: ComposerAttachme
         throw new Error(c.couldNotPreview(attachment.label))
       }
 
-      openPreview(preview, 'manual')
+      openPreview(preview)
     } catch (error) {
       notifyError(error, c.previewUnavailable)
     }

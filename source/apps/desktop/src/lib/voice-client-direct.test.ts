@@ -111,6 +111,8 @@ describe('transcribeAudioClientDirect', () => {
     const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
     expect(url).toBe('https://api.groq.com/openai/v1/audio/transcriptions')
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer gsk_test')
+    // A hung provider must not stall dictation forever: every STT upload carries a timeout signal.
+    expect(init.signal).toBeInstanceOf(AbortSignal)
 
     const form = init.body as FormData
     expect(form.get('model')).toBe('whisper-large-v3-turbo')
@@ -205,6 +207,109 @@ describe('transcribeAudioClientDirect', () => {
     expect((init.headers as Record<string, string>)['xi-api-key']).toBe('gsk_test')
     expect((init.body as FormData).get('model_id')).toBe('scribe_v2')
   })
+
+  /** A fetch that only settles when its AbortSignal fires — a wedged STT endpoint. */
+  function hangingFetch() {
+    return vi.fn(
+      (_url: string, init?: RequestInit) =>
+        new Promise<Response>((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+        })
+    )
+  }
+
+  it.each(['openai-multipart', 'xai-stt', 'elevenlabs-stt'] as const)(
+    'aborts a hanging %s transcription at the default 60 s',
+    async wire => {
+      vi.useFakeTimers()
+
+      try {
+        mockDesktopApi({ ok: true, stt: { ...directStt, wire }, tts: relay })
+        const fetchMock = hangingFetch()
+        vi.stubGlobal('fetch', fetchMock)
+
+        const pending = transcribeAudioClientDirect(new Blob(['x'], { type: 'audio/webm' }))
+        const settled = vi.fn()
+
+        pending.then(settled, settled)
+        await vi.advanceTimersByTimeAsync(0)
+
+        const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+        expect(init.signal).toBeInstanceOf(AbortSignal)
+
+        await vi.advanceTimersByTimeAsync(59_000)
+        expect(settled).not.toHaveBeenCalled()
+
+        await vi.advanceTimersByTimeAsync(1_000)
+        await expect(pending).rejects.toThrow(/Transcription timed out after 60s/)
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+  )
+
+  it.each(
+    (['openai-multipart', 'xai-stt', 'elevenlabs-stt'] as const).flatMap(wire =>
+      [200, 401].map(status => ({ wire, status }))
+    )
+  )('times out a hanging $wire body after HTTP $status headers arrive', async ({ wire, status }) => {
+    vi.useFakeTimers()
+
+    try {
+      mockDesktopApi({ ok: true, stt: { ...directStt, wire, timeout_s: 5 }, tts: relay })
+      const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+        const body = new ReadableStream<Uint8Array>({
+          start(controller) {
+            init?.signal?.addEventListener('abort', () => {
+              controller.error(new DOMException('aborted', 'AbortError'))
+            })
+          }
+        })
+
+        return new Response(body, { status })
+      })
+      vi.stubGlobal('fetch', fetchMock)
+
+      const pending = transcribeAudioClientDirect(new Blob(['x']))
+      const settled = vi.fn()
+      pending.then(settled, settled)
+
+      await vi.advanceTimersByTimeAsync(4_999)
+      expect(fetchMock).toHaveResolved()
+      expect(settled).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(1)
+      expect(settled).toHaveBeenCalledTimes(1)
+      await expect(pending).rejects.toThrow('Transcription timed out after 5s')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it.each(
+    (['openai-multipart', 'xai-stt', 'elevenlabs-stt'] as const).flatMap(wire =>
+      [5, 90].map(timeout_s => ({ wire, timeout_s }))
+    )
+  )('honours the gateway-resolved $timeout_s s timeout for $wire', async ({ wire, timeout_s }) => {
+    vi.useFakeTimers()
+
+    try {
+      mockDesktopApi({ ok: true, stt: { ...directStt, wire, timeout_s }, tts: relay })
+      vi.stubGlobal('fetch', hangingFetch())
+
+      const pending = transcribeAudioClientDirect(new Blob(['x'], { type: 'audio/webm' }))
+      const settled = vi.fn()
+
+      pending.then(settled, settled)
+      await vi.advanceTimersByTimeAsync(timeout_s * 1000 - 100)
+      expect(settled).not.toHaveBeenCalled()
+
+      await vi.advanceTimersByTimeAsync(200)
+      await expect(pending).rejects.toThrow(`Transcription timed out after ${timeout_s}s`)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 })
 
 describe('synthesizeSpeechClientDirect', () => {
@@ -230,7 +335,10 @@ describe('synthesizeSpeechClientDirect', () => {
     const fetchMock = vi.fn(async () => new Response(bytes, { status: 200 }))
     vi.stubGlobal('fetch', fetchMock)
 
-    const audio = await synthesizeSpeechClientDirect(openaiTts, 'Hello there.')
+    const audio = await synthesizeSpeechClientDirect(
+      { ...openaiTts, extra_body: { consent_attestation: 'I own this voice' } },
+      'Hello there.'
+    )
 
     expect(new Uint8Array(audio)).toEqual(new Uint8Array([1, 2, 3]))
 
@@ -242,6 +350,8 @@ describe('synthesizeSpeechClientDirect', () => {
     expect(body.voice).toBe('nova')
     expect(body.input).toBe('Hello there.')
     expect(body.speed).toBeUndefined()
+    // Server-resolved tts.openai extras (consent_attestation for cloned voices) reach the wire.
+    expect(body.consent_attestation).toBe('I own this voice')
   })
 
   it('speaks the elevenlabs tts shape with the voice in the path', async () => {
@@ -333,5 +443,17 @@ describe('cutSentences', () => {
 
     expect(sentences[0]).toContain('。')
     expect(sentences).toHaveLength(2)
+  })
+
+  it('cuts a short CJK opener alone when the backend sends tts.streaming.min_len', () => {
+    const text = '记得，叫团团。 然后我们再说第二句话，这一句要长一些才行。 '
+
+    // Historical 24-char floor (older backend, no key): the opener rides with sentence two.
+    expect(cutSentences(text, false).sentences).toEqual(['记得，叫团团。 然后我们再说第二句话，这一句要长一些才行。'])
+    // tts.streaming.min_len = 6 (the CJK voice setup from #96927): spoken on its own.
+    expect(cutSentences(text, false, 6).sentences).toEqual([
+      '记得，叫团团。',
+      '然后我们再说第二句话，这一句要长一些才行。'
+    ])
   })
 })

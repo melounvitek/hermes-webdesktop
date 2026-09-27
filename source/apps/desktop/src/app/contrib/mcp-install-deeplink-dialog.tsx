@@ -119,7 +119,7 @@ export function McpInstallDeepLinkDialog() {
       writeConfigCache(previous => (previous ? { ...previous, mcp_servers: nextServers } : previous))
       notify({ kind: 'success', title: m.savedTitle, message: m.savedMessage(trimmedName) })
       $mcpInstallRequest.set(null)
-      navigate(`/skills?tab=mcp&server=${encodeURIComponent(trimmedName)}`)
+      navigate(`/capabilities?tab=connectors&server=${encodeURIComponent(trimmedName)}`)
     } catch (err) {
       setError(readableError(err, m.saveFailed).message)
     } finally {

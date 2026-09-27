@@ -45,7 +45,7 @@ async function outer(inputs) {
     try { pythonAlias = path.dirname(path.dirname(path.resolve(path.dirname(inputs.python), await readlink(inputs.python)))) }
     catch (error) { if (error.code !== 'EINVAL') throw error }
     const mounts = [here, inputs['backend-root'], inputs['web-dist'], commonGit, pythonRuntime, pythonAlias,
-      path.dirname(path.dirname(inputs.python)), inputs.chrome, process.execPath,
+      path.dirname(path.dirname(inputs.python)), path.dirname(inputs.chrome), process.execPath,
       path.resolve(here, '../node_modules'), path.resolve(here, '../../../node_modules')]
     const readOnly = [...new Set((await Promise.all(mounts.map(async file => [file, await realpath(file)]))).flat())]
     for (const file of readOnly) {

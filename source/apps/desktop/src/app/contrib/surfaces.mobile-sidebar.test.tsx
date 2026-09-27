@@ -13,7 +13,7 @@ import { SidebarSurface } from './surfaces'
 import type { SidebarActions } from './types'
 
 const otherSession = makeSessionInfo({ id: 'other', title: 'Other session' })
-const destination = { id: 'skills', label: 'Capabilities', route: '/skills', icon: () => null }
+const destination = { id: 'capabilities', label: 'Capabilities', route: '/capabilities', icon: () => null }
 
 vi.mock('../chat/sidebar', () => ({
   ChatSidebar: ({ onResumeSession, onNavigate, onNewSessionInWorkspace, onManageCronJob }: SidebarActions) => (

@@ -11,7 +11,7 @@ import { normalizeOrLocalPreviewTarget, openPreviewTargetInBrowser } from '@/lib
 import { isBrowserClient } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 import { notifyError } from '@/store/notifications'
-import { $previewTabSources, closePreviewForSource, openPreview } from '@/store/preview'
+import { $previewTabSources, closePreviewForSource, openPreview, renderedHtmlTarget } from '@/store/preview'
 import { type PreviewArtifact } from '@/store/preview-status'
 
 interface PreviewStatusRowProps {
@@ -51,7 +51,7 @@ export const PreviewStatusRow = memo(function PreviewStatusRow({ item, onDismiss
     setOpening(true)
 
     try {
-      openPreview(await resolveTarget(), 'tool-result')
+      openPreview(renderedHtmlTarget(await resolveTarget()))
     } catch (error) {
       notifyError(error, t.preview.unavailable)
     } finally {
@@ -70,7 +70,7 @@ export const PreviewStatusRow = memo(function PreviewStatusRow({ item, onDismiss
       // (Remote HTML stays on openPreviewTargetInBrowser, which stages a
       // sanitized local copy before opening it.)
       if (target.kind === 'file' && target.previewKind !== 'html' && isDesktopFsRemoteMode()) {
-        openPreview(target, 'tool-result')
+        openPreview(target)
 
         return
       }

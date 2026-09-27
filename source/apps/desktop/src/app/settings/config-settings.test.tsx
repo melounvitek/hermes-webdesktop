@@ -1,20 +1,29 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, render, screen, waitFor } from '@testing-library/react'
 import { atom } from 'nanostores'
 import { createRef } from 'react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import type * as ConfigApi from '@/api/config'
+import { $settingsRequestProfile } from '@/store/settings-scope'
+
 import type { ConfigSettings as ConfigSettingsType } from './config-settings'
+
+// The vi.mock factory below replaces the computed (read-only) atom with a
+// writable one; narrow the import back so tests can drive it.
+const scopeProfileMock = $settingsRequestProfile as unknown as { set: (value: string) => void }
 
 const getHermesConfigRecord = vi.fn()
 const getHermesConfigSchema = vi.fn()
 const saveHermesConfig = vi.fn()
 const getElevenLabsVoices = vi.fn()
 
+// Keep the read-origin helpers and concrete owner cache keys live.
 vi.mock('@/hermes', async () => ({
+  ...(await vi.importActual<typeof ConfigApi>('@/api/config')),
   profileScopeKey: (await import('@/api/client')).profileScopeKey,
-  getHermesConfigRecord: () => getHermesConfigRecord(),
+  getHermesConfigRecord: (profile?: unknown) => getHermesConfigRecord(profile),
   getHermesConfigSchema: () => getHermesConfigSchema(),
   saveHermesConfigRecord: (config: unknown, profile?: unknown) => saveHermesConfig(config, profile),
   getElevenLabsVoices: () => getElevenLabsVoices(),
@@ -31,7 +40,10 @@ vi.mock('../hooks/use-on-profile-switch', () => ({
 // scope chip it renders also reads the selected profile and the loud-note
 // selector, so those are stubbed to the single-profile default shape.
 vi.mock('@/store/settings-scope', () => ({
-  $settingsRequestProfile: atom<string | undefined>(undefined),
+  // The real store derives this from the displayed $settingsScopeProfile
+  // (never undefined for a real profile — settings-scope.test.ts pins that);
+  // here it is a plain atom so the page's threading of it can be driven.
+  $settingsRequestProfile: atom<string | undefined>('default'),
   $settingsScopeEditsNonDefault: atom(false),
   $settingsScopeOverride: atom<null | string>(null),
   $settingsScopeProfile: atom<string>('default')
@@ -53,6 +65,7 @@ beforeAll(async () => {
 }, 60_000)
 
 beforeEach(() => {
+  scopeProfileMock.set('default')
   getElevenLabsVoices.mockResolvedValue({ available: false })
   getHermesConfigSchema.mockResolvedValue({ fields: {} })
   saveHermesConfig.mockResolvedValue({ ok: true })
@@ -64,14 +77,14 @@ afterEach(() => {
   vi.unstubAllGlobals()
 })
 
-function renderConfigSettings(activeSectionId = 'safety') {
+function renderConfigSettings(activeSectionId = 'safety', subpage?: string) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   const importInputRef = createRef<HTMLInputElement>()
 
   render(
     <MemoryRouter>
       <QueryClientProvider client={client}>
-        <ConfigSettings activeSectionId={activeSectionId} importInputRef={importInputRef} />
+        <ConfigSettings activeSectionId={activeSectionId} importInputRef={importInputRef} subpage={subpage} />
       </QueryClientProvider>
     </MemoryRouter>
   )
@@ -80,13 +93,19 @@ function renderConfigSettings(activeSectionId = 'safety') {
 }
 
 describe('ConfigSettings autosave', () => {
-  it.each([true, false])('only offers native power and devtools preferences outside browser=%s', async browser => {
+  it.each([
+    [true, undefined],
+    [false, undefined],
+    [true, 'desktop'],
+    [false, 'desktop']
+  ] as const)('only offers native preferences outside browser=%s on page %s', async (browser, subpage) => {
     vi.stubGlobal('hermesDesktop', { browser })
     getHermesConfigRecord.mockResolvedValue({})
-    renderConfigSettings('advanced')
-    await screen.findByText('Nothing to configure')
+    const { importInputRef } = renderConfigSettings('advanced', subpage)
+    await waitFor(() => expect(importInputRef.current).not.toBeNull())
     expect(Boolean(screen.queryByText('Keep computer awake'))).toBe(!browser)
     expect(Boolean(screen.queryByText('Disable F12 DevTools'))).toBe(!browser)
+    expect(Boolean(screen.queryByText('Always open links in external browser'))).toBe(!browser)
   })
 
   it('renders and saves the Codex compression auto-raise setting', async () => {
@@ -113,7 +132,7 @@ describe('ConfigSettings autosave', () => {
       await vi.waitFor(() =>
         expect(saveHermesConfig).toHaveBeenCalledWith(
           { compression: { codex_gpt55_autoraise: false } },
-          { connectionId: null, profile: 'default' }
+          expect.objectContaining({ connectionId: null, profile: 'default' })
         )
       )
     } finally {
@@ -148,6 +167,39 @@ describe('ConfigSettings autosave', () => {
       // (the field is back to its original value) and leave disk stuck at
       // `enabled: true` from the first save.
       expect(saveHermesConfig.mock.calls[1][0]).toEqual({ checkpoints: { enabled: false } })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('threads the "Applies to" request scope into both the config read and the autosave write', async () => {
+    // #118432: the request scope is the concrete profile the page displays
+    // (see settings-scope.test.ts). The page must carry it into the read AND
+    // the write — a read scoped to B with a write that falls back to the
+    // ambient (launch) profile is exactly the silent cross-profile write.
+    scopeProfileMock.set('nash')
+    getHermesConfigRecord.mockResolvedValue({ checkpoints: { enabled: false } })
+
+    vi.useFakeTimers({ shouldAdvanceTime: true })
+
+    try {
+      renderConfigSettings()
+
+      await vi.waitFor(() =>
+        expect(getHermesConfigRecord).toHaveBeenCalledWith(
+          expect.objectContaining({ connectionId: null, profile: 'nash' })
+        )
+      )
+
+      ;(await screen.findByRole('switch')).click()
+      await vi.advanceTimersByTimeAsync(700)
+
+      await vi.waitFor(() =>
+        expect(saveHermesConfig).toHaveBeenCalledWith(
+          { checkpoints: { enabled: true } },
+          getHermesConfigRecord.mock.calls[0][0]
+        )
+      )
     } finally {
       vi.useRealTimers()
     }

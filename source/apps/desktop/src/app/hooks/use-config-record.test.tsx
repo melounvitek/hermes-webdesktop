@@ -36,6 +36,7 @@ afterEach(() => {
   cleanup()
   queryClient.clear()
   vi.clearAllMocks()
+  vi.restoreAllMocks()
 })
 
 function wrapper({ children }: PropsWithChildren) {
@@ -90,4 +91,36 @@ it('keeps the captured request owner when an old query is refetched after a prof
     client.setApiRequestConnection(null)
     queryClient.clear()
   }
+})
+
+it.each(['dark', 'light'])('updates the write origin after refetching a %s record', async theme => {
+  const hermes = await import('@/hermes')
+  const first = { display: { theme: 'dark' } }
+  const second = { display: { theme } }
+  hermes.bindConfigReadOrigin(first, { connectionId: 'connection-a', profile: 'worker' })
+  hermes.bindConfigReadOrigin(second, { connectionId: 'connection-b', profile: 'worker' })
+  vi.spyOn(hermes, 'getHermesConfigRecord').mockResolvedValueOnce(first).mockResolvedValueOnce(second)
+
+  const { result } = renderHook(() => config.useHermesConfigRecord(), { wrapper })
+
+  // Before the first GET resolves the scope must be `undefined` (not `null`):
+  // profileScoped(null) drops the active profile and targets the PRIMARY.
+  expect(result.current.data).toBeUndefined()
+  expect(result.current.writeScope).toBeUndefined()
+  expect(result.current.writeScope).not.toBeNull()
+
+  await waitFor(() => expect(result.current.data).toBe(first))
+  expect(result.current.writeScope).toEqual({ connectionId: 'connection-a', profile: 'worker' })
+
+  await queryClient.invalidateQueries({ queryKey: config.HERMES_CONFIG_KEY })
+
+  await waitFor(() => expect(result.current.data).toEqual(second))
+  await waitFor(() => expect(result.current.writeScope).toEqual({ connectionId: 'connection-b', profile: 'worker' }))
+
+  if (theme === 'dark') {
+    expect(result.current.data).toBe(first)
+  }
+
+  act(() => config.hermesConfigCacheWriter(result.current.scope)({ display: { theme: 'optimistic' } }))
+  expect(result.current.writeScope).toEqual({ connectionId: 'connection-b', profile: 'worker' })
 })

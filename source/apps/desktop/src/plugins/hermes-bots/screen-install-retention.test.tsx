@@ -1,0 +1,154 @@
+/**
+ * An INACTIVE registry-routed bot's pooled socket is disposed by the SDK as soon
+ * as its request count hits zero — so `display.install.log/done` (and the
+ * pane's `display.lease` events) would never arrive. The install card must hold
+ * a retention from before `display.install` until the done event lands.
+ */
+
+import { act, fireEvent, render } from '@testing-library/react'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+
+import type { DisplayStatus } from './screen-connection'
+import type { RosterRow } from './types'
+
+const calls = vi.hoisted(() => [] as string[])
+
+vi.mock('@hermes/plugin-sdk', async () => {
+  const { onGatewayEvent } = await import('../../contrib/events')
+
+  return {
+    Button: ({ children, ...props }: React.ButtonHTMLAttributes<HTMLButtonElement>) => (
+      <button {...props}>{children}</button>
+    ),
+    Codicon: () => null,
+    GlyphSpinner: () => null,
+    resolveSiblingWsUrl: vi.fn(),
+    isBrowserClient: (await import('../../lib/platform')).isBrowserClient,
+    host: {
+      onEvent: onGatewayEvent,
+      requestProfile: vi.fn(async (_route: unknown, method: string) => {
+        calls.push(`request:${method}`)
+
+        return {}
+      }),
+      retainProfile: vi.fn(async () => {
+        calls.push('retain')
+
+        return () => {
+          calls.push('release')
+        }
+      })
+    }
+  }
+})
+vi.mock('./routing', () => {
+  const route = { connectionId: 'host-a', mode: 'remote', profile: 'ops', targetProfile: 'ops' }
+
+  return { botConnectionRoute: () => route, resolveBotConnectionRoute: () => ({ status: 'resolved', route }) }
+})
+vi.mock('./i18n', () => ({
+  useBots: () => ({
+    screen: {
+      notInstalledTitle: 'Missing',
+      notInstalledBody: 'Body',
+      installHint: 'Hint',
+      install: 'Install on host',
+      installing: 'Installing',
+      installCancelled: 'Cancelled',
+      installFailed: 'Failed',
+      noPackageManager: 'None'
+    }
+  })
+}))
+
+import { host } from '@hermes/plugin-sdk'
+
+// eslint-disable-next-line no-restricted-imports
+import { emitGatewayEvent } from '../../contrib/events'
+
+import { displayRequest } from './screen-connection'
+import { ScreenInstallCard } from './screen-install'
+
+const bot: RosterRow = { name: 'ops', sourceScoped: true, connectionId: 'host-a', connectionKind: 'remote' }
+
+const status: DisplayStatus = {
+  profile: 'ops',
+  profile_key: '/home/hermes/.hermes',
+  supported: true,
+  installed: false,
+  missing: ['tigervnc'],
+  running: false,
+  pid: null,
+  display: null,
+  socket: null,
+  geometry: '1440x900',
+  install_command: 'sudo apt-get install -y tigervnc-standalone-server',
+  lease: { holder: 'agent', viewer_id: null, viewer_hash: null, since: 1, reason: '', epoch: 0 }
+}
+
+beforeEach(() => {
+  calls.length = 0
+})
+
+afterEach(() => vi.unstubAllGlobals())
+
+it('never offers or dispatches host package installation in the browser', async () => {
+  vi.stubGlobal('hermesDesktop', { browser: {} })
+  const view = render(<ScreenInstallCard bot={bot} onInstalled={vi.fn()} status={status} />)
+
+  expect(view.queryByRole('button', { name: 'Install on host' })).toBeNull()
+  await expect(displayRequest(bot, 'display.install')).rejects.toThrow(/unavailable in the browser/i)
+  expect(calls).toEqual([])
+  // Viewing an already provisioned screen remains a stock-API operation.
+  await displayRequest(bot, 'display.status')
+  expect(calls).toEqual(['request:display.status'])
+  view.unmount()
+})
+
+it('retains the bot socket before display.install and releases it when the done event lands', async () => {
+  const onInstalled = vi.fn()
+  const view = render(<ScreenInstallCard bot={bot} onInstalled={onInstalled} status={status} />)
+
+  await act(async () => {
+    fireEvent.click(view.getByText('Install on host'))
+  })
+  expect(calls).toEqual(['retain', 'request:display.install'])
+
+  act(() =>
+    emitGatewayEvent({
+      type: 'display.install.done',
+      connectionId: 'host-a',
+      profile: 'ops',
+      payload: { profile_key: status.profile_key, code: 0, status: { ...status, installed: true } }
+    })
+  )
+  expect(calls).toEqual(['retain', 'request:display.install', 'release'])
+  expect(onInstalled).toHaveBeenCalledTimes(1)
+  view.unmount()
+  // Unmount after done must not double-release.
+  expect(calls.filter(call => call === 'release')).toHaveLength(1)
+})
+
+it('an unmount while the retention is still pending releases it once and never sends display.install', async () => {
+  let grant: (() => void) | null = null
+  vi.mocked(host.retainProfile).mockImplementationOnce(
+    () =>
+      new Promise(resolve => {
+        grant = () => {
+          calls.push('retain')
+          resolve(() => {
+            calls.push('release')
+          })
+        }
+      })
+  )
+  const view = render(<ScreenInstallCard bot={bot} onInstalled={vi.fn()} status={status} />)
+
+  await act(async () => {
+    fireEvent.click(view.getByText('Install on host'))
+  })
+  view.unmount()
+  await act(async () => grant?.())
+  await act(async () => {})
+  expect(calls).toEqual(['retain', 'release'])
+})

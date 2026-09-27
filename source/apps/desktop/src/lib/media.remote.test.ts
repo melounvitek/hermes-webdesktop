@@ -7,33 +7,11 @@ import {
   filePathFromMediaPath,
   gatewayMediaDataUrl,
   isInlineMediaSrc,
-  isRemoteGateway,
   mediaExternalUrl,
   mediaGatewayStreamUrl,
   resolveMediaDisplaySrc,
   resolveMediaPlaybackSrc
 } from './media'
-
-describe('isRemoteGateway', () => {
-  afterEach(() => {
-    $connection.set(null)
-  })
-
-  it('is false with no connection', () => {
-    $connection.set(null)
-    expect(isRemoteGateway()).toBe(false)
-  })
-
-  it('is false in local mode', () => {
-    $connection.set({ mode: 'local' } as never)
-    expect(isRemoteGateway()).toBe(false)
-  })
-
-  it('is true in remote mode', () => {
-    $connection.set({ mode: 'remote' } as never)
-    expect(isRemoteGateway()).toBe(true)
-  })
-})
 
 describe('filePathFromMediaPath', () => {
   it('passes through a plain path', () => {
@@ -262,13 +240,18 @@ describe('downloadGatewayMediaFile', () => {
 
   it('keeps explicit origins independent of the foreground connection and profile', async () => {
     for (const origin of [
-      { sessionId: 'background-session', profile: 'research', connectionId: 'origin-host' },
+      { sessionId: 'background-session', owner: { profile: 'research', connectionId: 'origin-host' } },
+      { sessionId: 'background-session', owner: { connectionId: 'local' } },
+      { sessionId: 'background-session', owner: { profile: 'research' } },
+      { sessionId: 'background-session', owner: {} },
       { sessionId: 'background-session', profile: 'research' },
-      { sessionId: 'background-session' }
+      { sessionId: 'background-session' },
+      {}
     ]) {
       await downloadGatewayMediaFile('./report.md', origin)
       expect(saveGatewayFile).toHaveBeenLastCalledWith({
-        ...origin,
+        ...(origin.owner ?? (origin.profile ? { profile: origin.profile } : {})),
+        ...(origin.sessionId ? { sessionId: origin.sessionId } : {}),
         path: './report.md',
         suggestedName: 'report.md'
       })

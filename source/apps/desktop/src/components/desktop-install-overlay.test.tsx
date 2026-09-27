@@ -2,6 +2,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { createBrowserBridge } from '@/browser/bridge'
 import type { DesktopBootstrapEvent, DesktopBootstrapState, DesktopConnectionProbeResult } from '@/global'
 
 import { DesktopInstallOverlay } from './desktop-install-overlay'
@@ -90,20 +91,15 @@ afterEach(() => {
 })
 
 describe('DesktopInstallOverlay first-run setup', () => {
-  it('shows the remote/local choice without installer progress', async () => {
-    installDesktopMock(
-      bootstrapState({
-        setupChoice: { platform: 'win32', activeRoot: 'C:\\Users\\me\\AppData\\Local\\hermes\\hermes-agent' }
-      })
-    )
+  it('is a safe no-op with the browser bridge, which has no native installer', () => {
+    Object.defineProperty(window, 'hermesDesktop', {
+      configurable: true,
+      value: createBrowserBridge({ token: '', authRequired: false })
+    })
 
-    render(<DesktopInstallOverlay />)
+    const { container } = render(<DesktopInstallOverlay />)
 
-    expect(await screen.findByText('Set up Hermes Desktop')).toBeTruthy()
-    expect(screen.getByText('Connect to existing Hermes')).toBeTruthy()
-    expect(screen.getByText('Install Hermes locally')).toBeTruthy()
-    expect(screen.queryByText(/steps complete/i)).toBeNull()
-    expect(screen.queryByText(/Fetching installer manifest/i)).toBeNull()
+    expect(container.childElementCount).toBe(0)
   })
 
   it('continues local bootstrap only when Install Hermes locally is selected', async () => {
@@ -195,22 +191,6 @@ describe('DesktopInstallOverlay first-run setup', () => {
     })
 
     expect(screen.queryByText('Local installation could not start. Restart Hermes Desktop and try again.')).toBeNull()
-  })
-
-  it('opens the remote connection form from the first-run choice', async () => {
-    installDesktopMock(
-      bootstrapState({
-        setupChoice: { platform: 'linux', activeRoot: '/home/me/.hermes/hermes-agent' }
-      })
-    )
-
-    render(<DesktopInstallOverlay />)
-
-    fireEvent.click(await screen.findByText('Connect to existing Hermes'))
-
-    expect(await screen.findByText('Gateway URL')).toBeTruthy()
-    expect(screen.getByText('Test connection')).toBeTruthy()
-    expect(screen.getByText('Apply and reconnect')).toBeTruthy()
   })
 
   it('returns from the remote connection form to the first-run choice', async () => {

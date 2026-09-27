@@ -96,6 +96,7 @@ async function newPage(boundary = false) {
       ws.close()
     }
   })
+  await context.tracing.start({ screenshots: true, snapshots: true, sources: true })
   const page = await context.newPage()
   page.setDefaultTimeout(15000)
   page.on('pageerror', error => errors.push(error.stack))
@@ -172,6 +173,7 @@ async function check(name, body, { boundary = false } = {}) {
     if (page) {
       await page.screenshot({ path: path.join(artifacts, `${name}.png`) })
       await writeFile(path.join(artifacts, `${name}.aria.txt`), await page.locator('body').ariaSnapshot())
+      await page.context().tracing.stop({ path: path.join(artifacts, `${name}.trace.zip`) })
       await page.context().close()
     }
   }
@@ -199,6 +201,16 @@ async function selectProfile(page, profile) {
   await button.click()
   await expect(button).toHaveAttribute('aria-pressed', 'true')
   await expect(page.getByRole('textbox', { name: 'Message', exact: true })).toBeEditable()
+}
+
+async function dismissCompatibilityNotice(page) {
+  // Stock runtimes without the new capability stamp show a persistent notice
+  // over the first transcript row. Dismiss it as a user would; never force clicks.
+  const notice = page.getByRole('status').filter({ hasText: 'Backend out of date' })
+  if (await notice.isVisible()) {
+    await notice.getByRole('button', { name: 'Dismiss notification', exact: true }).click()
+    await expect(notice).not.toBeVisible()
+  }
 }
 
 function sessionRow(page, marker) {
@@ -580,6 +592,7 @@ try {
       )
       assert.equal(unauthorized.status(), 401, 'Downloads must require authentication')
       await send(page, `spike: [fixture download](#media:${encodeURIComponent(file)})`)
+      await dismissCompatibilityNotice(page)
       const start = downloads.length
       const [download] = await Promise.all([
         page.waitForEvent('download'),
@@ -609,6 +622,12 @@ try {
     await expect(tile.getByRole('textbox', { name: 'Message', exact: true })).toBeEditable()
     const relative = './workspace/résumé & report.bin'
     await send(page, `spike: [no workspace download](#media:${encodeURIComponent(relative)})`)
+    await dismissCompatibilityNotice(page)
+    const created = requestFrames(start).find(f => f.method === 'session.create')
+    assert.ok(created, 'The missing-workspace case needs a fresh session, never a resumed one')
+    const owner = frames.find(f => f.direction === 'received' && f.socket === created.socket && f.id === created.id)?.result
+    assert.equal(owner?.info?.profile_name, profiles[0])
+    assert.ok(owner.session_id)
     const storedId = (await tile.getAttribute('data-session-anchor')).slice('session-tile:'.length)
     const sessionUrl = `${runtime.url}/api/sessions/${encodeURIComponent(storedId)}?profile=${profiles[0]}`
     const persisted = await page.request.get(sessionUrl, { headers })
@@ -651,6 +670,58 @@ try {
     )
     await alert.getByRole('button', { name: 'Dismiss notification', exact: true }).click()
     await expect(alert).not.toBeVisible()
+
+    // Choose a workspace through stock RPC, then retry the exact same URL.
+    const profile = profiles[0]
+    const cwd = path.join(runtime.hermes_home, 'profiles', profile)
+    const wsUrl = new URL('/api/ws', runtime.url.replace('http:', 'ws:'))
+    wsUrl.searchParams.set('token', runtime.token)
+    wsUrl.searchParams.set('profile', profile)
+    const reply = await page.evaluate(
+      ({ url, sessionId, cwd, profile }) =>
+        new Promise((resolve, reject) => {
+          const ws = new WebSocket(url)
+          const timer = setTimeout(() => {
+            ws.close()
+            reject(new Error('session.cwd.set timed out'))
+          }, 15000)
+          ws.onopen = () =>
+            ws.send(
+              JSON.stringify({
+                jsonrpc: '2.0',
+                id: 'fixture-set-workspace',
+                method: 'session.cwd.set',
+                params: { session_id: sessionId, cwd, profile }
+              })
+            )
+          ws.onmessage = event => {
+            const reply = JSON.parse(event.data)
+            if (reply.id !== 'fixture-set-workspace') return
+            clearTimeout(timer)
+            resolve(reply)
+            ws.close()
+          }
+          ws.onclose = () => {
+            clearTimeout(timer)
+            reject(new Error('Workspace socket closed before reply'))
+          }
+        }),
+      { url: wsUrl.href, sessionId: owner.session_id, cwd, profile }
+    )
+    assert.equal(reply.error, undefined, JSON.stringify(reply))
+    assert.equal(reply.result.cwd, cwd)
+    const [download, response] = await Promise.all([
+      page.waitForEvent('download'),
+      page.waitForResponse(response => new URL(response.url()).pathname === '/api/fs/download'),
+      downloadButton.click()
+    ])
+    assert.equal(response.status(), 200)
+    assert.equal(response.url(), unavailable.url(), 'Choosing a workspace must fix the same download, not retarget it')
+    const filename = 'résumé & report.bin'
+    assert.equal(download.suggestedFilename(), filename)
+    const destination = path.join(artifacts, 'chosen-workspace.bin')
+    await download.saveAs(destination)
+    assert.deepEqual(await readFile(destination), await readFile(path.join(cwd, 'workspace', filename)))
   })
   await check('relative-download-a-tile-b-foreground', async page => {
     const filename = 'résumé & report.bin'
@@ -689,55 +760,16 @@ try {
     const foreground = page.getByRole('contentinfo').getByRole('button', { name: profiles[1], exact: true })
     await expect(foreground).toBeVisible()
     const downloadButton = tile.getByRole('button', { name: 'Download', exact: true }).last()
-    // Projects' folder picker is native in local browser mode. Use the public
-    // RPC instead, with A's actual live id (not the stored id used by downloads).
-    const owner = frames.findLast(
-      f =>
-        f.direction === 'received' &&
-        (f.result?.session_key === storedId ||
-          f.result?.resumed === storedId ||
-          f.result?.stored_session_id === storedId)
-    )?.result
-    assert.ok(owner?.session_id, 'A must have a live session from the real resume frames')
-    assert.equal(owner.info.profile_name, profiles[0])
-    const cwd = path.join(runtime.hermes_home, 'profiles', profiles[0])
-    const wsUrl = new URL('/api/ws', runtime.url.replace('http:', 'ws:'))
-    wsUrl.searchParams.set('token', runtime.token)
-    wsUrl.searchParams.set('profile', profiles[0])
-    const reply = await page.evaluate(
-      ({ url, sessionId, cwd, profile }) =>
-        new Promise((resolve, reject) => {
-          const ws = new WebSocket(url)
-          const timer = setTimeout(() => {
-            ws.close()
-            reject(new Error('session.cwd.set timed out'))
-          }, 15000)
-          ws.onopen = () =>
-            ws.send(
-              JSON.stringify({
-                jsonrpc: '2.0',
-                id: 'fixture-set-workspace',
-                method: 'session.cwd.set',
-                params: { session_id: sessionId, cwd, profile }
-              })
-            )
-          ws.onmessage = event => {
-            const reply = JSON.parse(event.data)
-            if (reply.id !== 'fixture-set-workspace') return
-            clearTimeout(timer)
-            resolve(reply)
-            ws.close()
-          }
-          ws.onclose = () => {
-            clearTimeout(timer)
-            reject(new Error('Workspace socket closed before reply'))
-          }
-        }),
-      { url: wsUrl.href, sessionId: owner.session_id, cwd, profile: profiles[0] }
+    // Resuming/using this session has persisted its cwd in stock Hermes. Read
+    // that authority rather than assuming a previously resumed chat has no cwd.
+    const session = await page.request.get(`${runtime.url}/api/sessions/${storedId}?profile=${profiles[0]}`, { headers })
+    assert.equal(session.status(), 200)
+    assert.equal((await session.json()).cwd, path.join(runtime.hermes_home, 'profiles', profiles[0]))
+    const wrongOwner = await page.request.get(
+      `${runtime.url}/api/fs/download?path=${encodeURIComponent(relative)}&session_id=${storedId}&profile=${profiles[1]}`,
+      { headers }
     )
-    assert.equal(reply.error, undefined, JSON.stringify(reply))
-    assert.equal(reply.result.cwd, cwd)
-    await expect(foreground).toBeVisible()
+    assert.equal(wrongOwner.status(), 404, 'A session must not resolve through B, even when B has the same relative file')
     const start = downloads.length
     // Invoke the real tile button without pointer hover/focus-follow switching
     // the foreground to A first. No bridge, resolver, or transport is mocked.
@@ -857,9 +889,8 @@ try {
             const content = page.getByText(file.bytes.toString().trim(), { exact: true })
             await expect(content).toBeVisible()
             // Enter the real editor, but never change text or explicitly save.
-            await content.click()
-            await page.keyboard.press('e')
-            const editor = preview.getByRole('textbox')
+            await preview.getByRole('button', { name: 'Edit', exact: true }).click()
+            const editor = preview.locator('.cm-editor .cm-content[contenteditable="true"]')
             await expect(editor).toBeVisible()
             await expect(editor).toBeEditable()
             await expect(editor).toContainText(file.bytes.toString().trim())

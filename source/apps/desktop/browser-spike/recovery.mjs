@@ -197,6 +197,7 @@ function messageRows(fixture, text, role = 'user') {
 
 const occurrences = (text, original) => text.split(original).length - 1
 const normalize = text => text.replace(/\s+/g, ' ').trim()
+const messageText = content => typeof content === 'string' ? content : (content ?? []).map(p => p.text || '').join('\n')
 
 async function check(fixture, name, body, { ticket503 = false, shiki503 = false } = {}) {
   assert.ok(!cleanupPromise, 'Recovery is shutting down')
@@ -281,10 +282,10 @@ async function check(fixture, name, body, { ticket503 = false, shiki503 = false 
       .split('\n')
       .map(JSON.parse)
     const users = requests
-      .findLast(r => JSON.stringify(r.messages.at(-1)?.content).includes(turn.text))
+      .findLast(r => messageText(r.messages.at(-1)?.content).includes(turn.text))
       .messages.filter(m => m.role === 'user')
     const prompt = users.at(-1).content
-    const expected = `Spike turn ${users.length}: ${typeof prompt === 'string' ? prompt : prompt.map(p => p.text || '').join('\n')}`
+    const expected = `Spike turn ${users.length}: ${messageText(prompt)}`
     assert.equal(result.text, expected, 'The completed stream must deliver every byte of the fixture response')
     await visibleReply(result.text)
     turn.reply = result.text
@@ -336,7 +337,9 @@ async function check(fixture, name, body, { ticket503 = false, shiki503 = false 
   }
   async function retained(turn) {
     const users = page.locator('[data-slot="aui_user-message-root"]')
-    await expect.poll(async () => occurrences((await users.allInnerTexts()).join('\n'), turn.text)).toBe(1)
+    await expect.poll(async () => occurrences(
+      normalize((await users.allInnerTexts()).join('\n')), normalize(turn.userText ?? turn.text)
+    )).toBe(1)
     const rows = messageRows(fixture, turn.text)
     assert.equal(rows.length, 1, 'Original user turn must occur in exactly one DB row')
     assert.equal(rows[0][0], turn.stored, 'Original user turn must retain its durable identity')
@@ -360,13 +363,13 @@ async function check(fixture, name, body, { ticket503 = false, shiki503 = false 
       .trim()
       .split('\n')
       .map(JSON.parse)
-    const last = requests.findLast(r => JSON.stringify(r.messages).includes(next.text))
+    const last = requests.findLast(r => r.messages.some(m => messageText(m.content).includes(next.text)))
     assert.ok(last, 'Follow-up must reach the isolated model')
     // Consecutive interrupted user rows may be merged for model role alternation.
     // Count occurrences, not rows: one merged message could contain a duplicate.
     const history = last.messages
       .filter(m => m.role === 'user')
-      .map(m => JSON.stringify(m.content))
+      .map(m => messageText(m.content))
       .join('\n')
     for (const original of [turn, next]) {
       assert.equal(
@@ -423,7 +426,7 @@ async function check(fixture, name, body, { ticket503 = false, shiki503 = false 
   }
   let shikiRequests = 0
   if (shiki503) {
-    // Fail only the optional plugin bundle, not the renderer/highlighter modules.
+    // Fail only the lazy Shiki library bundle, not the renderer/highlighter modules.
     // A fresh browser context makes the initial import deterministic.
     await page.route(/\/assets\/shiki-(?!block-|highlighter-|plain-)[\w-]+\.js$/, async route => {
       shikiRequests++
@@ -459,7 +462,8 @@ async function check(fixture, name, body, { ticket503 = false, shiki503 = false 
       signInAgain,
       expireCookies,
       responses,
-      socketEvents
+      socketEvents,
+      shikiRequestCount: () => shikiRequests
     })
     if (ticket503) {
       assert.equal(injected503, 1)
@@ -568,11 +572,18 @@ try {
   await check(
     token,
     'shiki503',
-    async ({ page, submit, retained, followup }) => {
-      const turn = await submit(
-        'spike: shiki503 keeps this entire reply readable through its final sentence after the optional syntax highlighting import fails.'
-      )
-      const reply = await page.locator('[data-slot="aui_assistant-message-content"]').elementHandle()
+    async ({ page, submit, retained, followup, shikiRequestCount }) => {
+      await submit('spike: shiki503 prose must not load syntax highlighting')
+      assert.equal(shikiRequestCount(), 0, 'Boot and plain prose must leave Shiki unloaded')
+      // The custom highlighter loads only for settled code, not prose. The
+      // removed Streamdown code plugin used to import Shiki on every mount.
+      const prose = 'spike: shiki503 keeps this entire reply readable.'
+      const code = 'const stillReadable = 42;\nconsole.log(stillReadable);\n// The final sentence survives the syntax highlighting import failure.'
+      const turn = await submit(`${prose}\n\n\`\`\`javascript\n${code}\n\`\`\``)
+      // User bubbles render fences as code; DB/model checks retain the raw markdown.
+      turn.userText = `${prose}\n\n${code}`
+      assert.equal(shikiRequestCount(), 1, 'Settled code must exercise the failed lazy import')
+      const reply = await page.locator('[data-slot="aui_assistant-message-content"]').last().elementHandle()
       // Navigate within the same document: reloading would clear the failed
       // module cache and would not test a subsequent markdown mount.
       await page.getByRole('button', { name: 'New session', exact: true }).click()

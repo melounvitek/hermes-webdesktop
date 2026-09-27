@@ -182,7 +182,7 @@ it('preserves older backfill, inline errors and the supplied exact owner on fres
   expect(h.state().messages.at(-1)?.error).toBe('local failure')
 })
 
-it('still hydrates a legitimate empty-stream completion and later authoritative empty transcript', async () => {
+it('hydrates an empty-stream completion without letting a transient empty page erase the answer', async () => {
   const h = mount()
   vi.mocked(getLatestSessionMessages).mockResolvedValueOnce(rows(['first', 'persisted reply']) as never)
   h.complete()
@@ -190,7 +190,16 @@ it('still hydrates a legitimate empty-stream completion and later authoritative 
     await h.invoked.mock.results[0].value
   })
   expect(h.state().messages.map(chatMessageText)).toEqual(['first', 'persisted reply'])
+  const completed = h.state().messages
+  setSessionTodos(SID, todos)
+  vi.mocked(getLatestSessionMessages).mockResolvedValueOnce(rows([]) as never)
+  await h.hydrate()
+  expect(h.state().messages).toBe(completed)
+  expect($todosBySession.get()[SID]).toEqual(todos)
+
+  h.update(SID, state => ({ ...state, messages: [] }))
   vi.mocked(getLatestSessionMessages).mockResolvedValueOnce(rows([]) as never)
   await h.hydrate()
   expect(h.state().messages).toEqual([])
+  expect($todosBySession.get()[SID]).toBeUndefined()
 })

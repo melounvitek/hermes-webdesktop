@@ -140,15 +140,16 @@ afterEach(async () => {
 })
 
 describe('browser attention settings and request admission', () => {
-  it('stays off with granted permission and legacy prefs; does not advertise other native kinds', async () => {
-    mount()
-    request('default-off')
+  it.each([undefined, 'alerts'])('keeps browser attention opt-in and native kinds hidden on page %s', async subpage => {
+    render(<NotificationsSettings subpage={subpage} />)
+    // Seen requests survive disable/remount for the document's lifetime.
+    request(`default-off-${subpage ?? 'all'}`)
     expect(notices).toHaveLength(0)
     expect(screen.getByRole('button', { name: 'Enable attention notifications in this tab' })).toBeTruthy()
     expect(screen.queryAllByRole('switch')).toHaveLength(0)
     expect(requestPermission).not.toHaveBeenCalled()
     await enable()
-    request('fresh')
+    request(`fresh-${subpage ?? 'all'}`)
     expect(notices.map(n => [n.title, n.options])).toEqual([
       ['Hermes', { body: 'A conversation needs your attention.' }]
     ])

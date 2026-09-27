@@ -6,7 +6,7 @@ import { $sessionStates, knownOwnerForSession } from '@/store/session-states'
 
 import { resolveSessionOwner } from '../use-session-actions/utils'
 
-import { finalizeInterruptedMessages } from './rewind'
+import { finalizeUserInterruptedMessages } from './rewind'
 import {
   type GatewayRequest,
   isSessionNotFoundError,
@@ -94,7 +94,7 @@ export async function interruptStoppedSession({
             state => ({
               ...state,
               storedSessionId,
-              messages: finalizeInterruptedMessages(
+              messages: finalizeUserInterruptedMessages(
                 state.messages.length ? state.messages : (stopped?.messages ?? []),
                 state.streamId
               ),

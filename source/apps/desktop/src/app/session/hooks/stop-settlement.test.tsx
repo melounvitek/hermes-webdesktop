@@ -7,6 +7,7 @@ import {
   reconcileTileTranscripts,
   rehydrateLiveSessionStatuses
 } from '@/app/contrib/hooks/use-background-sync'
+import { hydrateStoredSession } from '@/app/contrib/stored-session-hydration'
 import type { ClientSessionState } from '@/app/types'
 import { getLatestSessionMessages } from '@/hermes'
 import { createClientSessionState } from '@/lib/chat-runtime'
@@ -182,7 +183,7 @@ it.each([false, true])(
   }
 )
 
-it.each(['active', 'tile'])(
+it.each(['active', 'tile', 'hydration'])(
   'does not read a pre-persistence Stop snapshot for the %s surface; later authority still wins',
   async surface => {
     const h = mountStop()
@@ -192,8 +193,18 @@ it.each(['active', 'tile'])(
       setActiveSessionId('another-runtime')
     }
 
-    const read = () =>
-      surface === 'active'
+    const read = () => {
+      if (surface === 'hydration') {
+        return hydrateStoredSession({
+          storedSessionId: STORED,
+          runtimeSessionId: SID,
+          profile: 'default',
+          attempts: 1,
+          updateSessionState: h.update
+        })
+      }
+
+      return surface === 'active'
         ? reconcileActiveTranscript({
             activeSessionIdRef: h.activeSessionIdRef,
             busyRef: h.busyRef,
@@ -209,6 +220,7 @@ it.each(['active', 'tile'])(
             signatureRef: { current: new Map() },
             updateSessionState: h.update
           })
+    }
 
     vi.mocked(getLatestSessionMessages).mockResolvedValue({ messages: [] } as never)
     await act(read)

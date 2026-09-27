@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { ArrowUpRight } from '@/lib/icons'
 import { IS_MAC } from '@/lib/keybinds/combo'
 import { isBrowserClient } from '@/lib/platform'
+import { $alwaysExternalLinks } from '@/store/external-links'
 
 import { resolveBrandIcon } from './brand-icon'
 import { cn } from './utils'
@@ -246,6 +247,7 @@ export function hudForcesNativeLinks(search = typeof window === 'undefined' ? ''
  * Everything that ISN'T a web page — `mailto:`, `file:`, a custom scheme — has
  * no business in the webview and always hands off to the OS. The HUD and the
  * browser client have no browser pane, so user clicks always open externally.
+ * The "Always open links in external browser" setting sends every click there too.
  */
 export function openLink(href: string, options: { native?: boolean } = {}): void {
   const target = normalizeExternalUrl(href)
@@ -257,6 +259,7 @@ export function openLink(href: string, options: { native?: boolean } = {}): void
   if (
     options.native ||
     isBrowserClient() ||
+    $alwaysExternalLinks.get() ||
     isConnectorAuthorizationLink(target) ||
     hudForcesNativeLinks() ||
     !/^https?:$/i.test(parseUrl(target)?.protocol ?? '')
@@ -271,7 +274,7 @@ export function openLink(href: string, options: { native?: boolean } = {}): void
   // link helper drag that whole tree into anything that renders a link. The
   // tab lands a microtask later, which is invisible.
   void import('@/store/preview').then(({ openPreview }) =>
-    openPreview({ kind: 'url', label: hostPathLabel(target), source: target, url: target }, 'explicit-link')
+    openPreview({ kind: 'url', label: hostPathLabel(target), source: target, url: target })
   )
 }
 

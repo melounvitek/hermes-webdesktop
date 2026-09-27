@@ -13,6 +13,7 @@ import { stubResizeObserver } from '@/test/jsdom'
 import { group, split } from '../model'
 import { $hiddenTreePanes, $layoutTree, $narrowViewport, declareDefaultTree } from '../store'
 
+import { KeepAlivePanes } from './keep-alive-panes'
 import { NarrowOverlays } from './narrow-overlays'
 
 // Ground truth for "the Bots tab is still visible when the sessions sidebar
@@ -97,11 +98,11 @@ describe('browser narrow sidebar dismissal', () => {
     }
   )
 
-  it('preserves inside/portalled actions, gestures, toggles and higher layer ownership', () => {
+  it.each([false, true])('preserves inside/portalled actions and higher layers (keepAlive=%s)', keepAlive => {
     registerPane(
       'files',
       'Files',
-      { collapsible: true, placement: 'right' },
+      { collapsible: true, placement: 'right', lifecycleKeepAlive: keepAlive },
       <>
         <input aria-label="Sidebar draft" defaultValue="Keep me" />
         {createPortal(
@@ -117,7 +118,9 @@ describe('browser narrow sidebar dismissal', () => {
 
     const { getByText, getByRole, getByTestId, queryByTestId } = render(
       <>
-        <NarrowOverlays />
+        <KeepAlivePanes>
+          <NarrowOverlays />
+        </KeepAlivePanes>
         <button
           onClick={() => {
             window.dispatchEvent(new CustomEvent(PANE_TOGGLE_REVEAL_EVENT, { detail: { id: 'files' } }))
@@ -133,7 +136,7 @@ describe('browser narrow sidebar dismissal', () => {
     // Pane reveals also come from ordinary uncovered controls, not just titlebar toggles.
     click(getByText('Toggle files'))
     const draft = getByRole('textbox') as HTMLInputElement
-    expect((draft.closest('[data-glass-opaque]') as HTMLElement).style.top).toBe(`${TITLEBAR_HEIGHT}px`)
+    expect(document.querySelector<HTMLElement>('[data-narrow-overlay]')?.style.top).toBe(`${TITLEBAR_HEIGHT}px`)
     click(draft)
     click(getByText('Portalled action'))
     click(getByText('Stopped action'))
@@ -165,15 +168,15 @@ describe('browser narrow sidebar dismissal', () => {
     expect(getByTestId('files-body')).toBeTruthy()
     release()
     click(getByText('Toggle files'))
-    expect(queryByTestId('files-body')).toBeNull()
+    expect(document.querySelector('[data-narrow-overlay]')).toBeNull()
     click(getByText('Toggle files'))
     expect(getByTestId('files-body')).toBeTruthy()
     click(getByText('Outside action'))
-    expect(queryByTestId('files-body')).toBeNull()
+    expect(document.querySelector('[data-narrow-overlay]')).toBeNull()
 
     revealPane('files')
     fireEvent.keyDown(window, { key: 'Escape' })
-    expect(queryByTestId('files-body')).toBeNull()
+    expect(document.querySelector('[data-narrow-overlay]')).toBeNull()
     const dockedTree = $layoutTree.get()
     act(() => $narrowViewport.set(false))
     revealPane('sessions')
