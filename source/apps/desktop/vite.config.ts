@@ -20,6 +20,8 @@ import path from 'path'
 
 import tailwindcss from '@tailwindcss/vite'
 
+import { getBrowserBuild } from './scripts/browser-build.mjs'
+
 // `hgui` symlinks a worktree's node_modules to the main checkout. Vite realpaths
 // those before enforcing server.fs.allow, so codicon/font assets resolve outside
 // the worktree root and 404. Whitelist the real node_modules locations.
@@ -114,6 +116,10 @@ const emojibaseAssets = () => ({
 
 export default defineConfig(({ command }) => ({
   base: './',
+  define:
+    process.env.VITE_BROWSER === '1'
+      ? { __HERMES_BROWSER_BUILD__: JSON.stringify(getBrowserBuild(path.resolve(__dirname, '../..'))) }
+      : {},
   plugins: [
     react(),
     babel({ presets: [compilerPreset()] }),

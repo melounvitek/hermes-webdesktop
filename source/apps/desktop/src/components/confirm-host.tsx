@@ -2,7 +2,7 @@ import { useStore } from '@nanostores/react'
 import { useEffect, useState } from 'react'
 
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
-import { $confirmRequest, type PendingConfirm, settleConfirm } from '@/store/confirm'
+import { $confirmRequest, settleConfirm } from '@/store/confirm'
 
 // The one mount point for `confirm()` from @/store/confirm. Mounted once at the
 // shell, the way NotificationStack backs notify().
@@ -10,16 +10,23 @@ export function ConfirmHost() {
   const request = useStore($confirmRequest)
   // The atom clears the moment the question is answered, but Radix still has a
   // close animation to play — hold the copy so the dialog doesn't blank mid-fade.
-  const [shown, setShown] = useState<null | PendingConfirm>(request)
+  const [{ request: shown, generation }, setShown] = useState({ request, generation: 0 })
 
   useEffect(() => {
     if (request) {
-      setShown(request)
+      setShown(previous => (previous.request === request ? previous : { request, generation: previous.generation + 1 }))
     }
   }, [request])
 
   if (!shown) {
     return null
+  }
+
+  // A's confirmation can open B before A's awaited onClose continuation runs.
+  function settle(confirmed: boolean) {
+    if ($confirmRequest.get() === shown) {
+      settleConfirm(confirmed)
+    }
   }
 
   return (
@@ -31,8 +38,10 @@ export function ConfirmHost() {
       // The caller does the work once it has its answer, so there is nothing
       // here to keep the dialog open for.
       dismissOnConfirm
-      onClose={() => settleConfirm(false)}
-      onConfirm={() => settleConfirm(true)}
+      // A replacement must not inherit the previous request's pending state.
+      key={generation}
+      onClose={() => settle(false)}
+      onConfirm={() => settle(true)}
       open={request !== null}
       title={shown.title}
     />

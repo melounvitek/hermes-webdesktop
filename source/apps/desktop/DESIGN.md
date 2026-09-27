@@ -294,10 +294,13 @@ so glass and message-bubble transparency do not reveal scrolling text.
   master/detail empties with an icon and action. Don't hand-roll a third
   centered empty.
 - **Confirmation:** `ConfirmDialog` is the only way we ask "are you sure". It
-  opens focused on Confirm, so `Enter` confirms and `Esc` cancels, and it owns
-  the pending → done → close beat and the inline error — a call site passes an
-  async `onConfirm` and nothing else. A third way out (e.g. "Remove from
-  sidebar" beside "Delete worktree") goes in the one `secondaryAction` slot.
+  opens focused on Confirm. `Enter`/`Space` activate the focused button; moving
+  focus to Cancel or the secondary action never confirms. `Esc` cancels when
+  idle. It owns pending state, duplicate-submission protection, and inline errors
+  with retry. A call site passes an async `onConfirm`; success follows the
+  done → close beat, or closes immediately with `dismissOnConfirm`.
+  A third way out (e.g. "Remove from sidebar" beside "Delete worktree") goes in
+  the one `secondaryAction` slot.
   Never `window.confirm`: it's an unstyled blocking Chromium modal. A handler
   that wants the answer inline instead of a mounted dialog calls `confirm()`
   from `src/store/confirm.ts`, which renders this same primitive through the

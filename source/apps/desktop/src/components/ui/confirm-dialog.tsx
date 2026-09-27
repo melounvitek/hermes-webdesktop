@@ -38,10 +38,9 @@ interface ConfirmSecondaryAction {
   onClick: () => void
 }
 
-// Shared confirmation dialog: opens focused on Confirm, Enter confirms (from
-// anywhere in the dialog), Esc/Cancel/backdrop dismiss. Owns the pending → done
-// → close beat and inline error, so callers pass only an async onConfirm that
-// does the work.
+// Shared confirmation dialog: opens focused on Confirm; Enter/Space activate
+// the focused button. Esc/Cancel/backdrop dismiss when idle. Owns the pending
+// → done → close beat and inline error, so callers pass only an async onConfirm.
 export function ConfirmDialog({
   open,
   onClose,
@@ -58,6 +57,8 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   const { t } = useI18n()
   const confirmRef = useRef<HTMLButtonElement>(null)
+  const inFlightRef = useRef(false)
+  const mountedRef = useRef(false)
   const closeTimerRef = useRef<null | number>(null)
   const [status, setStatus] = useState<'done' | 'idle' | 'saving'>('idle')
   const [error, setError] = useState<null | string>(null)
@@ -74,17 +75,15 @@ export function ConfirmDialog({
     }
   }, [open])
 
-  // Cancel the pending close timer on unmount. The timer below holds the
-  // "done" beat visible for 600ms, and an unmount inside that window used to
-  // leave it armed. It then called onClose on a tree that is gone, which
-  // reaches setState in the parent. Under vitest the environment can be torn
-  // down first, and React then reads `window` during the update and throws
-  // ReferenceError.
-  // The write below is a timer handle, and not a mirror of a reactive value.
-  // It happens on unmount only, and it clears the handle this component owns.
-  // eslint-disable-next-line no-restricted-syntax
+  // Unmount retires the UI, not the work: late completions must not close a
+  // replacement dialog or install a timer after cleanup has already run.
+  // eslint-disable-next-line no-restricted-syntax -- lifecycle and timer ownership, not mirrored state
   useEffect(() => {
+    mountedRef.current = true
+
     return () => {
+      mountedRef.current = false
+
       if (closeTimerRef.current !== null) {
         window.clearTimeout(closeTimerRef.current)
         closeTimerRef.current = null
@@ -93,35 +92,39 @@ export function ConfirmDialog({
   }, [])
 
   async function run() {
-    if (busy) {
+    if (busy || inFlightRef.current) {
       return
     }
 
+    inFlightRef.current = true
     setError(null)
-
-    if (dismissOnConfirm) {
-      try {
-        await onConfirm()
-        onClose()
-      } catch (err) {
-        setError(err instanceof Error ? err.message : t.errors.genericFailure)
-      }
-
-      return
-    }
-
     setStatus('saving')
 
     try {
       await onConfirm()
-      setStatus('done')
-      closeTimerRef.current = window.setTimeout(() => {
-        closeTimerRef.current = null
+
+      if (!mountedRef.current) {
+        return
+      }
+
+      if (dismissOnConfirm) {
         onClose()
-      }, 600)
+      } else {
+        setStatus('done')
+        closeTimerRef.current = window.setTimeout(() => {
+          closeTimerRef.current = null
+          onClose()
+        }, 600)
+      }
     } catch (err) {
+      if (!mountedRef.current) {
+        return
+      }
+
       setStatus('idle')
       setError(err instanceof Error ? err.message : t.errors.genericFailure)
+    } finally {
+      inFlightRef.current = false
     }
   }
 
@@ -129,19 +132,9 @@ export function ConfirmDialog({
     <Dialog onOpenChange={value => !value && !busy && onClose()} open={open}>
       <DialogContent
         className="max-w-md"
-        onKeyDown={event => {
-          // Enter/Space confirm regardless of which button holds focus
-          // (preventDefault stops a focused Cancel from swallowing it).
-          if ((event.key === 'Enter' || event.key === ' ') && !busy) {
-            event.preventDefault()
-            void run()
-          }
-        }}
         onOpenAutoFocus={event => {
-          // Focus must land inside the dialog or the handler above never sees
-          // the key: it stays on whatever opened the dialog (a menu item, a
-          // sidebar row) and Enter re-triggers that instead. Radix's default
-          // would take the X — confirm is the button Enter maps to.
+          // Radix defaults to the X; start on Confirm and let native button
+          // activation follow focus from there.
           event.preventDefault()
           confirmRef.current?.focus()
         }}

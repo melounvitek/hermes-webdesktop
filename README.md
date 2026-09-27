@@ -14,6 +14,32 @@ Run this in a trusted, writable directory: it replaces `hermes-browser-install.s
 
 Run `hermes-browser start`, then open **http://127.0.0.1:9119/**. Press Ctrl-C to stop.
 
+## Browser build and updates
+
+The footer identifies the build loaded in this tab, not necessarily the version
+currently served. Reload to load a newly installed build.
+
+The update dialog separates **Check and download** from the confirmed restart.
+Checking or downloading does not restart Hermes. Applying an update disconnects
+all users of this installation and may interrupt chats and terminals. Confirmation
+also permits rollback to restart the service again if the new browser build fails.
+It updates the browser UI, not Hermes itself.
+
+The updater is opt-in and unconfigured by default. The ordinary installer does
+not enable it or provision services. An operator must separately install trusted
+`browser_updater.py`, `browser_update_jobs.py` and `browser_update_service.py`
+helpers alongside the trusted launcher and installer modules, and configure a
+root-path HTTPS origin, administrator identities and the managed service.
+These helpers are checked in `SHA256SUMS` but are not shipped in the downloaded
+UI archive or ordinary installer. Keep this trusted control code separate from
+release downloads; never execute a launcher from a downloaded archive or let
+an update replace its own helpers.
+
+Browser UI and scripted updater-protocol checks do not certify real service
+updates. Verification of accepted apply and rollback against stock Hermes with
+systemd is still pending: the sandbox blocked it with `EPERM`/`EROFS`. The updater
+is **not production-certified** and remains disabled on ordinary installations.
+
 ## Remote access
 
 **Tailscale Serve is the recommended option:** it keeps access within your tailnet rather than exposing Hermes publicly. Use Serve, not Funnel.

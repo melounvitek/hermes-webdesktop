@@ -3396,6 +3396,58 @@ export interface Translations {
     }
   }
 
+  browserUpdates: {
+    title: string
+    label: (version: string) => string
+    unknownBuild: string
+    localChanges: string
+    loadedBuild: string
+    beforeRelease: string
+    offeredRelease: string
+    check: string
+    checkHint: string
+    checking: string
+    preparing: string
+    current: string
+    unsupported: string
+    forbidden: string
+    network: string
+    invalid: string
+    conflict: string
+    insecure: string
+    paused: string
+    signIn: string
+    checkSession: string
+    retry: string
+    update: string
+    confirmTitle: string
+    confirmDescription: (from: string, to: string) => string
+    sending: string
+    succeeded: string
+    rolledBack: string
+    failed: string
+    recoveryRequired: string
+    expired: string
+    compatibility: (revision: string) => string
+    disconnectNotice: string
+    reload: string
+    reloadHint: string
+    reloadTitle: string
+    reloadDescription: string
+    unknownOutcome: string
+    differentJob: string
+    forgetTracking: string
+    forgetTrackingHint: string
+    phases: {
+      stopping: string
+      switching: string
+      starting: string
+      rollback_stopping: string
+      rollback_switching: string
+      rollback_starting: string
+    }
+  }
+
   updates: {
     stages: Record<string, string>
     checking: string

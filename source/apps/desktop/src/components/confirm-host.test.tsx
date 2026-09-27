@@ -40,18 +40,56 @@ describe('confirm()', () => {
     expect(no.read()).toBe(false)
   })
 
-  it('confirms on Enter from wherever focus landed', async () => {
+  it('opens focused on the native Confirm button', async () => {
     render(<ConfirmHost />)
 
-    const { dialog, pending, read } = await ask()
+    const { pending, read } = await ask()
 
     // eslint-disable-next-line no-restricted-globals -- asserting real focus requires the live document
-    await waitFor(() => expect(dialog.contains(document.activeElement)).toBe(true))
-    // eslint-disable-next-line no-restricted-globals -- asserting real focus requires the live document
-    fireEvent.keyDown(document.activeElement!, { key: 'Enter' })
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole('button', { name: /confirm/i })))
+    fireEvent.click(screen.getByRole('button', { name: /confirm/i }))
 
     await pending
     expect(read()).toBe(true)
+  })
+
+  it.each(['promise chain', 'pending replacement'])('keeps the next request independent after %s', async path => {
+    render(<ConfirmHost />)
+    let secondAnswer: boolean | undefined
+    let secondPending!: Promise<void>
+
+    const askSecond = () => {
+      secondPending = confirm({ title: 'Second?' }).then(answer => {
+        secondAnswer = answer
+      })
+    }
+
+    let firstPending!: Promise<boolean>
+
+    act(() => {
+      firstPending = confirm({ title: 'First?' })
+
+      if (path === 'promise chain') {
+        void firstPending.then(askSecond)
+      }
+    })
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /confirm/i }))
+
+      if (path === 'pending replacement') {
+        askSecond()
+      }
+    })
+
+    expect(await firstPending).toBe(true)
+    expect(secondAnswer).toBeUndefined()
+    expect(screen.getByRole('dialog').textContent).toContain('Second?')
+    const button = screen.getByRole('button', { name: /confirm/i }) as HTMLButtonElement
+    expect(button.disabled).toBe(false)
+    await act(async () => fireEvent.click(button))
+    await secondPending
+    expect(secondAnswer).toBe(true)
   })
 
   it('answers no to Escape', async () => {

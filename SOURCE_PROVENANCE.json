@@ -9,6 +9,10 @@
     "integration_commit": "3d80c2b116c687bc191a34687a20be4e95dc3590",
     "scope": "Desktop renderer and shared frontend only; retained the selected source layout and browser adaptations. Backend and optional terminal plugin unchanged."
   },
+  "browser_updater_integration": {
+    "integration_commit": "3ca02ebca81d108f10f022a0c71dc56de8cec908",
+    "scope": "Browser-only build identity, opt-in updater UI, trusted standalone control helpers and tests; preserved the selected source layout and standalone build paths. Backend and optional terminal plugin unchanged. Stock Hermes/systemd apply and rollback verification remains pending; ordinary installation does not enable the updater."
+  },
   "original_snapshot": "3bffd1e41530bd6288d9477560107906a4763165",
   "sanitized_snapshot": "949e69a87e9d2214a26155c6012e95a4ebc90cd3",
   "history": "Main-branch ancestry, imported without squashing. Other development branches and unreachable work are not included.",

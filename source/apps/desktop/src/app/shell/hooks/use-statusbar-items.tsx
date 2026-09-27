@@ -10,6 +10,8 @@ import { ContextUsagePanel } from '@/app/shell/context-usage-panel'
 import { GatewayMenuPanel } from '@/app/shell/gateway-menu-panel'
 import { useContextBreakdown } from '@/app/shell/hooks/use-context-breakdown'
 import { useSystemResourcesStatusbarItem } from '@/app/shell/system-resources-statusbar'
+import { BROWSER_BUILD } from '@/browser/build'
+import { openBrowserUpdates } from '@/browser/updates'
 import { $paneVisible, togglePaneVisible } from '@/components/pane-shell/tree/store'
 import { Badge } from '@/components/ui/badge'
 import { Codicon } from '@/components/ui/codicon'
@@ -410,6 +412,26 @@ export function useStatusbarItems({
     updateStatus?.updateAvailable
   ])
 
+  const browserVersionItem = useMemo<StatusbarItem | null>(() => {
+    if (!isBrowserClient()) {
+      return null
+    }
+
+    const copy = t.browserUpdates
+    const version = BROWSER_BUILD.revision?.slice(0, 10) ?? copy.unknownBuild
+
+    return {
+      icon: <Hash className="size-3" />,
+      id: 'version-browser',
+      label: `${copy.label(version)}${BROWSER_BUILD.dirty ? ` · ${copy.localChanges}` : ''}`,
+      lockedVisible: true,
+      onSelect: () => openBrowserUpdates(),
+      title: copy.title,
+      toggleLabel: copy.title,
+      variant: 'action'
+    }
+  }, [t.browserUpdates])
+
   const backendVersionItem = useMemo<StatusbarItem | null>(() => {
     if (connection?.mode !== 'remote') {
       return null
@@ -713,11 +735,13 @@ export function useStatusbarItems({
         variant: 'action'
       },
       clientVersionItem,
+      ...(browserVersionItem ? [browserVersionItem] : []),
       ...(backendVersionItem ? [backendVersionItem] : [])
     ],
     [
       approvalModeItem,
       backendVersionItem,
+      browserVersionItem,
       busy,
       cacheHit,
       chatOpen,

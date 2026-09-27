@@ -1,9 +1,12 @@
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, expect, test, vi } from 'vitest'
 
 import { ConfirmDialog } from '@/components/ui/confirm-dialog'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.useRealTimers()
+})
 
 vi.mock('@/i18n', () => ({
   useI18n: () => ({
@@ -36,14 +39,7 @@ test('the close timer does not fire after unmount', async () => {
 
   render(<ConfirmDialog confirmLabel="Delete" onClose={onClose} onConfirm={onConfirm} open title="Delete session" />)
 
-  fireEvent.click(screen.getByRole('button', { name: 'Delete' }))
-
-  // Not waitFor: it polls on real timers, and the fake timers of this test
-  // never let it advance. onConfirm runs synchronously inside the click, and
-  // one microtask turn is enough for the await in run() to settle and reach
-  // the setTimeout.
-  await Promise.resolve()
-  await Promise.resolve()
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Delete' })))
   expect(onConfirm).toHaveBeenCalled()
 
   // Unmount while the close timer is still pending.
@@ -53,5 +49,30 @@ test('the close timer does not fire after unmount', async () => {
   vi.advanceTimersByTime(1000)
 
   expect(onClose).not.toHaveBeenCalled()
-  vi.useRealTimers()
+})
+
+test.each([false, true])('ignores async completion after unmount (dismissOnConfirm=%s)', async dismissOnConfirm => {
+  vi.useFakeTimers()
+  let resolve!: () => void
+
+  const pending = new Promise<void>(done => {
+    resolve = done
+  })
+
+  const onConfirm = vi.fn(() => pending)
+  const onClose = vi.fn()
+
+  const { unmount } = render(
+    <ConfirmDialog dismissOnConfirm={dismissOnConfirm} onClose={onClose} onConfirm={onConfirm} open title="Update?" />
+  )
+
+  fireEvent.click(screen.getByRole('button', { name: 'Confirm' }))
+  expect(onConfirm).toHaveBeenCalledTimes(1)
+  unmount()
+  vi.runAllTimers()
+  expect(vi.getTimerCount()).toBe(0)
+
+  await act(async () => resolve())
+  expect(vi.getTimerCount()).toBe(0)
+  expect(onClose).not.toHaveBeenCalled()
 })
