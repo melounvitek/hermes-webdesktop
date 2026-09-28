@@ -35,10 +35,13 @@ UI archive or ordinary installer. Keep this trusted control code separate from
 release downloads; never execute a launcher from a downloaded archive or let
 an update replace its own helpers.
 
-Browser UI and scripted updater-protocol checks do not certify real service
-updates. Verification of accepted apply and rollback against stock Hermes with
-systemd is still pending: the sandbox blocked it with `EPERM`/`EROFS`. The updater
-is **not production-certified** and remains disabled on ordinary installations.
+Isolated tests with real systemd and stock Hermes
+`30de041b011aa3d3830a7ffa05815e2cb2f063be` passed authenticated download and
+installation, graceful restart, and automatic rollback after an activation
+failure. Authentication, sessions and configuration survived both paths;
+backend and dependency file hashes were unchanged. These checks cover the
+service lifecycle and APIs, not every Hermes version or deployment. The updater
+remains disabled on ordinary installations until an operator provisions it.
 
 ## Remote access
 
