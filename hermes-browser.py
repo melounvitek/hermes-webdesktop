@@ -779,12 +779,57 @@ def startup_configuration(selection, runtime):
     path = home / "config.yaml"
     no_links(path)
     config = read_regular(path, MAX_JSON) if os.path.lexists(path) else b"{}"
+    python, packages = selection["python"], []
+    launcher = Path(selection["backend_root"]) / ".hermes/bin/hermes"
+    # Hermes with its own runtime moves its interpreter and dependencies on
+    # update, so ask at every start instead of trusting the recorded Python.
+    # A launcher without this flag would run the whole CLI; leave it alone.
+    if launcher.is_file() and b"--print-runtime-command" in read_regular(
+        launcher, MAX_JSON
+    ):
+        env = {
+            "HOME": "/dev/null",
+            "HERMES_HOME": selection["hermes_root"],
+            "PATH": "/usr/bin:/bin",
+            "LANG": "C.UTF-8",
+        }
+        # Neither command reads configuration, so both may precede its check.
+        try:
+            result = subprocess.run(
+                [str(launcher), "--print-runtime-command"],
+                cwd="/",
+                env=env,
+                capture_output=True,
+                timeout=10,
+                check=True,
+            )
+            python = str(absolute_path(load_json(result.stdout)[0]))
+            result = subprocess.run(
+                [python, "-E", "-s", "-B", "-m", "pm.environments"],
+                cwd=selection["backend_root"],
+                env=env,
+                capture_output=True,
+                timeout=10,
+                check=True,
+            )
+            # The first entry is the backend itself; keep it off the parser's path.
+            packages = load_json(result.stdout)["PYTHONPATH"].split(os.pathsep)[1:]
+        except (
+            subprocess.SubprocessError,
+            ValueError,
+            LookupError,
+            TypeError,
+            AttributeError,
+        ) as error:
+            raise ValueError(
+                f"Hermes runtime resolution failed ({type(error).__name__}); nothing started"
+            ) from error
     # Use the runtime's existing YAML parser, not Hermes loaders (which sanitize
     # dotenv files and fetch secrets). -S prevents .pth/sitecustomize execution;
     # add package directories explicitly, keeping the lexical venv prefix.
     code = """import sys, site
 try:
-    sys.path.extend(site.getsitepackages([sys.argv[1]]) + site.getsitepackages())
+    sys.path.extend(sys.argv[2:] + site.getsitepackages([sys.argv[1]]) + site.getsitepackages())
     import yaml
     value = yaml.safe_load(sys.stdin.buffer.read())
     if value is not None and not isinstance(value, dict):
@@ -802,13 +847,14 @@ except Exception:
 """
     result = subprocess.run(
         [
-            selection["python"],
+            python,
             "-I",
             "-S",
             "-B",
             "-c",
             code,
-            str(Path(selection["python"]).parent.parent),
+            str(Path(python).parent.parent),
+            *packages,
         ],
         input=config,
         cwd="/",
@@ -825,6 +871,7 @@ except Exception:
         result.returncode == 0,
         "External secret sources or unreadable configuration/parser are unsupported; nothing started",
     )
+    return python
 
 
 def current_disk(root):
@@ -869,7 +916,7 @@ def check_ready(port, asset, info):
 def run_foreground(args, root, stream, record, receipt, manifest, runtime):
     selection = receipt["selection"]
     backend = Path(selection["backend_root"])
-    startup_configuration(selection, runtime)
+    python = startup_configuration(selection, runtime)
     asset = next(
         (
             name
@@ -894,7 +941,7 @@ def run_foreground(args, root, stream, record, receipt, manifest, runtime):
         HERMES_DISABLE_LAZY_INSTALLS="1",
     )
     command = [
-        selection["python"],
+        python,
         "-E",
         "-s",
         "-B",
