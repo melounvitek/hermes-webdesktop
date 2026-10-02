@@ -1101,3 +1101,65 @@ def test_inspection_reports_prerequisites_not_source_identity_or_api_compatibili
         == json.loads(release["receipt"].read_bytes())["tested_backend"]["revision"]
     )
     assert "not exercised" in runtime["limitations"]
+
+
+@pytest.fixture
+def published(release, tmp_path, request):
+    """A backend publishing its own launcher; the recorded Python cannot run it."""
+    import shlex
+
+    import yaml
+
+    recorded = tmp_path / "recorded/bin/python"
+    recorded.parent.mkdir(parents=True)
+    recorded.write_text(
+        '#!/bin/sh\ncase "$*" in *--version) echo "Python 3.11.9";; *) exit 1;; esac\n'
+    )
+    recorded.chmod(0o700)
+    release["args"][release["args"].index("--python") + 1] = recorded
+    # Outside the test venv, so only the selected packages can supply yaml.
+    store = tmp_path / "store/bin/python3"
+    store.parent.mkdir(parents=True)
+    store.symlink_to(sys.executable)
+    packages = tmp_path / "generation-1"
+    packages.mkdir()
+    (packages / "yaml").symlink_to(Path(yaml.__file__).parent)
+    backend = release["backend"]
+    (backend / "selected").write_text(str(packages))
+    launcher = backend / ".hermes/bin/hermes"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text(
+        "#!/bin/sh\n"
+        f"touch {shlex.quote(str(backend / 'resolved'))}\n"
+        '[ "$1" = --print-runtime-command ] || exit 64\n'
+        f"cat {shlex.quote(str(backend / 'runtime-command'))}\n"
+    )
+    launcher.chmod(0o700)
+    (backend / "runtime-command").write_text(
+        json.dumps([str(store), "-I", "-c", "raise SystemExit(64)"])
+    )
+    (backend / "pm").mkdir()
+    (backend / "pm/environments.py").write_text(
+        textwrap.dedent(
+            """
+            import json, os
+            from pathlib import Path
+            root = Path(__file__).resolve().parents[1]
+            (root / "resolver-env.json").write_text(json.dumps(dict(os.environ)))
+            path = os.pathsep.join([str(root), (root / "selected").read_text()])
+            print(json.dumps({**os.environ, "PYTHONPATH": path}))
+            """
+        )
+    )
+    return {**request.getfixturevalue("dashboard"), "store": store}
+
+
+def test_start_uses_the_python_hermes_publishes(published, controllers):
+    process, _ = controllers(published)
+    wait_for(lambda: state_is(published, "ready") or process.poll() is not None)
+    assert state_is(published, "ready")
+    launch = json.loads((published["home"] / "launch.json").read_text())
+    assert Path(f"/proc/{launch['pid']}/exe").samefile(published["store"])
+    assert launch["env"]["HERMES_DISABLE_LAZY_INSTALLS"] == "1"
+    assert lifecycle(published, "stop").returncode == 0
+    assert process.wait(timeout=10) == 0
