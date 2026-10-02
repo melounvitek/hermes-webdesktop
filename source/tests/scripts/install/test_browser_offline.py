@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import select
+import shlex
 import signal
 import socket
 import time
@@ -1103,11 +1104,18 @@ def test_inspection_reports_prerequisites_not_source_identity_or_api_compatibili
     assert "not exercised" in runtime["limitations"]
 
 
+def publish_launcher(backend, script):
+    launcher = backend / ".hermes/bin/hermes"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_text(
+        f"#!/bin/sh\ntouch {shlex.quote(str(backend / 'resolved'))}\n{script}\n"
+    )
+    launcher.chmod(0o700)
+
+
 @pytest.fixture
 def published(release, tmp_path, request):
     """A backend publishing its own launcher; the recorded Python cannot run it."""
-    import shlex
-
     import yaml
 
     recorded = tmp_path / "recorded/bin/python"
@@ -1126,17 +1134,10 @@ def published(release, tmp_path, request):
     (packages / "yaml").symlink_to(Path(yaml.__file__).parent)
     backend = release["backend"]
     (backend / "selected").write_text(str(packages))
-    launcher = backend / ".hermes/bin/hermes"
-    launcher.parent.mkdir(parents=True)
-    launcher.write_text(
-        "#!/bin/sh\n"
-        f"touch {shlex.quote(str(backend / 'resolved'))}\n"
-        '[ "$1" = --print-runtime-command ] || exit 64\n'
-        f"cat {shlex.quote(str(backend / 'runtime-command'))}\n"
-    )
-    launcher.chmod(0o700)
-    (backend / "runtime-command").write_text(
-        json.dumps([str(store), "-I", "-c", "raise SystemExit(64)"])
+    command = json.dumps([str(store), "-I", "-c", "raise SystemExit(64)"])
+    publish_launcher(
+        backend,
+        f'[ "$1" = --print-runtime-command ] || exit 64\necho {shlex.quote(command)}',
     )
     (backend / "pm").mkdir()
     (backend / "pm/environments.py").write_text(
@@ -1162,4 +1163,66 @@ def test_start_uses_the_python_hermes_publishes(published, controllers):
     assert Path(f"/proc/{launch['pid']}/exe").samefile(published["store"])
     assert launch["env"]["HERMES_DISABLE_LAZY_INSTALLS"] == "1"
     assert lifecycle(published, "stop").returncode == 0
+    assert process.wait(timeout=10) == 0
+
+
+def test_published_runtime_is_resolved_privately_at_every_start(
+    published, controllers, tmp_path
+):
+    backend = published["backend"]
+    env = {**os.environ, "HERMES_DASHBOARD_SESSION_TOKEN": "preserved-auth"}
+    for generation in ("generation-1", "generation-2"):
+        # A Hermes update selects new packages and collects the old ones.
+        (tmp_path / "generation-1").rename(tmp_path / generation)
+        (backend / "selected").write_text(str(tmp_path / generation))
+        process, _ = controllers(published, env=env)
+        wait_for(lambda: state_is(published, "ready") or process.poll() is not None)
+        assert state_is(published, "ready")
+        assert lifecycle(published, "stop").returncode == 0
+        assert process.wait(timeout=10) == 0
+    assert json.loads((backend / "resolver-env.json").read_text()) == {
+        "HOME": "/dev/null",
+        "HERMES_HOME": str(published["home"]),
+        "PATH": "/usr/bin:/bin",
+        "LANG": "C.UTF-8",
+    }
+
+
+def test_published_runtime_keeps_refusing_external_secret_sources(
+    published, controllers
+):
+    (published["home"] / "profiles/alpha/config.yaml").write_text(
+        "secrets: {command: {enabled: true}}\n"
+    )
+    process, _ = controllers(published)
+    assert process.wait(timeout=12) != 0
+    assert not (published["home"] / "launch.json").exists()
+
+
+def test_pending_backend_repair_is_refused_before_running_hermes(
+    published, controllers
+):
+    (published["backend"] / ".update-incomplete").write_text("pending")
+    process, _ = controllers(published)
+    assert process.wait(timeout=10) != 0
+    assert not (published["backend"] / "resolved").exists()
+
+
+@pytest.mark.parametrize("output", ["exit 1", "echo '{}'", "echo '[\"python3\"]'"])
+def test_unresolvable_published_runtime_never_falls_back_to_recorded_python(
+    dashboard, controllers, output
+):
+    publish_launcher(dashboard["backend"], f"# --print-runtime-command\n{output}")
+    process, _ = controllers(dashboard)
+    assert process.wait(timeout=12) != 0
+    assert not (dashboard["home"] / "launch.json").exists()
+
+
+def test_launcher_without_runtime_command_is_not_executed(dashboard, controllers):
+    publish_launcher(dashboard["backend"], "exit 64")
+    process, _ = controllers(dashboard)
+    wait_for(lambda: state_is(dashboard, "ready") or process.poll() is not None)
+    assert state_is(dashboard, "ready")
+    assert not (dashboard["backend"] / "resolved").exists()
+    assert lifecycle(dashboard, "stop").returncode == 0
     assert process.wait(timeout=10) == 0
