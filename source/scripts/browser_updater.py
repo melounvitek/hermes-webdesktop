@@ -326,6 +326,10 @@ class UpdaterHandler(BaseHTTPRequestHandler):
                     "__Secure-hermes_session_at",
                     "hermes_session_at",
                 ):
+                    # Stock Hermes quotes values containing "=" (padded tokens),
+                    # and browsers send the quotes back.
+                    if len(value) > 1 and value[0] == value[-1] == '"':
+                        value = value[1:-1]
                     tokens.append((name, value if separator else ""))
         if (
             len(cookies) != 1

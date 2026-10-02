@@ -151,6 +151,14 @@ def test_only_allowlisted_stock_identity_can_read_capabilities(
     assert "do-not-forward" not in output.out + output.err
 
 
+def test_accepts_quoted_cookie_set_by_stock_hermes_for_padded_tokens(service, backend):
+    status, _, _ = request(
+        service, headers={"Cookie": '__Host-hermes_session_at="cGFkZGVk="'}
+    )
+    assert status == 200
+    assert backend["requests"][-1][1]["Authorization"] == "Bearer cGFkZGVk="
+
+
 @pytest.mark.parametrize(
     "headers",
     [
@@ -162,6 +170,7 @@ def test_only_allowlisted_stock_identity_can_read_capabilities(
         {"Cookie": None},
         {"Cookie": "__Host-hermes_session_rt=refresh-only"},
         {"Cookie": f"hermes_session_at={TOKEN}"},
+        {"Cookie": f'__Host-hermes_session_at="{TOKEN}'},
         pytest.param(
             {"Cookie": "__Host-hermes_session_at=x" + "=" * 8192}, id="oversized-token"
         ),
