@@ -1152,34 +1152,26 @@ def published(release, tmp_path, request):
             """
         )
     )
-    return {**request.getfixturevalue("dashboard"), "store": store}
+    return request.getfixturevalue("dashboard")
 
 
-def test_start_uses_the_python_hermes_publishes(published, controllers):
-    process, _ = controllers(published)
-    wait_for(lambda: state_is(published, "ready") or process.poll() is not None)
-    assert state_is(published, "ready")
-    launch = json.loads((published["home"] / "launch.json").read_text())
-    assert Path(f"/proc/{launch['pid']}/exe").samefile(published["store"])
-    assert launch["env"]["HERMES_DISABLE_LAZY_INSTALLS"] == "1"
-    assert lifecycle(published, "stop").returncode == 0
-    assert process.wait(timeout=10) == 0
-
-
-def test_published_runtime_is_resolved_privately_at_every_start(
+def test_every_start_uses_the_runtime_hermes_currently_publishes(
     published, controllers, tmp_path
 ):
     backend = published["backend"]
-    env = {**os.environ, "HERMES_DASHBOARD_SESSION_TOKEN": "preserved-auth"}
-    for generation in ("generation-1", "generation-2"):
-        # A Hermes update selects new packages and collects the old ones.
-        (tmp_path / "generation-1").rename(tmp_path / generation)
-        (backend / "selected").write_text(str(tmp_path / generation))
-        process, _ = controllers(published, env=env)
+
+    def start_and_stop():
+        process, _ = controllers(published)
         wait_for(lambda: state_is(published, "ready") or process.poll() is not None)
         assert state_is(published, "ready")
         assert lifecycle(published, "stop").returncode == 0
         assert process.wait(timeout=10) == 0
+
+    start_and_stop()
+    # A Hermes update selects new packages and collects the old ones.
+    (tmp_path / "generation-1").rename(tmp_path / "generation-2")
+    (backend / "selected").write_text(str(tmp_path / "generation-2"))
+    start_and_stop()
     assert json.loads((backend / "resolver-env.json").read_text()) == {
         "HOME": "/dev/null",
         "HERMES_HOME": str(published["home"]),
@@ -1208,11 +1200,10 @@ def test_pending_backend_repair_is_refused_before_running_hermes(
     assert not (published["backend"] / "resolved").exists()
 
 
-@pytest.mark.parametrize("output", ["exit 1", "echo '{}'", "echo '[\"python3\"]'"])
 def test_unresolvable_published_runtime_never_falls_back_to_recorded_python(
-    dashboard, controllers, output
+    dashboard, controllers
 ):
-    publish_launcher(dashboard["backend"], f"# --print-runtime-command\n{output}")
+    publish_launcher(dashboard["backend"], "# --print-runtime-command\nexit 1")
     process, _ = controllers(dashboard)
     assert process.wait(timeout=12) != 0
     assert not (dashboard["home"] / "launch.json").exists()

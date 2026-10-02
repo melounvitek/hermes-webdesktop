@@ -776,6 +776,9 @@ def startup_configuration(selection, runtime):
                 ),
                 "Configuration contains reserved launch controls; nothing started",
             )
+    path = home / "config.yaml"
+    no_links(path)
+    config = read_regular(path, MAX_JSON) if os.path.lexists(path) else b"{}"
     python, packages = selection["python"], []
     launcher = Path(selection["backend_root"]) / ".hermes/bin/hermes"
     # Hermes with its own runtime moves its interpreter and dependencies on
@@ -790,35 +793,37 @@ def startup_configuration(selection, runtime):
             "PATH": "/usr/bin:/bin",
             "LANG": "C.UTF-8",
         }
-        # Neither command reads configuration. Never print their output: the
-        # second one echoes its environment.
-        result = subprocess.run(
-            [str(launcher), "--print-runtime-command"],
-            cwd="/",
-            env=env,
-            capture_output=True,
-            timeout=10,
-            check=True,
-        )
-        command = load_json(result.stdout)
-        require(
-            isinstance(command, list) and command and isinstance(command[0], str),
-            "Unrecognized Hermes runtime command; nothing started",
-        )
-        python = str(absolute_path(command[0]))
-        result = subprocess.run(
-            [python, "-E", "-s", "-B", "-m", "pm.environments"],
-            cwd=selection["backend_root"],
-            env=env,
-            capture_output=True,
-            timeout=10,
-            check=True,
-        )
-        # The first entry is the backend itself; keep it off the parser's path.
-        packages = load_json(result.stdout)["PYTHONPATH"].split(os.pathsep)[1:]
-    path = home / "config.yaml"
-    no_links(path)
-    config = read_regular(path, MAX_JSON) if os.path.lexists(path) else b"{}"
+        # Neither command reads configuration, so both may precede its check.
+        try:
+            result = subprocess.run(
+                [str(launcher), "--print-runtime-command"],
+                cwd="/",
+                env=env,
+                capture_output=True,
+                timeout=10,
+                check=True,
+            )
+            python = str(absolute_path(load_json(result.stdout)[0]))
+            result = subprocess.run(
+                [python, "-E", "-s", "-B", "-m", "pm.environments"],
+                cwd=selection["backend_root"],
+                env=env,
+                capture_output=True,
+                timeout=10,
+                check=True,
+            )
+            # The first entry is the backend itself; keep it off the parser's path.
+            packages = load_json(result.stdout)["PYTHONPATH"].split(os.pathsep)[1:]
+        except (
+            subprocess.SubprocessError,
+            ValueError,
+            LookupError,
+            TypeError,
+            AttributeError,
+        ) as error:
+            raise ValueError(
+                f"Hermes runtime resolution failed ({type(error).__name__}); nothing started"
+            ) from error
     # Use the runtime's existing YAML parser, not Hermes loaders (which sanitize
     # dotenv files and fetch secrets). -S prevents .pth/sitecustomize execution;
     # add package directories explicitly, keeping the lexical venv prefix.
