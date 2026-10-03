@@ -31,6 +31,7 @@ export function createBrowserZoom() {
     #root .w-screen { width: 100%; }
     [data-radix-popper-content-wrapper] { zoom: calc(1 / var(--hermes-browser-zoom)); }
     [data-radix-popper-content-wrapper] > * { zoom: var(--hermes-browser-zoom); }
+    [data-remote-screen] { zoom: calc(1 / var(--hermes-browser-zoom)); }
   `
   document.head.appendChild(style)
 
