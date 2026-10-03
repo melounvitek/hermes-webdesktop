@@ -79,13 +79,3 @@ test('every device.* entitlement on the main app is also inherited', () => {
       'any device access the app needs must be listed in both (#37718).'
   )
 })
-
-for (const plist of [MAIN_PLIST, INHERIT_PLIST]) {
-  test(`${path.basename(plist)} is a well-formed non-empty entitlement dict`, () => {
-    const data = loadEntitlements(plist)
-    assert.ok(
-      Object.keys(data).length > 0,
-      `${path.basename(plist)} should be a non-empty dict`
-    )
-  })
-}

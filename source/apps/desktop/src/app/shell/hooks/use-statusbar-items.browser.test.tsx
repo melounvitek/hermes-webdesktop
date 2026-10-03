@@ -3,6 +3,9 @@ import { afterEach, expect, it, vi } from 'vitest'
 
 import type * as I18n from '@/i18n'
 
+// Each case cold-imports the statusbar module graph, which is slow in a full run.
+vi.setConfig({ testTimeout: 60_000 })
+
 const { openBrowserUpdates, copy } = vi.hoisted(() => ({
   openBrowserUpdates: vi.fn(),
   copy: {

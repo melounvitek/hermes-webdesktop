@@ -4,7 +4,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { registerTerminalContextMenu } from '@/app/right-sidebar/terminal/terminal-context-menu'
 import { DirectiveContent } from '@/components/assistant-ui/directive-text'
-import { ContextMenu, ContextMenuTrigger, HERMES_CONTEXT_MENU_TRIGGER_ATTR } from '@/components/ui/context-menu'
+import {
+  ContextMenu,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuTrigger,
+  HERMES_CONTEXT_MENU_TRIGGER_ATTR
+} from '@/components/ui/context-menu'
 import { Dialog, DialogContent, DialogTitle } from '@/components/ui/dialog'
 import { $notifications } from '@/store/notifications'
 import { $previewTabs, closeRightRail } from '@/store/preview'
@@ -127,6 +133,28 @@ describe('AppContextMenu', () => {
     )
   })
 
+  it('leaves a browser text field inside a pane body to the native menu', () => {
+    installBridge({ browser: { authRequired: false, signIn: vi.fn() } })
+    render(
+      <MemoryRouter>
+        <AppContextMenu />
+        <ContextMenu>
+          <ContextMenuTrigger asChild>
+            <div data-zone-body="zone">
+              <textarea defaultValue="draft" />
+            </div>
+          </ContextMenuTrigger>
+          <ContextMenuContent>
+            <ContextMenuItem>Pane action</ContextMenuItem>
+          </ContextMenuContent>
+        </ContextMenu>
+      </MemoryRouter>
+    )
+
+    expect(fireEvent.contextMenu(screen.getByRole('textbox'))).toBe(true)
+    expect(screen.queryByRole('menu')).toBeNull()
+  })
+
   it.each([true, false])('only offers the shell updater outside browser mode (%s)', async browser => {
     installBridge(browser ? { browser: { authRequired: true, signIn: vi.fn() } } : {})
     mountMenu()
@@ -192,6 +220,17 @@ describe('AppContextMenu', () => {
       expect(openExternal).toHaveBeenCalledExactlyOnceWith('https://example.invalid/releases')
       expect(screen.queryByRole('menu')).toBeNull()
     }
+  })
+
+  it('ignores the browser opening release over a shell item', async () => {
+    installBridge({ browser: { authRequired: false, signIn: vi.fn() } })
+    mountMenu()
+    fireEvent.contextMenu(document.body)
+    const item = await screen.findByRole('menuitem', { name: 'Settings' })
+
+    fireEvent.pointerUp(item, { button: 2, buttons: 0, pointerType: 'mouse' })
+
+    expect(screen.getByRole('menuitem', { name: 'Settings' })).toBe(item)
   })
 
   it('opens the link menu on a chat link right-click', async () => {
@@ -508,6 +547,22 @@ describe('AppContextMenu', () => {
     expect(await screen.findByText('Copy URL')).toBeTruthy()
   })
 
+  it('lets editable targets inside a radix surface use the edit menu', async () => {
+    installBridge()
+    mountMenu()
+
+    const host = attach(
+      `<div data-zone-body="test" data-slot="context-menu-trigger"><textarea>draft text</textarea></div>`
+    )
+
+    const textarea = host.querySelector('textarea')!
+
+    fireEvent.contextMenu(textarea)
+
+    expect(await screen.findByText('Select all')).toBeTruthy()
+    expect(screen.getByText('Paste')).toBeTruthy()
+  })
+
   it('leaves surfaces with their own radix menu alone', () => {
     installBridge()
     mountMenu()
@@ -527,7 +582,9 @@ describe('AppContextMenu', () => {
     const unregister = registerTerminalContextMenu(host.querySelector('[data-terminal]')!, {
       getSelection: () => 'picked text',
       paste,
-      selectAll: vi.fn()
+      reload: vi.fn(),
+      selectAll: vi.fn(),
+      wordErase: null
     })
 
     fireEvent.contextMenu(host.querySelector('canvas')!)
@@ -548,7 +605,9 @@ describe('AppContextMenu', () => {
     const unregister = registerTerminalContextMenu(host.firstElementChild as HTMLElement, {
       getSelection: () => '',
       paste,
-      selectAll: vi.fn()
+      reload: vi.fn(),
+      selectAll: vi.fn(),
+      wordErase: null
     })
 
     try {
@@ -572,7 +631,9 @@ describe('AppContextMenu', () => {
     const unregister = registerTerminalContextMenu(host.querySelector('[data-terminal]')!, {
       getSelection: () => '',
       paste: null,
-      selectAll: vi.fn()
+      reload: vi.fn(),
+      selectAll: vi.fn(),
+      wordErase: null
     })
 
     fireEvent.contextMenu(host.querySelector('canvas')!)

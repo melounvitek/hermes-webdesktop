@@ -15,10 +15,12 @@ beforeAll(async () => {
   vi.stubGlobal('hermesDesktop', { browser: { authRequired: false, signIn: vi.fn() }, openExternal })
   localStorage.setItem(
     'hermes.desktop.previewTabs.v2',
-    JSON.stringify([
-      { id: 'url:restored', target: url },
-      { id: 'file:restored', target: file }
-    ])
+    JSON.stringify({
+      default: [
+        { id: 'url:restored', target: url },
+        { id: 'file:restored', target: file }
+      ]
+    })
   )
   layout = await import('./layout')
   layout.$rightRailActiveTabId.set('url:restored')
@@ -37,7 +39,7 @@ afterAll(() => {
 })
 
 it('restores only supported previews and selects the surviving file instead of the removed URL', () => {
-  expect(preview.$previewTabs.get()).toEqual([{ id: 'file:restored', target: file }])
+  expect(preview.$previewTabs.get()).toEqual([{ id: 'file:restored', pinned: true, target: file }])
   expect(layout.$rightRailActiveTabId.get()).toBe('file:restored')
 })
 
@@ -45,7 +47,7 @@ it('refuses every URL opening path visibly without replacing a supported preview
   preview.openPreview(file)
   const before = preview.$previewTabs.get()
   const active = layout.$rightRailActiveTabId.get()
-  preview.openPreview(url, 'tool-result')
+  preview.openPreview(url)
   preview.openBrowserTab()
   preview.newBrowserTab()
   expect(preview.$previewTabs.get()).toEqual(before)
@@ -57,17 +59,18 @@ it('refuses every URL opening path visibly without replacing a supported preview
 it('keeps file, artifact and static HTML targets usable in browser mode', () => {
   preview.openPreview(file)
   preview.openPreview({ kind: 'artifact', label: 'Artifact', source: 'artifact:a', url: 'artifact:a' })
-  preview.openPreview(
-    {
-      ...file,
-      url: 'file:///work/page.html',
-      previewKind: 'html',
-      dataUrl: 'data:text/html,<h1>hello</h1>',
-      transient: true
-    },
-    'tool-result'
-  )
+  const html = {
+    ...file,
+    url: 'file:///work/page.html',
+    previewKind: 'html' as const,
+    dataUrl: 'data:text/html,<h1>hello</h1>',
+    transient: true
+  }
+
+  preview.openPreview(html)
   expect(preview.$previewTabs.get().map(tab => tab.target.kind)).toEqual(['file', 'artifact', 'file'])
+  expect(preview.$previewTarget.get()?.renderMode).toBe('source')
+  preview.openPreview(preview.renderedHtmlTarget(html))
   expect(preview.$previewTarget.get()?.renderMode).toBe('preview')
 })
 

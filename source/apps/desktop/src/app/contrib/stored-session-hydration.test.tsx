@@ -12,7 +12,7 @@ import { $todosBySession, clearSessionTodos, setSessionTodos } from '@/store/tod
 
 import { renderMessageStream } from '../session/hooks/use-message-stream/test-harness'
 
-import { hydrateStoredSession } from './stored-session-hydration'
+import { hydrateStoredSessionTranscript } from './stored-session-hydration'
 
 vi.mock('@/hermes', async actual => ({
   ...(await actual<Record<string, unknown>>()),
@@ -44,10 +44,10 @@ function mount() {
   update(SID, s => s)
 
   const hydrate = () =>
-    hydrateStoredSession({
+    hydrateStoredSessionTranscript({
       storedSessionId: STORED,
       runtimeSessionId: SID,
-      profile: 'default',
+      storedProfile: 'default',
       attempts: 1,
       updateSessionState: update
     })
@@ -170,10 +170,10 @@ it('preserves older backfill, inline errors and the supplied exact owner on fres
   h.update(SID, state => ({ ...state, busy: false, messages: [{ ...user('older page'), rowId: 0 }, ...converted] }))
   vi.mocked(getLatestSessionMessages).mockResolvedValueOnce(response as never)
   const owner = { connectionId: 'other-owner', profile: 'default' }
-  await hydrateStoredSession({
+  await hydrateStoredSessionTranscript({
     storedSessionId: STORED,
     runtimeSessionId: SID,
-    profile: owner,
+    storedProfile: owner,
     attempts: 1,
     updateSessionState: h.update
   })

@@ -154,9 +154,9 @@ export async function scenario(inputs) {
     summary.chromium = browser.version()
     const context = await browser.newContext({ viewport: { width: 1440, height: 1000 } })
     await context.addInitScript(({ file, url }) => {
-      localStorage.setItem('hermes.desktop.previewTabs.v2', JSON.stringify([{ id: `file:${file}`, target: {
+      localStorage.setItem('hermes.desktop.previewTabs.v2', JSON.stringify({ default: [{ id: `file:${file}`, target: {
         kind: 'file', label: 'file-editor-fixture.txt', path: file, source: file, url, previewKind: 'text'
-      } }]))
+      } }] }))
       localStorage.setItem('hermes.desktop.rightRailActiveTab', `file:${file}`)
     }, { file, url: pathToFileURL(file).href })
     page = await context.newPage()

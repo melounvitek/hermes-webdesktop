@@ -233,9 +233,9 @@ async function run(name, body, { mobile = false, file = false } = {}) {
     filePath = path.join(runtime.home, 'updater-draft.txt')
     await writeFile(filePath, 'Original fixture file; never save this acceptance draft.\n')
     await context.addInitScript(({ file, url }) => {
-      localStorage.setItem('hermes.desktop.previewTabs.v2', JSON.stringify([{ id: `file:${file}`, target: {
+      localStorage.setItem('hermes.desktop.previewTabs.v2', JSON.stringify({ default: [{ id: `file:${file}`, target: {
         kind: 'file', label: 'updater-draft.txt', path: file, source: file, url, previewKind: 'text'
-      } }]))
+      } }] }))
       localStorage.setItem('hermes.desktop.rightRailActiveTab', `file:${file}`)
     }, { file: filePath, url: pathToFileURL(filePath).href })
   }
@@ -338,7 +338,12 @@ try {
       await expect(confirmation(page)).not.toBeVisible(); await expect(panel(page)).toBeVisible()
       assert.equal(count('apply'), before.applies)
     })
-    await update(page).click(); await page.keyboard.press('Escape')
+    await update(page).click()
+    // Radix hands Escape to the confirmation a render after it opens, when the
+    // dialog behind it stops taking pointer events.
+    await expect(page.getByRole('dialog', { name: 'Browser updates', exact: true, includeHidden: true }))
+      .toHaveCSS('pointer-events', 'none')
+    await page.keyboard.press('Escape')
     await prove('Escape closes only top confirmation, not parent', async () => {
       await expect(confirmation(page)).not.toBeVisible(); await expect(panel(page)).toBeVisible()
       assert.equal(count('apply'), before.applies)

@@ -7,7 +7,7 @@ import {
   reconcileTileTranscripts,
   rehydrateLiveSessionStatuses
 } from '@/app/contrib/hooks/use-background-sync'
-import { hydrateStoredSession } from '@/app/contrib/stored-session-hydration'
+import { hydrateStoredSessionTranscript } from '@/app/contrib/stored-session-hydration'
 import type { ClientSessionState } from '@/app/types'
 import { getLatestSessionMessages } from '@/hermes'
 import { createClientSessionState } from '@/lib/chat-runtime'
@@ -195,10 +195,10 @@ it.each(['active', 'tile', 'hydration'])(
 
     const read = () => {
       if (surface === 'hydration') {
-        return hydrateStoredSession({
+        return hydrateStoredSessionTranscript({
           storedSessionId: STORED,
           runtimeSessionId: SID,
-          profile: 'default',
+          storedProfile: 'default',
           attempts: 1,
           updateSessionState: h.update
         })

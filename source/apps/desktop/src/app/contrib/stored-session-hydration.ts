@@ -1,12 +1,28 @@
-import { graftRefreshedTailOntoBackfill } from '@/app/chat/transcript-backfill'
+import {
+  extendRefreshPageToOverlap,
+  graftRefreshedTailOntoBackfill,
+  olderPageReader
+} from '@/app/chat/transcript-backfill'
 import { preserveLocalPendingTurnMessages } from '@/app/session/hooks/use-session-actions/utils'
 import type { ClientSessionState } from '@/app/types'
 import { getLatestSessionMessages, type ProfileScope } from '@/hermes'
-import { type ChatMessage, preserveLocalAssistantErrors, toChatMessages } from '@/lib/chat-messages'
-import { latestSessionTodos } from '@/lib/todos'
+import {
+  type ChatMessage,
+  preserveLocalAssistantErrors,
+  preserveLocalSystemNotices,
+  toChatMessages
+} from '@/lib/chat-messages'
+import { latestSessionTodos, latestSessionTodoSnapshot } from '@/lib/todos'
 import { pendingSessionReplay } from '@/store/gateway'
 import { $sessionStates } from '@/store/session-states'
-import { $todosBySession, clearSessionTodos, setSessionTodos, todosForHydration } from '@/store/todos'
+import {
+  $todosBySession,
+  clearActiveSessionTodos,
+  clearSessionTodos,
+  restoreSessionTodosFromSnapshot,
+  setSessionTodos,
+  todosForHydration
+} from '@/store/todos'
 
 /** Backfill/retention may prepend or release a prefix without changing the tail. */
 export function transcriptChangedDuringRead(
@@ -37,7 +53,7 @@ export function transcriptChangedDuringRead(
 interface HydrationOptions {
   storedSessionId: string
   runtimeSessionId: string
-  profile: ProfileScope
+  storedProfile: ProfileScope
   attempts: number
   updateSessionState: (
     runtimeId: string,
@@ -46,10 +62,10 @@ interface HydrationOptions {
   ) => ClientSessionState
 }
 
-export async function hydrateStoredSession({
+export async function hydrateStoredSessionTranscript({
   storedSessionId,
   runtimeSessionId,
-  profile,
+  storedProfile,
   attempts,
   updateSessionState
 }: HydrationOptions) {
@@ -86,7 +102,7 @@ export async function hydrateStoredSession({
     }
 
     try {
-      const latest = await getLatestSessionMessages(storedSessionId, profile)
+      const latest = await getLatestSessionMessages(storedSessionId, storedProfile)
       const replayAtReturn = pendingSessionReplay(runtimeSessionId)
 
       if (replayAtReturn && !(await replayAtReturn)) {
@@ -105,7 +121,16 @@ export async function hydrateStoredSession({
         continue
       }
 
-      const messages = toChatMessages(latest.messages)
+      const messages = await extendRefreshPageToOverlap(
+        toChatMessages(latest.messages),
+        current?.messages ?? [],
+        olderPageReader(storedSessionId, storedProfile, latest)
+      )
+
+      if (!ownsSnapshot($sessionStates.get()[runtimeSessionId])) {
+        return
+      }
+
       let applied = false
       updateSessionState(
         runtimeSessionId,
@@ -118,10 +143,17 @@ export async function hydrateStoredSession({
 
           return {
             ...state,
-            // Keep backfill, un-acked optimistic input and local errors, not
-            // arbitrary live messages from an obsolete server transcript.
-            messages: preserveLocalAssistantErrors(
-              preserveLocalPendingTurnMessages(graftRefreshedTailOntoBackfill(messages, state.messages), state.messages),
+            // Keep backfill, un-acked optimistic input, local errors and trailing
+            // client-local system notices, not arbitrary live messages from an
+            // obsolete server transcript.
+            messages: preserveLocalSystemNotices(
+              preserveLocalAssistantErrors(
+                preserveLocalPendingTurnMessages(
+                  graftRefreshedTailOntoBackfill(messages, state.messages),
+                  state.messages
+                ),
+                state.messages
+              ),
               state.messages
             )
           }
@@ -133,12 +165,27 @@ export async function hydrateStoredSession({
         return
       }
 
-      const restored = todosForHydration(latestSessionTodos(messages))
+      const todoSnapshot = latestSessionTodoSnapshot(messages)
 
-      if (restored) {
+      if (todoSnapshot) {
+        // Deferred Desktop resume sends no todo_state on its initial ACK.
+        // The persisted tool result is the first authoritative snapshot.
+        restoreSessionTodosFromSnapshot(runtimeSessionId, todoSnapshot, false)
+      }
+
+      const latestTodos = latestSessionTodos(messages)
+      const restored = todosForHydration(latestTodos)
+
+      if (latestTodos?.length === 0) {
+        // An explicit empty result retires the list; missing paged history does not.
+        // A valid older snapshot must not mask a newer legacy clear without a revision.
+        if (!todoSnapshot || todoSnapshot.todos.length > 0) {
+          clearSessionTodos(runtimeSessionId)
+        }
+      } else if (restored) {
         setSessionTodos(runtimeSessionId, restored)
       } else {
-        clearSessionTodos(runtimeSessionId)
+        clearActiveSessionTodos(runtimeSessionId)
       }
 
       return

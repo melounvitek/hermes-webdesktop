@@ -1,9 +1,46 @@
 import { defineFieldCopy } from '@/app/settings/field-copy'
 
-import { defineLocale } from './define-locale'
+import { defineLocale, type TranslationOverrides } from './define-locale'
 import { introEs } from './intro-es'
 
-export const es = defineLocale({
+export const esOverrides = {
+  sharedMetrics: {
+    consentTitle: '¿Nos ayudas a mejorar Hermes?',
+    consentBody:
+      'Las métricas compartidas solo contienen contadores acotados. Nunca prompts, archivos, rutas ni textos de error. La recopilación es local. Enviarlas a Nous es una aceptación aparte.',
+    whatIsCollected: 'Qué se recopila',
+    collectedIntro: 'Solo contadores acotados:',
+    collectedActivity: 'Actividad, duración de sesiones, resultados y clases de error',
+    collectedModels: 'Rutas de modelo y totales de tokens',
+    collectedNames: 'Nombres de herramientas, comandos y elementos del catálogo integrados',
+    collectedMilestones: 'Recuentos de configuración agrupados',
+    collectedReliability:
+      'Resultados y duración de actualizaciones, fallos, velocidad de inicio y de respuesta, estado de las plataformas de mensajería',
+    collectedUsage:
+      'Cómo se usa Hermes: precisión y eficiencia del agente (ediciones acertadas, bucles, recuperaciones, tokens y llamadas a herramientas por tarea, cortes de caché), tiempo activo por superficie y modo de Desktop, qué áreas, acciones y ajustes de la app se usan, se cierran enseguida o se desactivan, y resultados de la configuración de proveedores',
+    collectedMachine:
+      'Datos generales del equipo: rango de RAM, tipo de GPU, antigüedad y canal de la versión de Hermes, actualizaciones pendientes, si se usa un servidor de modelos local',
+    installId:
+      'Al enviar, cada paquete diario se sube al servicio de telemetría de Nous. Los paquetes llevan el ID de instalación de este perfil: un UUID aleatorio y estable sin información personal, que se restablece al borrar el directorio de métricas compartidas.',
+    consentWindow:
+      'Solo se envían los paquetes cuyo periodo de recopilación completo cae dentro de una ventana de consentimiento registrada; los datos de antes de aceptar, o de cualquier intervalo con el envío desactivado, se quedan en este equipo. Puedes volver a desactivar el envío cuando quieras.',
+    readDocs: 'Leer todos los detalles',
+    share: 'Recopilar y enviar a Nous',
+    local: 'Recopilar solo en local',
+    off: 'No, gracias',
+    changeLater: 'Puedes cambiarlo cuando quieras en Ajustes → Seguridad.',
+    saveFailed: 'No se pudo guardar tu elección',
+    collectLabel: 'Recopilar estadísticas de uso',
+    collectDesc:
+      'Contadores acotados guardados en este dispositivo. Nunca prompts, archivos, rutas ni textos de error.',
+    sendLabel: 'Enviar estadísticas de uso a Nous',
+    sendDesc:
+      'Sube cada paquete diario al servicio de telemetría de Nous. Solo se envían datos de una ventana de consentimiento. Requiere la recopilación activada.',
+    unavailable: 'Actualiza el backend de Hermes para cambiar este ajuste.',
+    stripBody: 'Solo contadores acotados, nunca prompts ni archivos.',
+    stripChoices: { share: 'Enviar a Nous', local: 'Solo local', off: 'No, gracias' },
+    stripDetails: 'Detalles'
+  },
   intro: introEs,
   connectors: {
     title: 'Conecta tus apps',
@@ -494,6 +531,10 @@ export const es = defineLocale({
     backendOutOfDateTitle: 'Backend desactualizado',
     backendOutOfDateMessage:
       'Tu backend de Hermes es más antiguo que esta compilación de escritorio y puede no funcionar correctamente. Actualízalo para alinearlos.',
+    desktopOutOfDateTitle: 'Aplicación de Hermes desactualizada',
+    desktopOutOfDateMessage:
+      'Esta aplicación de Hermes es más antigua que el backend al que está conectada y puede no funcionar correctamente. Actualiza la aplicación para alinearlos.',
+    updateDesktopApp: 'Actualizar aplicación',
     installMethodUnsupportedTitle: 'Método de instalación no compatible',
     updateHermes: 'Actualizar Hermes',
     updateReadyTitle: 'Actualización lista',
@@ -683,6 +724,8 @@ export const es = defineLocale({
       'composer.focus': 'Enfocar compositor',
       'composer.modelPicker': 'Abrir selector de modelo',
       'composer.voice': 'Iniciar / detener conversación por voz',
+      'composer.reasoningUp': 'Subir nivel de razonamiento',
+      'composer.reasoningDown': 'Bajar nivel de razonamiento',
       'view.toggleSidebar': 'Alternar barra lateral de sesiones',
       'view.cycleSidebarGrouping': 'Cambiar la agrupación de sesiones',
       'view.toggleRightSidebar': 'Alternar explorador de archivos',
@@ -692,7 +735,7 @@ export const es = defineLocale({
       'view.toggleProfileRail': 'Mostrar u ocultar la barra de perfiles',
       'view.toggleSimpleMode': 'Activar o desactivar el modo simple',
       'view.showFiles': 'Mostrar explorador de archivos',
-      'view.showBrowser': 'Abrir el navegador',
+      'view.showBrowser': 'Alternar navegador',
       'view.toggleHud': 'Alternar modo HUD',
       'hud.snapToPointer': 'Mover HUD al puntero (global, mientras el HUD esté abierto)',
       'view.showTerminal': 'Mostrar terminal',
@@ -709,6 +752,15 @@ export const es = defineLocale({
       'view.findInPage': 'Buscar en la página',
       'view.findNext': 'Siguiente coincidencia',
       'view.findPrevious': 'Coincidencia anterior',
+      'view.tabSlot.1': 'Cambiar a la pestaña 1',
+      'view.tabSlot.2': 'Cambiar a la pestaña 2',
+      'view.tabSlot.3': 'Cambiar a la pestaña 3',
+      'view.tabSlot.4': 'Cambiar a la pestaña 4',
+      'view.tabSlot.5': 'Cambiar a la pestaña 5',
+      'view.tabSlot.6': 'Cambiar a la pestaña 6',
+      'view.tabSlot.7': 'Cambiar a la pestaña 7',
+      'view.tabSlot.8': 'Cambiar a la pestaña 8',
+      'view.tabSlot.9': 'Cambiar a la pestaña 9',
       'appearance.toggleMode': 'Alternar claro / oscuro',
       'profile.default': 'Cambiar al perfil predeterminado',
       'profile.switch.1': 'Cambiar al perfil 1',
@@ -911,6 +963,8 @@ export const es = defineLocale({
         agentSuccess: name => `Plugin del agente ${name} instalado`,
         desktopSuccess: name => `Plugin de escritorio ${name} instalado`,
         agentFailed: 'Error al instalar el plugin del agente',
+        installUncertain:
+          'Hermes dejó de esperar el resultado de la instalación, pero es posible que el plugin siga instalándose. Cierra este cuadro y actualiza la lista de plugins antes de volver a instalarlo.',
         desktopFailed: 'Error al instalar el plugin de escritorio',
         missingEnv: (name, vars) =>
           `${name} está instalado, pero necesita una clave para funcionar: ${vars}. Añádela ahora o las herramientas del plugin fallarán.`
@@ -1082,6 +1136,9 @@ export const es = defineLocale({
       }
     },
     appearance: {
+      chatTextScaleTitle: 'Tamaño del texto del chat',
+      chatTextScaleDesc:
+        'Ajusta el texto de la conversación y del editor respecto a la escala de la interfaz. Las barras laterales y los controles mantienen su tamaño.',
       title: 'Apariencia',
       intro: 'Solo escritorio. El modo es el brillo; el tema es la paleta y el marco del chat.',
       colorMode: 'Modo de color',
@@ -1157,6 +1214,9 @@ export const es = defineLocale({
       textDirection: { auto: 'Auto', rtl: 'De derecha a izquierda', ltr: 'De izquierda a derecha' },
       introSplashTitle: 'Pantalla de bienvenida',
       introSplashDesc: 'El logotipo y la indicación que se muestran en un chat vacío.',
+      modelPricingTitle: 'Precios de modelos',
+      modelPricingDesc:
+        'Muestra los precios de entrada, salida y lectura de caché por millón de tokens en el selector de modelos.',
       reactionsTitle: 'Reacciones a mensajes',
       reactionsDesc:
         'Reacciones emoji estilo iMessage — reacciona a los mensajes, y Hermes puede reaccionar a los tuyos.',
@@ -1169,7 +1229,10 @@ export const es = defineLocale({
         'Deja que Hermes resalte cada paso mientras te guía por la app. Se desactiva automáticamente tras tus primeros 30 días; puedes volver a activarlo.',
       composerPopoutTitle: 'Compositor flotante',
       composerPopoutDesc:
-        'Permite arrastrar el compositor fuera de su posición fija. Desactívalo para mantenerlo anclado abajo.',
+        'Permite arrastrar el compositor fuera de su posición fija. Si está desactivado, permanece anclado abajo.',
+      fileBrowserTitle: 'Explorador de archivos',
+      fileBrowserDesc:
+        'Muestra el explorador de archivos junto al chat cuando hay un espacio de trabajo abierto. El botón de la barra de título también cambia este ajuste.',
       vibeHeartsTitle: 'Corazones de vibra',
       vibeHeartsDesc:
         'Corazones flotantes cuando dices gracias, te quiero, buen bot o envías un corazón. Independiente de las reacciones a mensajes de arriba.',
@@ -1606,42 +1669,7 @@ export const es = defineLocale({
       driverHealth: 'Estado del controlador'
     },
     about: {
-      heading: 'Hermes Desktop',
-      version: value => `Versión ${value}`,
-      versionUnavailable: 'Versión no disponible',
-      bundleOutOfSync: 'La compilación de la app está desactualizada',
-      bundleOutOfSyncDesc:
-        'El entorno de ejecución de Hermes se actualizó, pero la app de escritorio sigue siendo una compilación anterior: faltarán funciones nuevas de la interfaz (como el modo Bot) hasta que se actualice. Ejecuta la actualización de abajo para recompilar la app. Si eso no elimina este aviso, reinstala desde el instalador de escritorio más reciente.',
-      bundleOutOfSyncAction: 'Obtener el instalador',
-      bundleSwapPending: 'Reinicia para terminar la actualización',
-      bundleSwapPendingDesc:
-        'La app actualizada ya está instalada; Hermes solo necesita reiniciarse para cargarla. Los chats y los ajustes no se tocan.',
-      bundleSwapPendingAction: 'Reiniciar Hermes',
-      updates: 'Actualizaciones',
-      checkNow: 'Comprobar ahora',
-      checking: 'Comprobando…',
-      seeWhatsNew: 'Ver novedades',
-      updateNow: 'Actualizar ahora',
-      releaseNotes: 'Notas de la versión',
-      onLatest: 'Ya tienes la versión más reciente.',
-      installing: 'Se está instalando una actualización.',
-      cantUpdate: 'Esta compilación no puede actualizarse desde la app.',
-      cantReach: 'No pudimos contactar con el servidor de actualizaciones.',
-      tapCheck: 'Pulsa "Comprobar ahora" para buscar actualizaciones.',
-      updateReady: count =>
-        `Hay una actualización lista (${count} ${count === 1 ? 'cambio incluido' : 'cambios incluidos'}).`,
-      updateReadyUnknown: 'Hay una nueva actualización lista.',
-      lastChecked: age => `Última comprobación ${age}`,
-      justNowSuffix: ' · ahora mismo',
-      automaticUpdates: 'Actualizaciones automáticas',
-      automaticUpdatesDesc:
-        'Hermes busca actualizaciones automáticamente en segundo plano y te avisa cuando hay una actualización lista.',
-      branchCommit: (branch, commit) => `Rama ${branch} · Commit ${commit}`,
-      never: 'nunca',
-      justNow: 'ahora mismo',
-      minAgo: count => `hace ${count} min`,
-      hoursAgo: count => `hace ${count} h`,
-      daysAgo: count => `hace ${count} d`
+      updates: 'Actualizaciones'
     },
     config: {
       minimizeToTrayTitle: 'Minimizar a la bandeja',
@@ -1668,7 +1696,10 @@ export const es = defineLocale({
         '¿Quitar todos los conjuntos de herramientas activados? Esto desactiva la memoria, el terminal, la búsqueda web, la delegación y la mayoría de las demás herramientas hasta que los vuelvas a activar.',
       keepAwakeTitle: 'Mantener el equipo activo',
       keepAwakeDesc:
-        'Impide que este equipo entre en reposo para que las ejecuciones largas o nocturnas continúen. La pantalla puede seguir atenuándose.',
+        'Impide que este equipo entre en reposo. «Mientras trabaja» solo se aplica mientras hay un turno en curso: las ejecuciones nocturnas continúan sin mantener el portátil despierto toda la semana. La pantalla puede seguir atenuándose.',
+      keepAwakeOff: 'Desactivado',
+      keepAwakeWhileWorking: 'Mientras trabaja',
+      keepAwakeAlways: 'Siempre',
       disableF12Title: 'Desactivar DevTools con F12',
       disableF12Desc:
         'Impide que F12 abra las herramientas para desarrolladores. Ctrl+Shift+I (o Cmd+Opt+I en Mac) sigue funcionando.',
@@ -2064,6 +2095,8 @@ export const es = defineLocale({
       provider: 'Proveedor',
       model: 'Modelo',
       applying: 'Aplicando...',
+      mainAppliedTitle: 'Modelo principal actualizado',
+      mainAppliedMessage: model => `Las sesiones nuevas usarán ${model}.`,
       defaultsLabel: 'Valores predeterminados',
       reasoning: 'Razonamiento',
       reasoningOff: 'Desactivado',
@@ -2076,6 +2109,7 @@ export const es = defineLocale({
       restartFailed: 'No se pudo reiniciar el backend',
       auxiliaryTitle: 'Modelos auxiliares',
       resetAllToMain: 'Restablecer todos al principal',
+      staleAuxDismiss: 'No volver a mostrar',
       auxiliaryDesc:
         'Las tareas auxiliares usan el modelo principal de forma predeterminada. Asigna un modelo dedicado a cualquier tarea para anularlo.',
       setToMain: 'Usar principal',
@@ -2141,6 +2175,7 @@ export const es = defineLocale({
       }
     },
     localModels: {
+      connectionChanged: 'Cambió la conexión de los modelos locales',
       title: 'Modelos locales',
       runtimeTitle: 'Entorno local',
       runtimeReady: backend => `Listo · ${backend}`,
@@ -2809,12 +2844,17 @@ export const es = defineLocale({
       emptyHint: 'Explora el catálogo de abajo e instala un plugin revisado con un clic.',
       loadFailed: 'No se pudieron cargar los plugins del agente',
       toggleFailed: (name: string) => `No se pudo cambiar ${name}`,
+      toolsetOn: (name: string, profile: string) => `Herramientas de agente de ${name} activadas para ${profile}`,
+      toolsetOff: (name: string, profile: string) => `Herramientas de agente de ${name} desactivadas para ${profile}`,
+      toolsetToggleFailed: (name: string) =>
+        `No se pudieron cambiar las herramientas de agente de ${name}; el panel de Escritorio no se modificó`,
       legacyBackend:
         'Este backend es anterior a los interruptores de plugins por clave: actualiza Hermes para gestionarlo aquí.',
       portableBadge: 'portátil',
       serverStates: {
         connected: 'conectado',
         app_not_running: 'la app no se está ejecutando',
+        hermes_not_connected: 'falta la conexión MCP',
         endpoint_unavailable: 'endpoint no disponible',
         no_interactive_session: 'sin sesión interactiva',
         version_too_old: 'versión demasiado antigua',
@@ -3086,12 +3126,6 @@ export const es = defineLocale({
       system: 'Sistema',
       usage: 'Uso'
     },
-    sectionDescriptions: {
-      maintenance: 'Diagnóstico, copias de seguridad, curador y datos de memoria',
-      sessions: 'Buscar y gestionar sesiones',
-      system: 'Estado, registros y acciones del sistema',
-      usage: 'Actividad de tokens, coste y skills a lo largo del tiempo'
-    },
     nav: {
       newChat: {
         title: 'Nueva sesión',
@@ -3142,7 +3176,8 @@ export const es = defineLocale({
     gatewayStopped: 'Gateway de mensajería detenido',
     hermesActiveSessions: (version, count) => `Hermes ${version} · Sesiones activas ${count}`,
     restartGateway: 'Reiniciar gateway',
-    openBrowser: 'Abrir navegador',
+    openBrowser: 'Alternar navegador',
+    toggleBrowser: 'Alternar navegador',
     gatewayRestartFailed: 'No se pudo reiniciar el gateway.',
     sharedGatewayRestartTitle: '¿Reiniciar el gateway compartido?',
     sharedGatewayRestartDescription: (bots: string) => `Todos los bots de este dispositivo se reconectan: ${bots}`,
@@ -3178,7 +3213,7 @@ export const es = defineLocale({
     actions: count => `${count} acciones`,
     logFile: 'Archivo de registro',
     logLevel: 'Nivel',
-    logSearchPlaceholder: 'Filtrar líneas de registro…',
+    logSearchPlaceholder: 'Buscar en los registros…',
     maintenance: {
       runOps: 'Diagnóstico',
       doctor: 'Ejecutar diagnóstico',
@@ -3227,6 +3262,13 @@ export const es = defineLocale({
   },
   messaging: {
     search: 'Buscar mensajería...',
+    statusFilter: {
+      all: 'Todos',
+      bad: 'Errores',
+      good: 'Conectados',
+      muted: 'Inactivos',
+      warn: 'Requiere atención'
+    },
     loading: 'Cargando plataformas de mensajería...',
     loadFailed: 'No se pudieron cargar las plataformas de mensajería',
     states: {
@@ -3553,7 +3595,23 @@ export const es = defineLocale({
       gatewayUnreachable: (gateway: string) => `${gateway} · inaccesible`,
       onGateway: (name: string, gateway: string) => `${name} · ${gateway}`,
       switchTo: (name: string, gateway: string) => `Cambiar a ${name} en ${gateway}`,
-      deleteOn: (gateway: string) => ` en ${gateway}`
+      deleteOn: (gateway: string) => ` en ${gateway}`,
+      localDevice: 'Este dispositivo (backend local: instala Hermes si falta; si no, abre una sesión nueva)',
+      switchDeviceTitle: '¿Cambiar a este dispositivo?',
+      switchDeviceDesc:
+        'Esto abre una sesión nueva en este equipo. La conversación actual permanece en el otro gateway.',
+      switchDeviceConfirm: 'Cambiar',
+      installDeviceTitle: '¿Cambiar a este dispositivo?',
+      installDeviceDesc:
+        'Esto instalará Hermes localmente y luego abrirá una sesión nueva en este equipo. No se instala nada hasta que confirmes.',
+      installDeviceConfirm: 'Instalar localmente',
+      connectExistingInstead: 'Conectar uno existente en su lugar'
+    },
+    status: {
+      unread: (count: number) => (count === 1 ? '1 sesión sin leer' : `${count} sesiones sin leer`),
+      needsInput: (count: number) =>
+        count === 1 ? '1 sesión espera tu respuesta' : `${count} sesiones esperan tu respuesta`,
+      working: (count: number) => (count === 1 ? '1 sesión en ejecución' : `${count} sesiones en ejecución`)
     },
     remoteOverride: {
       menuItem: 'Conectar a un host remoto…',
@@ -3784,6 +3842,8 @@ export const es = defineLocale({
     nameLabel: 'Nombre',
     namePlaceholder: 'Resumen matutino',
     promptLabel: 'Prompt',
+    scriptLabel: 'Script',
+    scriptBadge: 'script',
     promptPlaceholder: 'Resume mis hilos de Slack sin leer y envíame por email los 5 principales...',
     frequencyLabel: 'Frecuencia',
     deliverLabel: 'Entregar a',
@@ -3997,6 +4057,8 @@ export const es = defineLocale({
       reveal: 'Revelar en carpeta',
       copyPath: 'Copiar ruta',
       removeFromSidebar: 'Ocultar de la barra lateral',
+      createdInPreviousContext:
+        'El proyecto se creó en la conexión o el perfil anterior. Vuelve allí; no se escribió IDEA.md.',
       createFailed: 'No se pudo crear el proyecto',
       staleBackend:
         'Actualiza el backend de Hermes para crear proyectos: tu backend es más antiguo que esta aplicación de escritorio (Configuración → Actualizaciones → Backend).',
@@ -4057,6 +4119,7 @@ export const es = defineLocale({
       branchFrom: 'Rama',
       rename: 'Renombrar',
       archive: 'Archivar',
+      unarchive: 'Desarchivar',
       newWindow: 'Nueva ventana',
       openInTerminal: 'Abrir en el terminal',
       hideTabBar: 'Ocultar barra de pestañas',
@@ -4071,6 +4134,7 @@ export const es = defineLocale({
       backgroundRunning: 'Tarea en segundo plano en ejecución',
       draftSession: 'Borrador — aún no se ha enviado nada',
       handoffOrigin: platform => `Transferido desde ${platform}`,
+      continuationOrigin: 'Continuación automática: esta conversación fue comprimida y continuada',
       ownedByProfile: profile => `Perfil: ${profile}`,
       renamed: 'Renombrada',
       renameFailed: 'No se pudo renombrar',
@@ -4234,7 +4298,7 @@ export const es = defineLocale({
       '/init': 'Generar o actualizar las instrucciones de proyecto AGENTS.md a partir de un análisis del repositorio',
       '/suggestions': 'Revisar las automatizaciones sugeridas (aceptar/descartar)',
       '/blueprint': 'Configurar una automatización a partir de una plantilla',
-      '/browser': 'Gestionar la conexión CDP del navegador [connect|disconnect|status] (solo gateway local)',
+      '/browser': 'Gestionar el navegador del agente [connect|disconnect|status|use]',
       '/palette': 'Abrir la paleta de comandos aproximada (también Ctrl+P)',
       '/usage':
         'Mostrar el uso de tokens y los límites de frecuencia; `reset` canjea un restablecimiento de límite de Codex acumulado',
@@ -4271,6 +4335,8 @@ export const es = defineLocale({
     restoredDraftNotice: 'Se restauró tu mensaje sin enviar',
     restoredDraftUndo: 'Deshacer',
     queueEdit: 'Editar',
+    queueExpand: 'Expandir',
+    queueCollapse: 'Contraer',
     queueSendNext: 'Próximo',
     queueSteer: 'Redirigir — encauzar el turno en vivo ahora',
     queueSend: 'Enviar',
@@ -4279,6 +4345,9 @@ export const es = defineLocale({
     queueResumeTip: 'La cola se pausó al detener; reanuda el envío de los turnos en cola',
     queueStuckTitle: 'Mensaje en cola no enviado',
     queueStuckBody: 'Un turno en cola no llegó a enviarse. Sigue en la cola; vuelve a intentarlo.',
+    queueDroppedTitle: 'Entrada en cola descartada',
+    queueDroppedBody:
+      'Se descartó esta entrada en segundo plano porque su sesión no se pudo reanudar tras varios intentos. El resto de la cola no se ha visto afectado.',
     previewUnavailable: 'Vista previa no disponible',
     previewLabel: label => `Vista previa de ${label}`,
     couldNotPreview: label => `No se pudo previsualizar ${label}`,
@@ -4371,6 +4440,7 @@ export const es = defineLocale({
     goalWaiting: 'Objetivo esperando',
     subagents: count => `${count} subagente${count === 1 ? '' : 's'}`,
     todos: (done, total) => `Tareas ${done}/${total}`,
+    previousTodos: (done, total) => `Tareas anteriores ${done}/${total}`,
     running: 'En ejecución',
     stop: 'Detener',
     dismiss: 'Descartar',
@@ -4459,7 +4529,8 @@ export const es = defineLocale({
       copyFailure: 'No se pudo copiar el criterio al portapapeles',
       continuationFailed: 'No se pudo enviar la continuación del objetivo',
       continuationQueued: 'Objetivo reanudado: la continuación queda en cola hasta que termine el turno actual',
-      continuationBusy: 'Objetivo reanudado: la sesión está ocupada; usa /interrupt en el turno actual para continuar',
+      continuationBusy:
+        'Objetivo reanudado: la sesión está ocupada; detén primero la respuesta actual (botón Stop o Esc) para continuar',
       controlUnavailable: (msg: string) => `Controles de sesión no disponibles: ${msg}`,
       dismissError: 'Descartar error',
       add: 'Añadir'
@@ -4566,6 +4637,70 @@ export const es = defineLocale({
   },
 
   updates: {
+    discontinuedTitle: 'Esta versión de Hermes ya no tiene soporte',
+    discontinuedBody:
+      'Esta versión de Hermes ya no tiene soporte y podría dejar de funcionar; desinstálala. Tus datos permanecen en el disco.',
+    channels: { stable: 'Estable', canary: 'Canary' },
+    appName: 'Hermes',
+    availableBodyRelease: tag => `La versión ${tag} está lista para instalarse.`,
+    releaseAvailable: tag => `La versión ${tag} está disponible.`,
+    checkingShort: 'Comprobando…',
+    availableBodyAppInstaller:
+      'Hay una nueva versión de Hermes. Hermes se cerrará, Windows terminará la actualización y Hermes volverá a abrirse automáticamente.',
+    applyingBodyAppInstaller:
+      'Hermes se cerrará y Windows terminará la actualización. Hermes volverá a abrirse al finalizar; no tienes que hacer nada.',
+    applyingCloseAppInstaller:
+      'Esta ventana se cerrará; Windows terminará la actualización y Hermes volverá a abrirse automáticamente.',
+    checkUnknownTitleAppInstaller: 'No se pudieron buscar actualizaciones',
+    checkUnknownBodyAppInstaller:
+      'Windows no pudo buscar actualizaciones ahora. También se instalan automáticamente al reiniciar Hermes.',
+    versionDetailsTitle: 'Detalles de la versión',
+    versionDetailsBody:
+      'Esta instalación se administra fuera de la app. Actualízala de la misma forma en que la instalaste.',
+    versionDetailsVersion: 'Versión',
+    versionDetailsCommit: 'Commit',
+    versionDetailsBuildOrigin: 'Origen de la compilación',
+    versionDetailsDistribution: 'Distribución',
+    versionDetailsDistributionDesktop: 'Aplicación de escritorio',
+    versionDetailsDistributionDesktopMsix: 'Aplicación de escritorio (MSIX)',
+    versionDetailsDistributionDesktopInstaller: 'Aplicación de escritorio (instalador)',
+    versionDetailsDistributionSourceInstaller: 'Código fuente (script de instalación)',
+    versionDetailsDistributionSourceInstallerDesktop: 'Código fuente (script de instalación) + hermes desktop',
+    versionDetailsDistributionSource: 'Código fuente',
+    versionDetailsDistributionSourceDesktop: 'Código fuente + hermes desktop',
+    versionDetailsDistributionStore: 'Microsoft Store',
+    versionDetailsRuntime: 'Entorno de ejecución',
+    versionDetailsRuntimeEmbedded: 'Entorno de ejecución integrado',
+    versionDetailsRuntimeExternal: 'Externo (usa el entorno de ejecución del equipo)',
+    versionDetailsInstallId: 'ID de instalación',
+    versionDetailsUncommittedChanges: 'cambios sin confirmar',
+    version: value => `Versión ${value}`,
+    versionUnavailable: 'Versión no disponible',
+    bundleOutOfSync: 'La compilación de la app está desactualizada',
+    bundleOutOfSyncDesc:
+      'El entorno de ejecución de Hermes se actualizó, pero la app de escritorio sigue siendo una compilación anterior: faltarán funciones nuevas de la interfaz (como el modo Bot) hasta que se actualice. Ejecuta la actualización de abajo para recompilar la app. Si eso no elimina este aviso, reinstala desde el instalador de escritorio más reciente.',
+    bundleOutOfSyncAction: 'Obtener el instalador',
+    bundleSwapPending: 'Reinicia para terminar la actualización',
+    bundleSwapPendingDesc:
+      'La app actualizada ya está instalada; Hermes solo necesita reiniciarse para cargarla. Los chats y los ajustes no se tocan.',
+    bundleSwapPendingAction: 'Reiniciar Hermes',
+    checkNow: 'Comprobar ahora',
+    seeWhatsNew: 'Ver novedades',
+    releaseNotes: 'Notas de la versión',
+    onLatest: 'Ya tienes la versión más reciente.',
+    installing: 'Se está instalando una actualización.',
+    cantReach: 'No pudimos contactar con el servidor de actualizaciones.',
+    tapCheck: 'Pulsa "Comprobar ahora" para buscar actualizaciones.',
+    updateReady: count =>
+      `Hay una actualización lista (${count} ${count === 1 ? 'cambio incluido' : 'cambios incluidos'}).`,
+    updateReadyUnknown: 'Hay una nueva actualización lista.',
+    lastChecked: age => `Última comprobación ${age}`,
+    justNowSuffix: ' · ahora mismo',
+    never: 'nunca',
+    justNow: 'ahora mismo',
+    minAgo: count => `hace ${count} min`,
+    hoursAgo: count => `hace ${count} h`,
+    daysAgo: count => `hace ${count} d`,
     stages: {
       idle: 'Preparando…',
       prepare: 'Preparando…',
@@ -4603,10 +4738,14 @@ export const es = defineLocale({
     updateNow: 'Actualizar ahora',
     maybeLater: 'Quizá más tarde',
     moreChanges: count => `+ ${count} ${count === 1 ? 'cambio incluido' : 'cambios incluidos'}.`,
+    copyFullLog: 'Copiar el registro de cambios completo',
     manualTitle: 'Actualizar desde la terminal',
+    manualUnavailableTitle: 'No se puede actualizar desde aquí',
     manualBody:
       'Instalaste Hermes desde la línea de comandos, así que las actualizaciones también se ejecutan ahí. Pega esto en tu terminal:',
     manualPickedUp: 'Hermes usará la nueva versión la próxima vez que lo abras.',
+    manualBodyBackend: 'El backend de Hermes se gestiona fuera de esta app. Ejecuta esto en el servidor que lo aloja:',
+    manualPickedUpBackend: 'El backend cargará la nueva versión cuando termine la actualización.',
     guiSkewTitle: 'Actualiza la aplicación de escritorio',
     guiSkewBody:
       'El backend se actualizó, pero el paquete de esta aplicación de escritorio no cambió. Actualiza o reinstala la aplicación de escritorio de Hermes (tu AppImage / .deb / .rpm) para que coincidan.',
@@ -4801,6 +4940,7 @@ export const es = defineLocale({
     replaceCurrent: 'Reemplazar valor actual',
     pasteApiKey: 'Pegar clave API',
     localApiKeyPlaceholder: 'Clave API (opcional; solo si tu endpoint la requiere)',
+    localModelNamePlaceholder: 'Nombre del modelo (p. ej. command-a-plus-05-2026)',
     couldNotSave: 'No se pudo guardar la credencial.',
     connecting: 'Conectando',
     update: 'Actualizar',
@@ -4945,7 +5085,12 @@ export const es = defineLocale({
     noAuthenticatedProviders: 'No hay proveedores autenticados.',
     addProvider: 'Añadir proveedor…',
     addCustomModel: 'Añadir modelo personalizado',
-    removeCustomModel: 'Quitar modelo personalizado'
+    removeCustomModel: 'Quitar modelo personalizado',
+    resetToDefaults: 'Restablecer valores predeterminados',
+    resetConfirm: '¿Restablecer la visibilidad de los modelos?',
+    resetDescription:
+      'Se borran tus elecciones de modelos visibles y ocultos, y cada proveedor vuelve a su lista predeterminada. Los modelos personalizados que añadiste se conservan y se muestran.',
+    resetAction: 'Restablecer'
   },
   shell: {
     windowControls: 'Controles de ventana',
@@ -4955,8 +5100,17 @@ export const es = defineLocale({
       search: 'Buscar modelos',
       noModels: 'No se encontraron modelos',
       editModels: 'Editar modelos…',
+      followDefault: 'Usar el predeterminado de Ajustes',
       refreshModels: 'Actualizar modelos',
-      fast: 'Rápido'
+      favorites: 'Favoritos',
+      addFavorite: 'Añadir a favoritos',
+      removeFavorite: 'Quitar de favoritos',
+      favoriteShortcut: '⇧ Clic',
+      fast: 'Rápido',
+      free: 'gratis',
+      cacheRead: 'lectura en caché',
+      priceTitle: (input: string, output: string, cache: string) =>
+        `Entrada ${input}/Mtok · Salida ${output}/Mtok` + (cache ? ` · Lectura en caché ${cache}/Mtok` : '')
     },
     modelOptions: {
       noOptions: 'No hay opciones para este modelo',
@@ -5090,7 +5244,8 @@ export const es = defineLocale({
         title: 'Uso del contexto',
         tokenSummary: (used, max) => `${used} / ${max} tokens`
       },
-      session: 'Sesión',
+      focusedSince: 'Enfocado desde',
+      focusedSinceTitle: 'Tiempo desde que este chat está enfocado — no cuánto lleva un turno',
       yoloOn: 'YOLO activado — autoaprobando comandos peligrosos. Shift+clic lo alterna globalmente.',
       yoloOff: 'YOLO desactivado. Shift+clic lo alterna globalmente.',
       modelNone: 'ninguno',
@@ -5147,6 +5302,8 @@ export const es = defineLocale({
   },
   preview: {
     tab: 'Vista previa',
+    pin: 'Fijar al espacio de trabajo',
+    unpin: 'Desfijar del espacio de trabajo',
     closePane: 'Cerrar panel de vista previa',
     loading: 'Cargando vista previa',
     unavailable: 'Vista previa no disponible',
@@ -5175,6 +5332,7 @@ export const es = defineLocale({
     editing: 'Edición',
     unsavedChanges: 'Cambios no guardados',
     saveFailed: message => `No se pudo guardar: ${message}`,
+    saveScopeChanged: 'Vuelve a la conexión y al perfil originales para guardar este borrador.',
     diskChangedTitle: 'Archivo cambiado en el disco',
     diskChangedBody:
       'Este archivo cambió desde que lo abriste. ¿Quieres sobrescribirlo con tu versión o descartar tus cambios y recargar?',
@@ -5278,6 +5436,7 @@ export const es = defineLocale({
     hideTabStrip: 'Ocultar pestañas',
     showStripTab: title => `Mostrar ${title}`,
     hideStripTab: title => `Ocultar ${title}`,
+    zoneMenuLabel: title => `Opciones de zona para ${title}`,
     lastTabKeptTitle: 'La última pestaña permanece',
     lastTabKeptBody:
       'Esta zona necesita al menos una pestaña visible. Muestra otra pestaña primero, o colapsa toda la barra lateral.',
@@ -5370,6 +5529,7 @@ export const es = defineLocale({
       branchNewChat: 'Ramificar en chat nuevo',
       react: 'Reaccionar',
       dismissError: 'Descartar error',
+      responseStopped: 'Respuesta detenida',
       errorLayers: {
         auth: 'Problema de inicio de sesión',
         billing: 'Créditos agotados',
@@ -5433,8 +5593,13 @@ export const es = defineLocale({
             `${provider} devolvió un error del servidor. Reinténtalo en un momento o cambia de proveedor.`
         },
         timeout: {
-          title: 'Se agotó el tiempo de la respuesta',
-          body: (provider: string) => `${provider} no respondió a tiempo. Reinténtalo para enviarlo de nuevo.`
+          title: 'No se pudo conectar con el servicio de IA',
+          body: (provider: string) =>
+            `No se pudo conectar con ${provider} o no respondió a tiempo. Revisa tu conexión a internet y vuelve a intentarlo.`
+        },
+        no_reply: {
+          title: 'La respuesta no terminó',
+          body: 'Hermes terminó este turno sin respuesta. Reinténtalo para enviarla de nuevo.'
         },
         stream_drop: {
           title: 'La respuesta se cortó',
@@ -5571,6 +5736,8 @@ export const es = defineLocale({
       preparingAudio: 'Preparando audio...',
       stopReading: 'Detener lectura',
       readAloud: 'Leer en voz alta',
+      copyFullResponse: 'Copiar la respuesta completa',
+      readAloudFullResponseHint: 'Mayús+clic: leer la respuesta completa',
       editMessage: 'Editar mensaje',
       expandMessage: 'Expandir mensaje',
       scrollToBottom: 'Desplazarse hacia abajo',
@@ -5616,14 +5783,13 @@ export const es = defineLocale({
       placeholder: 'Escribe tu respuesta…',
       skip: 'Omitir',
       skipped: 'Omitido',
-      continueLabel: 'Continuar',
+      noAnswer: 'Sin respuesta',
       confirmAndContinueLabel: 'Confirmar y continuar',
-      answeredBadge: 'Respondido',
+      singleSelectHint: 'Elige una',
+      multiSelectHint: 'Elige todas las que correspondan',
       questionProgress: (answered, total) => `${answered} de ${total} respondidas`,
-      lateAnswer: (question, choice) => `Con respecto a “${question}”: mi respuesta es ${choice}`,
-      lateAnswerTip: 'Redactar esta respuesta como mensaje de seguimiento',
-      lateAnswerHint:
-        'Este prompt ya no espera una respuesta. Elige una opción para redactarla como mensaje de seguimiento.'
+      notDelivered:
+        'Esta pregunta no llegó a la app, así que no se puede responder aquí. Pulsa Detener para terminar el turno y luego responde en el chat.'
     },
     catalogInstall: {
       preparing: 'Preparando la instalación…',
@@ -5905,6 +6071,9 @@ export const es = defineLocale({
     sessionUnavailable: 'Sesión no disponible',
     createSessionFailed: 'No se pudo crear una sesión nueva',
     promptFailed: 'Falló el prompt',
+    staleSessionTitle: 'Chat desactualizado',
+    staleSessionBody:
+      'Esta ventana estaba detrás de otra vista del mismo chat. Se cargaron los mensajes más recientes. Envía de nuevo si aún quieres.',
     providerCredentialRequired: 'Añade una credencial de proveedor antes de enviar tu primer mensaje.',
     emptySlashCommand: 'comando slash vacío',
     desktopCommands: 'Comandos de escritorio',
@@ -5949,6 +6118,8 @@ export const es = defineLocale({
     deleteFailed: 'No se pudo eliminar',
     archived: 'Archivado',
     archiveFailed: 'No se pudo archivar',
+    restored: 'Restaurado',
+    unarchiveFailed: 'No se pudo desarchivar',
     cwdChangeFailed: 'No se pudo cambiar el directorio de trabajo',
     cwdStagedTitle: 'Directorio de trabajo preparado',
     cwdStagedMessage: 'Reinicia el backend de escritorio para aplicar cambios de cwd a esta sesión activa.',
@@ -6055,6 +6226,11 @@ export const es = defineLocale({
     search: {
       clear: 'Limpiar búsqueda'
     },
+    logs: {
+      bottom: 'Ir al final',
+      search: 'Buscar en los registros…',
+      top: 'Ir al inicio'
+    },
     pagination: {
       label: 'paginación',
       previous: 'Anterior',
@@ -6068,4 +6244,6 @@ export const es = defineLocale({
       toggle: open => `${open ? 'Mostrar' : 'Ocultar'} barra lateral`
     }
   }
-})
+} satisfies TranslationOverrides
+
+export const es = defineLocale(esOverrides)

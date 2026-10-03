@@ -56,6 +56,7 @@ class FakeNotification {
 const deps: ServerRequestContext['deps'] = {
   activeSessionIdRef: { current: 'active' },
   sessionInterrupted: () => false,
+  sessionStateByRuntimeIdRef: { current: new Map() },
   updateSessionState: (_id, update) => update(createClientSessionState('stored')),
   upsertToolCall: () => undefined
 }
@@ -68,7 +69,12 @@ function request(id: string, sessionId = 'owned-a', method = 'clarify', replayed
       method,
       profile: 'unproven-primary',
       replayed,
-      params: { session_id: sessionId, question: 'PRIVATE QUESTION', command: 'PRIVATE COMMAND', site: 'PRIVATE SITE' },
+      params: {
+        session_id: sessionId,
+        questions: [{ qid: 'q1', question: 'PRIVATE QUESTION' }],
+        command: 'PRIVATE COMMAND',
+        site: 'PRIVATE SITE'
+      },
       respond,
       fail: vi.fn()
     },
@@ -396,7 +402,7 @@ describe('browser attention settings and request admission', () => {
     expect(notices).toHaveLength(2)
     expect(sessionClarifyRequest('owned-a').get()).toMatchObject({
       requestId: 'denied-in-app',
-      question: 'PRIVATE QUESTION'
+      questions: [{ question: 'PRIVATE QUESTION' }]
     })
   })
 

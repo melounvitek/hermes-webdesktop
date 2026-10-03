@@ -11,6 +11,7 @@ import {
   retainConfigReadOrigin
 } from '@/hermes'
 import { queryClient } from '@/lib/query-client'
+import { $activeConnectionId } from '@/store/connections'
 import { $activeGatewayProfile } from '@/store/profile'
 import { $connection } from '@/store/session'
 import type { HermesConfigRecord } from '@/types/hermes'
@@ -36,15 +37,54 @@ export function useHermesConfigScope(profile?: ProfileScope) {
   return useMemo(() => hermesConfigScope(profile), [profile, activeProfile, connection])
 }
 
-export const hermesConfigKey = (profile?: ProfileScope) =>
-  [...HERMES_CONFIG_KEY, profileScopeKey(hermesConfigScope(profile))] as const
+// Slot for one gateway inside the existing config-record cache. The id is
+// `$activeConnectionId` — the resolved descriptor identity the rest of the app
+// already uses — not a second cache. A bare root key let a settings save after
+// a gateway switch paint the previous machine's record and PUT it onto the
+// other config.yaml. An owner that already names a connection keeps
+// profileScopeKey's suffix; an untagged owner is namespaced the same way so
+// two gateways' `default` profiles do not share a row.
+export const hermesConfigKey = (
+  profile?: ProfileScope,
+  connectionId: null | string | undefined = $activeConnectionId.get()
+) => {
+  const scope = hermesConfigScope(profile)
+  const active = (connectionId ?? '').trim()
 
-// Both key and request capture the owner, even for later inactive refetches.
+  return [
+    ...HERMES_CONFIG_KEY,
+    profileScopeKey(scope.connectionId || !active ? scope : { ...scope, connectionId: active })
+  ] as const
+}
+
+// staleTime 0 → serve cache instantly, background-revalidate on every mount.
+// Both key and request capture the owner, even for later inactive refetches;
+// the cache slot is additionally the active gateway's.
 export const useHermesConfigRecord = (profile?: ProfileScope) => {
   const scope = useHermesConfigScope(profile)
+  // Reactive read, not a store getter: under the React Compiler a value with
+  // no reactive inputs is computed once per component instance, so a
+  // getter-based key would freeze on the first gateway and keep serving its
+  // record after a switch.
+  const connectionId = useStore($activeConnectionId)
+
   const query = useQuery({
-    queryKey: hermesConfigKey(scope),
-    queryFn: () => getHermesConfigRecord(scope),
+    queryKey: hermesConfigKey(scope, connectionId),
+    queryFn: () => {
+      // $activeConnectionId.listen invalidates profile queries in the same
+      // turn it publishes the new id, before this observer moves to the new
+      // key. A refetch of the slot we are leaving must not store the new
+      // gateway's record there — that is the other machine's config.yaml.
+      if (connectionId && $activeConnectionId.get() !== connectionId) {
+        const cached = queryClient.getQueryData<HermesConfigRecord>(hermesConfigKey(scope, connectionId))
+
+        if (cached !== undefined) {
+          return cached
+        }
+      }
+
+      return getHermesConfigRecord(scope)
+    },
     staleTime: 0,
     // Keep structural sharing so an unchanged refetch (every consumer mount at
     // staleTime 0, every invalidate) yields the SAME object and consumers'
@@ -82,14 +122,13 @@ export const useHermesConfigRecord = (profile?: ProfileScope) => {
   return query as typeof query & { scope: typeof scope; writeScope: ReturnType<typeof peekConfigReadOrigin> }
 }
 
-// Capture before awaiting a mutation so success and rollback stay with its owner.
 const writeHermesConfigCache =
-  (key: ReturnType<typeof hermesConfigKey>) =>
+  (keyFor: () => ReturnType<typeof hermesConfigKey>) =>
   (
     next:
       HermesConfigRecord | undefined | ((previous: HermesConfigRecord | undefined) => HermesConfigRecord | undefined)
   ) =>
-    void queryClient.setQueryData<HermesConfigRecord>(key, previous => {
+    void queryClient.setQueryData<HermesConfigRecord>(keyFor(), previous => {
       const record = typeof next === 'function' ? next(previous) : next
 
       // setQueryData also runs the hook's structuralSharing (query.setData →
@@ -100,7 +139,15 @@ const writeHermesConfigCache =
       return record ? retainConfigReadOrigin(record, previous) : record
     })
 
-export const hermesConfigCacheWriter = (profile?: ProfileScope) => writeHermesConfigCache(hermesConfigKey(profile))
+// Capture the owner before awaiting a mutation so success and rollback stay
+// with it. Only an untagged owner's gateway slot is resolved at WRITE time, so
+// a writer memoized by a long-lived settings panel lands on whichever gateway
+// is active when the save happens — the same row its query reads.
+export const hermesConfigCacheWriter = (profile?: ProfileScope) => {
+  const scope = hermesConfigScope(profile)
+
+  return writeHermesConfigCache(() => hermesConfigKey(scope))
+}
 
 export const invalidateHermesConfig = (profile?: ProfileScope) =>
   queryClient.invalidateQueries({ queryKey: profile == null ? HERMES_CONFIG_KEY : hermesConfigKey(profile) })

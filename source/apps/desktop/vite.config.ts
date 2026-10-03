@@ -17,10 +17,14 @@ function compilerPreset() {
 import fs from 'fs'
 import { createRequire } from 'module'
 import path from 'path'
+import { fileURLToPath } from 'url'
 
 import tailwindcss from '@tailwindcss/vite'
 
 import { getBrowserBuild } from './scripts/browser-build.mjs'
+
+// The runner loads this as ESM without the default bundler's CJS globals.
+const __dirname: string = path.dirname(fileURLToPath(import.meta.url))
 
 // `hgui` symlinks a worktree's node_modules to the main checkout. Vite realpaths
 // those before enforcing server.fs.allow, so codicon/font assets resolve outside
@@ -267,9 +271,6 @@ export default defineConfig(({ command }) => ({
     host: '127.0.0.1',
     port: 5174,
     strictPort: true,
-    warmup: {
-      clientFiles: ['./src/components/intro-reveal/intro-root.tsx']
-    },
     fs: {
       allow: fsAllow
     }

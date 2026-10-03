@@ -88,7 +88,7 @@ it does not contain the Hermes backend or other applications. Electron
 code and the optional terminal plugin are retained. Native application packaging
 is not supported by this repository's release workflow.
 
-The renderer follows upstream `v2026.9.24`, including Simple/Advanced mode,
+The renderer follows upstream `main` as of 2026-10-03, including Simple/Advanced mode,
 custom model entry and additional languages. Native package installation/removal
 and account-wide connector management remain unavailable in the browser.
 Session-based connectors retain compatibility with the tested stock backend.
@@ -114,7 +114,7 @@ npm run build:browser --workspace apps/desktop
 
 Edit `source/apps/desktop/src/`; the output is
 `source/apps/desktop/dist-browser/`. Shared frontend code is in `source/apps/shared/`.
-For wider UI coverage, omit `-- src/browser`. The September 24 update passes the
+For wider UI coverage, omit `-- src/browser`. The October 3 update passes the
 full UI suite. The plain desktop-workspace `dev` and `build` commands are for Electron,
 not the browser edition. Generated frontend API contracts stay committed; updating
 them is a separate compatibility task against stock Hermes.
@@ -147,9 +147,9 @@ local fake model. No provider key is needed:
 scratch=$(mktemp -d)
 stock="$scratch/stock"
 git clone https://github.com/NousResearch/hermes-agent.git "$stock"
-git -C "$stock" checkout --detach 30de041b011aa3d3830a7ffa05815e2cb2f063be
+git -C "$stock" checkout --detach 98d8ea79afce089c3ec35eb7f442daef485932b9
 UV_PROJECT_ENVIRONMENT="$scratch/venv" \
-  uv sync --project "$stock" --locked --python 3.11 --extra web --no-install-project
+  uv sync --project "$stock" --locked --python 3.14 --extra web --no-install-project
 python="$scratch/venv/bin/python"
 mkdir "$scratch/home"
 env -i HOME="$scratch/home" PATH=/usr/bin:/bin LANG=C.UTF-8 \
@@ -169,7 +169,7 @@ From `source/`, run `npm run test:browser-compat:harness --workspace apps/deskto
 to check it. For the broader Chromium API checks, run
 `npm run test:browser-compat --workspace apps/desktop --` followed by
 `--backend-root`, `--python`, `--chrome`, `--web-dist` and a new `--evidence`
-directory, all with absolute paths. The September 24 update passes all five
+directory, all with absolute paths. The October 3 update passes all five
 Chromium groups against the stock revision above, including syntax-highlighting
 recovery, profile isolation and transcript freshness. File editing, conflict
 handling and draft retention also pass separate Chromium checks. This does not

@@ -36,7 +36,6 @@ vi.mock('@/store/session', async importActual => ({
 }))
 
 const { createSessionRpcDispatcher } = await import('./session-rpc-dispatcher')
-const { syncApprovalModeForProfile, setApprovalModeForProfile } = await import('@/store/approval-mode')
 const { $connectionsRegistry } = await import('@/store/connection-registry-state')
 const { $profiles } = await import('@/store/profile')
 
@@ -63,8 +62,6 @@ function dispatcher(
 }
 
 beforeEach(() => {
-  gatewayMocks.requestGatewayForAgent.mockReset().mockResolvedValue({ routed: true })
-  gatewayMocks.requestGatewayForProfile.mockReset().mockResolvedValue({ profiled: true })
   gatewayMocks.activeConnectionId = 'local'
   $connectionsRegistry.set({ connections: [{ id: 'local' }] } as never)
   $profiles.set([{ name: 'default' }, { name: 'omar' }] as never)
@@ -84,26 +81,6 @@ afterEach(() => {
 })
 
 describe('createSessionRpcDispatcher: fail closed', () => {
-  it('reads and writes the selected Electron device when both devices expose default', async () => {
-    $connectionsRegistry.set({ connections: [{ id: 'local' }, { id: 'secondary' }] } as never)
-    setSessions([makeSessionInfo({ connection_id: 'secondary', id: 'stored-secondary', profile: 'default' })])
-    const { request } = dispatcher(undefined, 'stored-secondary')
-    gatewayMocks.requestGatewayForAgent.mockResolvedValueOnce({ value: 'off' } as never)
-    gatewayMocks.requestGatewayForProfile.mockResolvedValueOnce({ value: 'manual' } as never)
-
-    await expect(syncApprovalModeForProfile(request, 'default')).resolves.toBe('off')
-    gatewayMocks.requestGatewayForAgent.mockResolvedValueOnce({ value: 'smart' } as never)
-    await expect(setApprovalModeForProfile(request, 'default', 'smart')).resolves.toBe('smart')
-    expect(gatewayMocks.requestGatewayForAgent).toHaveBeenCalledWith('secondary', 'default', 'config.get', {
-      key: 'approvals.mode'
-    })
-    expect(gatewayMocks.requestGatewayForAgent).toHaveBeenCalledWith('secondary', 'default', 'config.set', {
-      key: 'approvals.mode',
-      value: 'smart'
-    })
-    expect(gatewayMocks.requestGatewayForProfile).not.toHaveBeenCalled()
-  })
-
   it('rejects with an explicit owner-resolution error instead of riding the ambient socket', async () => {
     const { ambientRequest, request } = dispatcher()
 

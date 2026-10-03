@@ -10,7 +10,6 @@ import {
   $updateOverlayOpen,
   $updateOverlayTarget,
   $updateStatus,
-  checkBackendUpdates,
   resetUpdateApplyState
 } from '@/store/updates'
 import type { StatusResponse } from '@/types/hermes'
@@ -104,10 +103,10 @@ it.each([true, false])('gates About and Command Center update gestures for brows
     expect(screen.queryByRole('button', { name: 'Update now' })).toBeNull()
     expect(screen.queryByRole('button', { name: 'Update Hermes' })).toBeNull()
     expect(screen.queryByText(/Hermes checks for updates automatically/)).toBeNull()
-    expect(api.mock.calls.some(([request]) => request.path === '/api/hermes/update')).toBe(false)
+    expect(api.mock.calls.some(([request]) => request.path.startsWith('/api/hermes/update'))).toBe(false)
     expect(check).not.toHaveBeenCalled()
   } else {
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Check now' })))
+    await act(async () => fireEvent.click(screen.getAllByRole('button', { name: 'Check now' })[0]))
     expect(check).toHaveBeenCalledWith({ force: true })
     await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Update Hermes' })))
     expect(api.mock.calls.some(([request]) => request.path === '/api/hermes/update' && request.method === 'POST')).toBe(
@@ -170,27 +169,4 @@ it('does not render a forced browser updater overlay or check on its behalf', as
   expect(screen.queryByRole('dialog')).toBeNull()
   expect(api).not.toHaveBeenCalled()
   expect(apply).not.toHaveBeenCalled()
-})
-
-it.each([
-  { behind: null, update_available: false, failed: true },
-  { behind: -1, update_available: false, failed: true },
-  { behind: 0, update_available: false, failed: false },
-  { behind: null, update_available: true, failed: false }
-])('renders honest backend check state for %j', async result => {
-  api.mockResolvedValue({
-    ...result,
-    can_apply: true,
-    current_version: 'fixture',
-    message: 'Update source unavailable'
-  })
-  await checkBackendUpdates()
-  $updateOverlayTarget.set('backend')
-  $updateOverlayOpen.set(true)
-  await mount(<UpdatesOverlay />)
-
-  expect(Boolean(screen.queryByText('The backend is running the latest version.'))).toBe(result.behind === 0)
-  expect(Boolean(screen.queryByText('Update source unavailable'))).toBe(result.failed)
-  expect(Boolean(screen.queryByRole('button', { name: 'Update now' }))).toBe(result.update_available)
-  expect(api.mock.calls.every(([request]) => request.method !== 'POST')).toBe(true)
 })

@@ -10,12 +10,6 @@ import { stubMenuDomApis, stubResizeObserver } from '@/test/jsdom'
 
 import { useApprovalModeStatusbarItem } from './approval-mode-menu'
 
-const profileRequest = vi.hoisted(() => vi.fn())
-vi.mock('@/store/gateway', async original => ({
-  ...(await original<Record<string, unknown>>()),
-  requestGatewayForProfile: profileRequest
-}))
-
 beforeAll(() => {
   stubResizeObserver()
   stubMenuDomApis()
@@ -25,8 +19,6 @@ afterEach(() => {
   cleanup()
   $approvalModes.set({})
   $notifications.set([])
-  vi.unstubAllGlobals()
-  profileRequest.mockReset()
 })
 
 function Harness({
@@ -46,26 +38,6 @@ function Harness({
 }
 
 describe('approval mode statusbar item', () => {
-  it('routes browser A/B policy reads and writes by displayed profile, not the session dispatcher', async () => {
-    vi.stubGlobal('hermesDesktop', { browser: { authRequired: false, signIn: vi.fn() } })
-    const policies: Record<string, string> = { a: 'manual', b: 'off' }
-    profileRequest.mockImplementation(async (profile, method, params) => {
-      if (method === 'config.set') {
-        policies[profile] = params.value
-      }
-
-      return { value: policies[profile] }
-    })
-    const sessionRequest = vi.fn().mockRejectedValue(new Error('Wrong session route'))
-    const view = render(<Harness profile="a" requestGateway={sessionRequest} />)
-    await screen.findByRole('button', { name: 'Manual' })
-    view.rerender(<Harness profile="b" requestGateway={sessionRequest} />)
-    fireEvent.pointerDown(await screen.findByRole('button', { name: 'Off' }), { button: 0 })
-    fireEvent.click(await screen.findByRole('menuitemradio', { name: /smart/i }))
-    await waitFor(() => expect(policies).toEqual({ a: 'manual', b: 'smart' }))
-    expect(sessionRequest).not.toHaveBeenCalled()
-  })
-
   it('uses the shared statusbar menu trigger without a nested bespoke button', async () => {
     const response = new Promise<never>(() => undefined)
     render(<Harness requestGateway={vi.fn(() => response)} />)
@@ -90,9 +62,12 @@ describe('approval mode statusbar item', () => {
     fireEvent.click(await screen.findByRole('menuitemradio', { name: /manual/i }))
 
     await waitFor(() => {
+      // The menu shows the "work" profile, so the write must name it (#125969); an unscoped
+      // `config.set` would edit whichever profile the backend was launched with instead.
       expect(requestGateway).toHaveBeenCalledWith('config.set', {
         key: 'approvals.mode',
-        value: 'manual'
+        value: 'manual',
+        profile: 'work'
       })
       expect(screen.getByRole('button', { name: /manual/i })).toBeTruthy()
     })

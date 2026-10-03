@@ -86,7 +86,8 @@ try {
   const followup = 'spike: followup-transcript-freshness'
   const events = () => frames.filter(f => f.direction === 'received' && f.method === 'event').map(f => f.params)
   const completion = text => events().find(e => e.type === 'message.complete' && e.payload.text?.includes(text))
-  const users = page.locator('[data-slot="aui_user-message-root"]')
+  // The message root also carries its timestamp.
+  const users = page.locator('[data-slot="aui_user-message-text"]')
   const replies = page.locator('[data-slot="aui_assistant-message-content"]')
   const normalize = text => text.replace(/\s+/g, ' ').trim()
   async function visibleReply(text) {
@@ -155,7 +156,8 @@ try {
     // Flush response publication through browser paint, not an arbitrary delay.
     await page.evaluate(() => new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve))))
     await expect.poll(async () => (await users.allInnerTexts()).map(normalize)).toEqual([original, followup])
-    await visibleReply('Spike tu')
+    // The interrupted partial stays, now marked as stopped.
+    await visibleReply('Spike tu Response stopped')
     await visibleReply(reply.text)
     assert.deepEqual(
       frames.filter(f => f.direction === 'sent' && f.method === 'prompt.submit').map(f => f.params.text),

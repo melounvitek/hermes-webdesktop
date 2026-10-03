@@ -5,14 +5,17 @@ import { afterEach, beforeAll, beforeEach, expect, it, vi } from 'vitest'
 
 import type * as ApiClient from '@/api/client'
 import type { HermesApiRequest } from '@/global'
+import type * as HermesApi from '@/hermes'
 import type { ProfileScope } from '@/hermes'
 import type { queryClient as QueryClientInstance } from '@/lib/query-client'
 import type * as Profile from '@/store/profile'
+import { $connection } from '@/store/session'
 
 import type * as ConfigRecord from './use-config-record'
 
 let config: typeof ConfigRecord
 let client: typeof ApiClient
+let hermes: typeof HermesApi
 let profile: typeof Profile
 let queryClient: typeof QueryClientInstance
 const api = vi.fn<(request: HermesApiRequest) => Promise<unknown>>()
@@ -20,6 +23,7 @@ const api = vi.fn<(request: HermesApiRequest) => Promise<unknown>>()
 beforeAll(async () => {
   config = await import('./use-config-record')
   client = await import('@/api/client')
+  hermes = await import('@/hermes')
   profile = await import('@/store/profile')
   ;({ queryClient } = await import('@/lib/query-client'))
 }, 60_000)
@@ -35,6 +39,7 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   queryClient.clear()
+  $connection.set(null)
   vi.clearAllMocks()
   vi.restoreAllMocks()
 })
@@ -94,7 +99,6 @@ it('keeps the captured request owner when an old query is refetched after a prof
 })
 
 it.each(['dark', 'light'])('updates the write origin after refetching a %s record', async theme => {
-  const hermes = await import('@/hermes')
   const first = { display: { theme: 'dark' } }
   const second = { display: { theme } }
   hermes.bindConfigReadOrigin(first, { connectionId: 'connection-a', profile: 'worker' })
@@ -123,4 +127,70 @@ it.each(['dark', 'light'])('updates the write origin after refetching a %s recor
 
   act(() => config.hermesConfigCacheWriter(result.current.scope)({ display: { theme: 'optimistic' } }))
   expect(result.current.writeScope).toEqual({ connectionId: 'connection-b', profile: 'worker' })
+})
+
+function useGateway(connectionId: string) {
+  $connection.set({ connectionId, mode: 'remote' } as never)
+}
+
+it('does not share one config record across two gateways', async () => {
+  const laptop = { display: { theme: 'dark' } }
+  const devbox = { display: { theme: 'light' } }
+  let releaseDevbox: (record: typeof devbox) => void = () => undefined
+
+  const devboxFetch = new Promise<typeof devbox>(resolve => {
+    releaseDevbox = resolve
+  })
+
+  vi.spyOn(hermes, 'getHermesConfigRecord').mockImplementation(() =>
+    $connection.get()?.connectionId === 'devbox' ? devboxFetch : Promise.resolve(laptop)
+  )
+
+  useGateway('laptop')
+  const { result } = renderHook(() => config.useHermesConfigRecord(), { wrapper })
+
+  await waitFor(() => expect(result.current.data).toEqual(laptop))
+
+  await act(async () => {
+    useGateway('devbox')
+  })
+
+  // A settings save paints from this cache. The previous machine's record must
+  // not still be the displayed one after the switch, or the save PUTs it onto
+  // the other machine's config.yaml.
+  expect(result.current.data).not.toEqual(laptop)
+
+  await act(async () => {
+    releaseDevbox(devbox)
+  })
+  await waitFor(() => expect(result.current.data).toEqual(devbox))
+
+  const cached = queryClient.getQueriesData({ queryKey: config.HERMES_CONFIG_KEY }).map(([, data]) => data)
+
+  expect(cached).toContainEqual(laptop)
+  expect(cached).toContainEqual(devbox)
+})
+
+it('a settings cache write after switching gateways does not replace the other gateway record', () => {
+  const laptop = { display: { theme: 'dark' } }
+  const devbox = { display: { theme: 'light' } }
+  // Config settings memoize the writer on the profile name. Both gateways are
+  // on `default`, so a captured unscoped key would let the second save replace
+  // the first machine's record.
+  const writer = config.hermesConfigCacheWriter('default')
+
+  useGateway('laptop')
+  config.hermesConfigCacheWriter()(laptop)
+  writer({ agent: { model: 'laptop-model' } })
+
+  useGateway('devbox')
+  config.hermesConfigCacheWriter()(devbox)
+  writer({ agent: { model: 'devbox-model' } })
+
+  const cached = queryClient.getQueriesData({ queryKey: config.HERMES_CONFIG_KEY }).map(([, data]) => data)
+
+  expect(cached).toContainEqual(laptop)
+  expect(cached).toContainEqual(devbox)
+  expect(cached).toContainEqual({ agent: { model: 'laptop-model' } })
+  expect(cached).toContainEqual({ agent: { model: 'devbox-model' } })
 })

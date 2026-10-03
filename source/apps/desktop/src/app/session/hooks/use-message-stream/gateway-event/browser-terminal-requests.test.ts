@@ -15,6 +15,7 @@ it('reads only the selected agent mirror owned by the requesting profile through
   const deps: ServerRequestContext['deps'] = {
     activeSessionIdRef: { current: null },
     sessionInterrupted: () => false,
+    sessionStateByRuntimeIdRef: { current: new Map() },
     updateSessionState: vi.fn(),
     upsertToolCall: vi.fn()
   }

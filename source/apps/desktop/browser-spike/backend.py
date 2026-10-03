@@ -27,6 +27,15 @@ from urllib.parse import urlsplit
 from urllib.request import ProxyHandler, build_opener
 
 MODEL = "browser-spike-local"
+# Stock stages a one-shot note on an install's first message. Scenarios compare
+# what the user typed, so the fixture drops it before echoing and logging.
+FIRST_CONTACT_NOTE = "[System note: This is the user's very first message ever."
+
+
+def typed(content):
+    if isinstance(content, str):
+        return content.partition("\n\n" + FIRST_CONTACT_NOTE)[0]
+    return [part for part in content if not part.get("text", "").startswith(FIRST_CONTACT_NOTE)]
 
 
 def stock_identity(root):
@@ -74,6 +83,8 @@ class ModelFixture(BaseHTTPRequestHandler):
         request = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         messages = request["messages"]
         users = [m for m in messages if m["role"] == "user"]
+        for user in users:
+            user["content"] = typed(user["content"])
         prompt = users[-1]["content"] if users else ""
         if isinstance(prompt, list):
             prompt = "\n".join(p.get("text", "") for p in prompt)

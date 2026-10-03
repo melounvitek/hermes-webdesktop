@@ -214,11 +214,11 @@ async function dismissCompatibilityNotice(page) {
 }
 
 function sessionRow(page, marker) {
-  // Single-session lists have no reorder wrapper; target either row shape
-  // inside the sidebar, never a matching transcript or tab caption.
+  // Reorderable rows add a grab handle named after the same title; target the
+  // row inside the sidebar, never the handle, a transcript or a tab caption.
   return page
     .locator('[data-tree-group="grp-sessions"]')
-    .getByRole('button', { name: new RegExp(marker) })
+    .getByRole('button', { name: new RegExp(`^(?!Reorder ).*${marker}`) })
     .first()
 }
 
@@ -341,7 +341,8 @@ try {
     const measurements = [{ percent: 90, ...baseline }]
     for (const percent of [100, 125]) {
       await openSettingsSection(page, 'Appearance', 'Typography')
-      await page.getByRole('button', { name: `${percent}%`, exact: true }).click()
+      // Chat Text Size offers the same percentages.
+      await page.locator('[id$=".ui-scale"]').getByRole('button', { name: `${percent}%`, exact: true }).click()
       await page.getByRole('button', { name: 'Close settings', exact: true }).click()
       const measured = await geometry(page, percent)
       measurements.push({ percent, ...measured })
@@ -866,7 +867,7 @@ try {
         const showProjects = page.getByRole('button', { name: 'Show projects', exact: true })
         const projectRow = page
           .locator('[data-tree-group="grp-sessions"]')
-          .getByRole('button', { name: new RegExp(projectName) })
+          .getByRole('button', { name: new RegExp(`^(?!Reorder ).*${projectName}`) })
           .first()
         // The status-bar project button opens a menu, not the sidebar project.
         await expect(showProjects.or(projectRow).first()).toBeVisible()

@@ -7,9 +7,10 @@ import type {
   MouseEvent as ReactMouseEvent,
   ReactNode
 } from 'react'
-import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { Streamdown } from 'streamdown'
+import { createContext, Fragment, useCallback, useContext, useEffect, useMemo, useRef, useState } from 'react'
+import { defaultRehypePlugins, defaultRemarkPlugins, Streamdown } from 'streamdown'
 
+import { getApiRequestConnection } from '@/api/client'
 import { requestComposerFocus, requestComposerInsertRefs } from '@/app/chat/composer/focus'
 import { droppedFileInlineRef } from '@/app/chat/composer/inline-refs'
 import { HERMES_PATHS_MIME } from '@/app/chat/hooks/use-composer-actions'
@@ -24,18 +25,30 @@ import { translateNow, useI18n } from '@/i18n'
 import { readBrowserEditorText, validateBrowserEditorText } from '@/lib/browser-file-editor'
 import {
   desktopFileDiff,
+  DesktopFileMissingError,
   desktopFsCacheKey,
   desktopGitRoot,
+  isReadFileErrorResult,
   readDesktopFileDataUrl,
   readDesktopFileText,
   writeDesktopFileText
 } from '@/lib/desktop-fs'
+import { ExternalLink } from '@/lib/external-link'
 import { Check, Pencil, X } from '@/lib/icons'
 import { createMemoizedMathPlugin } from '@/lib/katex-memo'
 import { isComposerChord } from '@/lib/keybinds/chords'
+import { normalizeOrLocalPreviewTarget } from '@/lib/local-preview'
 import { shikiLanguageForFilename } from '@/lib/markdown-code'
 import { normalizeFilePreviewMath } from '@/lib/markdown-preprocess'
 import { isBrowserClient } from '@/lib/platform'
+import {
+  decodeHashFragment,
+  noteDirectory,
+  rehypePreviewHeadingIds,
+  remarkPreviewFileLinks,
+  scrollPreviewHeading
+} from '@/lib/preview-markdown-links'
+import { previewTargetFromMarkdownHref } from '@/lib/preview-targets'
 import { cn } from '@/lib/utils'
 import {
   clearBrowserFileDraft,
@@ -45,7 +58,7 @@ import {
   setBrowserFileDraft
 } from '@/store/browser-file-drafts'
 import { confirm } from '@/store/confirm'
-import type { PreviewTarget } from '@/store/preview'
+import { markPreviewTabMissing, openPreview, type PreviewTarget } from '@/store/preview'
 import { setPreviewDirty } from '@/store/preview-edit'
 import { $connection, $currentCwd } from '@/store/session'
 import { notifyWorkspaceChanged } from '@/store/workspace-events'
@@ -167,8 +180,11 @@ interface LocalPreviewState {
   diff?: string
   error?: string
   language?: string
-  loading: boolean
+  /** The read confirmed the file is gone (not a transient failure) — renders
+   *  the explicit tombstone and prunes the tab from future restores. */
+  missing?: boolean
   text?: string
+  loading: boolean
   truncated?: boolean
 }
 
@@ -183,6 +199,12 @@ function isTypableElement(el: Element | null): boolean {
   const tag = el.tagName
 
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT' || (el as HTMLElement).isContentEditable
+}
+
+function fileEditScopeKey() {
+  // The REST wrapper has its own routing authority. Include it while the
+  // resolved connection descriptor is catching up with an activation.
+  return JSON.stringify([desktopFsCacheKey(), getApiRequestConnection()])
 }
 
 function filePathForTarget(target: PreviewTarget) {
@@ -289,6 +311,11 @@ async function readTextPreview(filePath: string) {
   // Back-compat for a running Electron process whose preload hasn't been
   // restarted since readFileText was added. readFileDataUrl already existed.
   const dataUrl = await window.hermesDesktop.readFileDataUrl(filePath)
+
+  if (isReadFileErrorResult(dataUrl)) {
+    throw new Error(dataUrl.message || `File read failed: ${dataUrl.error}`)
+  }
+
   const [, metadata = '', data = ''] = dataUrl.match(/^data:([^,]*),(.*)$/) || []
   const base64 = metadata.includes(';base64')
   const mimeType = metadata.replace(/;base64$/, '') || undefined
@@ -389,16 +416,61 @@ function MarkdownImage({ alt, src, ...rest }: ComponentProps<'img'>) {
   )
 }
 
-function MarkdownLink({ children, className, href, ...rest }: ComponentProps<'a'>) {
-  const isExternal = /^https?:\/\//i.test(href || '')
+const PreviewNoteContext = createContext<string | undefined>(undefined)
+
+const MARKDOWN_LINK_CLASS = 'text-foreground underline underline-offset-2 hover:text-primary'
+
+async function openLinkedNote(target: string, filePath?: string) {
+  const preview = await normalizeOrLocalPreviewTarget(target, noteDirectory(filePath))
+
+  if (preview) {
+    openPreview(preview)
+  }
+}
+
+// Same doors as chat links: web → ExternalLink (in-app browser, Cmd/Ctrl for
+// native; a blank window is denied by Electron), `#preview/…` → the preview
+// rail, `#fragment` → scroll this note (the hash must never reach the router).
+function MarkdownLink({ children, className, href, node: _node, ...rest }: ComponentProps<'a'> & { node?: unknown }) {
+  const filePath = useContext(PreviewNoteContext)
+  const raw = href?.trim() ?? ''
+  const fileTarget = previewTargetFromMarkdownHref(raw)
+  const linkClass = cn(MARKDOWN_LINK_CLASS, className)
+
+  if (!raw) {
+    return <span className={linkClass}>{children}</span>
+  }
+
+  if (!fileTarget && !raw.startsWith('#')) {
+    return (
+      <ExternalLink className={linkClass} href={raw}>
+        {children}
+      </ExternalLink>
+    )
+  }
 
   return (
     <a
-      className={cn('text-foreground underline underline-offset-2 hover:text-primary', className)}
-      href={href}
-      rel={isExternal ? 'noopener noreferrer' : undefined}
-      target={isExternal ? '_blank' : undefined}
       {...rest}
+      className={linkClass}
+      href={raw}
+      onAuxClick={event => void event.preventDefault()}
+      onClick={event => {
+        event.preventDefault()
+        event.stopPropagation()
+
+        if (fileTarget) {
+          void openLinkedNote(fileTarget, filePath)
+
+          return
+        }
+
+        const root = event.currentTarget.closest('[data-preview-markdown]')
+
+        if (root) {
+          scrollPreviewHeading(root, decodeHashFragment(raw))
+        }
+      }}
     >
       {children}
     </a>
@@ -426,21 +498,33 @@ const MARKDOWN_COMPONENTS = {
   a: MarkdownLink
 }
 
-export function MarkdownPreview({ text }: { text: string }) {
+// Passing either plugin list REPLACES Streamdown's defaults, so both spread them.
+const PREVIEW_REMARK_PLUGINS = [...Object.values(defaultRemarkPlugins), remarkPreviewFileLinks]
+const PREVIEW_REHYPE_PLUGINS = [...Object.values(defaultRehypePlugins), rehypePreviewHeadingIds]
+
+export function MarkdownPreview({ filePath, text }: { filePath?: string; text: string }) {
   const mathText = useMemo(() => normalizeFilePreviewMath(text), [text])
 
   return (
-    <div className="preview-markdown mx-auto max-w-3xl px-4 py-3 text-sm text-foreground" data-selectable-text="true">
-      <Streamdown
-        components={MARKDOWN_COMPONENTS}
-        controls={false}
-        mode="static"
-        parseIncompleteMarkdown={false}
-        plugins={{ math: previewMathPlugin }}
+    <PreviewNoteContext.Provider value={filePath}>
+      <div
+        className="preview-markdown mx-auto max-w-3xl px-4 py-3 text-sm text-foreground"
+        data-preview-markdown=""
+        data-selectable-text="true"
       >
-        {mathText}
-      </Streamdown>
-    </div>
+        <Streamdown
+          components={MARKDOWN_COMPONENTS}
+          controls={false}
+          mode="static"
+          parseIncompleteMarkdown={false}
+          plugins={{ math: previewMathPlugin }}
+          rehypePlugins={PREVIEW_REHYPE_PLUGINS}
+          remarkPlugins={PREVIEW_REMARK_PLUGINS}
+        >
+          {mathText}
+        </Streamdown>
+      </div>
+    </PreviewNoteContext.Provider>
   )
 }
 
@@ -673,6 +757,8 @@ export function SourceView({ filePath, language, text }: { filePath?: string; la
 export type PreviewViewMode = 'diff' | 'rendered' | 'source'
 
 interface LocalFilePreviewProps {
+  /** Closes the preview's tab; offered when the file can't be shown. */
+  onClose?: () => void
   /** Present when the pane can render this file live (HTML). Adds the
    *  `rendered` mode to the switcher and routes its selection to the pane. */
   onSelectRendered?: () => void
@@ -680,14 +766,17 @@ interface LocalFilePreviewProps {
   target: PreviewTarget
 }
 
-export function LocalFilePreview({ onSelectRendered, reloadKey, target }: LocalFilePreviewProps) {
+export function LocalFilePreview({ onClose, onSelectRendered, reloadKey, target }: LocalFilePreviewProps) {
   const connection = useStore($connection)
   const ownerKey = desktopFsCacheKey(connection)
-  const identity = JSON.stringify([ownerKey, filePathForTarget(target)])
+  // Browser drafts are stored per owner, so an owner switch remounts onto that
+  // owner's draft. Electron keeps the editor mounted and refuses the save.
+  const identity = JSON.stringify([isBrowserClient() ? ownerKey : null, filePathForTarget(target)])
 
   return (
     <FilePreview
       key={identity}
+      onClose={onClose}
       onSelectRendered={onSelectRendered}
       ownerKey={ownerKey}
       reloadKey={reloadKey}
@@ -697,6 +786,7 @@ export function LocalFilePreview({ onSelectRendered, reloadKey, target }: LocalF
 }
 
 function FilePreview({
+  onClose,
   onSelectRendered,
   ownerKey,
   reloadKey,
@@ -723,6 +813,8 @@ function FilePreview({
   const [editing, setEditing] = useState(Boolean(initialDraft || pendingSave))
   const draftRef = useRef(initialDraft?.text ?? pendingSave?.text ?? '')
   const baselineRef = useRef(initialDraft?.baseline ?? pendingSave?.text ?? '')
+  // A restored browser draft starts in edit mode without passing beginEdit.
+  const editorScopeRef = useRef(initialDraft || pendingSave ? fileEditScopeKey() : '')
   const [dirty, setDirty] = useState(Boolean(initialDraft))
   const [editorKey, setEditorKey] = useState(0)
   const [saving, setSaving] = useState(Boolean(pendingSave))
@@ -870,9 +962,19 @@ function FilePreview({
         }
       } catch (error) {
         if (active) {
+          // Expected absence (deleted / moved / cleared /tmp): tombstone the
+          // tab so the next launch drops it instead of re-probing the dead
+          // path, and show the explicit "file no longer exists" state.
+          const missing = error instanceof DesktopFileMissingError
+
+          if (missing) {
+            markPreviewTabMissing(target.url)
+          }
+
           setState({
             error: error instanceof Error ? error.message : String(error),
-            loading: false
+            loading: false,
+            missing
           })
         }
       }
@@ -894,7 +996,8 @@ function FilePreview({
     reloadKey,
     selfReload,
     target.dataUrl,
-    target.language
+    target.language,
+    target.url
   ])
 
   useEffect(() => {
@@ -974,6 +1077,7 @@ function FilePreview({
         return
       }
 
+      editorScopeRef.current = fileEditScopeKey()
       baselineRef.current = text
       draftRef.current = text
       setDirty(false)
@@ -1069,9 +1173,21 @@ function FilePreview({
     setSaving(true)
     setSaved(false)
     setSaveError(null)
-    setConflict(false)
+
+    // Keep the edit's owner across awaits: the FS facade routes each call via
+    // the window's current connection, which can change while validation waits.
+    const saveScope = editorScopeRef.current
+
+    const requireEditorOwner = () => {
+      if (fileEditScopeKey() !== saveScope) {
+        throw new Error(t.preview.saveScopeChanged)
+      }
+    }
 
     try {
+      requireEditorOwner()
+      setConflict(false)
+
       if (browser) {
         if (desktopFsCacheKey() !== ownerKey) {
           throw new Error(t.preview.browserOwnerChanged)
@@ -1108,6 +1224,10 @@ function FilePreview({
           // Couldn't re-read for the check — fall through and attempt the write.
         }
       }
+
+      // Also guards Overwrite: bypassing a content conflict never authorizes
+      // writing the same path on another connection/profile or this device.
+      requireEditorOwner()
 
       if (browser) {
         await saveBrowserFileDraft(draftKey, submitted, () => writeDesktopFileText(filePath, submitted))
@@ -1215,12 +1335,22 @@ function FilePreview({
     return <PageLoader label={t.preview.loading} />
   }
 
+  if (state.missing) {
+    return (
+      <PreviewEmptyState body={t.preview.missingBody(target.label)} title={t.preview.missingTitle} tone="warning" />
+    )
+  }
+
+  // A preview that can't load (the file was moved or deleted) is a dead end,
+  // so it carries its own way out rather than leaving it to the tab strip.
+  const closeAction = onClose ? { label: t.common.close, onClick: onClose } : undefined
+
   if (state.error) {
-    return <PreviewEmptyState body={state.error} title={t.preview.unavailable} />
+    return <PreviewEmptyState body={state.error} primaryAction={closeAction} title={t.preview.unavailable} />
   }
 
   if (pdfError) {
-    return <PreviewEmptyState body={pdfError} title={t.preview.unavailable} />
+    return <PreviewEmptyState body={pdfError} primaryAction={closeAction} title={t.preview.unavailable} />
   }
 
   if (
@@ -1344,7 +1474,7 @@ function FilePreview({
         )}
         <div className="min-h-0 flex-1 overflow-auto">
           {mode === 'rendered' ? (
-            <MarkdownPreview text={state.text} />
+            <MarkdownPreview filePath={filePath} text={state.text} />
           ) : mode === 'diff' ? (
             <FileDiffPanel
               className="mx-0 mb-0 h-full max-h-none"

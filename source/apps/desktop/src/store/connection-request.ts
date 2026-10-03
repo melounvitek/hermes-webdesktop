@@ -238,7 +238,17 @@ export function applyOperationStatus(request: ConnectionRequest, status: Connect
 
   const settledBy = settleReason(status.settled_by) ?? null
 
-  return { ...request, deadlineAt: status.deadline_at, seq: status.seq, settled: status.settled, settledBy, targets }
+  // Same reference on a no-op so subscribers do not re-render for an identical frame.
+  const unchanged =
+    request.deadlineAt === status.deadline_at &&
+    request.seq === status.seq &&
+    request.settled === status.settled &&
+    request.settledBy === settledBy &&
+    targets.every((target, index) => target === request.targets[index])
+
+  return unchanged
+    ? request
+    : { ...request, deadlineAt: status.deadline_at, seq: status.seq, settled: status.settled, settledBy, targets }
 }
 
 function mergeLiveTarget(target: ConnectionTarget, live: ConnectionOperationTarget): ConnectionTarget {

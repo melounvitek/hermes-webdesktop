@@ -25,13 +25,17 @@
   "homepage": "https://github.com/melounvitek/hermes-webdesktop#readme",
   "devDependencies": {
     "@eslint/js": "9.39.5",
-    "typescript-eslint": "8.64.0",
     "eslint-plugin-perfectionist": "5.10.0",
     "eslint-plugin-react-hooks": "7.1.1",
     "eslint-plugin-unused-imports": "4.4.1",
-    "globals": "17.7.0"
+    "globals": "17.7.0",
+    "typescript-eslint": "8.64.0",
+    "ws": "8.21.1"
   },
   "overrides": {
+    "@electron/osx-sign": {
+      "isbinaryfile": "5.0.7"
+    },
     "lodash": "4.18.1",
     "yauzl": "^3.3.1",
     "protobufjs": "^8.7.1",
@@ -60,5 +64,9 @@
     "fsevents@2.3.2": true,
     "fsevents@2.3.3": true,
     "get-windows@9.3.0": true
+  },
+  "dependencies": {
+    "js-yaml": "4.3.1",
+    "semver": "7.7.4"
   }
 }

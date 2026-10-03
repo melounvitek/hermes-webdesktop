@@ -101,6 +101,7 @@ function mount(surface: 'main' | 'tile') {
     })
     useSessionTileDelegate({
       archiveSession: async () => {},
+      branchLoadedSession: async () => false,
       branchStoredSession: async () => {},
       executeSlashCommand: async () => {},
       removeSession: async () => {},

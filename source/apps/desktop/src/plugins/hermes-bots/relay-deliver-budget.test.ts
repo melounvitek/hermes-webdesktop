@@ -9,7 +9,9 @@ const { hostMock, clearBotAttentionMock, noteBotAttentionMock } = vi.hoisted(() 
   noteBotAttentionMock: vi.fn()
 }))
 
+// relay.ts imports ./shared, which holds the $pendingBotOpen atom.
 vi.mock('@hermes/plugin-sdk', async () => ({
+  atom: (await import('nanostores')).atom,
   host: hostMock,
   LruCache: (await import('../../lib/lru-cache')).LruCache
 }))

@@ -266,11 +266,13 @@ async function check(fixture, name, body, { ticket503 = false, shiki503 = false 
   async function visibleReply(text) {
     // Markdown paragraphs are separate nodes. Compare the entire rendered reply,
     // normalizing whitespace only — never just its prefix or final paragraph.
+    // A fenced block renders as code without its fence lines.
+    const rendered = normalize(text.replace(/^```\w*$/gm, ''))
     const replies = page.locator('[data-slot="aui_assistant-message-content"]')
     await expect
-      .poll(async () => (await replies.allInnerTexts()).filter(t => normalize(t) === normalize(text)).length)
+      .poll(async () => (await replies.allInnerTexts()).filter(t => normalize(t) === rendered).length)
       .toBe(1)
-    const index = (await replies.allInnerTexts()).findIndex(t => normalize(t) === normalize(text))
+    const index = (await replies.allInnerTexts()).findIndex(t => normalize(t) === rendered)
     await expect(replies.nth(index)).toBeVisible()
   }
   async function completed(turn) {
@@ -592,7 +594,7 @@ try {
       await tab.getByRole('button', { name: 'Close', exact: true }).click()
       await expect.poll(() => reply.evaluate(element => element.isConnected)).toBe(false)
       await page
-        .getByRole('button', { name: /^(Reorder )?spike: shiki503/ })
+        .getByRole('button', { name: /^spike: shiki503/ })
         .first()
         .click()
       await retained(turn)

@@ -49,7 +49,7 @@ const input = page => page.getByRole('textbox', { name: 'Message', exact: true }
 const users = page => page.locator('[data-slot="aui_user-message-root"]')
 const replies = page => page.locator('[data-slot="aui_assistant-message-content"]')
 const row = (page, marker) => page.locator('[data-tree-group="grp-sessions"]')
-  .getByRole('button', { name: new RegExp(marker) }).first()
+  .getByRole('button', { name: new RegExp(`^(?!Reorder ).*${marker}`) }).first()
 const normalize = text => text.replace(/\s+/g, ' ').trim()
 
 // Independent durable evidence, not the renderer's optimistic cache.
@@ -65,7 +65,10 @@ function rows(profile, text, role = 'user') {
 
 async function selectProfile(page, profile) {
   // The rail, unlike a settings scope chip or status-bar button, declares pressed state.
-  const rail = page.locator('button[aria-pressed]').and(page.getByRole('button', { name: profile, exact: true }))
+  // It appends a profile's attention status to the name.
+  const rail = page
+    .locator('button[aria-pressed]')
+    .and(page.getByRole('button', { name: new RegExp(`^${profile}(, |$)`) }))
   await rail.click()
   await expect(rail).toHaveAttribute('aria-pressed', 'true')
   await expect(input(page)).toBeEditable()
@@ -268,7 +271,8 @@ try {
       const response = await route.fetch()
       held.push({ url: route.request().url(), status: response.status(), body: await response.json() })
       await release.promise
-      await route.fulfill({ response })
+      // Unrouting can continue a request that is still being fetched; fulfilling it then throws.
+      await route.fulfill({ response }).catch(() => {})
     })
     // Observe from before mounting, so even a transient editable A seed fails.
     const probe = await page.evaluateHandle(() => {
