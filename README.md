@@ -4,7 +4,7 @@ The [Hermes Desktop](https://hermes-agent.nousresearch.com/desktop), just runnin
 
 ## Install
 
-Requires Linux, a configured Hermes installation, and `curl`:
+Requires Linux, a configured Hermes installation updated since 2026-09-29 (`hermes update`), and `curl`:
 
 ```sh
 curl -qfsS --proto '=https' --max-time 60 --max-filesize 65536 https://raw.githubusercontent.com/melounvitek/hermes-webdesktop/main/install.sh -o hermes-browser-install.sh && sh ./hermes-browser-install.sh
@@ -177,8 +177,10 @@ certify other backend revisions, physical mobile devices or external providers.
 
 ### Optional terminal plugin tests
 
-The plugin and terminal UI are unchanged. Their integration suite is separate
-from installer tests because it imports stock server/authentication/PTY modules.
+The plugin is unchanged. Its integration suite is separate from installer tests
+because it imports stock server/authentication/PTY modules. Against the stock
+revision above it passes 16 of 18 cases; two job-cleanup cases that pass on the
+previous revision fail in the test's signal guard and are not yet investigated.
 Using the disposable `scratch`, `stock` and `python` from above, after stopping
 the UI fixture:
 
