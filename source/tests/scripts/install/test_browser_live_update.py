@@ -347,6 +347,8 @@ def test_start_refuses_a_mailbox_that_is_not_private(ready, tmp_path, unsafe):
     # The short timeout only bounds a regression that would launch the dashboard.
     refused = command(d, "start", "--port", str(free_port()), "--timeout", "2")
     assert refused.returncode == 1, refused.stdout
-    assert "Unsafe update mailbox" in refused.stderr
+    assert (
+        "Symlink path refused" if unsafe == "symlink" else "Unsafe update mailbox"
+    ) in refused.stderr
     assert (kept / "request.json").read_bytes() == request("0" * 32)
     assert not list((d["home"] / ".hermes").glob("launch*.json"))
