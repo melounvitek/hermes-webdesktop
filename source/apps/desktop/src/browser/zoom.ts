@@ -24,6 +24,8 @@ export function createBrowserZoom() {
 
   // Chromium compensates the html/body/#root percentage dimensions for root zoom,
   // but not viewport units. Let the full-window shells inherit that sizing.
+  // The body-level canvas is the bot screen's cursor, which noVNC draws itself
+  // on devices with touch input and positions in viewport pixels.
   const style = document.getElementById('hermes-browser-zoom') ?? document.createElement('style')
   style.id = 'hermes-browser-zoom'
   style.textContent = `
@@ -32,6 +34,7 @@ export function createBrowserZoom() {
     [data-radix-popper-content-wrapper] { zoom: calc(1 / var(--hermes-browser-zoom)); }
     [data-radix-popper-content-wrapper] > * { zoom: var(--hermes-browser-zoom); }
     [data-remote-screen] { zoom: calc(1 / var(--hermes-browser-zoom)); }
+    body > canvas { zoom: calc(1 / var(--hermes-browser-zoom)); }
   `
   document.head.appendChild(style)
 
