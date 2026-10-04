@@ -4212,7 +4212,7 @@ export const en: Translations = {
     timedOut: 'The update did not finish within 10 minutes.',
     unavailable: 'Updating from the browser is not available for this installation. In a terminal, stop the web desktop, update it and start it again:',
     reload: 'Reload this tab',
-    reloadHint: 'The new build is already being served. Reload this tab and any other open tabs to use it.',
+    reloadHint: 'This tab still runs the previous build. Reload it, and any other open tabs, to use the new one.',
     reloadTitle: 'Reload this tab?',
     reloadDescription: 'Reloading may lose drafts and unsaved file changes in this tab. Save your work first. Only this tab will reload; the server will not restart.'
   },

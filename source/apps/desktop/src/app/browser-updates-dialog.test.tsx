@@ -128,12 +128,12 @@ it('requests one update, shows progress, and offers a cancellable reload once th
   // Progress and its result belong to the page, not to the open dialog.
   await click(button('Close'))
   expect(screen.queryByRole('dialog')).toBeNull()
-  await launcherReports({ state: 'updated', release: 'browser-2' })
+  await launcherReports({ state: 'updated', release: 'browser-2', commit: 'b'.repeat(40) })
   await act(async () => {
     openBrowserUpdates()
   })
   expect(dialog().textContent).toContain('Updated to browser-2')
-  expect(dialog().textContent).toMatch(/reload this tab and any other open tabs/i)
+  expect(dialog().textContent).toMatch(/this tab still runs the previous build/i)
   expect(within(dialog()).queryByRole('button', { name: 'Update' })).toBeNull()
 
   const url = window.location.href
@@ -150,14 +150,25 @@ it('requests one update, shows progress, and offers a cancellable reload once th
 it('says the installed release is already the newest and allows another check', async () => {
   await mount()
   await click(button('Update'))
-  await launcherReports({ state: 'current', release: 'browser-1' })
+  await launcherReports({ state: 'current', release: 'browser-1', commit: 'a'.repeat(40) })
   expect(dialog().textContent).toContain('browser-1 is already the newest release')
+  expect(dialog().textContent).not.toMatch(/this tab still runs the previous build/i)
   expect(within(dialog()).queryByRole('button', { name: 'Reload this tab' })).toBeNull()
 
   await click(button('Update'))
   expect(requests).toHaveLength(2)
   expect(requests[1].id).not.toBe(requests[0].id)
   expect(dialog().textContent).not.toContain('browser-1')
+})
+
+it('offers a reload when the newest release was installed from another tab', async () => {
+  await mount()
+  await click(button('Update'))
+  await launcherReports({ state: 'current', release: 'browser-2', commit: 'b'.repeat(40) })
+  expect(dialog().textContent).toContain('browser-2 is already the newest release')
+  expect(dialog().textContent).toMatch(/this tab still runs the previous build/i)
+  expect(within(dialog()).queryByRole('button', { name: 'Update' })).toBeNull()
+  expect(button('Reload this tab').disabled).toBe(false)
 })
 
 it('shows the launcher failure as plain text and allows a retry', async () => {

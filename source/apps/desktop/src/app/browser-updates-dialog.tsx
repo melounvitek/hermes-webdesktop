@@ -30,6 +30,10 @@ function BrowserUpdatesPanel() {
   const update = useStore($browserUpdate)
   const [confirmingReload, setConfirmingReload] = useState(false)
 
+  // Also after an update from another tab: the release is current, this tab is not.
+  const outdated =
+    update.state === 'updated' || (update.state === 'current' && update.commit !== BROWSER_BUILD.revision)
+
   return (
     <>
       <Dialog
@@ -60,16 +64,11 @@ function BrowserUpdatesPanel() {
               <p>{copy.working}</p>
             </div>
           )}
-          {update.state === 'updated' && (
+          {(update.state === 'updated' || update.state === 'current') && (
             <div className="grid gap-2 text-sm" role="status">
-              <p>{copy.updated(update.release)}</p>
-              <p className="text-muted-foreground">{copy.reloadHint}</p>
+              <p>{update.state === 'updated' ? copy.updated(update.release) : copy.current(update.release)}</p>
+              {outdated && <p className="text-muted-foreground">{copy.reloadHint}</p>}
             </div>
-          )}
-          {update.state === 'current' && (
-            <p className="text-sm" role="status">
-              {copy.current(update.release)}
-            </p>
           )}
           {update.state === 'failed' && (
             <ErrorState className="wrap-anywhere" description={update.error ?? copy.timedOut} title={t.common.error} />
@@ -83,7 +82,7 @@ function BrowserUpdatesPanel() {
             </div>
           )}
           <DialogFooter>
-            {update.state === 'updated' ? (
+            {outdated ? (
               <Button onClick={() => setConfirmingReload(true)}>{copy.reload}</Button>
             ) : (
               <Button disabled={update.state === 'working'} onClick={() => void requestBrowserUpdate()}>

@@ -7,6 +7,7 @@ import { $browserUpdate, requestBrowserUpdate } from './updates'
 const DIRECTORY = '~/.local/lib/hermes-browser/installation.updates'
 const REQUEST = `${DIRECTORY}/request.json`
 const STATUS = `${DIRECTORY}/status.json`
+const COMMIT = 'c'.repeat(40)
 
 // The stock file API over the launcher's updates directory.
 let files: Record<string, string>
@@ -64,10 +65,10 @@ it('asks the launcher through the stock file API and follows the update to its r
   expect(api).toHaveBeenLastCalledWith({ path: `/api/fs/read-text?path=${encodeURIComponent(STATUS)}` })
   expect($browserUpdate.get()).toEqual({ state: 'working' })
 
-  launcherReports({ state: 'updated', release: 'browser-2.0_rc-1' })
+  launcherReports({ state: 'updated', release: 'browser-2.0_rc-1', commit: COMMIT })
   await vi.advanceTimersByTimeAsync(1000)
   await done
-  expect($browserUpdate.get()).toEqual({ state: 'updated', release: 'browser-2.0_rc-1' })
+  expect($browserUpdate.get()).toEqual({ state: 'updated', release: 'browser-2.0_rc-1', commit: COMMIT })
 
   const requests = api.mock.calls.length
   await vi.advanceTimersByTimeAsync(60_000)
@@ -84,7 +85,10 @@ it('truncates a long failure message', async () => {
 })
 
 it.each([
-  ['a status left by an earlier request', JSON.stringify({ id: 'a'.repeat(32), state: 'updated', release: 'old' })],
+  [
+    'the result of an earlier request',
+    JSON.stringify({ id: 'a'.repeat(32), state: 'updated', release: 'old', commit: COMMIT })
+  ],
   ['an unparsable status', '{"id":'],
   ['a status that is not an object', 'null']
 ])('is unavailable when only %s appears within 15 seconds', async (_label, status) => {
@@ -98,11 +102,13 @@ it.each([
 })
 
 it.each([
-  ['an unknown state', { state: 'done', release: 'browser-2' }],
-  ['no release', { state: 'updated' }],
-  ['a release that is a path', { state: 'updated', release: '../browser-2' }],
-  ['a release with markup', { state: 'updated', release: '<b>browser-2</b>' }],
-  ['a release longer than 80 characters', { state: 'current', release: 'b'.repeat(81) }],
+  ['an unknown state', { state: 'done', release: 'browser-2', commit: COMMIT }],
+  ['no release', { state: 'updated', commit: COMMIT }],
+  ['a release that is a path', { state: 'updated', release: '../browser-2', commit: COMMIT }],
+  ['a release with markup', { state: 'updated', release: '<b>browser-2</b>', commit: COMMIT }],
+  ['a release longer than 80 characters', { state: 'current', release: 'b'.repeat(81), commit: COMMIT }],
+  ['no commit', { state: 'current', release: 'browser-2' }],
+  ['a commit that is not a revision', { state: 'updated', release: 'browser-2', commit: 'main' }],
   ['an error that is not text', { state: 'failed', error: { message: 'Download failed' } }]
 ])('does not trust a status with %s', async (_label, status) => {
   const done = requestBrowserUpdate()
@@ -113,33 +119,30 @@ it.each([
   expect($browserUpdate.get()).toEqual({ state: 'unavailable' })
 })
 
-it('waits while the launcher finishes an update requested from another tab', async () => {
-  files[STATUS] = JSON.stringify({ id: 'a'.repeat(32), state: 'running' })
+it('takes the result of an update that another tab requested', async () => {
+  const other = { id: 'a'.repeat(32) }
+  files[STATUS] = JSON.stringify({ ...other, state: 'running' })
   const done = requestBrowserUpdate()
   await vi.advanceTimersByTimeAsync(20_000)
   expect($browserUpdate.get()).toEqual({ state: 'working' })
 
-  files[STATUS] = JSON.stringify({ id: 'a'.repeat(32), state: 'updated', release: 'browser-2' })
-  await vi.advanceTimersByTimeAsync(5000)
-  expect($browserUpdate.get()).toEqual({ state: 'working' })
-
-  launcherReports({ state: 'current', release: 'browser-2' })
+  files[STATUS] = JSON.stringify({ ...other, state: 'updated', release: 'browser-2', commit: COMMIT })
   await vi.advanceTimersByTimeAsync(1000)
   await done
-  expect($browserUpdate.get()).toEqual({ state: 'current', release: 'browser-2' })
+  expect($browserUpdate.get()).toEqual({ state: 'updated', release: 'browser-2', commit: COMMIT })
 })
 
-it('sends no second request while one is in progress, then a fresh id that ignores the previous status', async () => {
+it('sends no second request while one is in progress, then a fresh id that ignores the previous result', async () => {
   const first = requestBrowserUpdate()
   await requestBrowserUpdate()
   await vi.advanceTimersByTimeAsync(0)
   expect(writes()).toHaveLength(1)
 
   const firstId = requestId()
-  launcherReports({ state: 'current', release: 'browser-1' })
+  launcherReports({ state: 'current', release: 'browser-1', commit: COMMIT })
   await vi.advanceTimersByTimeAsync(1000)
   await first
-  expect($browserUpdate.get()).toEqual({ state: 'current', release: 'browser-1' })
+  expect($browserUpdate.get()).toEqual({ state: 'current', release: 'browser-1', commit: COMMIT })
 
   const second = requestBrowserUpdate()
   await vi.advanceTimersByTimeAsync(5000)
@@ -147,8 +150,8 @@ it('sends no second request while one is in progress, then a fresh id that ignor
   expect(requestId()).not.toBe(firstId)
   expect($browserUpdate.get()).toEqual({ state: 'working' })
 
-  launcherReports({ state: 'updated', release: 'browser-2' })
+  launcherReports({ state: 'updated', release: 'browser-2', commit: COMMIT })
   await vi.advanceTimersByTimeAsync(1000)
   await second
-  expect($browserUpdate.get()).toEqual({ state: 'updated', release: 'browser-2' })
+  expect($browserUpdate.get()).toEqual({ state: 'updated', release: 'browser-2', commit: COMMIT })
 })

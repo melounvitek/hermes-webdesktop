@@ -85,6 +85,8 @@ try {
   await open()
   await expect(panel).toContainText('installs it while Hermes keeps running')
   await expect(update).toBeEnabled()
+  const loaded = (await panel.locator('dd').first().textContent()).match(/^[0-9a-f]{40}/)?.[0]
+  assert.ok(loaded, 'The dialog must name the commit this build was made from')
   await shot('idle')
   passed('Idle dialog shows the loaded build and offers Update')
 
@@ -102,9 +104,9 @@ try {
   await report({ id, state: 'running' })
   await page.waitForTimeout(16000) // Longer than the page waits for a launcher that never answers.
   await expect(update).toBeDisabled()
-  await report({ id, state: 'updated', release: 'browser-fixture-2' })
+  await report({ id, state: 'updated', release: 'browser-fixture-2', commit: 'b'.repeat(40) })
   await expect(panel).toContainText('Updated to browser-fixture-2.')
-  await expect(panel).toContainText('Reload this tab and any other open tabs')
+  await expect(panel).toContainText('This tab still runs the previous build.')
   await shot('updated')
   passed('Update writes a valid request.json through stock; running then updated shows the release and Reload')
 
@@ -119,11 +121,12 @@ try {
   await request()
   await page.waitForTimeout(3000)
   await expect(update).toBeDisabled()
-  await report({ id, state: 'current', release: 'browser-fixture-2' })
+  await report({ id, state: 'current', release: 'browser-fixture-2', commit: loaded })
   await expect(panel).toContainText('browser-fixture-2 is already the newest release.')
+  await expect(panel).not.toContainText('This tab still runs the previous build.')
   await expect(update).toBeEnabled()
   await shot('current')
-  passed('A new request ignores the earlier status; current names the release and Update stays available')
+  passed('A new request ignores the earlier result; current names the release and Update stays available')
 
   const message = `<img src=x onerror="document.title='markup'"> Download <b>failed</b>: https://releases.invalid/${'a'.repeat(120)}`
   await request()
@@ -134,6 +137,15 @@ try {
   await expect(update).toBeEnabled()
   await shot('failed')
   passed('A failure shows the launcher message as plain text')
+
+  await request()
+  await report({ id, state: 'current', release: 'browser-fixture-3', commit: 'c'.repeat(40) })
+  await expect(panel).toContainText('browser-fixture-3 is already the newest release.')
+  await expect(panel).toContainText('This tab still runs the previous build.')
+  await expect(reload).toBeVisible()
+  await expect(update).toBeHidden()
+  await shot('outdated')
+  passed('A release installed from another tab is current, and this tab is offered a reload')
 
   assert.deepEqual(errors, [], 'Uncaught browser errors')
 } catch (error) {

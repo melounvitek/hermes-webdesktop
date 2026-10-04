@@ -1013,10 +1013,15 @@ def run_foreground(args, root, stream, record, receipt, manifest, runtime, updat
     def perform(job):
         try:
             write_status(mailbox, {"id": job, "state": "running"})
-            release, switched = update()
+            target, switched = update()
             if switched:
                 info["receipt"] = installed(root)[0]
-            result = {"state": "updated" if switched else "current", "release": release}
+            # The commit lets a page tell whether it still runs an older build.
+            result = {
+                "state": "updated" if switched else "current",
+                "release": target["release"],
+                "commit": target["ui_commit"],
+            }
         except Exception as error:
             print(f"Update failed: {error}", file=sys.stderr, flush=True)
             result = {"state": "failed", "error": str(error)}

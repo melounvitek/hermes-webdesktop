@@ -4,7 +4,8 @@ import { hermesApi } from '@/api/client'
 
 export type BrowserUpdate =
   | { state: 'idle' | 'working' | 'unavailable' }
-  | { state: 'updated' | 'current'; release: string }
+  // The commit tells this tab whether it still runs an older build.
+  | { state: 'updated' | 'current'; release: string; commit: string }
   // No error: the launcher never reported how the update ended.
   | { state: 'failed'; error?: string }
 
@@ -28,19 +29,21 @@ export function closeBrowserUpdates() {
   $browserUpdatesOpen.set(false)
 }
 
-async function readStatus(id: string): Promise<BrowserUpdate | null> {
+async function readStatus(): Promise<string | null> {
   try {
     const { text } = await hermesApi<{ text: string }>({
       path: `/api/fs/read-text?path=${encodeURIComponent(`${DIRECTORY}/status.json`)}`
     })
 
-    const status = JSON.parse(text) as Record<string, unknown>
+    return text
+  } catch {
+    return null // Not written yet.
+  }
+}
 
-    // Another request's status: either left over, or an update the launcher
-    // finishes before it takes this request.
-    if (status.id !== id) {
-      return status.state === 'running' ? { state: 'working' } : null
-    }
+function parseStatus(text: string): BrowserUpdate | null {
+  try {
+    const status = JSON.parse(text) as Record<string, unknown>
 
     if (status.state === 'running') {
       return { state: 'working' }
@@ -49,16 +52,18 @@ async function readStatus(id: string): Promise<BrowserUpdate | null> {
     if (
       (status.state === 'updated' || status.state === 'current') &&
       typeof status.release === 'string' &&
-      RELEASE.test(status.release)
+      RELEASE.test(status.release) &&
+      typeof status.commit === 'string' &&
+      /^[0-9a-f]{40}$/.test(status.commit)
     ) {
-      return { state: status.state, release: status.release }
+      return { state: status.state, release: status.release, commit: status.commit }
     }
 
     if (status.state === 'failed' && typeof status.error === 'string') {
       return { state: 'failed', error: status.error.slice(0, 500) }
     }
   } catch {
-    // Not written yet, or caught while the launcher was replacing it.
+    // Not a status this page understands.
   }
 
   return null
@@ -71,6 +76,9 @@ export async function requestBrowserUpdate() {
 
   $browserUpdate.set({ state: 'working' })
 
+  // The launcher runs one update at a time for every open tab, so two requests
+  // can share a result: the first finished status that was not there before.
+  const before = await readStatus()
   const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('')
 
   try {
@@ -91,11 +99,12 @@ export async function requestBrowserUpdate() {
 
   for (;;) {
     await new Promise(resolve => setTimeout(resolve, 1000))
-    const status = await readStatus(id)
+    const text = await readStatus()
+    const status = text === null ? null : parseStatus(text)
 
     if (status?.state === 'working') {
       running = true
-    } else if (status) {
+    } else if (status && text !== before) {
       $browserUpdate.set(status)
 
       return

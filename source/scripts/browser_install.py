@@ -458,7 +458,7 @@ def manage(args):
                         validate=preflight,
                         running=True,
                     )
-                    return target["release"], switched
+                    return target, switched
 
             return E.lifecycle(args, selection=selection, update=update)
         if args.command in ("status", "stop"):

@@ -4598,7 +4598,7 @@ export const esOverrides = {
     timedOut: 'La actualización no terminó en 10 minutos.',
     unavailable: 'La actualización desde el navegador no está disponible para esta instalación. En un terminal, detén el escritorio web, actualízalo y vuelve a iniciarlo:',
     reload: 'Recargar esta pestaña',
-    reloadHint: 'La nueva compilación ya está disponible. Recarga esta pestaña y las demás pestañas abiertas para usarla.',
+    reloadHint: 'Esta pestaña sigue usando la compilación anterior. Recárgala, junto con las demás pestañas abiertas, para usar la nueva.',
     reloadTitle: '¿Recargar esta pestaña?',
     reloadDescription: 'Al recargar puedes perder borradores y cambios en archivos sin guardar de esta pestaña. Guarda tu trabajo primero. Solo se recargará esta pestaña; el servidor no se reiniciará.'
   },

@@ -187,10 +187,12 @@ def test_request_switches_the_served_build_without_restarting_the_dashboard(
     assert not (mailbox / "request.json").exists()
     assert snapshot(root) == original
     issuer.set()
+    commit = json.loads(release["receipt"].read_bytes())["ui_commit"]
     assert finished(d, "a" * 32) == {
         "id": "a" * 32,
         "state": "updated",
         "release": "next",
+        "commit": commit,
     }
     assert stat.S_IMODE((mailbox / "status.json").stat().st_mode) == 0o600
     assert {path.name for path in mailbox.iterdir()} == {"status.json"}
@@ -212,6 +214,7 @@ def test_request_switches_the_served_build_without_restarting_the_dashboard(
         "id": "b" * 32,
         "state": "current",
         "release": "next",
+        "commit": commit,
     }
     assert (snapshot(root), snapshot(history)) == before
     assert not select.select([d["pidfd"]], [], [], 0)[0]

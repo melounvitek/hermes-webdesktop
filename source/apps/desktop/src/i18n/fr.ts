@@ -4620,7 +4620,7 @@ export const frOverrides = {
     timedOut: 'La mise à jour ne s’est pas terminée dans les 10 minutes.',
     unavailable: 'La mise à jour depuis le navigateur n’est pas disponible pour cette installation. Dans un terminal, arrêtez le bureau web, mettez-le à jour, puis redémarrez-le :',
     reload: 'Recharger cet onglet',
-    reloadHint: 'Le nouveau build est déjà disponible. Rechargez cet onglet et les autres onglets ouverts pour l’utiliser.',
+    reloadHint: 'Cet onglet utilise encore le build précédent. Rechargez-le, ainsi que les autres onglets ouverts, pour utiliser le nouveau.',
     reloadTitle: 'Recharger cet onglet ?',
     reloadDescription: 'Le rechargement peut faire perdre les brouillons et les modifications de fichiers non enregistrées dans cet onglet. Enregistrez votre travail d’abord. Seul cet onglet sera rechargé ; le serveur ne redémarrera pas.'
   },

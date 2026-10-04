@@ -4606,7 +4606,7 @@ export const deOverrides = {
     timedOut: 'Das Update wurde nicht innerhalb von 10 Minuten abgeschlossen.',
     unavailable: 'Für diese Installation ist das Aktualisieren aus dem Browser nicht verfügbar. Beenden Sie den Web-Desktop in einem Terminal, aktualisieren Sie ihn und starten Sie ihn erneut:',
     reload: 'Diesen Tab neu laden',
-    reloadHint: 'Der neue Build wird bereits ausgeliefert. Laden Sie diesen Tab und alle anderen geöffneten Tabs neu, um ihn zu verwenden.',
+    reloadHint: 'Dieser Tab verwendet noch den vorherigen Build. Laden Sie ihn und alle anderen geöffneten Tabs neu, um den neuen zu verwenden.',
     reloadTitle: 'Diesen Tab neu laden?',
     reloadDescription: 'Beim Neuladen können Entwürfe und ungespeicherte Dateiänderungen in diesem Tab verloren gehen. Speichern Sie zuerst Ihre Arbeit. Nur dieser Tab wird neu geladen; der Server wird nicht neu gestartet.'
   },
