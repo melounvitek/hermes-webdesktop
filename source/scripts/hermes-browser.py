@@ -456,6 +456,7 @@ def safe_destination(root, selection, *, parent_required=True):
         root,
         root.with_name(root.name + ".run"),
         root.with_name(root.name + ".history"),
+        root.with_name(root.name + ".updates"),
     ):
         no_links(owned)
         for other in protected:

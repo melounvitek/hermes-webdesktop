@@ -119,6 +119,14 @@ it.each([
   expect($browserUpdate.get()).toEqual({ state: 'unavailable' })
 })
 
+it('does not ask when it cannot tell which result was there before', async () => {
+  files[STATUS] = JSON.stringify({ id: 'a'.repeat(32), state: 'failed', error: 'An earlier failure' })
+  api.mockRejectedValueOnce(new Error('HTTP 502: Bad Gateway'))
+  await requestBrowserUpdate()
+  expect(writes()).toHaveLength(0)
+  expect($browserUpdate.get()).toEqual({ state: 'unavailable' })
+})
+
 it('takes the result of an update that another tab requested', async () => {
   const other = { id: 'a'.repeat(32) }
   files[STATUS] = JSON.stringify({ ...other, state: 'running' })

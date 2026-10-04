@@ -36,8 +36,13 @@ async function readStatus(): Promise<string | null> {
     })
 
     return text
-  } catch {
-    return null // Not written yet.
+  } catch (error) {
+    // Only a missing file means that the launcher has reported nothing.
+    if (error instanceof Error && error.message.startsWith('HTTP 404')) {
+      return null
+    }
+
+    throw error
   }
 }
 
@@ -76,12 +81,13 @@ export async function requestBrowserUpdate() {
 
   $browserUpdate.set({ state: 'working' })
 
-  // The launcher runs one update at a time for every open tab, so two requests
-  // can share a result: the first finished status that was not there before.
-  const before = await readStatus()
   const id = Array.from(crypto.getRandomValues(new Uint8Array(16)), byte => byte.toString(16).padStart(2, '0')).join('')
+  let before: string | null
 
   try {
+    // The launcher runs one update at a time for every open tab, so two requests
+    // can share a result: the first finished status that was not there before.
+    before = await readStatus()
     await hermesApi({
       path: '/api/fs/write-text',
       method: 'POST',
@@ -99,7 +105,7 @@ export async function requestBrowserUpdate() {
 
   for (;;) {
     await new Promise(resolve => setTimeout(resolve, 1000))
-    const text = await readStatus()
+    const text = await readStatus().catch(() => null)
     const status = text === null ? null : parseStatus(text)
 
     if (status?.state === 'working') {

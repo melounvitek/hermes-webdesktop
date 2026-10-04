@@ -27,8 +27,8 @@ browser UI, not Hermes itself.
 
 If the dialog says updating is unavailable, use the commands it shows:
 `hermes-browser update` does the same from a terminal while the web desktop is
-stopped. That is the case for installations made before 2026-10-04, and for
-profiles whose terminal backend is a remote SSH host.
+stopped. That is the case for installations made with an earlier release, and
+for profiles whose terminal backend is a remote SSH host.
 
 Updates replace the UI, not the launcher. To get a release that changes the
 launcher, such as the one that added updating from the browser, stop the web
