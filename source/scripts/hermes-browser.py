@@ -830,8 +830,16 @@ def startup_configuration(selection, runtime):
     code = """import sys, site
 try:
     sys.path.extend(sys.argv[2:] + site.getsitepackages([sys.argv[1]]) + site.getsitepackages())
-    import yaml
-    value = yaml.safe_load(sys.stdin.buffer.read())
+    try:
+        from ruamel.yaml import YAML
+    except ImportError:
+        import yaml
+        value = yaml.safe_load(sys.stdin.buffer.read())
+    else:
+        # As Hermes reads it: YAML 1.1 through the pure parser.
+        parser = YAML(typ="safe", pure=True)
+        parser.version = (1, 1)
+        value = parser.load(sys.stdin.buffer.read())
     if value is not None and not isinstance(value, dict):
         sys.exit(2)
     secrets = (value or {}).get("secrets")

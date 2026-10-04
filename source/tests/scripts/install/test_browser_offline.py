@@ -997,6 +997,7 @@ def test_external_secret_sources_are_unsupported_not_executed(
     "config",
     [
         "secrets: {bitwarden: {enabled: false, auto_install: true}}\n",
+        "secrets: {bitwarden: {enabled: off}}\n",
         "base: &s {secrets: {bitwarden: {enabled: false}}}\n<<: *s\n",
     ],
 )
@@ -1116,7 +1117,7 @@ def publish_launcher(backend, script):
 @pytest.fixture
 def published(release, tmp_path, request):
     """A backend publishing its own launcher; the recorded Python cannot run it."""
-    import yaml
+    import ruamel.yaml
 
     recorded = tmp_path / "recorded/bin/python"
     recorded.parent.mkdir(parents=True)
@@ -1125,13 +1126,14 @@ def published(release, tmp_path, request):
     )
     recorded.chmod(0o700)
     release["args"][release["args"].index("--python") + 1] = recorded
-    # Outside the test venv, so only the selected packages can supply yaml.
+    # Outside the test venv, so only the selected packages can supply a parser.
+    # Hermes ships ruamel.yaml; PyYAML arrives only with some optional extras.
     store = tmp_path / "store/bin/python3"
     store.parent.mkdir(parents=True)
     store.symlink_to(sys.executable)
     packages = tmp_path / "generation-1"
     packages.mkdir()
-    (packages / "yaml").symlink_to(Path(yaml.__file__).parent)
+    (packages / "ruamel").symlink_to(Path(ruamel.yaml.__file__).parents[1])
     backend = release["backend"]
     (backend / "selected").write_text(str(packages))
     command = json.dumps([str(store), "-I", "-c", "raise SystemExit(64)"])
