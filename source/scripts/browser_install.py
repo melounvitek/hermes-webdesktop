@@ -3,9 +3,12 @@
 
 import argparse
 from contextlib import contextmanager
+import errno
 import fcntl
+import grp
 import os
 from pathlib import Path
+import pwd
 import shlex
 import stat
 import subprocess
@@ -27,6 +30,32 @@ CONTROL_FILES = (
     "browser_install.py",
     "source.json",
 )
+
+
+def own_group_only(path, meta):
+    # Debian and Ubuntu give each user a group of the same name and a umask of
+    # 002, so ordinary directories there are group-writable without being shared.
+    try:
+        # With an ACL the group bits are its mask, which also covers named users.
+        os.getxattr(path, "system.posix_acl_access")
+        return False
+    except OSError as error:
+        if error.errno != errno.ENODATA:
+            return False
+    try:
+        user = pwd.getpwuid(meta.st_uid)
+        group = grp.getgrgid(meta.st_gid)
+    except KeyError:
+        return False
+    # The name guards directories that cannot list users of a shared primary group.
+    return (
+        group.gr_name == user.pw_name
+        and set(group.gr_mem) <= {user.pw_name}
+        and all(
+            other.pw_gid != meta.st_gid or other.pw_uid == meta.st_uid
+            for other in pwd.getpwall()
+        )
+    )
 
 
 def locations():
@@ -56,7 +85,8 @@ def locations():
     writable = {
         path: meta.st_mode & 0o022
         for path, meta in existing.items()
-        if meta.st_mode & 0o022
+        if meta.st_mode & 0o002
+        or (meta.st_mode & 0o020 and not own_group_only(path, meta))
     }
     if writable:
         commands = []

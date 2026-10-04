@@ -1,12 +1,15 @@
 """Permission failures explain safe, manual repairs before installation writes."""
 
+import grp
 import importlib.util
 import os
 from pathlib import Path
+import pwd
 import shlex
 import stat
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -24,9 +27,7 @@ pytestmark = pytest.mark.linux_only
 SCRIPTS = Path(__file__).resolve().parents[3] / "scripts"
 
 
-@pytest.mark.parametrize(
-    "mode,repair", [(0o775, "g-w"), (0o757, "o-w"), (0o777, "go-w")]
-)
+@pytest.mark.parametrize("mode,repair", [(0o757, "o-w"), (0o777, "go-w")])
 def test_packaged_installer_reports_all_permission_repairs(distribution, mode, repair):
     d = distribution
     home = d["home"].with_name("user's $(touch SHOULD_NOT_EXIST)")
@@ -75,6 +76,53 @@ def test_packaged_installer_reports_all_permission_repairs(distribution, mode, r
     assert code == 0, output
     assert d["command"].is_file()
     assert (d["base"] / "installation/installation.json").is_file()
+
+
+@pytest.mark.parametrize("shared_by", [None, "member", "primary group", "name", "acl"])
+def test_group_write_stops_installation_only_when_the_group_is_shared(
+    tmp_path, monkeypatch, shared_by
+):
+    # Debian and Ubuntu default to a umask of 002 and one group per user, so
+    # ~/.local/lib and ~/.local/bin are usually group-writable there.
+    home = tmp_path / "home"
+    paths = [home / ".local", home / ".local/lib", home / ".local/bin"]
+    home.mkdir(mode=0o700)
+    for path in paths:
+        path.mkdir()
+        path.chmod(0o775)
+    monkeypatch.setenv("HOME", str(home))
+    spec = importlib.util.spec_from_file_location(
+        "group_install", SCRIPTS / "browser_install.py"
+    )
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    gid = home.stat().st_gid
+    user = SimpleNamespace(pw_name="me", pw_uid=os.getuid(), pw_gid=gid)
+    other = SimpleNamespace(
+        pw_name="other",
+        pw_uid=os.getuid() + 1,
+        pw_gid=gid if shared_by == "primary group" else gid + 1,
+    )
+    group = SimpleNamespace(
+        gr_name="staff" if shared_by == "name" else "me",
+        gr_mem=["me", "other"] if shared_by == "member" else ["me"],
+    )
+    monkeypatch.setattr(pwd, "getpwuid", lambda uid: user)
+    monkeypatch.setattr(pwd, "getpwall", lambda: [user, other])
+    monkeypatch.setattr(grp, "getgrgid", lambda gid: group)
+    if shared_by == "acl":
+        monkeypatch.setattr(os, "getxattr", lambda *args, **kwargs: b"acl")
+    if shared_by is None:
+        assert module.locations() == (
+            home / ".local/lib/hermes-browser",
+            home / ".local/bin/hermes-browser",
+        )
+    else:
+        with pytest.raises(ValueError) as stopped:
+            module.locations()
+        assert "writable by other users" in str(stopped.value)
+        for path in paths:
+            assert f"chmod g-w -- {path}" in str(stopped.value)
 
 
 @pytest.mark.parametrize("mode", [0o700, 0o777])
