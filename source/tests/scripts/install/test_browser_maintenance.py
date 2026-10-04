@@ -223,15 +223,15 @@ def test_update_chain_and_rollback_preserve_complete_installations(
         assert receipt["selection"] == selection
         with tarfile.open(archive) as source:
             for member in source:
-                assert (
-                    root / "versions" / digest / member.name
-                ).read_bytes() == source.extractfile(member).read()
+                assert (root / member.name).read_bytes() == source.extractfile(
+                    member
+                ).read()
         assert {path.name for path in root.iterdir()} == {
             "installation.json",
             "hermes-browser.py",
-            "versions",
+            "manifest.json",
+            "web",
         }
-        assert {path.name for path in (root / "versions").iterdir()} == {digest}
         snapshots[digest] = snapshot(root)
         retained[digest] = label
     result = maintenance(r, "rollback", "--to", a)

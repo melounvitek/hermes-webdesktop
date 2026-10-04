@@ -258,9 +258,7 @@ def test_current_controller_runs_restored_launcher_and_stop_survives_changed_ui(
                 assert code == 1, output
                 assert "Type yes" not in output
                 assert "ready" in command(d, "status").stdout
-            (next((root / "versions").iterdir()) / "web/index.html").write_text(
-                "modified"
-            )
+            (root / "web/index.html").write_text("modified")
             stopped = command(d, "stop")
             assert stopped.returncode == 0, stopped.stderr
             assert "stopped" in stopped.stdout

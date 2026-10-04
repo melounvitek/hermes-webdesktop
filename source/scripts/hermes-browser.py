@@ -461,11 +461,10 @@ def installed(root):
     receipt = load_json(read_regular(root / "installation.json", MAX_JSON))
     keys(receipt, "owner archive_sha256 manifest_sha256 selection")
     require(receipt["owner"] == OWNER, "Foreign installation")
-    sha = hex_value(receipt["archive_sha256"])
+    hex_value(receipt["archive_sha256"])
     hex_value(receipt["manifest_sha256"])
     keys(receipt["selection"], " ".join(SELECTION))
-    prefix = "versions/" + sha + "/"
-    manifest_bytes = read_regular(root / prefix / "manifest.json", MAX_JSON)
+    manifest_bytes = read_regular(root / "manifest.json", MAX_JSON)
     require(
         digest(manifest_bytes) == receipt["manifest_sha256"],
         "Installed manifest modified",
@@ -474,8 +473,8 @@ def installed(root):
     expected = {
         "installation.json",
         "hermes-browser.py",
-        prefix + "manifest.json",
-        *(prefix + "web/" + name for name in manifest["files"]),
+        "manifest.json",
+        *("web/" + name for name in manifest["files"]),
     }
     require(
         tree_files(root, strict_dirs=True) == expected,
@@ -486,7 +485,7 @@ def installed(root):
         "Installed launcher modified",
     )
     # Exhaust validation without retaining a second copy of every installed asset.
-    for _ in verified_web(root / prefix / "web", manifest):
+    for _ in verified_web(root / "web", manifest):
         pass
     return receipt, manifest
 
@@ -952,7 +951,8 @@ def run_foreground(args, root, stream, record, receipt, manifest, runtime):
     }
     env.update(
         HERMES_HOME=selection["hermes_root"],
-        HERMES_WEB_DIST=str(root / "versions" / receipt["archive_sha256"] / "web"),
+        # A fixed path: exchanging the installation switches the served build.
+        HERMES_WEB_DIST=str(root / "web"),
         HERMES_DISABLE_LAZY_INSTALLS="1",
     )
     command = [
@@ -1164,11 +1164,10 @@ def installation_files(sha, selection, payload, launcher):
         "manifest_sha256": digest(payload["manifest.json"]),
         "selection": selection,
     }
-    prefix = "versions/" + sha + "/"
     return receipt, {
         "installation.json": json_bytes(receipt),
         "hermes-browser.py": launcher,
-        **{prefix + name: data for name, data in payload.items()},
+        **payload,
     }
 
 

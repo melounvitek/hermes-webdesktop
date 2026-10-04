@@ -98,8 +98,10 @@ def test_published_controller_requires_explicit_stopped_reinstall(
     serve(d, current)
     before = snapshot(d["base"])
     requests = len(d["requests"])
+    # Today's setup does not read the published versions/ layout: it refuses
+    # without changes until the explicit reinstall at the end of this test.
     code, output = terminal(entry(d), d["env"])
-    assert code == 0 and "Already installed" in output, output
+    assert code == 1 and "installation/manifest.json" in output, output
     assert "Type yes" not in output
     assert "/CURRENT.json" not in d["requests"][requests:]
     assert snapshot(d["base"]) == before
@@ -147,14 +149,10 @@ def test_published_controller_requires_explicit_stopped_reinstall(
         assert "bundle reference files do not match" in rejected.stderr
         record_property("old_repeat_setup", rejected.stderr)
 
-        # A downloaded setup can verify with newer rules, but must not replace the
-        # persistent controller. The baseline itself rejects before Already installed.
+        # A downloaded setup must not replace the persistent controller.
         requests = len(d["requests"])
         code, output = terminal(entry(d), d["env"])
-        if code == 0:
-            assert "Already installed" in output, output
-        else:
-            assert code == 1 and "bundle reference files do not match" in output, output
+        assert code == 1 and "installation/manifest.json" in output, output
         record_property("downloaded_repeat_setup", output)
         assert "Type yes" not in output
         assert "/CURRENT.json" not in d["requests"][requests:]

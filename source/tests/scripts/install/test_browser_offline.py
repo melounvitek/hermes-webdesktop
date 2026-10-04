@@ -131,7 +131,7 @@ def test_preview_decline_install_repeat_and_inspect(release):
     assert not r["dest"].exists()
     result = run("install", *r["args"], input="yes\n")
     assert result.returncode == 0, result.stderr
-    installed_web = next((r["dest"] / "versions").iterdir()) / "web"
+    installed_web = r["dest"] / "web"
     assert (installed_web / "index.html").read_bytes() == (
         r["web"] / "index.html"
     ).read_bytes()
@@ -288,7 +288,7 @@ def test_modified_install_and_changed_selection_refused(release):
     args = release["args"].copy()
     args[args.index("--profile") + 1] = "alpha"
     assert run("install", *args, input="yes\n").returncode != 0
-    web = next((release["dest"] / "versions").iterdir()) / "web"
+    web = release["dest"] / "web"
     (web / "index.html").write_text("user changes")
     assert run("install", *release["args"], input="yes\n").returncode != 0
     assert run("inspect", "--install-root", release["dest"]).returncode != 0
@@ -395,7 +395,7 @@ def test_archive_replacement_during_confirmation_cannot_change_payload(release):
         release["archive"].write_bytes(b"replaced after verification")
         _, stderr = process.communicate("yes\n", timeout=15)
         assert process.returncode == 0, stderr
-        web = next((release["dest"] / "versions").iterdir()) / "web"
+        web = release["dest"] / "web"
         assert (web / "index.html").read_bytes() == (
             release["web"] / "index.html"
         ).read_bytes()
@@ -775,9 +775,7 @@ def test_foreground_start_status_stop_and_changed_disk(dashboard, controllers):
         "no_open": True,
     }
     assert launch["home"] == str(dashboard["home"] / "profiles/alpha")
-    assert launch["env"]["HERMES_WEB_DIST"] == str(
-        next((dashboard["dest"] / "versions").iterdir()) / "web"
-    )
+    assert launch["env"]["HERMES_WEB_DIST"] == str(dashboard["dest"] / "web")
     assert launch["env"]["HERMES_DISABLE_LAZY_INSTALLS"] == "1"
     assert launch["env"]["HERMES_DASHBOARD_SESSION_TOKEN"] == "preserved-auth"
     assert not any(
@@ -796,9 +794,7 @@ def test_foreground_start_status_stop_and_changed_disk(dashboard, controllers):
     status = json.loads(lifecycle(dashboard, "status").stdout)
     assert status["startup"]["compatibility"] == "not-exercised"
     assert status["current_disk"]["compatibility"] == "unavailable"
-    (next((dashboard["dest"] / "versions").iterdir()) / "web/index.html").write_text(
-        "changed"
-    )
+    (dashboard["dest"] / "web/index.html").write_text("changed")
     stopped = lifecycle(dashboard, "stop")
     assert stopped.returncode == 0, stopped.stderr
     assert json.loads(stopped.stdout)["state"] == "stopped"

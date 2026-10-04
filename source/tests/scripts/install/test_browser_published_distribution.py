@@ -96,7 +96,7 @@ def test_published_distribution_install_inspect_and_uninstall(
     assert runtime["compatibility"] == "not-exercised"
     assert runtime["backend_root"] == str(backend)
     assert runtime["profile_home"] == str(data / "profiles/alpha")
-    web = next((base / "installation/versions").iterdir()) / "web"
+    web = base / "installation/web"
     with tarfile.open(archive) as bundle:
         expected = {
             member.name.removeprefix("web/"): bundle.extractfile(member).read()
