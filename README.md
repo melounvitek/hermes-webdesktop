@@ -16,32 +16,30 @@ Run `hermes-browser start`, then open **http://127.0.0.1:9119/**. Press Ctrl-C t
 
 ## Browser build and updates
 
-The footer identifies the build loaded in this tab, not necessarily the version
-currently served. Reload to load a newly installed build.
+The footer shows the build loaded in this tab. Click it and press **Update**: the
+launcher downloads the newest release, checks it against its published SHA-256
+and switches to it while Hermes keeps running. Chats and terminals are not
+interrupted. Reload each open tab afterwards to use the new build.
 
-The update dialog separates **Check and download** from the confirmed restart.
-Checking or downloading does not restart Hermes. Applying an update disconnects
-all users of this installation and may interrupt chats and terminals. Confirmation
-also permits rollback to restart the service again if the new browser build fails.
-It updates the browser UI, not Hermes itself.
+Anyone who can use the web desktop can start an update. It only ever installs
+the release published at the source the installer used, and it updates the
+browser UI, not Hermes itself.
 
-The updater is opt-in and unconfigured by default. The ordinary installer does
-not enable it or provision services. An operator must separately install trusted
-`browser_updater.py`, `browser_update_jobs.py` and `browser_update_service.py`
-helpers alongside the trusted launcher and installer modules, and configure a
-root-path HTTPS origin, administrator identities and the managed service.
-These helpers are checked in `SHA256SUMS` but are not shipped in the downloaded
-UI archive or ordinary installer. Keep this trusted control code separate from
-release downloads; never execute a launcher from a downloaded archive or let
-an update replace its own helpers.
+If the dialog says updating is unavailable, use the commands it shows:
+`hermes-browser update` does the same from a terminal while the web desktop is
+stopped. That is the case for installations made before 2026-10-04, and for
+profiles whose terminal backend is a remote SSH host.
 
-Isolated tests with real systemd and stock Hermes
-`30de041b011aa3d3830a7ffa05815e2cb2f063be` passed authenticated download and
-installation, graceful restart, and automatic rollback after an activation
-failure. Authentication, sessions and configuration survived both paths;
-backend and dependency file hashes were unchanged. These checks cover the
-service lifecycle and APIs, not every Hermes version or deployment. The updater
-remains disabled on ordinary installations until an operator provisions it.
+Updates replace the UI, not the launcher. To get a release that changes the
+launcher, such as the one that added updating from the browser, stop the web
+desktop, run `hermes-browser uninstall` and run the install command again.
+Hermes and its data stay untouched.
+
+The real installer and launcher were checked in Chromium against stock Hermes
+`98d8ea79afce089c3ec35eb7f442daef485932b9`, on plain loopback and behind one
+HTTPS port with the password login: an update switched the build without
+restarting the dashboard process, and a release with a wrong checksum was
+refused. This does not cover other Hermes revisions.
 
 ## Remote access
 
