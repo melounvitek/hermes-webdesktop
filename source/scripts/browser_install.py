@@ -116,6 +116,7 @@ def namespace(base):
         "installation",
         "installation.run",
         "installation.history",
+        "installation.updates",
     }
     E.require(
         {p.name for p in base.iterdir()} <= allowed,
@@ -419,7 +420,41 @@ def manage(args):
                 "Starting in the foreground on loopback. Wait for 'Browser ready'; Ctrl-C stops it.",
                 flush=True,
             )
-            return E.lifecycle(args, selection=selection)
+
+            def requested(preview):
+                # The dashboard page's request replaces the terminal confirmation.
+                E.require(
+                    preview["selection"] == selection,
+                    "Installation selection differs from controller",
+                )
+                return True
+
+            def update():
+                locations()
+                namespace(base)
+                E.require(
+                    owned_control(base, command)[0] == owner,
+                    "Controller changed since start",
+                )
+                with tempfile.TemporaryDirectory(
+                    prefix="hermes-browser-update-"
+                ) as temp:
+                    descriptor, target = current(packaged_source(), Path(temp))
+                    switched = E.maintenance(
+                        argparse.Namespace(
+                            command="update",
+                            install_root=str(root),
+                            archive=str(Path(temp) / "archive"),
+                            launcher=str(Path(temp) / "launcher"),
+                            sha256=descriptor["archive"]["sha256"],
+                        ),
+                        confirm=requested,
+                        validate=preflight,
+                        running=True,
+                    )
+                    return target["release"], switched
+
+            return E.lifecycle(args, selection=selection, update=update)
         if args.command in ("status", "stop"):
 
             def report(result):
