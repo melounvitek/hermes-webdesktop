@@ -1,8 +1,8 @@
 {
   "archive": {
     "name": "hermes-browser.tar.gz",
-    "sha256": "3f88538c341fdae251a5a08ecfed11153da3df89dbf0887cac2900a2fb192f79",
-    "size": 14613819
+    "sha256": "af4e0af36f9bb095f268f115506dc3f684eaac9497344aca78504e02a0a75a8c",
+    "size": 14613955
   },
   "launcher": {
     "name": "hermes-browser.py",
