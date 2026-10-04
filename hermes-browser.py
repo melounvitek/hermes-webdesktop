@@ -25,7 +25,10 @@ Startup readiness checks the dashboard sentinel, health and a browser asset, not
 comprehensive API compatibility.
 
 Update/rollback/uninstall require stopped, known ownership and confirmation. They
-never stop or start Hermes. Previous complete installations are retained in the
+never stop or start Hermes. The installed command's foreground controller is the
+exception: it applies the same update while running when the dashboard writes a
+request for its signed-in page into the sibling .updates directory, with that
+request as the confirmation. Previous complete installations are retained in the
 sibling .history directory; the sibling .run lock survives uninstall. Update may
 accept a separately trusted --launcher paired with its archive; it is copied,
 not executed. Rollback --to takes a full retained archive SHA-256 (listed by
@@ -37,7 +40,7 @@ remnants automatically. Runtime, data and pre-existing plugins are not removed.
 """
 
 import argparse
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 import ctypes
 import fcntl
 import gzip
@@ -58,6 +61,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import threading
 import time
 from urllib.parse import quote
 
@@ -122,7 +126,13 @@ def no_links(path):
 
 def read_regular(path, limit=MAX_FILE):
     fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
-    with os.fdopen(fd, "rb") as stream:
+    try:
+        stream = os.fdopen(fd, "rb")
+    except OSError:
+        # fdopen does not close a descriptor it refuses, such as a directory.
+        os.close(fd)
+        raise
+    with stream:
         require(
             stat.S_ISREG(os.fstat(stream.fileno()).st_mode),
             f"Not a regular file: {path}",
@@ -446,6 +456,7 @@ def safe_destination(root, selection, *, parent_required=True):
         root,
         root.with_name(root.name + ".run"),
         root.with_name(root.name + ".history"),
+        root.with_name(root.name + ".updates"),
     ):
         no_links(owned)
         for other in protected:
@@ -461,11 +472,10 @@ def installed(root):
     receipt = load_json(read_regular(root / "installation.json", MAX_JSON))
     keys(receipt, "owner archive_sha256 manifest_sha256 selection")
     require(receipt["owner"] == OWNER, "Foreign installation")
-    sha = hex_value(receipt["archive_sha256"])
+    hex_value(receipt["archive_sha256"])
     hex_value(receipt["manifest_sha256"])
     keys(receipt["selection"], " ".join(SELECTION))
-    prefix = "versions/" + sha + "/"
-    manifest_bytes = read_regular(root / prefix / "manifest.json", MAX_JSON)
+    manifest_bytes = read_regular(root / "manifest.json", MAX_JSON)
     require(
         digest(manifest_bytes) == receipt["manifest_sha256"],
         "Installed manifest modified",
@@ -474,8 +484,8 @@ def installed(root):
     expected = {
         "installation.json",
         "hermes-browser.py",
-        prefix + "manifest.json",
-        *(prefix + "web/" + name for name in manifest["files"]),
+        "manifest.json",
+        *("web/" + name for name in manifest["files"]),
     }
     require(
         tree_files(root, strict_dirs=True) == expected,
@@ -486,7 +496,7 @@ def installed(root):
         "Installed launcher modified",
     )
     # Exhaust validation without retaining a second copy of every installed asset.
-    for _ in verified_web(root / prefix / "web", manifest):
+    for _ in verified_web(root / "web", manifest):
         pass
     return receipt, manifest
 
@@ -630,22 +640,17 @@ def control_address(root):
 
 
 def same_user(connection):
-    pid, uid, _ = struct.unpack(
+    _, uid, _ = struct.unpack(
         "3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
     )
     require(uid == os.getuid(), "Foreign lifecycle controller/client")
-    return pid
 
 
-def control_request(root, command, *, expected_pid=None):
+def control_request(root, command):
     with socket.socket(socket.AF_UNIX) as connection:
         connection.settimeout(2)
         connection.connect(control_address(root))
-        pid = same_user(connection)
-        require(
-            expected_pid is None or pid == expected_pid,
-            "Lifecycle controller PID differs from expected PID",
-        )
+        same_user(connection)
         connection.sendall(command.encode() + b"\n")
         with connection.makefile("rb") as stream:
             result = load_json(stream.readline(MAX_JSON + 1))
@@ -928,7 +933,15 @@ def check_ready(port, asset, info):
             connection.close()
 
 
-def run_foreground(args, root, stream, record, receipt, manifest, runtime):
+def write_status(mailbox, status):
+    # Readers see the previous or the complete new status, never a partial one.
+    fd, staged = tempfile.mkstemp(dir=mailbox)
+    with os.fdopen(fd, "wb") as output:
+        output.write(json_bytes(status))
+    os.replace(staged, mailbox / "status.json")
+
+
+def run_foreground(args, root, stream, record, receipt, manifest, runtime, update=None):
     selection = receipt["selection"]
     backend = Path(selection["backend_root"])
     python = startup_configuration(selection, runtime)
@@ -952,7 +965,8 @@ def run_foreground(args, root, stream, record, receipt, manifest, runtime):
     }
     env.update(
         HERMES_HOME=selection["hermes_root"],
-        HERMES_WEB_DIST=str(root / "versions" / receipt["archive_sha256"] / "web"),
+        # A fixed path: exchanging the installation switches the served build.
+        HERMES_WEB_DIST=str(root / "web"),
         HERMES_DISABLE_LAZY_INSTALLS="1",
     )
     command = [
@@ -992,11 +1006,43 @@ def run_foreground(args, root, stream, record, receipt, manifest, runtime):
     child = None
     requested = False
     failed = False
+    # The dashboard writes update requests here for its authenticated page.
+    mailbox = root.with_name(root.name + ".updates")
+    worker = None
+    checked = 0
+
+    def perform(job):
+        try:
+            write_status(mailbox, {"id": job, "state": "running"})
+            target, switched = update()
+            if switched:
+                info["receipt"] = installed(root)[0]
+            # The commit lets a page tell whether it still runs an older build.
+            result = {
+                "state": "updated" if switched else "current",
+                "release": target["release"],
+                "commit": target["ui_commit"],
+            }
+        except Exception as error:
+            print(f"Update failed: {error}", file=sys.stderr, flush=True)
+            result = {"state": "failed", "error": str(error)}
+        write_status(mailbox, {"id": job, **result})
 
     def request_stop(_signum, _frame):
         nonlocal requested
         requested = True
 
+    if update is not None:
+        mailbox.mkdir(mode=0o700, exist_ok=True)
+        meta = mailbox.lstat()
+        require(
+            stat.S_ISDIR(meta.st_mode)
+            and meta.st_uid == os.getuid()
+            and stat.S_IMODE(meta.st_mode) == 0o700,
+            "Unsafe update mailbox",
+        )
+        for name in ("request.json", "status.json"):
+            (mailbox / name).unlink(missing_ok=True)
     previous = {
         sig: signal.signal(sig, request_stop)
         for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
@@ -1038,6 +1084,27 @@ def run_foreground(args, root, stream, record, receipt, manifest, runtime):
                 if requested and info["state"] != "stopping":
                     child.terminate()
                     info["state"] = "stopping"
+                if (
+                    update is not None
+                    and info["state"] == "ready"
+                    and not (worker and worker.is_alive())
+                    and time.monotonic() >= checked + 1
+                ):
+                    checked = time.monotonic()
+                    path = mailbox / "request.json"
+                    try:
+                        try:
+                            asked = load_json(read_regular(path, 256))
+                        finally:
+                            path.unlink(missing_ok=True)
+                        keys(asked, "id")
+                        job = hex_value(asked["id"], 32)
+                    except (OSError, ValueError):
+                        pass  # No request, or content this launcher does not accept.
+                    else:
+                        # A thread, so this loop keeps draining the child's output.
+                        worker = threading.Thread(target=perform, args=(job,))
+                        worker.start()
                 for key, _ in selector.select(0.1):
                     if key.fileobj is server:
                         connection, _ = server.accept()
@@ -1107,6 +1174,18 @@ def run_foreground(args, root, stream, record, receipt, manifest, runtime):
                         file=sys.stderr,
                     )
             child.stdout.close()
+        if worker is not None:
+            if worker.is_alive():
+                print("Finishing the update in progress", file=sys.stderr, flush=True)
+            # No switch may be in flight once the caller releases the control lock.
+            worker.join()
+        if update is not None:
+            try:
+                for name in ("request.json", "status.json"):
+                    (mailbox / name).unlink(missing_ok=True)
+                mailbox.rmdir()
+            except OSError:
+                pass  # Best effort; unknown entries stay for manual inspection.
         if child is None or child.returncode is not None:
             record["state"] = "stopped"
             write_control(stream, record)
@@ -1164,11 +1243,10 @@ def installation_files(sha, selection, payload, launcher):
         "manifest_sha256": digest(payload["manifest.json"]),
         "selection": selection,
     }
-    prefix = "versions/" + sha + "/"
     return receipt, {
         "installation.json": json_bytes(receipt),
         "hermes-browser.py": launcher,
-        **{prefix + name: data for name, data in payload.items()},
+        **payload,
     }
 
 
@@ -1283,23 +1361,13 @@ def remove_installation(root):
     sync_directory(root.parent)
 
 
-def maintenance(
-    args,
-    confirm=None,
-    validate=inspect_runtime,
-    *,
-    expected_current=None,
-    expected_target=None,
-):
+def maintenance(args, confirm=None, validate=inspect_runtime, *, running=False):
     root = absolute_path(args.install_root)
     initial, _ = installed(root)
     safe_destination(root, initial["selection"])
-    with stopped_control(root) as control:
+    # The running controller already holds this lock and fenced it at start.
+    with nullcontext() if running else stopped_control(root) as control:
         current, current_manifest = installed(root)
-        require(
-            expected_current is None or current == expected_current,
-            "Current installation differs from expected current receipt",
-        )
         selection = current["selection"]
         safe_destination(root, selection)
         versions = retained(root, selection)
@@ -1322,16 +1390,12 @@ def maintenance(
             else:
                 require(sha in versions, "Requested version is not retained")
                 target, target_manifest = versions[sha]
-        require(
-            expected_target is None or target == expected_target,
-            "Target installation differs from expected target receipt",
-        )
         if target is not None:
             if args.command != "rollback" or target != current:
                 runtime = validate(selection, target_manifest)
             if target == current:
                 print("Already selected; verified without installation changes.")
-                return
+                return False
         preview = {
             "command": args.command,
             "installation": str(root),
@@ -1363,7 +1427,7 @@ def maintenance(
             accepted = confirm(preview)
         if not accepted:
             print("Cancelled; no installation changes.")
-            return
+            return False
         safe_destination(root, selection)
         require(
             installed(root)[0] == current and retained(root, selection) == versions,
@@ -1381,12 +1445,13 @@ def maintenance(
             print(
                 "Uninstalled verified browser files; lifecycle lock, Hermes and data preserved."
             )
-            return
+            return False
         require(
             validate(selection, target_manifest) == runtime,
             "Runtime changed during confirmation",
         )
-        fence_control(*control)
+        if not running:
+            fence_control(*control)
         private = Path(
             tempfile.mkdtemp(prefix=".hermes-browser-switch-", dir=root.parent)
         )
@@ -1420,9 +1485,10 @@ def maintenance(
             else:
                 shutil.rmtree(private)
         print(f"Selected {target['archive_sha256']}. Nothing started.")
+        return True
 
 
-def lifecycle(args, selection=None, report=None, *, admit_start=None):
+def lifecycle(args, selection=None, report=None, *, update=None):
     if report is None:
 
         def report(result):
@@ -1458,12 +1524,10 @@ def lifecycle(args, selection=None, report=None, *, admit_start=None):
                     "Installation selection differs from controller",
                 )
                 safe_destination(root, receipt["selection"])
-                if admit_start is not None:
-                    admit_start(receipt)
                 fence_control(stream, record)
                 runtime = inspect_runtime(receipt["selection"], manifest)
                 return run_foreground(
-                    args, root, stream, record, receipt, manifest, runtime
+                    args, root, stream, record, receipt, manifest, runtime, update
                 )
             report(record)
             return int(args.command == "stop" and record["state"] != "stopped")

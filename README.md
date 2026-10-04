@@ -18,8 +18,9 @@ Run `hermes-browser start`, then open **http://127.0.0.1:9119/**. Press Ctrl-C t
 
 The footer shows the build loaded in this tab. Click it and press **Update**: the
 launcher downloads the newest release, checks it against its published SHA-256
-and switches to it while Hermes keeps running. Chats and terminals are not
-interrupted. Reload each open tab afterwards to use the new build.
+and switches to it without restarting Hermes. Reload each open tab afterwards:
+until then a tab keeps the previous build and can fail to load parts of it that
+it had not loaded yet.
 
 Anyone who can use the web desktop can start an update. It only ever installs
 the release published at the source the installer used, and it updates the

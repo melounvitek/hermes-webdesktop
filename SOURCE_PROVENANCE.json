@@ -12,7 +12,7 @@
   },
   "browser_updater_integration": {
     "integration_commit": "3ca02ebca81d108f10f022a0c71dc56de8cec908",
-    "scope": "Browser-only build identity, opt-in updater UI, trusted standalone control helpers and tests; preserved the selected source layout and standalone build paths. Backend and optional terminal plugin unchanged. The standalone updater helpers were removed on 2026-10-04, when the launcher began to update the browser build itself."
+    "scope": "Browser-only build identity, opt-in updater UI, trusted standalone control helpers and tests; preserved the selected source layout and standalone build paths. Backend and optional terminal plugin unchanged. That updater UI and the standalone helpers were replaced on 2026-10-04, when the launcher began to update the browser build itself."
   },
   "original_snapshot": "3bffd1e41530bd6288d9477560107906a4763165",
   "sanitized_snapshot": "949e69a87e9d2214a26155c6012e95a4ebc90cd3",

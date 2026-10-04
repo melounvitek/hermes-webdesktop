@@ -116,6 +116,7 @@ def namespace(base):
         "installation",
         "installation.run",
         "installation.history",
+        "installation.updates",
     }
     E.require(
         {p.name for p in base.iterdir()} <= allowed,
@@ -275,6 +276,12 @@ def setup(args):
                 "Download the install.sh from the same trusted issuer and run sh install.sh uninstall "
                 "to confirm owned cleanup before a fresh setup. Do not append flags to the compound download command.",
             )
+            E.require(
+                not os.path.lexists(base / "installation/versions"),
+                "This installation predates updating from the browser. Stop it, run "
+                "hermes-browser uninstall, then run the install command again. "
+                "Hermes and its data stay untouched.",
+            )
             receipt, manifest = E.installed(base / "installation")
             E.require(receipt["selection"] == selection, "Existing selection differs")
             preflight(selection, manifest)
@@ -419,7 +426,41 @@ def manage(args):
                 "Starting in the foreground on loopback. Wait for 'Browser ready'; Ctrl-C stops it.",
                 flush=True,
             )
-            return E.lifecycle(args, selection=selection)
+
+            def requested(preview):
+                # The dashboard page's request replaces the terminal confirmation.
+                E.require(
+                    preview["selection"] == selection,
+                    "Installation selection differs from controller",
+                )
+                return True
+
+            def update():
+                locations()
+                namespace(base)
+                E.require(
+                    owned_control(base, command)[0] == owner,
+                    "Controller changed since start",
+                )
+                with tempfile.TemporaryDirectory(
+                    prefix="hermes-browser-update-"
+                ) as temp:
+                    descriptor, target = current(packaged_source(), Path(temp))
+                    switched = E.maintenance(
+                        argparse.Namespace(
+                            command="update",
+                            install_root=str(root),
+                            archive=str(Path(temp) / "archive"),
+                            launcher=str(Path(temp) / "launcher"),
+                            sha256=descriptor["archive"]["sha256"],
+                        ),
+                        confirm=requested,
+                        validate=preflight,
+                        running=True,
+                    )
+                    return target, switched
+
+            return E.lifecycle(args, selection=selection, update=update)
         if args.command in ("status", "stop"):
 
             def report(result):
