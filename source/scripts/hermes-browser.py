@@ -639,22 +639,17 @@ def control_address(root):
 
 
 def same_user(connection):
-    pid, uid, _ = struct.unpack(
+    _, uid, _ = struct.unpack(
         "3i", connection.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
     )
     require(uid == os.getuid(), "Foreign lifecycle controller/client")
-    return pid
 
 
-def control_request(root, command, *, expected_pid=None):
+def control_request(root, command):
     with socket.socket(socket.AF_UNIX) as connection:
         connection.settimeout(2)
         connection.connect(control_address(root))
-        pid = same_user(connection)
-        require(
-            expected_pid is None or pid == expected_pid,
-            "Lifecycle controller PID differs from expected PID",
-        )
+        same_user(connection)
         connection.sendall(command.encode() + b"\n")
         with connection.makefile("rb") as stream:
             result = load_json(stream.readline(MAX_JSON + 1))
@@ -1360,25 +1355,13 @@ def remove_installation(root):
     sync_directory(root.parent)
 
 
-def maintenance(
-    args,
-    confirm=None,
-    validate=inspect_runtime,
-    *,
-    expected_current=None,
-    expected_target=None,
-    running=False,
-):
+def maintenance(args, confirm=None, validate=inspect_runtime, *, running=False):
     root = absolute_path(args.install_root)
     initial, _ = installed(root)
     safe_destination(root, initial["selection"])
     # The running controller already holds this lock and fenced it at start.
     with nullcontext() if running else stopped_control(root) as control:
         current, current_manifest = installed(root)
-        require(
-            expected_current is None or current == expected_current,
-            "Current installation differs from expected current receipt",
-        )
         selection = current["selection"]
         safe_destination(root, selection)
         versions = retained(root, selection)
@@ -1401,10 +1384,6 @@ def maintenance(
             else:
                 require(sha in versions, "Requested version is not retained")
                 target, target_manifest = versions[sha]
-        require(
-            expected_target is None or target == expected_target,
-            "Target installation differs from expected target receipt",
-        )
         if target is not None:
             if args.command != "rollback" or target != current:
                 runtime = validate(selection, target_manifest)
@@ -1503,7 +1482,7 @@ def maintenance(
         return True
 
 
-def lifecycle(args, selection=None, report=None, *, admit_start=None, update=None):
+def lifecycle(args, selection=None, report=None, *, update=None):
     if report is None:
 
         def report(result):
@@ -1539,8 +1518,6 @@ def lifecycle(args, selection=None, report=None, *, admit_start=None, update=Non
                     "Installation selection differs from controller",
                 )
                 safe_destination(root, receipt["selection"])
-                if admit_start is not None:
-                    admit_start(receipt)
                 fence_control(stream, record)
                 runtime = inspect_runtime(receipt["selection"], manifest)
                 return run_foreground(
