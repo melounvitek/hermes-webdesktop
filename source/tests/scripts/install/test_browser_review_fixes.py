@@ -128,7 +128,14 @@ def test_explicit_profile_home_challenges_stored_profile(distribution):
 
 @pytest.mark.parametrize(
     "fault",
-    ["dotenv", "secrets", "parser", ".update-incomplete", ".lazy-refresh-incomplete"],
+    [
+        "dotenv",
+        "secrets",
+        "marked secrets",
+        "parser",
+        ".update-incomplete",
+        ".lazy-refresh-incomplete",
+    ],
 )
 def test_unstartable_configuration_refused_before_confirmation(distribution, fault):
     d = distribution
@@ -139,6 +146,11 @@ def test_unstartable_configuration_refused_before_confirmation(distribution, fau
         (data / ".env").write_text("TOKEN=" + secret)
     elif fault == "secrets":
         (data / "config.yaml").write_text("secrets:\n  provider: " + secret + "\n")
+    elif fault == "marked secrets":
+        # Only PyYAML is installed here; Hermes read this key as `secrets` then too.
+        (data / "config.yaml").write_text(
+            "\ufeff\ufeff\ufeffsecrets:\n  provider: " + secret + "\n"
+        )
     elif fault == "parser":
         next((backend / "venv/lib").glob("python*/site-packages/yaml")).unlink()
     else:

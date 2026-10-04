@@ -980,6 +980,9 @@ def test_configuration_cannot_override_launch_controls(
         "secrets: {bitwarden: {enabled: false}, command: {enabled: false}}\n",
         "base: &s {secrets: {command: {enabled: true}}}\n<<: *s\n",
         "base: &s {secrets: {bitwarden: {enabled: true}}}\n<<: *s\n",
+        # Hermes reads this key as `secrets`: its decoder and C parser skip all
+        # three byte-order marks.
+        "\ufeff\ufeff\ufeffsecrets: {command: {enabled: true}}\n",
     ],
 )
 def test_external_secret_sources_are_unsupported_not_executed(
@@ -998,6 +1001,8 @@ def test_external_secret_sources_are_unsupported_not_executed(
     [
         "secrets: {bitwarden: {enabled: false, auto_install: true}}\n",
         "secrets: {bitwarden: {enabled: off}}\n",
+        # The C parser rejects this flow mapping; Hermes then uses the pure one.
+        "x: [{url: http://h}]\nsecrets: {bitwarden: {enabled: false}}\n",
         "base: &s {secrets: {bitwarden: {enabled: false}}}\n<<: *s\n",
     ],
 )
