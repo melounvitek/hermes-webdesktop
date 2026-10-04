@@ -830,8 +830,23 @@ def startup_configuration(selection, runtime):
     code = """import sys, site
 try:
     sys.path.extend(sys.argv[2:] + site.getsitepackages([sys.argv[1]]) + site.getsitepackages())
-    import yaml
-    value = yaml.safe_load(sys.stdin.buffer.read())
+    # Mirror Hermes's own reader (hermes_yaml.safe_load, earlier PyYAML's C loader)
+    # on utf-8-sig text; any difference can hide `secrets` from this check.
+    text = sys.stdin.buffer.read().decode("utf-8-sig")
+    try:
+        from ruamel.yaml import YAML, YAMLError
+    except ImportError:
+        import yaml
+        value = yaml.load(text, Loader=getattr(yaml, "CSafeLoader", yaml.SafeLoader))
+    else:
+        def load(pure):
+            parser = YAML(typ="safe", pure=pure)
+            parser.version = (1, 1)
+            return parser.load(text)
+        try:
+            value = load(False)
+        except YAMLError:
+            value = load(True)
     if value is not None and not isinstance(value, dict):
         sys.exit(2)
     secrets = (value or {}).get("secrets")

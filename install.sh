@@ -17,5 +17,5 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 status=$(curl -q --fail --silent --show-error --proto '=https' --max-time 120 --max-filesize 2097152 --write-out '%{http_code}' https://raw.githubusercontent.com/melounvitek/hermes-webdesktop/main/installer.pyz -o "$t/installer.pyz")
 [ "$status" = 200 ] || { echo 'Expected complete HTTPS 200 download; not executed.' >&2; exit 1; }
-printf '%s  %s\n' 9d0f1a49f40a03ef9052bd939c73e58475c08ec3275add76c8dd1ccebeec51eb "$t/installer.pyz" | sha256sum --check --status || { echo 'Installer checksum mismatch; not executed.' >&2; exit 1; }
+printf '%s  %s\n' b5ed70abb381923a52449c7a7bd543f1dbaa1e09f849f07ed922cc569dbc4075 "$t/installer.pyz" | sha256sum --check --status || { echo 'Installer checksum mismatch; not executed.' >&2; exit 1; }
 "$p" -I -S -B "$t/installer.pyz" "$@"

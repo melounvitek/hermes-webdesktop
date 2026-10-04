@@ -1,13 +1,13 @@
 {
   "archive": {
     "name": "hermes-browser.tar.gz",
-    "sha256": "4fadb926f22c906099004459626da0e42d0d0b5302aebd38687bd24586415509",
-    "size": 14623775
+    "sha256": "9f4d253d6e40ee95b03d3be1562f254aa3bfe4ca082dfb900498fb2cda5dfb15",
+    "size": 14623724
   },
   "launcher": {
     "name": "hermes-browser.py",
-    "sha256": "036d646879ca5fa0bcfd64a82c6075ee835098aada83d4cea315fa0a71fa59f8",
-    "size": 58154
+    "sha256": "acec61ec19d1353af5358952c7465d7816702ca38a8d9b7ab63cfc800cfe9392",
+    "size": 58746
   },
   "schema": 1
 }
