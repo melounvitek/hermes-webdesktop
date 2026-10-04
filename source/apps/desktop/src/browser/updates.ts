@@ -36,9 +36,10 @@ async function readStatus(id: string): Promise<BrowserUpdate | null> {
 
     const status = JSON.parse(text) as Record<string, unknown>
 
-    // A status with another id was left by an earlier request.
+    // Another request's status: either left over, or an update the launcher
+    // finishes before it takes this request.
     if (status.id !== id) {
-      return null
+      return status.state === 'running' ? { state: 'working' } : null
     }
 
     if (status.state === 'running') {

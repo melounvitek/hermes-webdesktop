@@ -101,7 +101,7 @@ def test_published_controller_requires_explicit_stopped_reinstall(
     # Today's setup does not read the published versions/ layout: it refuses
     # without changes until the explicit reinstall at the end of this test.
     code, output = terminal(entry(d), d["env"])
-    assert code == 1 and "installation/manifest.json" in output, output
+    assert code == 1 and "run hermes-browser uninstall" in output, output
     assert "Type yes" not in output
     assert "/CURRENT.json" not in d["requests"][requests:]
     assert snapshot(d["base"]) == before
@@ -152,7 +152,7 @@ def test_published_controller_requires_explicit_stopped_reinstall(
         # A downloaded setup must not replace the persistent controller.
         requests = len(d["requests"])
         code, output = terminal(entry(d), d["env"])
-        assert code == 1 and "installation/manifest.json" in output, output
+        assert code == 1 and "run hermes-browser uninstall" in output, output
         record_property("downloaded_repeat_setup", output)
         assert "Type yes" not in output
         assert "/CURRENT.json" not in d["requests"][requests:]

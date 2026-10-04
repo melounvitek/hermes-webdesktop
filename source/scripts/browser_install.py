@@ -276,6 +276,12 @@ def setup(args):
                 "Download the install.sh from the same trusted issuer and run sh install.sh uninstall "
                 "to confirm owned cleanup before a fresh setup. Do not append flags to the compound download command.",
             )
+            E.require(
+                not os.path.lexists(base / "installation/versions"),
+                "This installation predates updating from the browser. Stop it, run "
+                "hermes-browser uninstall, then run the install command again. "
+                "Hermes and its data stay untouched.",
+            )
             receipt, manifest = E.installed(base / "installation")
             E.require(receipt["selection"] == selection, "Existing selection differs")
             preflight(selection, manifest)

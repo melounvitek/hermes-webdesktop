@@ -113,6 +113,22 @@ it.each([
   expect($browserUpdate.get()).toEqual({ state: 'unavailable' })
 })
 
+it('waits while the launcher finishes an update requested from another tab', async () => {
+  files[STATUS] = JSON.stringify({ id: 'a'.repeat(32), state: 'running' })
+  const done = requestBrowserUpdate()
+  await vi.advanceTimersByTimeAsync(20_000)
+  expect($browserUpdate.get()).toEqual({ state: 'working' })
+
+  files[STATUS] = JSON.stringify({ id: 'a'.repeat(32), state: 'updated', release: 'browser-2' })
+  await vi.advanceTimersByTimeAsync(5000)
+  expect($browserUpdate.get()).toEqual({ state: 'working' })
+
+  launcherReports({ state: 'current', release: 'browser-2' })
+  await vi.advanceTimersByTimeAsync(1000)
+  await done
+  expect($browserUpdate.get()).toEqual({ state: 'current', release: 'browser-2' })
+})
+
 it('sends no second request while one is in progress, then a fresh id that ignores the previous status', async () => {
   const first = requestBrowserUpdate()
   await requestBrowserUpdate()
