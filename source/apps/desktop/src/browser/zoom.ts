@@ -26,6 +26,10 @@ export function createBrowserZoom() {
   // but not viewport units. Let the full-window shells inherit that sizing.
   // The body-level canvas is the bot screen's cursor, which noVNC draws itself
   // on devices with touch input and positions in viewport pixels.
+  // The composer clearance and the pinned-prompt clip are measured in viewport
+  // pixels and the status stack is capped in vh, so all three scale with the
+  // zoom and can hide the reply. `html` beats the app's base rule in any
+  // stylesheet order but still loses to its HUD override.
   const style = document.getElementById('hermes-browser-zoom') ?? document.createElement('style')
   style.id = 'hermes-browser-zoom'
   style.textContent = `
@@ -35,6 +39,13 @@ export function createBrowserZoom() {
     [data-radix-popper-content-wrapper] > * { zoom: var(--hermes-browser-zoom); }
     [data-remote-screen] { zoom: calc(1 / var(--hermes-browser-zoom)); }
     body > canvas { zoom: calc(1 / var(--hermes-browser-zoom)); }
+    html [data-chat-surface] {
+      --thread-last-message-clearance: calc(var(--composer-measured-height) / var(--hermes-browser-zoom) + 2rem);
+    }
+    html [data-sticky-prompt-clip] {
+      clip-path: inset(calc(var(--sticky-prompt-clip) / var(--hermes-browser-zoom)) 0 0);
+    }
+    [data-slot="composer-status-stack"] { max-height: calc(40vh / var(--hermes-browser-zoom)); }
   `
   document.head.appendChild(style)
 
