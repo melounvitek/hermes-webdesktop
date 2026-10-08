@@ -136,6 +136,8 @@ async function check(name, body) {
   }
   async function retained(turn) {
     await expect.poll(async () => (await users(page).allInnerTexts()).join('\n').split(turn.text).length - 1).toBe(1)
+    // innerText of a transcript that is mounted but not yet shown has no line breaks.
+    await expect(users(page).filter({ hasText: turn.text })).toBeVisible()
     await expect.poll(async () => (await replies(page).allInnerTexts())
       .filter(text => normalize(text) === normalize(turn.reply)).length).toBe(1)
     assert.deepEqual(rows(turn.profile, turn.text), [[turn.stored, turn.text]])
