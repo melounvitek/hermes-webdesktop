@@ -4,7 +4,11 @@ import { cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 
 const { rpc } = vi.hoisted(() => ({ rpc: vi.fn() }))
-vi.mock('@/store/gateway', () => ({ requestGatewayForAgent: rpc }))
+vi.mock('@/store/gateway', async () => {
+  const { atom } = await import('nanostores')
+
+  return { $gateway: atom<unknown>(null), requestGatewayForAgent: rpc }
+})
 
 import { $notifications, clearNotifications } from '@/store/notifications'
 

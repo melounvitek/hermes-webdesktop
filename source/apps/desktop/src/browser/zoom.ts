@@ -1,5 +1,5 @@
 const STORAGE_KEY = 'hermes:browser:global:uiScalePercent'
-const DEFAULT_PERCENT = 90
+const DEFAULT_PERCENT = 100
 
 function normalizePercent(percent: number): number {
   if (!Number.isFinite(percent) || percent <= 0) {

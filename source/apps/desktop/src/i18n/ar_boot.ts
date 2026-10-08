@@ -78,6 +78,16 @@ export const arBoot = {
     reloadDescription:
       'قد تؤدي إعادة التحميل إلى فقدان المسودات وتغييرات الملفات غير المحفوظة في علامة التبويب هذه. احفظ عملك أولًا. ستُعاد تحميل هذه العلامة فقط؛ ولن يُعاد تشغيل الخادم.'
   },
+  butterbar: {
+    goTo: (index, total) => `عرض الإشعار ${index} من ${total}`,
+    legal: {
+      before: 'يخضع استخدام Hermes Agent لـ',
+      terms: 'شروط الخدمة',
+      between: ' و',
+      privacy: 'سياسة الخصوصية',
+      after: ' الخاصة بنا.'
+    }
+  },
   updates: {
     discontinuedTitle: 'لم يعد إصدار Hermes هذا مدعومًا',
     discontinuedBody: 'لم يعد إصدار Hermes هذا مدعومًا وقد يتوقف عن العمل — ألغِ تثبيته. ستبقى بياناتك على القرص.',
@@ -220,10 +230,6 @@ export const arBoot = {
       noReturn: 'لم تعد الواجهة الخلفية إلى الاتصال. قد لا يكون التحديث قد اكتمل — تحقق من مضيف الواجهة الخلفية.'
     }
   },
-  guidedGreeting: {
-    line: 'أهلا، تفضل بالدخول. أنا Hermes. امنحني دقيقتين لأرتب المكان حولك، ثم نبدأ بشيء تريد إنجازه فعلا.\n\nبداية، بماذا أناديك؟',
-    nameSuggestion: (name: string) => `(يمكنني أن أناديك ${name} إن كنت تفضل ذلك.)`
-  },
   install: {
     stageStates: {
       pending: 'قيد الانتظار',
@@ -267,6 +273,9 @@ export const arBoot = {
     headerDesc: 'اربط مزوّد نماذج لبدء المحادثة. معظم الخيارات تتطلب نقرة واحدة.',
     preparingInstall: 'يُكمل Hermes التثبيت. عادة ما يستغرق ذلك أقل من دقيقة في أول تشغيل.',
     starting: 'جار بدء Hermes...',
+    setupSlowTitle: 'يستغرق الإعداد وقتا أطول من المعتاد.',
+    setupSlowBody: 'لا يزال Hermes قيد البدء في الخلفية.',
+    continueWithoutSetup: 'المتابعة دون إعداد',
     lookingUpProviders: 'جار البحث عن المزوّدين...',
     collapse: 'طي',
     otherProviders: 'مزودون آخرون',
@@ -327,8 +336,6 @@ export const arBoot = {
     copyAuthCode: 'انسخ رمز التفويض وألصقه أدناه.',
     pasteAuthCode: 'ألصق رمز التفويض',
     reopenAuthPage: 'إعادة فتح صفحة التفويض',
-    autoBrowser: provider => `فتحنا ${provider} في المتصفح. صرّح لـ Hermes هناك وسيتم الاتصال تلقائياً دون نسخ أو لصق.`,
-    reopenSignInPage: 'إعادة فتح صفحة تسجيل الدخول',
     waitingAuthorize: 'بانتظار التفويض...',
     externalPending: provider =>
       `${provider} يسجل الدخول عبر أداة سطر الأوامر الخاصة به. شغّل هذا الأمر في الطرفية، ثم عد واختر "سجلت الدخول":`,
@@ -347,5 +354,5 @@ export const arBoot = {
   }
 } satisfies Pick<
   TranslationOverrides,
-  'boot' | 'remoteDisplayBanner' | 'browserUpdates' | 'updates' | 'guidedGreeting' | 'install' | 'onboarding'
+  'boot' | 'remoteDisplayBanner' | 'browserUpdates' | 'butterbar' | 'updates' | 'install' | 'onboarding'
 >

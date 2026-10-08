@@ -10,7 +10,6 @@ import {
   respondToConnectionRequest,
   setConnectionRequest
 } from './connection-request'
-import { prefetchConnectorCatalog } from './connector-catalog'
 import { setPrimaryGateway, setPrimaryGatewayConnectionId } from './gateway'
 import { _resetSessionOwnerHintsForTests, setSessionOwnerHint } from './session'
 
@@ -36,7 +35,7 @@ afterEach(() => {
 })
 
 describe('session connector wire compatibility', () => {
-  it.each(['stock', 'owner'] as const)('lists, retries, wakes and responds on the %s contract', async version => {
+  it.each(['stock', 'owner'] as const)('retries, wakes and responds on the %s contract', async version => {
     const accepted: string[] = []
 
     const rpc = vi.fn(async (method: string, params: Record<string, unknown>) => {
@@ -71,19 +70,13 @@ describe('session connector wire compatibility', () => {
     setSessionOwnerHint('stored', owner)
     setConnectionRequest(request)
 
-    prefetchConnectorCatalog('stored', 'runtime')
-    await vi.waitFor(() =>
-      expect(queryClient.getQueryData(['onboarding', 'connectors.list', 'stored', 'runtime'])).toMatchObject({
-        status: 'ready'
-      })
-    )
     expect(await reissueConnectionTarget(owner, request, 'gmail')).toBe('https://example.com/connect')
     await openConnectionDoneLink('op', vi.fn(), () => 'stored')
     expect(await respondToConnectionRequest(request, { settled_by: 'continue' })).toBe(true)
     expect(accepted).toEqual(
       version === 'stock'
-        ? ['connectors.list', 'connectors.connect', 'connection.respond']
-        : ['connectors.list', 'connectors.connect', 'connectors.operation.wake', 'connection.respond']
+        ? ['connectors.connect', 'connection.respond']
+        : ['connectors.connect', 'connectors.operation.wake', 'connection.respond']
     )
     expect(rpc.mock.calls.filter(([method]) => method === 'connectors.operation.wake')).toHaveLength(1)
   })
