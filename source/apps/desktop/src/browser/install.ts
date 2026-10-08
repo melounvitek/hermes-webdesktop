@@ -1,4 +1,5 @@
 import { createBrowserBridge } from './bridge'
+import { quietPasswordFields } from './password-fields'
 
 declare global {
   interface Window {
@@ -16,4 +17,5 @@ if (import.meta.env.VITE_BROWSER === '1' && !window.hermesDesktop) {
     token: window.__HERMES_SESSION_TOKEN__ ?? '',
     authRequired: window.__HERMES_AUTH_REQUIRED__ === true
   }) as unknown as Window['hermesDesktop']
+  quietPasswordFields()
 }
