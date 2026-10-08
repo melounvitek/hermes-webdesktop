@@ -4,7 +4,7 @@ The [Hermes Desktop](https://hermes-agent.nousresearch.com/desktop), just runnin
 
 ## Install
 
-Requires Linux, a configured Hermes installation updated since 2026-09-29 (`hermes update`), and `curl`:
+Requires Linux, a configured Hermes installation updated since 2026-10-07 (`hermes update`), and `curl`:
 
 ```sh
 curl -qfsS --proto '=https' --max-time 60 --max-filesize 65536 https://raw.githubusercontent.com/melounvitek/hermes-webdesktop/main/install.sh -o hermes-browser-install.sh && sh ./hermes-browser-install.sh
@@ -88,9 +88,10 @@ it does not contain the Hermes backend or other applications. Electron
 code and the optional terminal plugin are retained. Native application packaging
 is not supported by this repository's release workflow.
 
-The renderer follows upstream `main` as of 2026-10-03, including Simple/Advanced mode,
+The renderer follows upstream `main` as of 2026-10-07, including Simple/Advanced mode,
 custom model entry and additional languages. Native package installation/removal
-and account-wide connector management remain unavailable in the browser.
+remains unavailable in the browser. Account-wide connector management, which
+stock Hermes now supports, has not been checked in the browser.
 Session-based connectors retain compatibility with the tested stock backend.
 
 The source came from a sanitized Git subtree import. Private plans, a historical
@@ -114,7 +115,7 @@ npm run build:browser --workspace apps/desktop
 
 Edit `source/apps/desktop/src/`; the output is
 `source/apps/desktop/dist-browser/`. Shared frontend code is in `source/apps/shared/`.
-For wider UI coverage, omit `-- src/browser`. The October 3 update passes the
+For wider UI coverage, omit `-- src/browser`. The October 7 update passes the
 full UI suite. The plain desktop-workspace `dev` and `build` commands are for Electron,
 not the browser edition. Generated frontend API contracts stay committed; updating
 them is a separate compatibility task against stock Hermes.
@@ -147,7 +148,7 @@ local fake model. No provider key is needed:
 scratch=$(mktemp -d)
 stock="$scratch/stock"
 git clone https://github.com/NousResearch/hermes-agent.git "$stock"
-git -C "$stock" checkout --detach 98d8ea79afce089c3ec35eb7f442daef485932b9
+git -C "$stock" checkout --detach 8a33891bdd58c3e0795ebfb277bcdde1003e91ea
 UV_PROJECT_ENVIRONMENT="$scratch/venv" \
   uv sync --project "$stock" --locked --python 3.14 --extra web --no-install-project
 python="$scratch/venv/bin/python"
@@ -169,7 +170,7 @@ From `source/`, run `npm run test:browser-compat:harness --workspace apps/deskto
 to check it. For the broader Chromium API checks, run
 `npm run test:browser-compat --workspace apps/desktop --` followed by
 `--backend-root`, `--python`, `--chrome`, `--web-dist` and a new `--evidence`
-directory, all with absolute paths. The October 3 update passes all five
+directory, all with absolute paths. The October 7 update passes all five
 Chromium groups against the stock revision above, including syntax-highlighting
 recovery, profile isolation and transcript freshness. File editing, conflict
 handling and draft retention also pass separate Chromium checks. This does not
@@ -179,8 +180,9 @@ certify other backend revisions, physical mobile devices or external providers.
 
 The plugin is unchanged. Its integration suite is separate from installer tests
 because it imports stock server/authentication/PTY modules. Against the stock
-revision above it passes 16 of 18 cases; two job-cleanup cases that pass on the
-previous revision fail in the test's signal guard and are not yet investigated.
+revision above it passes 16 of 18 cases; two job-cleanup cases fail in the
+test's signal guard, as on the previous stock revision, and are not yet
+investigated.
 Using the disposable `scratch`, `stock` and `python` from above, after stopping
 the UI fixture:
 
