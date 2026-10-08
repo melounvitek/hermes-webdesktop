@@ -115,7 +115,7 @@ try {
   let result
   try {
     await page.goto(runtime.url)
-    await expect(page.getByRole('button', { name: 'Gateway ready', exact: true })).toBeVisible({ timeout: 60000 })
+    await expect(page.getByRole('button', { name: 'Backend ready', exact: true })).toBeVisible({ timeout: 60000 })
     await writeFile(holdFile, original)
     await send(original)
     await expect.poll(() => events().some(e => e.type === 'message.delta'), { timeout: 60000 }).toBe(true)

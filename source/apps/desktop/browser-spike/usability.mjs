@@ -337,16 +337,16 @@ try {
 
   await check('scale-and-menus', async page => {
     await menuClick(page)
-    const baseline = await geometry(page, 90)
-    const measurements = [{ percent: 90, ...baseline }]
-    for (const percent of [100, 125]) {
+    const baseline = await geometry(page, 100)
+    const measurements = [{ percent: 100, ...baseline }]
+    for (const percent of [90, 125]) {
       await openSettingsSection(page, 'Appearance', 'Typography')
       // Chat Text Size offers the same percentages.
       await page.locator('[id$=".ui-scale"]').getByRole('button', { name: `${percent}%`, exact: true }).click()
       await page.getByRole('button', { name: 'Close settings', exact: true }).click()
       const measured = await geometry(page, percent)
       measurements.push({ percent, ...measured })
-      assert.ok(Math.abs(measured.width / baseline.width - percent / 90) < 0.02)
+      assert.ok(Math.abs(measured.width / baseline.width - percent / 100) < 0.02)
       await menuClick(page)
     }
     await page.reload()

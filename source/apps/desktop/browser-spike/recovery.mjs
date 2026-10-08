@@ -260,7 +260,7 @@ async function check(fixture, name, body, { ticket503 = false, shiki503 = false 
   const holdFile = path.join(fixture.runtime.run_dir, 'hold-stream')
   const release = () => rm(holdFile, { force: true })
   const ready = () =>
-    expect(page.getByRole('button', { name: 'Gateway ready', exact: true })).toBeVisible({ timeout: 30000 })
+    expect(page.getByRole('button', { name: 'Backend ready', exact: true })).toBeVisible({ timeout: 30000 })
   const completion = turn =>
     events(turn.start).find(e => e.type === 'message.complete' && e.payload.text?.includes(turn.text))
   async function visibleReply(text) {
@@ -326,7 +326,7 @@ async function check(fixture, name, body, { ticket503 = false, shiki503 = false 
   async function submit(text, hold = false) {
     if (hold) await writeFile(holdFile, name)
     const start = frames.length
-    await expect(page.getByRole('button', { name: 'Gateway ready', exact: true })).toBeVisible({ timeout: 30000 })
+    await expect(page.getByRole('button', { name: 'Backend ready', exact: true })).toBeVisible({ timeout: 30000 })
     await input().fill(text)
     await page.getByRole('button', { name: 'Send', exact: true }).click()
     await expect.poll(() => messageRows(fixture, text).length).toBe(1)
@@ -631,7 +631,7 @@ try {
         .poll(
           async () =>
             (await reconnect.isVisible()) ||
-            (await page.getByRole('button', { name: 'Gateway ready', exact: true }).isVisible()),
+            (await page.getByRole('button', { name: 'Backend ready', exact: true }).isVisible()),
           { timeout: 30000 }
         )
         .toBe(true)
