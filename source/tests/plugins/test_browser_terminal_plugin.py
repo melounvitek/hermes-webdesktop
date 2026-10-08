@@ -299,7 +299,7 @@ def test_profile_ownership_limits_expiry_and_shutdown(tmp_path, backend):
 
 @pytest.mark.linux_only
 @pytest.mark.parametrize("options,status", [
-    ({"installed": False}, 405),  # Stock SPA fallback owns unknown HTTP paths.
+    ({"installed": False}, 404),  # Stock answers unknown plugin API paths ahead of the SPA fallback.
     ({"enabled": False}, 404),
     ({"bound_host": "0.0.0.0"}, 401),
     ({"settings": {"max_sessions": 0}}, 503),
