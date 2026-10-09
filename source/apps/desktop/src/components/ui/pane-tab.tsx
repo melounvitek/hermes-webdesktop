@@ -19,11 +19,15 @@ const TAB =
 
 // Full height: with the strip's rule removed there is no last-pixel row to
 // leave uncovered, so tabs fill the bar and no sliver of gutter shows through.
-const TAB_HORIZONTAL = 'h-full min-w-0 max-w-48 not-first:border-l not-first:border-l-(--ui-stroke-quaternary)'
+// Never wider than the strip either: the close button sits on the tab's right
+// edge, and a long label in a narrow strip scrolled it out of reach.
+const TAB_HORIZONTAL =
+  'h-full min-w-0 max-w-[min(12rem,100%)] not-first:border-l not-first:border-l-(--ui-stroke-quaternary)'
 
 // A closeable tab's floor keeps short labels left of the close button.
-// A floor, not padding — a tab already wider than it pays nothing.
-const TAB_CLOSEABLE = 'min-w-13'
+// A floor, not padding — a tab already wider than it pays nothing. Capped at
+// the strip's width like the max, or it would override that limit.
+const TAB_CLOSEABLE = 'min-w-[min(3.25rem,100%)]'
 
 const TAB_VERTICAL =
   'w-full max-h-48 justify-center not-first:border-t not-first:border-t-(--ui-stroke-quaternary) [writing-mode:vertical-rl]'
