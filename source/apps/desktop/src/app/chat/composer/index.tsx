@@ -94,6 +94,7 @@ import {
   deleteSelectionInEditor,
   insertComposerContentsAtCaret,
   normalizeComposerEditorDom,
+  placeCaretEnd,
   RICH_INPUT_SLOT
 } from './rich-editor'
 import { useComposerScope, useComposerSurfaceId } from './scope'
@@ -1176,6 +1177,19 @@ export function ChatBar({
             closeTrigger()
           }, 80)
         }}
+        onClick={event => {
+          // Chrome's triple tap on an empty editor selects into the reply above
+          // it, which leaves the editor focused without a caret.
+          const editor = event.currentTarget
+          const selection = window.getSelection()
+
+          if (
+            document.activeElement === editor &&
+            !(editor.contains(selection?.anchorNode ?? null) && editor.contains(selection?.focusNode ?? null))
+          ) {
+            placeCaretEnd(editor)
+          }
+        }}
         onCompositionEnd={event => {
           composingRef.current = false
 
@@ -1455,6 +1469,23 @@ export function ChatBar({
                   dragActive && COMPOSER_DROP_ACTIVE_CLASS
                 )}
                 data-slot="composer-surface"
+                onClick={event => {
+                  // The editor is one line tall; a tap elsewhere on the bar still means "type here".
+                  const editor = editorRef.current
+
+                  if (
+                    editor &&
+                    !inputDisabled &&
+                    event.target instanceof Element &&
+                    !event.target.closest(
+                      'a, button, input, label, select, textarea, [contenteditable], [role="button"], [role="menuitem"]'
+                    ) &&
+                    window.getSelection()?.isCollapsed !== false
+                  ) {
+                    editor.focus({ preventScroll: true })
+                    placeCaretEnd(editor)
+                  }
+                }}
                 ref={composerSurfaceRef}
               >
                 <div aria-hidden className={composerInputBacking} />
