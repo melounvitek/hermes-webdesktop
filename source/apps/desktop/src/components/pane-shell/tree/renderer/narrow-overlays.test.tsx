@@ -79,6 +79,16 @@ const click = (target: HTMLElement) => {
   fireEvent.click(target, { button: 0 })
 }
 
+const touch = { button: 0, pointerType: 'touch' }
+
+// A touch dismissal waits for the tap's own click handlers.
+const tap = async (target: HTMLElement) => {
+  fireEvent.pointerDown(target, touch)
+  fireEvent.pointerUp(target, touch)
+  fireEvent.click(target, { button: 0 })
+  await act(() => new Promise(resolve => setTimeout(resolve)))
+}
+
 describe('browser narrow sidebar dismissal', () => {
   it.each([true, false])(
     'dismisses only the browser reveal without eating the outside action (browser=%s)',
@@ -102,7 +112,7 @@ describe('browser narrow sidebar dismissal', () => {
     }
   )
 
-  it.each([false, true])('preserves inside/portalled actions and higher layers (keepAlive=%s)', keepAlive => {
+  it.each([false, true])('preserves inside/portalled actions and higher layers (keepAlive=%s)', async keepAlive => {
     registerPane(
       'files',
       'Files',
@@ -144,6 +154,8 @@ describe('browser narrow sidebar dismissal', () => {
     click(draft)
     click(getByText('Portalled action'))
     click(getByText('Stopped action'))
+    await tap(getByText('Portalled action'))
+    await tap(getByText('Stopped action'))
     fireEvent.wheel(getByText('Outside action'))
     fireEvent.pointerDown(getByText('Outside action'), { button: 0 })
     fireEvent.pointerCancel(getByText('Outside action'))
@@ -187,6 +199,53 @@ describe('browser narrow sidebar dismissal', () => {
     click(getByText('Outside action'))
     expect(queryByTestId('sessions-body')).toBeNull()
     expect($layoutTree.get()).toBe(dockedTree)
+  })
+
+  it('dismisses on any outside touch, including swipes and stopped taps', async () => {
+    const stoppedAction = vi.fn()
+
+    const { getByText, getByTestId, queryByTestId } = render(
+      <>
+        <NarrowOverlays />
+        <p>Reply text</p>
+        <button
+          onClick={event => {
+            event.stopPropagation()
+            stoppedAction()
+          }}
+        >
+          Stopped action
+        </button>
+        <button
+          onClick={() => {
+            window.dispatchEvent(new CustomEvent(PANE_TOGGLE_REVEAL_EVENT, { detail: { id: 'sessions' } }))
+          }}
+        >
+          Toggle sessions
+        </button>
+      </>
+    )
+
+    // A swipe scrolls the chat: the browser cancels the pointer and never clicks.
+    revealPane('sessions')
+    fireEvent.pointerDown(getByText('Reply text'), touch)
+    fireEvent.pointerCancel(getByText('Reply text'), touch)
+    expect(queryByTestId('sessions-body')).toBeNull()
+
+    revealPane('sessions')
+    await tap(getByText('Stopped action'))
+    expect(stoppedAction).toHaveBeenCalledOnce()
+    expect(queryByTestId('sessions-body')).toBeNull()
+
+    revealPane('sessions')
+    await tap(getByText('Toggle sessions'))
+    expect(queryByTestId('sessions-body')).toBeNull()
+    await tap(getByText('Toggle sessions'))
+    expect(getByTestId('sessions-body')).toBeTruthy()
+
+    await tap(getByTestId('sessions-body'))
+    await tap(overlayTab('bots')!)
+    expect(getByTestId('bots-body')).toBeTruthy()
   })
 })
 

@@ -115,10 +115,35 @@ export function NarrowOverlays() {
     // Menus/dialogs can close on pointerdown, before the click reaches us.
     let childOwnedGesture = false
     let gestureReveal: typeof reveal = null
+    // Any outside touch dismisses: it may scroll instead of clicking, and its
+    // click may be stopped, open a menu or leave a text selection behind.
+    let outsideTouch = false
 
-    const onPointerDown = () => {
+    // Keep any pane opened/switched by this gesture, including non-titlebar controls.
+    const dismiss = () => setReveal(current => (current === gestureReveal ? null : current))
+
+    const onPointerDown = (event: PointerEvent) => {
       gestureReveal = currentReveal.current
       childOwnedGesture = childSurfaceOpen() || !isTopEscapeLayer(ESCAPE_PRIORITY.narrowOverlay)
+      outsideTouch =
+        event.pointerType === 'touch' &&
+        !childOwnedGesture &&
+        !(event.target instanceof Element && event.target.closest('[data-narrow-overlay], [data-pane-overlay]'))
+    }
+
+    const onPointerCancel = () => {
+      if (outsideTouch) {
+        outsideTouch = false
+        dismiss()
+      }
+    }
+
+    const onTouchClick = (event: MouseEvent) => {
+      if (outsideTouch) {
+        outsideTouch = false
+        // After the click's own handlers have run, even if they stopped it.
+        window.setTimeout(() => insideClick.current !== event && dismiss())
+      }
     }
 
     const onClick = (event: MouseEvent) => {
@@ -134,16 +159,19 @@ export function NarrowOverlays() {
         return
       }
 
-      // Keep any pane opened/switched by this gesture, including non-titlebar controls.
       // Do not consume the click: focusing/editing the uncovered chat still works.
-      setReveal(current => (current === gestureReveal ? null : current))
+      dismiss()
     }
 
     document.addEventListener('pointerdown', onPointerDown, true)
+    document.addEventListener('pointercancel', onPointerCancel, true)
+    window.addEventListener('click', onTouchClick, true)
     document.addEventListener('click', onClick)
 
     return () => {
       document.removeEventListener('pointerdown', onPointerDown, true)
+      document.removeEventListener('pointercancel', onPointerCancel, true)
+      window.removeEventListener('click', onTouchClick, true)
       document.removeEventListener('click', onClick)
     }
   }, [browser, narrow])
