@@ -144,3 +144,64 @@ it('pairs only the queue projection, preserving equal corrections and different 
     expect(new Set(current.map(row => row.id)).size).toBe(current.length)
   }
 })
+
+it('keeps the live view of a running turn that already shows every stored tool call', () => {
+  const prompt = 'Run the checks'
+  const call = (id: string) => ({ id, type: 'function', function: { name: 'terminal', arguments: '{}' } })
+  const tool = (toolCallId: string, done: boolean) => ({
+    type: 'tool-call' as const,
+    toolCallId,
+    toolName: 'terminal',
+    args: {},
+    argsText: '{}',
+    ...(done ? { result: 'done', completedAt: 3 } : {})
+  })
+
+  // Stored before each tool runs: the running tool has no result row yet.
+  const rows: SessionMessage[] = [
+    { id: 11, role: 'user', content: prompt },
+    { id: 12, role: 'assistant', content: 'Step 1.', tool_calls: [call('call-1')] },
+    { id: 13, role: 'tool', content: 'done', tool_call_id: 'call-1' },
+    { id: 14, role: 'assistant', content: 'Step 2.', tool_calls: [call('call-2')] }
+  ]
+
+  const live: ChatMessage[] = [
+    { id: 'local-user', role: 'user', rowId: 11, parts: [{ type: 'text', text: prompt }] },
+    assistant('live-1', '', {
+      parts: [
+        { type: 'reasoning', text: 'First, look.' },
+        { type: 'text', text: 'Step 1. ' }
+      ]
+    }),
+    assistant('live-2', '', {
+      parts: [tool('call-1', true), { type: 'reasoning', text: 'Then run.' }, { type: 'text', text: '\n\nStep 2.' }]
+    }),
+    assistant('live-3', '', { parts: [tool('call-2', false)], pending: true })
+  ]
+
+  const projection: Pick<SessionResumeResult, 'inflight' | 'queued' | 'session_id'> = {
+    session_id: 'runtime',
+    inflight: { user: prompt, assistant: 'Step 1. \n\nStep 2.', streaming: true }
+  }
+
+  const current = reconcilePersistedLiveTurn(toChatMessages(rows), live, rows, projection)!
+  expect(current.slice(1)).toEqual(live.slice(1))
+
+  // A live view that missed events loses to the stored rows: here the running
+  // tool, then the first tool's completion.
+  const behind = reconcilePersistedLiveTurn(toChatMessages(rows), live.slice(0, 3), rows, projection)!
+  expect(behind.flatMap(row => row.parts).some(part => part.type === 'tool-call' && part.toolCallId === 'call-2')).toBe(
+    true
+  )
+
+  const missedCompletion = live.map(row =>
+    row.id === 'live-2' ? { ...row, parts: [tool('call-1', false), ...row.parts.slice(1)] } : row
+  )
+
+  const repaired = reconcilePersistedLiveTurn(toChatMessages(rows), missedCompletion, rows, projection)!
+  expect(
+    repaired
+      .flatMap(row => row.parts)
+      .some(part => part.type === 'tool-call' && part.toolCallId === 'call-1' && part.result !== undefined)
+  ).toBe(true)
+})

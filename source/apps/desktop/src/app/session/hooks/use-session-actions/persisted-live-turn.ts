@@ -1,5 +1,11 @@
 import { textWithoutReferenceLines } from '@/components/assistant-ui/reference-kinds'
-import { assistantTextPart, type ChatMessage, chatMessageText, textPart } from '@/lib/chat-messages'
+import {
+  assistantTextPart,
+  type ChatMessage,
+  type ChatMessagePart,
+  chatMessageText,
+  textPart
+} from '@/lib/chat-messages'
 import { withoutCoveredAssistantPrefix } from '@/lib/chat-messages/coverage'
 import { parseErrorSurface } from '@/lib/error-surface'
 import type { SessionMessage, SessionResumeResult } from '@/types/hermes'
@@ -159,6 +165,30 @@ function unrepresentedText(snapshot: string, stored: string): string {
   return snapshot
 }
 
+type ToolCallPart = Extract<ChatMessagePart, { type: 'tool-call' }>
+
+const toolParts = (messages: ChatMessage[]) =>
+  messages.flatMap(message => message.parts.filter((part): part is ToolCallPart => part.type === 'tool-call'))
+
+const compactText = (text: string) => text.replace(/\s+/g, '')
+
+/** Stored rows of a running turn lag a live view that kept receiving its events:
+ *  a running tool has no result row yet, and thinking and timings are not stored.
+ *  Trust the live view only when it holds every stored tool call and result and
+ *  the snapshot's text, compared without whitespace (stored and streamed text
+ *  differ in separators). */
+function liveViewIsCurrent(live: ChatMessage[], durable: ChatMessage[], snapshot: string): boolean {
+  const liveTools = new Map(toolParts(live).map(part => [part.toolCallId, part]))
+
+  return (
+    toolParts(durable).every(part => {
+      const local = liveTools.get(part.toolCallId)
+
+      return local !== undefined && (part.result === undefined || local.result !== undefined)
+    }) && compactText(live.map(chatMessageText).join('')).startsWith(compactText(snapshot))
+  )
+}
+
 function snapshotIntervals(inflight: NonNullable<SessionResumeResult['inflight']>): string[] {
   const text = inflight.assistant ?? ''
   const corrections = inflight.corrections ?? []
@@ -215,11 +245,7 @@ export function reconcilePersistedLiveTurn(
   let localStart = previous.findIndex(message => message.role === 'user' && message.rowId === turn.prompt.rowId)
 
   if (localStart < 0) {
-    const tools = new Set(
-      turn.messages.flatMap(message =>
-        message.parts.flatMap(part => (part.type === 'tool-call' ? [part.toolCallId] : []))
-      )
-    )
+    const tools = new Set(toolParts(turn.messages).map(part => part.toolCallId))
 
     // Optimistic prompt rows have no durable id yet. Shared tool identity after
     // the matching prompt can anchor the turn, never the prompt text alone.
@@ -274,8 +300,20 @@ export function reconcilePersistedLiveTurn(
           ]
         : []
 
-    const local = pairedLocal ? withoutCoveredAssistantPrefix(durable, cached.intervals[index] ?? []) : []
-    result.push(...durable, ...mergeLiveAssistantRun(projected, local))
+    const live = cached.intervals[index] ?? []
+
+    if (
+      final &&
+      inflight.streaming &&
+      pairedLocal &&
+      live.length &&
+      liveViewIsCurrent(live, durable, snapshots[index])
+    ) {
+      result.push(...live)
+    } else {
+      const local = pairedLocal ? withoutCoveredAssistantPrefix(durable, live) : []
+      result.push(...durable, ...mergeLiveAssistantRun(projected, local))
+    }
 
     if (!final) {
       const correction = stored.users[index] ?? {
