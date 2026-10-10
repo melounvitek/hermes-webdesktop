@@ -41,6 +41,9 @@ import { clearTabSelection } from '../tab-selection'
 import { type EngineZone, HighlightedZones, primaryZone, type ZoneRect } from '../zones-engine'
 
 const DRAG_THRESHOLD_PX = 4
+// Beyond a finger's tap wobble and the browser's scroll slop: a scroll cancels
+// the press before it can become a drag.
+const TOUCH_DRAG_THRESHOLD_PX = 16
 
 /** Normalized radius of the elliptical CENTER region (stack/link). Outside it
  *  the drop targets the dominant-axis edge — the boundary curves with the
@@ -226,6 +229,7 @@ export function startDragSession(e: ReactPointerEvent<HTMLElement>, spec: DragSe
   const { pointerId } = e
   const sx = e.clientX
   const sy = e.clientY
+  const threshold = e.pointerType === 'touch' ? TOUCH_DRAG_THRESHOLD_PX : DRAG_THRESHOLD_PX
   const restoreCursor = document.body.style.cursor
   const restoreSelect = document.body.style.userSelect
   let engaged = false
@@ -287,7 +291,7 @@ export function startDragSession(e: ReactPointerEvent<HTMLElement>, spec: DragSe
 
   const processMove = (x: number, y: number, shift: boolean) => {
     if (!engaged) {
-      if (Math.hypot(x - sx, y - sy) < DRAG_THRESHOLD_PX) {
+      if (Math.hypot(x - sx, y - sy) < threshold) {
         return
       }
 
@@ -319,7 +323,7 @@ export function startDragSession(e: ReactPointerEvent<HTMLElement>, spec: DragSe
     raf ||= requestAnimationFrame(flushMove)
   }
 
-  const finish = (commit: boolean) => {
+  const finish = (commit: boolean, clickFollows = true) => {
     if (raf) {
       cancelAnimationFrame(raf)
       raf = 0
@@ -353,7 +357,9 @@ export function startDragSession(e: ReactPointerEvent<HTMLElement>, spec: DragSe
     window.removeEventListener('keydown', onKey, true)
 
     if (engaged) {
-      suppressDragClick(commit)
+      if (clickFollows) {
+        suppressDragClick(commit)
+      }
 
       if (commit) {
         spec.onCommit($dropHint.get())
@@ -368,7 +374,8 @@ export function startDragSession(e: ReactPointerEvent<HTMLElement>, spec: DragSe
   }
 
   const onUp = () => finish(true)
-  const onCancel = () => finish(false)
+  // The browser took the gesture over (a touch scroll): no click will follow.
+  const onCancel = () => finish(false, false)
 
   // Esc aborts the drag — the target selection vanishes and nothing moves,
   // the universal "never mind" for an in-flight drag. Capture-phase + stop so
