@@ -4,7 +4,7 @@ import { MemoryRouter } from 'react-router'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { I18nProvider } from '@/i18n'
-import { mainComposerScope } from '@/store/composer'
+import { clearSessionDraft, freshDraftScope, mainComposerScope } from '@/store/composer'
 
 import { RICH_INPUT_SLOT } from './rich-editor'
 import type { ChatBarState } from './types'
@@ -48,6 +48,7 @@ function Harness() {
 afterEach(() => {
   cleanup()
   mainComposerScope.clear()
+  clearSessionDraft(freshDraftScope())
 })
 
 function renderComposer() {
@@ -92,5 +93,28 @@ describe('tapping the composer on a phone', () => {
 
     expect(document.activeElement).toBe(editor)
     expect(caretInside(editor)).toBe(true)
+  })
+
+  // iPhone Safari drops a tap when the editable it lands on changes under the finger.
+  it('leaves an empty editor untouched when pressed', () => {
+    const { editor } = renderComposer()
+    const observer = new MutationObserver(() => {})
+
+    observer.observe(editor, { childList: true, subtree: true })
+    fireEvent.pointerDown(editor)
+    fireEvent.pointerDown(editor)
+
+    expect(observer.takeRecords()).toEqual([])
+    observer.disconnect()
+  })
+
+  it('still syncs typing the input flush has not caught up with', async () => {
+    const { editor, findByRole, queryByRole } = renderComposer()
+
+    editor.textContent = 'hello'
+    expect(queryByRole('button', { name: 'Send' })).toBeNull()
+    fireEvent.pointerDown(editor)
+
+    expect(await findByRole('button', { name: 'Send' })).toBeTruthy()
   })
 })

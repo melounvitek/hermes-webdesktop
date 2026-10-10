@@ -1398,7 +1398,10 @@ export function ChatBar({
               // dispatches mousedown), so the gate is open when the click
               // hit-tests. Mid-IME-composition the DOM holds uncommitted
               // preedit — compositionend owns that flush, so skip.
-              if (composingRef.current) {
+              // An empty editor has nothing to sync, and normalizing it swaps its
+              // placeholder <br>: iPhone Safari drops a tap whose target changes
+              // under the finger.
+              if (composingRef.current || (!editorRef.current?.textContent && !draftRef.current)) {
                 return
               }
 
