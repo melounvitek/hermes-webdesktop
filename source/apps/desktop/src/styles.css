@@ -10,6 +10,29 @@
   font-size: var(--titlebar-icon-size);
 }
 
+/* Touch screens: titlebar tools take taps across the whole 34px band without
+   moving, and the sidebar toggle from the screen edge to the tab strip. */
+@media (pointer: coarse) {
+  [data-titlebar-cluster] .titlebar-icon-button {
+    position: relative;
+  }
+
+  [data-titlebar-cluster] .titlebar-icon-button::before {
+    content: '';
+    position: absolute;
+    inset: -5px 0;
+  }
+
+  [data-titlebar-cluster='left'] > .titlebar-icon-button:first-child::before {
+    left: -14px;
+    right: -12px;
+  }
+
+  [data-titlebar-cluster='left'] > .titlebar-icon-button:first-child .codicon[class*='codicon-'] {
+    font-size: 18px !important;
+  }
+}
+
 /* v4 gates hover: on @media (hover: hover). Some Windows hosts with a
    digitizer answer false even with a mouse, so hover-reveal controls stay
    opacity-0 (clickable, invisible). Trust :hover itself. */
