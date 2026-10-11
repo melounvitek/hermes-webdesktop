@@ -195,6 +195,55 @@ function messageRows(fixture, text, role = 'user') {
   )
 }
 
+// A MEDIA: attachment on the gateway must play in the page's own player.
+async function attachedAudioPlays(fixture, { page, ready }) {
+  const seconds = 2
+  const rate = 8000
+  const wav = Buffer.alloc(44 + seconds * rate * 2) // 16-bit mono PCM silence
+  wav.write('RIFF', 0)
+  wav.writeUInt32LE(wav.length - 8, 4)
+  wav.write('WAVEfmt ', 8)
+  wav.writeUInt32LE(16, 16)
+  wav.writeUInt16LE(1, 20)
+  wav.writeUInt16LE(1, 22)
+  wav.writeUInt32LE(rate, 24)
+  wav.writeUInt32LE(rate * 2, 28)
+  wav.writeUInt16LE(2, 32)
+  wav.writeUInt16LE(16, 34)
+  wav.write('data', 36)
+  wav.writeUInt32LE(wav.length - 44, 40)
+  const file = path.join(fixture.runtime.hermes_home, 'cache', 'audio', 'spike-tts.wav')
+  await mkdir(path.dirname(file), { recursive: true })
+  await writeFile(file, wav)
+  const media = []
+  page.on('response', response => {
+    if (response.request().resourceType() === 'media') {
+      media.push({ status: response.status(), type: response.headers()['content-type'] })
+    }
+  })
+  await ready()
+  await page.getByRole('textbox', { name: 'Message', exact: true }).fill(`MEDIA:${file}`)
+  await page.getByRole('button', { name: 'Send', exact: true }).click()
+  const audio = page.locator('[data-slot="aui_assistant-message-content"] audio')
+  await expect(audio).toBeAttached({ timeout: 60000 })
+  // A finished reply re-renders its markdown, replacing a player that streamed in.
+  await expect(page.getByRole('button', { name: 'Stop', exact: true }).first()).not.toBeVisible({ timeout: 30000 })
+  await expect
+    .poll(() => audio.evaluate(a => (a.error ? `error ${a.error.code}` : a.readyState ? 'loaded' : 'loading')))
+    .toBe('loaded')
+  assert.equal(await audio.evaluate(a => a.duration), seconds)
+  await audio.evaluate(a => {
+    a.muted = true
+    return a.play()
+  })
+  await expect.poll(() => audio.evaluate(a => a.currentTime)).toBeGreaterThan(0)
+  await expect(page.getByRole('button', { name: 'Open audio file' })).toHaveCount(0)
+  assert.ok(
+    media.some(r => r.status === 206 && r.type.startsWith('audio/')),
+    `The player must stream byte ranges from the backend: ${JSON.stringify(media)}`
+  )
+}
+
 const occurrences = (text, original) => text.split(original).length - 1
 const normalize = text => text.replace(/\s+/g, ' ').trim()
 const messageText = content => typeof content === 'string' ? content : (content ?? []).map(p => p.text || '').join('\n')
@@ -567,7 +616,8 @@ try {
     'network-loss-during-stream',
     'backend-restart-interrupted-turn',
     'backend-restart-token-rotation',
-    'user-interrupted-turn'
+    'user-interrupted-turn',
+    'token-media-playback'
   ].some(name => selected.test(name))
     ? await startFixture()
     : null
@@ -645,11 +695,13 @@ try {
     await page.getByRole('button', { name: 'Stop', exact: true }).first().click()
     await followup(turn)
   })
+  await check(token, 'token-media-playback', body => attachedAudioPlays(token, body))
   const cookie = [
     'expired-cookie-relogin',
     'cookie-rest401-connected-ws',
     'cookie-backend-restart',
-    'cold-boot-ticket503'
+    'cold-boot-ticket503',
+    'cookie-media-playback'
   ].some(name => selected.test(name))
     ? await startFixture(true)
     : null
@@ -739,6 +791,7 @@ try {
     },
     { ticket503: true }
   )
+  await check(cookie, 'cookie-media-playback', body => attachedAudioPlays(cookie, body))
   assert.ok(results.length, 'No recovery cases matched the filter')
 } catch (error) {
   failure = error.stack
