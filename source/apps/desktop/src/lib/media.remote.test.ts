@@ -192,6 +192,48 @@ describe('resolveMediaPlaybackSrc', () => {
     )
   })
 
+  it('streams browser OAuth media from the same origin, authenticated by the login cookie', async () => {
+    vi.stubGlobal('window', { hermesDesktop: { api: vi.fn(), browser: { authRequired: true } } })
+    $connection.set({
+      authMode: 'oauth',
+      baseUrl: 'https://hermes.test',
+      mode: 'remote',
+      profile: 'voice reviewer',
+      token: ''
+    } as never)
+
+    const src = new URL(
+      await resolveMediaPlaybackSrc('file:///home/u/.hermes/cache/audio/tts%201.mp3'),
+      'https://hermes.test'
+    )
+
+    expect(src.origin + src.pathname).toBe('https://hermes.test/api/files/stream')
+    expect(Object.fromEntries(src.searchParams)).toEqual({
+      path: '/home/u/.hermes/cache/audio/tts 1.mp3',
+      profile: 'voice reviewer'
+    })
+  })
+
+  it('plays browser token-mode media through the one route that accepts a query token', async () => {
+    vi.stubGlobal('window', { hermesDesktop: { api: vi.fn(), browser: { authRequired: false } } })
+    $connection.set({
+      authMode: 'token',
+      baseUrl: 'https://hermes.test',
+      mode: 'remote',
+      profile: 'default',
+      token: 's e/cret'
+    } as never)
+
+    const src = new URL(await resolveMediaPlaybackSrc('/root/outputs/render.mp4'), 'https://hermes.test')
+
+    expect(src.origin + src.pathname).toBe('https://hermes.test/api/files/download')
+    expect(Object.fromEntries(src.searchParams)).toEqual({
+      path: '/root/outputs/render.mp4',
+      profile: 'default',
+      token: 's e/cret'
+    })
+  })
+
   it('uses the Electron streaming protocol for local desktop video', async () => {
     vi.stubGlobal('window', { hermesDesktop: { api: vi.fn() } })
     $connection.set({ mode: 'local' } as never)

@@ -5,6 +5,7 @@ import type { HermesConnection } from '@/global'
 import { translateNow } from '@/i18n'
 import { desktopFsCacheKey, isReadFileErrorResult, readDesktopFileDataUrl } from '@/lib/desktop-fs'
 import { LruCache } from '@/lib/lru-cache'
+import { isBrowserClient } from '@/lib/platform'
 import { capitalize } from '@/lib/text'
 import { notify, notifyError } from '@/store/notifications'
 import { $connection } from '@/store/session'
@@ -239,6 +240,23 @@ export async function resolveMediaPlaybackSrc(path: string): Promise<string> {
   }
 
   if (window.hermesDesktop && ['audio', 'video'].includes(mediaKind(path))) {
+    // Browsers cannot load the Electron protocol. Their same-origin media
+    // requests send the login cookie; a page token works only on download.
+    if (isBrowserClient()) {
+      const conn = $connection.get()
+      const params = new URLSearchParams({ path: filePathFromMediaPath(path) })
+
+      if (conn?.profile) {
+        params.set('profile', conn.profile)
+      }
+
+      if (conn?.token) {
+        params.set('token', conn.token)
+      }
+
+      return `/api/files/${conn?.token ? 'download' : 'stream'}?${params}`
+    }
+
     return isRemoteGateway() ? mediaGatewayStreamUrl(path) : mediaStreamUrl(path)
   }
 
