@@ -3830,6 +3830,7 @@ export const ruOverrides = {
       dismissError: 'Скрыть ошибку',
       filesChanged: count => `${count} ${RU_PLURAL(count, 'файл изменён', 'файла изменено', 'файлов изменено')}`,
       reviewChanges: 'Проверить',
+      readAloudBlocked: 'Браузер заблокировал звук. Нажмите «Зачитать вслух» у ответа, чтобы его прослушать.',
       readAloudFailed: 'Не удалось зачитать вслух',
       preparingAudio: 'Подготовка аудио...',
       stopReading: 'Остановить чтение',

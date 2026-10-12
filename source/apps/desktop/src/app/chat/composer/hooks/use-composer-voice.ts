@@ -437,6 +437,7 @@ export function useComposerVoice({
   }, [t])
 
   useAutoSpeakReplies({
+    blockedLabel: t.assistant.thread.readAloudBlocked,
     conversationActive: voiceConversationActive,
     failureLabel: t.assistant.thread.readAloudFailed,
     markSpoken: consumePendingResponse,

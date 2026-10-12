@@ -4,7 +4,9 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { assistantTextPart, type ChatMessage, chatMessageText } from '@/lib/chat-messages'
 import { clearSpokenRepliesForTests, markAssistantIdSpoken, resolveSpokenReply } from '@/lib/spoken-reply'
-import { playSpeechText, unlockSpeechAudio } from '@/lib/voice-playback'
+import { playSpeechText, SpeechAudioBlockedError, unlockSpeechAudio } from '@/lib/voice-playback'
+import type * as Notifications from '@/store/notifications'
+import { notify, notifyError } from '@/store/notifications'
 import { $voicePlayback, setVoicePlaybackState } from '@/store/voice-playback'
 import { $autoSpeakReplies } from '@/store/voice-prefs'
 
@@ -14,7 +16,13 @@ import { useAutoSpeakReplies } from './use-auto-speak-replies'
 
 vi.mock('@/lib/voice-playback', () => ({
   playSpeechText: vi.fn(),
+  SpeechAudioBlockedError: class SpeechAudioBlockedError extends Error {},
   unlockSpeechAudio: vi.fn()
+}))
+vi.mock('@/store/notifications', async importOriginal => ({
+  ...(await importOriginal<typeof Notifications>()),
+  notify: vi.fn(),
+  notifyError: vi.fn()
 }))
 
 const SESSION_ID = 'session-under-test'
@@ -101,6 +109,7 @@ describe('useAutoSpeakReplies — Edge TTS fallback chain (#93515)', () => {
     renderHook(
       () =>
         useAutoSpeakReplies({
+          blockedLabel: 'press read aloud',
           conversationActive: false,
           failureLabel: 'read-aloud failed',
           markSpoken,
@@ -185,6 +194,7 @@ describe('useAutoSpeakReplies — Edge TTS fallback chain (#93515)', () => {
     renderHook(
       () =>
         useAutoSpeakReplies({
+          blockedLabel: 'press read aloud',
           conversationActive: false,
           failureLabel: 'read-aloud failed',
           markSpoken,
@@ -251,6 +261,7 @@ describe('useAutoSpeakReplies — Edge TTS fallback chain (#93515)', () => {
     renderHook(
       () =>
         useAutoSpeakReplies({
+          blockedLabel: 'press read aloud',
           conversationActive: false,
           failureLabel: 'read-aloud failed',
           markSpoken,
@@ -303,6 +314,7 @@ describe('useAutoSpeakReplies — Edge TTS fallback chain (#93515)', () => {
     renderHook(
       () =>
         useAutoSpeakReplies({
+          blockedLabel: 'press read aloud',
           conversationActive: false,
           failureLabel: 'read-aloud failed',
           markSpoken,
@@ -349,6 +361,7 @@ describe('useAutoSpeakReplies — unlocking audio for later replies', () => {
     renderHook(
       () =>
         useAutoSpeakReplies({
+          blockedLabel: 'press read aloud',
           conversationActive: false,
           failureLabel: 'read-aloud failed',
           markSpoken: () => undefined,
@@ -392,5 +405,60 @@ describe('useAutoSpeakReplies — unlocking audio for later replies', () => {
     fireEvent.click(document.body)
 
     expect(unlockSpeechAudio).not.toHaveBeenCalled()
+  })
+
+  it('keeps a reply the browser would not play marked spoken and points at Read aloud', async () => {
+    $autoSpeakReplies.set(true)
+
+    const $messages = atom<ChatMessage[]>([])
+
+    const pendingReply = () => {
+      const messages = $messages.get()
+      const last = messages.findLast(m => m.role === 'assistant' && !m.hidden)
+
+      if (!last || last.id === resolveSpokenReply(SESSION_ID, messages)?.id) {
+        return null
+      }
+
+      return { id: last.id, pending: false, text: chatMessageText(last) }
+    }
+
+    const markSpoken = () => {
+      const messages = $messages.get()
+      const last = messages.findLast(m => m.role === 'assistant' && !m.hidden)
+
+      if (last) {
+        markAssistantIdSpoken(SESSION_ID, messages, last.id)
+      }
+    }
+
+    vi.mocked(playSpeechText).mockRejectedValue(new SpeechAudioBlockedError())
+
+    renderHook(
+      () =>
+        useAutoSpeakReplies({
+          blockedLabel: 'press read aloud',
+          conversationActive: false,
+          failureLabel: 'read-aloud failed',
+          markSpoken,
+          pendingReply,
+          sessionId: SESSION_ID
+        }),
+      {
+        wrapper: ({ children }) => (
+          <ComposerScopeProvider value={{ ...MAIN_COMPOSER_SCOPE, $messages }}>{children}</ComposerScopeProvider>
+        )
+      }
+    )
+
+    act(() => {
+      $messages.set([assistantMessage('assistant-stream-1', 'hello there')])
+    })
+
+    await waitFor(() => expect(notify).toHaveBeenCalledWith(expect.objectContaining({ message: 'press read aloud' })))
+    expect(notifyError).not.toHaveBeenCalled()
+    // Released, it would be read out late, when the next message is sent.
+    expect(resolveSpokenReply(SESSION_ID, $messages.get())?.id).toBe('assistant-stream-1')
+    clearSpokenRepliesForTests()
   })
 })

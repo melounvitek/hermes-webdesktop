@@ -124,6 +124,7 @@ export const zhHantAssistant = {
       errorSendDiagnostics: '傳送診斷資訊',
       filesChanged: count => `${count} 個檔案已變更`,
       reviewChanges: '檢視',
+      readAloudBlocked: '瀏覽器封鎖了音訊播放。點擊回覆上的「朗讀」即可收聽。',
       readAloudFailed: '朗讀失敗',
       preparingAudio: '正在準備音訊...',
       stopReading: '停止朗讀',

@@ -5285,6 +5285,7 @@ export const frOverrides = {
       errorSendDiagnostics: 'Envoyer les diagnostics',
       filesChanged: count => (count === 1 ? '1 fichier modifié' : `${count} fichiers modifiés`),
       reviewChanges: 'Examiner',
+      readAloudBlocked: 'Le navigateur a bloqué le son. Appuyez sur « Lire à voix haute » dans la réponse pour l’écouter.',
       readAloudFailed: 'Échec de la lecture à voix haute',
       preparingAudio: "Préparation de l'audio…",
       stopReading: 'Arrêter la lecture',

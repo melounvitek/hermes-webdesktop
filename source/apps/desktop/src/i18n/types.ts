@@ -4163,6 +4163,7 @@ export interface Translations extends NoticeTranslations {
       errorSendDiagnostics: string
       filesChanged: (count: number) => string
       reviewChanges: string
+      readAloudBlocked: string
       readAloudFailed: string
       preparingAudio: string
       stopReading: string

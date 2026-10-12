@@ -66,10 +66,10 @@ import { extractPreviewTargets } from '@/lib/preview-targets'
 import { markAssistantIdSpoken } from '@/lib/spoken-reply'
 import { useEnterAnimation } from '@/lib/use-enter-animation'
 import { cn } from '@/lib/utils'
-import { playSpeechText, stopVoicePlayback } from '@/lib/voice-playback'
+import { playSpeechText, SpeechAudioBlockedError, stopVoicePlayback } from '@/lib/voice-playback'
 import { DESKTOP_BUTTON_ACTIONS, recordAction } from '@/store/desktop-metrics'
 import { openFreeTierSignIn } from '@/store/free-tier-sign-in'
-import { notifyError } from '@/store/notifications'
+import { notify, notifyError } from '@/store/notifications'
 import { startManualProviderOAuth } from '@/store/onboarding'
 import { $activeGatewayProfile, normalizeProfileKey, requestFreshSession } from '@/store/profile'
 import { sessionApprovalRequest } from '@/store/prompts'
@@ -1180,10 +1180,24 @@ const ReadAloudButton: FC<{
         await playSpeechText(text, { connectionId, messageId, profile, source: 'read-aloud' })
         markAssistantIdSpoken(sessionId, view.$messages.get(), messageId)
       } catch (error) {
-        notifyError(error, copy.readAloudFailed)
+        if (error instanceof SpeechAudioBlockedError) {
+          notify({ id: 'read-aloud-blocked', kind: 'warning', message: copy.readAloudBlocked })
+        } else {
+          notifyError(error, copy.readAloudFailed)
+        }
       }
     },
-    [connectionId, copy.readAloudFailed, getFullText, getText, messageId, profile, sessionId, view.$messages]
+    [
+      connectionId,
+      copy.readAloudBlocked,
+      copy.readAloudFailed,
+      getFullText,
+      getText,
+      messageId,
+      profile,
+      sessionId,
+      view.$messages
+    ]
   )
 
   return (

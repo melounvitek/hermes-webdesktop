@@ -52,6 +52,7 @@ describe('useAutoSpeakReplies — owner-routed synthesis', () => {
     renderHook(
       () =>
         useAutoSpeakReplies({
+          blockedLabel: 'press read aloud',
           conversationActive: false,
           failureLabel: 'failed',
           markSpoken: () => {

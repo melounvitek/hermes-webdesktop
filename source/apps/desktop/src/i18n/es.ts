@@ -5269,6 +5269,7 @@ export const esOverrides = {
       errorSendDiagnostics: 'Enviar diagnóstico',
       filesChanged: count => (count === 1 ? '1 archivo cambiado' : `${count} archivos cambiados`),
       reviewChanges: 'Revisar',
+      readAloudBlocked: 'El navegador bloqueó el audio. Pulsa «Leer en voz alta» en la respuesta para escucharla.',
       readAloudFailed: 'Falló la lectura en voz alta',
       preparingAudio: 'Preparando audio...',
       stopReading: 'Detener lectura',

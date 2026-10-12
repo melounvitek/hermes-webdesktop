@@ -20,6 +20,18 @@ import { cutSentences, sanitizeTextForSpeech } from './speech-text'
 // tick, so legitimately long speech is never cut off).
 const PLAYBACK_STALL_MS = 15_000
 
+// How long reply audio may wait for the browser to start the audio context
+// before the reply counts as blocked. A tap within it still plays the reply.
+const AUDIO_BLOCKED_MS = 3_000
+
+/** Reply audio arrived, but the browser would not play it: no tap unlocked audio. */
+export class SpeechAudioBlockedError extends Error {
+  constructor() {
+    super('The browser blocked audio playback')
+    this.name = 'SpeechAudioBlockedError'
+  }
+}
+
 let currentAudio: HTMLAudioElement | null = null
 // Every live playback registers its barge-in stop here: streaming sessions
 // (kill the WebSocket + the reply's audio output) and data-URL audio elements (cut
@@ -206,8 +218,10 @@ export interface SpeechStreamSession {
    * 'done'    — audio fully played (or barged via stopVoicePlayback)
    * 'fallback'— no audio ever produced; caller should speak the accumulated
    *             text through `playSpeechText` instead.
+   * 'blocked' — audio arrived but the browser would not play it; any other
+   *             way of playing it would be blocked too.
    */
-  done: Promise<'done' | 'fallback'>
+  done: Promise<'blocked' | 'done' | 'fallback'>
 }
 
 // ---------------------------------------------------------------------------
@@ -383,12 +397,15 @@ function openSpeechStream(wsUrl: string, options: VoicePlaybackOptions): SpeechS
   let streamRate = 24_000
   let nextStartAt = 0
   let carry: null | Uint8Array = null
+  let received = false
   let started = false
+  let ended = false
   let settled = false
   let finished = false
+  let blockedTimer: number | undefined
   const pendingSends: string[] = []
 
-  let settle: (value: 'done' | 'fallback') => void = () => undefined
+  let settle: (value: 'blocked' | 'done' | 'fallback') => void = () => undefined
 
   // stopVoicePlayback() → immediate barge-in: kill the socket (the server
   // aborts synthesis on disconnect) and this reply's output (cuts sound now).
@@ -396,7 +413,7 @@ function openSpeechStream(wsUrl: string, options: VoicePlaybackOptions): SpeechS
   // while another playback is live alongside it (#91991).
   const stop = () => settle('done')
 
-  const done = new Promise<'done' | 'fallback'>(resolve => {
+  const done = new Promise<'blocked' | 'done' | 'fallback'>(resolve => {
     settle = value => {
       if (settled) {
         return
@@ -404,6 +421,7 @@ function openSpeechStream(wsUrl: string, options: VoicePlaybackOptions): SpeechS
 
       settled = true
       liveStops.delete(stop)
+      window.clearTimeout(blockedTimer)
 
       try {
         ws.close()
@@ -412,6 +430,7 @@ function openSpeechStream(wsUrl: string, options: VoicePlaybackOptions): SpeechS
       }
 
       // The context is shared and stays open for the next reply.
+      context?.removeEventListener('statechange', markSpeaking)
       output?.disconnect()
       resolve(value)
     }
@@ -432,6 +451,22 @@ function openSpeechStream(wsUrl: string, options: VoicePlaybackOptions): SpeechS
   const finishWhenDrained = () => {
     const remainingMs = context ? Math.max(0, nextStartAt - context.currentTime) * 1_000 : 0
     window.setTimeout(() => settle('done'), remainingMs + 100)
+  }
+
+  // "speaking" only once the reply is audible: a context that no tap unlocked
+  // stays suspended on iOS WebKit, and its buffers never play.
+  const markSpeaking = () => {
+    if (started || settled || !received || context?.state !== 'running') {
+      return
+    }
+
+    started = true
+    window.clearTimeout(blockedTimer)
+    setVoicePlaybackState(currentState('speaking', options))
+
+    if (ended) {
+      finishWhenDrained()
+    }
   }
 
   const schedule = (data: ArrayBuffer) => {
@@ -475,10 +510,11 @@ function openSpeechStream(wsUrl: string, options: VoicePlaybackOptions): SpeechS
     const startAt = Math.max(context.currentTime + 0.05, nextStartAt)
     source.start(startAt)
     nextStartAt = startAt + buffer.duration
+    received = true
+    markSpeaking()
 
-    if (!started) {
-      started = true
-      setVoicePlaybackState(currentState('speaking', options))
+    if (!started && blockedTimer === undefined) {
+      blockedTimer = window.setTimeout(() => settle('blocked'), AUDIO_BLOCKED_MS)
     }
   }
 
@@ -515,19 +551,39 @@ function openSpeechStream(wsUrl: string, options: VoicePlaybackOptions): SpeechS
 
       output = context.createGain()
       output.connect(context.destination)
+      context.addEventListener('statechange', markSpeaking)
       nextStartAt = 0
     } else if (frame.type === 'end') {
-      finishWhenDrained()
+      ended = true
+
+      // Audio still waiting for the browser drains once it starts.
+      if (started || !received) {
+        finishWhenDrained()
+      }
     } else if (frame.type === 'fallback') {
       settle(started ? 'done' : 'fallback')
     }
   }
 
   // A drop before any audio means the endpoint is unavailable (old backend,
-  // auth, network) → fall back. After audio started, replaying the whole
-  // message via POST would stutter — treat what played as the playback.
-  ws.onerror = () => settle(started ? 'done' : 'fallback')
-  ws.onclose = () => (started ? finishWhenDrained() : settle('fallback'))
+  // auth, network) → fall back. Audio that already arrived is the playback:
+  // replaying the whole message via POST would stutter.
+  const disconnected = () => {
+    if (!received) {
+      settle('fallback')
+
+      return
+    }
+
+    ended = true
+
+    if (started) {
+      finishWhenDrained()
+    }
+  }
+
+  ws.onerror = disconnected
+  ws.onclose = disconnected
 
   return {
     // Raw deltas — the server strips markdown/emoji per *sentence*, which is
@@ -607,7 +663,7 @@ export async function startSpeechStream(options: VoicePlaybackOptions): Promise<
   void session.done.then(outcome => {
     // A settled session must not reset the state of a NEWER playback — only
     // write idle when no other playback started since this one was created.
-    if (outcome === 'done' && sessionSequence === sequence) {
+    if (outcome !== 'fallback' && sessionSequence === sequence) {
       setVoicePlaybackState(currentState('idle'))
     }
   })
@@ -616,12 +672,16 @@ export async function startSpeechStream(options: VoicePlaybackOptions): Promise<
 }
 
 /** One-shot playback of complete text over the streaming WS. */
-function playSpeechStream(wsUrl: string, text: string, options: VoicePlaybackOptions): Promise<'fallback' | 'played'> {
+function playSpeechStream(
+  wsUrl: string,
+  text: string,
+  options: VoicePlaybackOptions
+): Promise<'blocked' | 'fallback' | 'played'> {
   const session = openSpeechStream(wsUrl, options)
   session.append(text)
   session.finish()
 
-  return session.done.then(outcome => (outcome === 'done' ? 'played' : 'fallback'))
+  return session.done.then(outcome => (outcome === 'done' ? 'played' : outcome))
 }
 
 async function playSpeechDataUrl(
@@ -731,11 +791,14 @@ export async function playSpeechText(text: string, options: VoicePlaybackOptions
 
     if (options.turnKey) {
       inFlight = { done, turnKey: options.turnKey }
-      void done.finally(() => {
-        if (inFlight?.done === done) {
-          inFlight = null
-        }
-      })
+      // The caller handles a rejection; this only releases the claim.
+      void done
+        .finally(() => {
+          if (inFlight?.done === done) {
+            inFlight = null
+          }
+        })
+        .catch(() => undefined)
     }
 
     return done
@@ -789,6 +852,10 @@ async function startSpeechText(text: string, options: VoicePlaybackOptions): Pro
 
     if (streamUrl && isCurrent()) {
       const outcome = await playSpeechStream(streamUrl, speakableText, options)
+
+      if (outcome === 'blocked') {
+        throw new SpeechAudioBlockedError()
+      }
 
       if (outcome === 'played') {
         if (!isCurrent()) {

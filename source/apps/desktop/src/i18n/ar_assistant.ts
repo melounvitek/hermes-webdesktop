@@ -72,6 +72,7 @@ export const arAssistant = {
       errorSendDiagnostics: 'إرسال التشخيصات',
       filesChanged: count => `${count} ملفات تم تغييرها`,
       reviewChanges: 'مراجعة',
+      readAloudBlocked: 'حظر المتصفح تشغيل الصوت. اضغط على «قراءة بصوت عال» في الرد لسماعه.',
       readAloudFailed: 'فشلت القراءة بصوت عال',
       preparingAudio: 'جار تجهيز الصوت',
       stopReading: 'إيقاف القراءة',

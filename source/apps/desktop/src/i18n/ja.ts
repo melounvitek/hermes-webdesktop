@@ -3654,6 +3654,7 @@ export const jaOverrides = {
       errorSendDiagnostics: '診断情報を送信',
       filesChanged: count => `${count} 件のファイルを変更`,
       reviewChanges: 'レビュー',
+      readAloudBlocked: 'ブラウザーが音声の再生をブロックしました。返信の「読み上げ」を押すと聞けます。',
       readAloudFailed: '読み上げに失敗しました',
       preparingAudio: '音声を準備中...',
       stopReading: '読み上げを停止',

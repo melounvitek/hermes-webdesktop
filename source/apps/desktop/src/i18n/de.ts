@@ -5276,6 +5276,7 @@ export const deOverrides = {
       errorSendDiagnostics: 'Diagnose senden',
       filesChanged: count => (count === 1 ? '1 Datei geändert' : `${count} Dateien geändert`),
       reviewChanges: 'Prüfen',
+      readAloudBlocked: 'Der Browser hat die Wiedergabe blockiert. Drücken Sie bei der Antwort auf „Vorlesen“, um sie zu hören.',
       readAloudFailed: 'Vorlesen fehlgeschlagen',
       preparingAudio: 'Bereitet Audio vor...',
       stopReading: 'Vorlesen stoppen',

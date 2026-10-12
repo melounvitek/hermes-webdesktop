@@ -6,9 +6,16 @@
 import type * as SharedTypes from '@hermes/shared'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { speakText } from '@/hermes'
 import { $voicePlayback } from '@/store/voice-playback'
 
-import { playSpeechText, startSpeechStream, stopVoicePlayback, unlockSpeechAudio } from './voice-playback'
+import {
+  playSpeechText,
+  SpeechAudioBlockedError,
+  startSpeechStream,
+  stopVoicePlayback,
+  unlockSpeechAudio
+} from './voice-playback'
 
 const gateway = vi.hoisted(() => {
   let nextUrl: string | null = 'ws://gateway.test/api/ws'
@@ -350,6 +357,7 @@ describe('voice-playback on iOS WebKit, which plays audio only after a tap', () 
     FakeAudioContext.instances = []
     FakeAudioContext.requireGesture = true
     FakeAudio.instances = []
+    vi.mocked(speakText).mockClear()
     gateway.setNextUrl('ws://gateway.test/api/ws')
     vi.stubGlobal('WebSocket', FakeSocket)
     vi.stubGlobal('AudioContext', FakeAudioContext)
@@ -419,6 +427,39 @@ describe('voice-playback on iOS WebKit, which plays audio only after a tap', () 
 
     expect(FakeAudioContext.instances[0]?.state).toBe('running')
     expect($voicePlayback.get().status).toBe('speaking')
+  })
+
+  it('never shows speaking while the browser blocks audio, then reports it blocked', async () => {
+    // An automatic read, so it carries a turn key.
+    const outcome = playSpeechText('Nobody tapped.', { messageId: 'm1', source: 'read-aloud', turnKey: 't1' }).catch(
+      error => error
+    )
+    const ws = await streamReply()
+
+    expect($voicePlayback.get().status).toBe('preparing')
+
+    ws.serverFrame({ type: 'end' })
+    ws.serverClose()
+    await vi.advanceTimersByTimeAsync(3_000)
+
+    expect(await outcome).toBeInstanceOf(SpeechAudioBlockedError)
+    expect($voicePlayback.get().status).toBe('idle')
+    // Not retried over POST: that audio element would be blocked as well.
+    expect(speakText).not.toHaveBeenCalled()
+  })
+
+  it('starts speaking once a tap unlocks audio that was waiting', async () => {
+    const playback = playSpeechText('Tap to hear.', { messageId: 'm1', source: 'read-aloud' })
+    const ws = await streamReply()
+
+    ws.serverFrame({ type: 'end' })
+    tap(unlockSpeechAudio)
+
+    expect($voicePlayback.get().status).toBe('speaking')
+
+    await vi.runAllTimersAsync()
+
+    await expect(playback).resolves.toBe(true)
   })
 
   it('resumes the unlocked context after iOS interrupted it', async () => {

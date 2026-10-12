@@ -2,9 +2,9 @@ import { useStore } from '@nanostores/react'
 import { useEffect, useRef } from 'react'
 
 import { releaseUnplayedSpokenReply, spokenReplyOf } from '@/lib/spoken-reply'
-import { playSpeechText, unlockSpeechAudio } from '@/lib/voice-playback'
+import { playSpeechText, SpeechAudioBlockedError, unlockSpeechAudio } from '@/lib/voice-playback'
 import { ownsAmbientCue } from '@/store/ambient'
-import { notifyError } from '@/store/notifications'
+import { notify, notifyError } from '@/store/notifications'
 import { $voicePlayback } from '@/store/voice-playback'
 import { $autoSpeakReplies } from '@/store/voice-prefs'
 
@@ -19,6 +19,8 @@ interface AutoSpeakReply {
 }
 
 interface UseAutoSpeakReplies {
+  /** Shown when the browser would not play a reply until the user taps. */
+  blockedLabel: string
   conversationActive: boolean
   failureLabel: string
   /** Mark the current last reply spoken — shared dedupe with the conversation consumer. */
@@ -37,6 +39,7 @@ interface UseAutoSpeakReplies {
  * the latest reply, so a backlog collapses to the newest.
  */
 export function useAutoSpeakReplies({
+  blockedLabel,
   conversationActive,
   failureLabel,
   markSpoken,
@@ -47,8 +50,18 @@ export function useAutoSpeakReplies({
   // Wake on THIS composer's transcript: a tile subscribed to the primary's
   // would never fire on its own replies (and would fire on someone else's).
   const { $messages, connectionId, profile } = useComposerScope()
-  const latest = useRef({ connectionId, conversationActive, failureLabel, markSpoken, pendingReply, profile })
-  latest.current = { connectionId, conversationActive, failureLabel, markSpoken, pendingReply, profile }
+
+  const latest = useRef({
+    blockedLabel,
+    connectionId,
+    conversationActive,
+    failureLabel,
+    markSpoken,
+    pendingReply,
+    profile
+  })
+
+  latest.current = { blockedLabel, connectionId, conversationActive, failureLabel, markSpoken, pendingReply, profile }
 
   // A reply lands long after the tap that asked for it, and iOS WebKit plays
   // audio only after a gesture: let every tap or key press unlock it.
@@ -78,7 +91,8 @@ export function useAutoSpeakReplies({
     let attemptSeq = 0
 
     const speakLatest = () => {
-      const { connectionId, conversationActive, failureLabel, markSpoken, pendingReply, profile } = latest.current
+      const { blockedLabel, connectionId, conversationActive, failureLabel, markSpoken, pendingReply, profile } =
+        latest.current
 
       if (conversationActive || $voicePlayback.get().status !== 'idle') {
         return
@@ -115,10 +129,20 @@ export function useAutoSpeakReplies({
             }
           },
           error => {
-            if (attempt === attemptSeq) {
-              releaseUnplayedSpokenReply(sessionId, marked)
-              notifyError(error, failureLabel)
+            if (attempt !== attemptSeq) {
+              return
             }
+
+            // Released, the reply would be read out late, when the next
+            // message changes the transcript. Point at Read aloud instead.
+            if (error instanceof SpeechAudioBlockedError) {
+              notify({ id: 'read-aloud-blocked', kind: 'warning', message: blockedLabel })
+
+              return
+            }
+
+            releaseUnplayedSpokenReply(sessionId, marked)
+            notifyError(error, failureLabel)
           }
         )
       })

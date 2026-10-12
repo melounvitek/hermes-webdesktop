@@ -4877,6 +4877,7 @@ export const en: Translations = {
       errorSendDiagnostics: 'Send diagnostics',
       filesChanged: count => (count === 1 ? '1 file changed' : `${count} files changed`),
       reviewChanges: 'Review',
+      readAloudBlocked: 'The browser blocked the audio. Press Read aloud on the reply to hear it.',
       readAloudFailed: 'Read aloud failed',
       preparingAudio: 'Preparing audio...',
       stopReading: 'Stop reading',

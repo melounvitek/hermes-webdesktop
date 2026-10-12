@@ -4620,6 +4620,7 @@ export const zhOverrides = {
       errorSendDiagnostics: '发送诊断信息',
       filesChanged: count => `${count} 个文件已更改`,
       reviewChanges: '查看',
+      readAloudBlocked: '浏览器阻止了音频播放。点击回复上的“朗读”即可收听。',
       readAloudFailed: '朗读失败',
       preparingAudio: '正在准备音频...',
       stopReading: '停止朗读',
