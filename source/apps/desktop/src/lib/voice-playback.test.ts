@@ -165,6 +165,7 @@ function tap(action: () => void) {
 class FakeAudio {
   static instances: FakeAudio[] = []
 
+  loop = false
   paused = false
   src: string
 
@@ -460,6 +461,53 @@ describe('voice-playback on iOS WebKit, which plays audio only after a tap', () 
     await vi.runAllTimersAsync()
 
     await expect(playback).resolves.toBe(true)
+  })
+
+  // WebKit mutes Web Audio with the Ring/Silent switch unless a media element
+  // plays, as with the attachment player. Fresh module: the element lives for
+  // the window.
+  describe('with the Ring/Silent switch on silent', () => {
+    afterEach(() => {
+      delete (navigator as { audioSession?: unknown }).audioSession
+    })
+
+    it('keeps a silent media element playing only while a reply is audible', async () => {
+      Object.defineProperty(navigator, 'audioSession', { configurable: true, value: { type: 'auto' } })
+      vi.resetModules()
+      const fresh = await import('./voice-playback')
+      let playback!: Promise<boolean>
+
+      tap(() => {
+        playback = fresh.playSpeechText('Hello.', { messageId: 'm1', source: 'read-aloud' })
+      })
+
+      const companion = FakeAudio.instances[0]!
+
+      expect(companion.loop).toBe(true)
+      expect(companion.play).toHaveBeenCalled() // inside the tap, so it may play later
+
+      const ws = await streamReply()
+
+      expect(companion.paused).toBe(false)
+
+      ws.serverFrame({ type: 'end' })
+      await vi.runAllTimersAsync()
+
+      await expect(playback).resolves.toBe(true)
+      expect(companion.paused).toBe(true)
+      fresh.stopVoicePlayback()
+    })
+
+    it('adds no media element where the browser has no audio session (Chrome, Electron)', async () => {
+      vi.resetModules()
+      const fresh = await import('./voice-playback')
+
+      tap(() => void fresh.playSpeechText('Hello.', { messageId: 'm1', source: 'read-aloud' }))
+      await streamReply()
+
+      expect(FakeAudio.instances).toHaveLength(0)
+      fresh.stopVoicePlayback()
+    })
   })
 
   it('resumes the unlocked context after iOS interrupted it', async () => {

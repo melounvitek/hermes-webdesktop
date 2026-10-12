@@ -57,6 +57,51 @@ async function unlockAutoplay(): Promise<void> {
   }
 }
 
+// WebKit puts a page that plays only Web Audio in the ambient audio session,
+// which the Ring/Silent switch mutes; an audible media element moves it to
+// playback, as with the attachment player. A silent looping element does that
+// without an audioSession type override, which would refuse microphone
+// capture (dictation, wake word). Only WebKit has navigator.audioSession.
+let silentCompanion: HTMLAudioElement | null = null
+let speechAudible = false
+
+function setSpeechAudible(audible: boolean) {
+  speechAudible = audible
+
+  if (audible) {
+    void silentCompanion?.play().catch(() => undefined)
+  } else {
+    silentCompanion?.pause()
+  }
+}
+
+// Half a second of 8-bit silence at 8 kHz, as a WAV data URL.
+function silentWavUrl() {
+  const samples = 4_000
+  const bytes = new Uint8Array(44 + samples).fill(128)
+  const view = new DataView(bytes.buffer)
+  const text = (offset: number, value: string) =>
+    bytes.set(
+      [...value].map(c => c.charCodeAt(0)),
+      offset
+    )
+
+  text(0, 'RIFF')
+  view.setUint32(4, 36 + samples, true)
+  text(8, 'WAVEfmt ')
+  view.setUint32(16, 16, true)
+  view.setUint16(20, 1, true) // PCM
+  view.setUint16(22, 1, true) // mono
+  view.setUint32(24, 8_000, true)
+  view.setUint32(28, 8_000, true)
+  view.setUint16(32, 1, true)
+  view.setUint16(34, 8, true)
+  text(36, 'data')
+  view.setUint32(40, samples, true)
+
+  return `data:audio/wav;base64,${btoa(String.fromCharCode(...bytes))}`
+}
+
 /**
  * Let spoken replies play later. iOS WebKit starts an AudioContext only during
  * a user gesture (or shortly after one) and lifts that per context, while reply
@@ -66,6 +111,26 @@ async function unlockAutoplay(): Promise<void> {
  */
 export function unlockSpeechAudio() {
   getAudioContext()
+
+  if (silentCompanion || !('audioSession' in navigator)) {
+    return
+  }
+
+  const companion = new Audio(silentWavUrl())
+  companion.loop = true
+  silentCompanion = companion
+
+  // Played once inside a gesture, a media element may play later without one.
+  void companion.play().then(
+    () => {
+      if (!speechAudible) {
+        companion.pause()
+      }
+    },
+    () => {
+      silentCompanion = null // not in a gesture: the next one tries again
+    }
+  )
 }
 
 function currentState(
@@ -432,6 +497,11 @@ function openSpeechStream(wsUrl: string, options: VoicePlaybackOptions): SpeechS
       // The context is shared and stays open for the next reply.
       context?.removeEventListener('statechange', markSpeaking)
       output?.disconnect()
+
+      if (started) {
+        setSpeechAudible(false)
+      }
+
       resolve(value)
     }
   })
@@ -462,6 +532,7 @@ function openSpeechStream(wsUrl: string, options: VoicePlaybackOptions): SpeechS
 
     started = true
     window.clearTimeout(blockedTimer)
+    setSpeechAudible(true)
     setVoicePlaybackState(currentState('speaking', options))
 
     if (ended) {
