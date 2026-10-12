@@ -49,7 +49,7 @@ function BrowserAttentionSettings() {
       <Caption>{copy.description}</Caption>
       <div className="flex flex-wrap gap-2">
         <Button
-          disabled={enabled || status === 'enabling'}
+          disabled={enabled || status === 'enabling' || status === 'otherTab'}
           onClick={() => void enableBrowserAttention()}
           size="sm"
           variant="outline"

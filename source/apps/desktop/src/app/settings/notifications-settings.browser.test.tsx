@@ -311,6 +311,7 @@ describe('browser attention settings and request admission', () => {
     mount()
     await enable()
     expect(screen.getByRole('status').textContent).toMatch(/another tab/i)
+    expect(screen.getByRole('button', { name: 'Enable attention notifications' })).toHaveProperty('disabled', true)
     request('while-waiting')
     expect(notices).toHaveLength(0)
     await close()
@@ -387,24 +388,72 @@ describe('browser attention settings and request admission', () => {
     expect(notices).toHaveLength(2)
   })
 
-  it('does not enable from a late permission answer after lifecycle reset', async () => {
+  it.each(['here', 'in another tab', 'in another tab, reported after the answer'])(
+    'does not enable from a late permission answer after Disable %s',
+    async where => {
+      let grant!: (v: NotificationPermission) => void
+      mount()
+      await enable()
+      // A remembered opt-in whose permission was reset offers Enable and Disable together.
+      permission = 'default'
+      await act(async () => window.dispatchEvent(new Event('focus')))
+      requestPermission.mockReturnValue(
+        new Promise<NotificationPermission>(r => {
+          grant = r
+        })
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'Enable attention notifications' }))
+      const key = 'hermes:browser:global:attentionNotifications'
+      await act(async () => {
+        if (where === 'here') {
+          fireEvent.click(screen.getByRole('button', { name: 'Disable' }))
+        } else if (where === 'in another tab') {
+          otherTabStores(false)
+        } else {
+          localStorage.removeItem(key)
+        }
+      })
+      await act(async () => {
+        permission = 'granted'
+        grant('granted')
+      })
+      // Storage events are asynchronous and can arrive after the permission answer.
+      await act(async () => window.dispatchEvent(new StorageEvent('storage', { key })))
+      request('late-permission')
+      expect(notices).toHaveLength(0)
+      expect(locked).toBe(false)
+      expect(screen.getByRole('status').textContent).toMatch(/^Off/)
+    }
+  )
+
+  it('keeps an Enable that is answered after a reconnect', async () => {
     let grant!: (v: NotificationPermission) => void
+    mount()
+    await enable()
     permission = 'default'
+    await act(async () => window.dispatchEvent(new Event('focus')))
     requestPermission.mockReturnValue(
       new Promise<NotificationPermission>(r => {
         grant = r
       })
     )
-    mount()
     fireEvent.click(screen.getByRole('button', { name: 'Enable attention notifications' }))
-    act(() => document.dispatchEvent(new Event('freeze')))
+    await act(async () => reportPrimaryGatewayState('closed'))
+    await act(async () => reportPrimaryGatewayState('open'))
     await act(async () => {
       permission = 'granted'
       grant('granted')
     })
-    request('late-permission')
-    expect(notices).toHaveLength(0)
-    expect(locked).toBe(false)
+    expect(screen.getByRole('status').textContent).toMatch(/^On/)
+    request('answered-after-reconnect')
+    expect(notices).toHaveLength(1)
+  })
+
+  it('removes the stored opt-in on Disable', async () => {
+    mount()
+    await enable()
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Disable' })))
+    expect(localStorage.getItem('hermes:browser:global:attentionNotifications')).toBeNull()
   })
 
   it('keeps excluded native kinds inert and does not route connection.request through the attention door', async () => {

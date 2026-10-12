@@ -3,7 +3,7 @@ import { atom } from 'nanostores'
 import { translateNow } from '@/i18n'
 import type { Translations } from '@/i18n/types'
 import { isBrowserClient } from '@/lib/platform'
-import { persistBoolean, storedBoolean } from '@/lib/storage'
+import { readKey, writeKey } from '@/lib/storage'
 
 export type BrowserAttentionStatus = keyof Translations['settings']['notifications']['browser']['status']
 
@@ -15,6 +15,8 @@ const LOCK_NAME = 'hermes:browser-attention'
 export const $browserAttentionStatus = atom<BrowserAttentionStatus>('off')
 export const $browserAttentionWanted = atom(false)
 let connected = false
+// The Enable click waiting for permission. Only Disable cancels it; pauses do not.
+let enabling: object | undefined
 let generation = 0
 let listening = false
 let pending: AbortController | undefined
@@ -42,10 +44,15 @@ function stop(status: BrowserAttentionStatus = 'off'): void {
   $browserAttentionStatus.set(seen.size >= MAX_SEEN ? 'limit' : status)
 }
 
-export function disableBrowserAttention(): void {
-  persistBoolean(STORAGE_KEY, false)
+function turnOff(): void {
+  enabling = undefined
   $browserAttentionWanted.set(false)
   stop()
+}
+
+export function disableBrowserAttention(): void {
+  writeKey(STORAGE_KEY, null)
+  turnOff()
 }
 
 /** Pause while the active socket is unavailable; resume when it opens again. */
@@ -96,15 +103,20 @@ function unavailable(): BrowserAttentionStatus | undefined {
 
 /** Start or stop this tab to match the stored opt-in. Never prompts. */
 function sync(): void {
-  const wanted = storedBoolean(STORAGE_KEY, false)
-  $browserAttentionWanted.set(wanted)
-  const reason = wanted ? (unavailable() ?? (Notification.permission === 'granted' ? undefined : 'default')) : 'off'
+  if (readKey(STORAGE_KEY) !== 'true') {
+    // Disabled in another tab. Without an opt-in, keep a declined Enable's message.
+    if ($browserAttentionWanted.get()) {
+      turnOff()
+    }
+
+    return
+  }
+
+  $browserAttentionWanted.set(true)
+  const reason = unavailable() ?? (Notification.permission === 'granted' ? undefined : 'default')
 
   if (reason) {
-    // Without an opt-in, keep the message from a declined Enable.
-    if (wanted || releaseLock || pending) {
-      stop(reason)
-    }
+    stop(reason)
 
     return
   }
@@ -191,7 +203,7 @@ export function startBrowserAttention(): void {
 
 /** Call directly from the Enable click: no await before requestPermission. */
 export async function enableBrowserAttention(): Promise<void> {
-  if (releaseLock || pending || $browserAttentionStatus.get() === 'enabling') {
+  if (releaseLock || pending || enabling) {
     return
   }
 
@@ -204,15 +216,19 @@ export async function enableBrowserAttention(): Promise<void> {
   }
 
   listen()
-  const epoch = ++generation
+  const attempt = (enabling = {})
   $browserAttentionStatus.set('enabling')
 
   try {
     const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission()
+    // Disable in another tab may land before its storage event does.
+    sync()
 
-    if (epoch !== generation) {
+    if (attempt !== enabling) {
       return
     }
+
+    enabling = undefined
 
     if (permission !== 'granted') {
       stop(permission)
@@ -220,9 +236,9 @@ export async function enableBrowserAttention(): Promise<void> {
       return
     }
 
-    persistBoolean(STORAGE_KEY, true)
+    writeKey(STORAGE_KEY, 'true')
 
-    if (!storedBoolean(STORAGE_KEY, false)) {
+    if (readKey(STORAGE_KEY) !== 'true') {
       // Storage is blocked, so the opt-in could not be kept.
       stop('failed')
 
@@ -231,7 +247,8 @@ export async function enableBrowserAttention(): Promise<void> {
 
     sync()
   } catch {
-    if (epoch === generation) {
+    if (attempt === enabling) {
+      enabling = undefined
       stop('failed')
     }
   }
