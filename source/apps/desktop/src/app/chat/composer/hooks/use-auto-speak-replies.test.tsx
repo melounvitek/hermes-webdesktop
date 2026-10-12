@@ -1,10 +1,10 @@
-import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, renderHook, waitFor } from '@testing-library/react'
 import { atom } from 'nanostores'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { assistantTextPart, type ChatMessage, chatMessageText } from '@/lib/chat-messages'
 import { clearSpokenRepliesForTests, markAssistantIdSpoken, resolveSpokenReply } from '@/lib/spoken-reply'
-import { playSpeechText } from '@/lib/voice-playback'
+import { playSpeechText, unlockSpeechAudio } from '@/lib/voice-playback'
 import { $voicePlayback, setVoicePlaybackState } from '@/store/voice-playback'
 import { $autoSpeakReplies } from '@/store/voice-prefs'
 
@@ -13,7 +13,8 @@ import { ComposerScopeProvider, MAIN_COMPOSER_SCOPE } from '../scope'
 import { useAutoSpeakReplies } from './use-auto-speak-replies'
 
 vi.mock('@/lib/voice-playback', () => ({
-  playSpeechText: vi.fn()
+  playSpeechText: vi.fn(),
+  unlockSpeechAudio: vi.fn()
 }))
 
 const SESSION_ID = 'session-under-test'
@@ -332,5 +333,64 @@ describe('useAutoSpeakReplies — Edge TTS fallback chain (#93515)', () => {
       ])
     })
     await waitFor(() => expect(playSpeechText).toHaveBeenCalledTimes(2))
+  })
+})
+
+// iOS WebKit plays audio only after a tap, and a reply lands long after the
+// tap that asked for it.
+describe('useAutoSpeakReplies — unlocking audio for later replies', () => {
+  afterEach(() => {
+    cleanup()
+    $autoSpeakReplies.set(false)
+    vi.clearAllMocks()
+  })
+
+  const renderAutoSpeak = () =>
+    renderHook(
+      () =>
+        useAutoSpeakReplies({
+          conversationActive: false,
+          failureLabel: 'read-aloud failed',
+          markSpoken: () => undefined,
+          pendingReply: () => null,
+          sessionId: SESSION_ID
+        }),
+      {
+        wrapper: ({ children }) => (
+          <ComposerScopeProvider value={{ ...MAIN_COMPOSER_SCOPE, $messages: atom<ChatMessage[]>([]) }}>
+            {children}
+          </ComposerScopeProvider>
+        )
+      }
+    )
+
+  it('unlocks speech audio on any tap or key press while it is on', () => {
+    $autoSpeakReplies.set(true)
+    renderAutoSpeak()
+
+    fireEvent.touchEnd(document.body)
+    fireEvent.click(document.body)
+    fireEvent.keyDown(document.body, { key: 'Enter' })
+
+    expect(unlockSpeechAudio).toHaveBeenCalledTimes(3)
+  })
+
+  it('keeps unlocking audio for the composers that stay open', () => {
+    $autoSpeakReplies.set(true)
+    const first = renderAutoSpeak()
+    renderAutoSpeak()
+
+    first.unmount()
+    fireEvent.click(document.body)
+
+    expect(unlockSpeechAudio).toHaveBeenCalled()
+  })
+
+  it('leaves audio alone while it is off', () => {
+    renderAutoSpeak()
+
+    fireEvent.click(document.body)
+
+    expect(unlockSpeechAudio).not.toHaveBeenCalled()
   })
 })

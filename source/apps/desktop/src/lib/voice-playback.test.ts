@@ -8,7 +8,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { $voicePlayback } from '@/store/voice-playback'
 
-import { playSpeechText, startSpeechStream, stopVoicePlayback } from './voice-playback'
+import { playSpeechText, startSpeechStream, stopVoicePlayback, unlockSpeechAudio } from './voice-playback'
 
 const gateway = vi.hoisted(() => {
   let nextUrl: string | null = 'ws://gateway.test/api/ws'
@@ -91,18 +91,34 @@ class FakeSocket {
 
 class FakeAudioContext {
   static instances: FakeAudioContext[] = []
+  // iOS WebKit: a context starts only during a user gesture, and resume()
+  // outside one never settles. Stricter than WebKit, which also allows the
+  // first seconds after a tap.
+  static requireGesture = false
+  static inGesture = false
 
-  closed = false
   currentTime = 0
   destination = {}
-  state = 'running'
+  gains: { connect: ReturnType<typeof vi.fn>; disconnect: ReturnType<typeof vi.fn> }[] = []
+  state = FakeAudioContext.requireGesture ? 'suspended' : 'running'
+  private listeners = new Set<() => void>()
 
+  addEventListener = (_type: string, listener: () => void) => this.listeners.add(listener)
+  removeEventListener = (_type: string, listener: () => void) => this.listeners.delete(listener)
   close = vi.fn(() => {
-    this.closed = true
+    this.setState('closed')
 
     return Promise.resolve()
   })
-  resume = vi.fn(() => Promise.resolve())
+  resume = vi.fn(() => {
+    if (FakeAudioContext.requireGesture && !FakeAudioContext.inGesture) {
+      return new Promise<void>(() => undefined)
+    }
+
+    this.setState('running')
+
+    return Promise.resolve()
+  })
   createBuffer = vi.fn((_channels: number, length: number, rate: number) => ({
     duration: length / rate,
     getChannelData: () => new Float32Array(length)
@@ -112,9 +128,30 @@ class FakeAudioContext {
     connect: vi.fn(),
     start: vi.fn()
   }))
+  createGain = vi.fn(() => {
+    const gain = { connect: vi.fn(), disconnect: vi.fn() }
+    this.gains.push(gain)
+
+    return gain
+  })
 
   constructor() {
     FakeAudioContext.instances.push(this)
+  }
+
+  setState(state: string) {
+    this.state = state
+    this.listeners.forEach(listener => listener())
+  }
+}
+
+function tap(action: () => void) {
+  FakeAudioContext.inGesture = true
+
+  try {
+    action()
+  } finally {
+    FakeAudioContext.inGesture = false
   }
 }
 
@@ -167,6 +204,10 @@ describe('voice-playback teardown (#91991)', () => {
   })
 
   afterEach(() => {
+    stopVoicePlayback()
+    // The app keeps one context for the window; start each test with a new one.
+    FakeAudioContext.instances.forEach(context => void context.close())
+    FakeAudioContext.requireGesture = false
     vi.unstubAllGlobals()
     vi.useRealTimers()
   })
@@ -197,7 +238,7 @@ describe('voice-playback teardown (#91991)', () => {
     stopVoicePlayback()
   })
 
-  it('a barge-in closes the socket and audio context of a live streaming session and settles it', async () => {
+  it('a barge-in closes the socket and cuts the audio of a live streaming session and settles it', async () => {
     const session = await liveSession()
     const ws = FakeSocket.instances[0]
 
@@ -210,7 +251,8 @@ describe('voice-playback teardown (#91991)', () => {
     stopVoicePlayback()
 
     expect(ws.close).toHaveBeenCalled()
-    expect(FakeAudioContext.instances[0]?.closed).toBe(true)
+    expect(FakeAudioContext.instances[0]?.gains[0]?.disconnect).toHaveBeenCalled()
+    expect(FakeAudioContext.instances[0]?.state).toBe('running')
     expect($voicePlayback.get().status).toBe('idle')
     await expect(session.done).resolves.toBe('done')
 
@@ -264,7 +306,7 @@ describe('voice-playback teardown (#91991)', () => {
   })
 
   it('one stop drains BOTH of two overlapping streaming sessions (#91991)', async () => {
-    // The reported overlap: session A is live with an open AudioContext;
+    // The reported overlap: session A is live and playing;
     // session B starts (its stopVoicePlayback drains A under the Set
     // registry — the old single currentStop slot left A's socket open and
     // its done unsettled). A final explicit stop must still tear down
@@ -287,16 +329,107 @@ describe('voice-playback teardown (#91991)', () => {
     secondWs.serverPcm(64)
     second.append('turn two')
 
-    // Starting B drained A: both its socket and its AudioContext are gone.
+    // Starting B drained A: its socket is closed and its audio is cut.
     await expect(first.done).resolves.toBe('done')
     expect(firstWs.close).toHaveBeenCalled()
-    expect(FakeAudioContext.instances[0]?.closed).toBe(true)
+    expect(FakeAudioContext.instances[0]?.gains[0]?.disconnect).toHaveBeenCalled()
 
     stopVoicePlayback()
 
     await expect(second.done).resolves.toBe('done')
     expect(secondWs.close).toHaveBeenCalled()
-    expect(FakeAudioContext.instances[1]?.closed).toBe(true)
+    expect(FakeAudioContext.instances[0]?.gains[1]?.disconnect).toHaveBeenCalled()
     expect($voicePlayback.get().status).toBe('idle')
+  })
+})
+
+describe('voice-playback on iOS WebKit, which plays audio only after a tap', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    FakeSocket.instances = []
+    FakeAudioContext.instances = []
+    FakeAudioContext.requireGesture = true
+    FakeAudio.instances = []
+    gateway.setNextUrl('ws://gateway.test/api/ws')
+    vi.stubGlobal('WebSocket', FakeSocket)
+    vi.stubGlobal('AudioContext', FakeAudioContext)
+    vi.stubGlobal('Audio', FakeAudio)
+    vi.stubGlobal('hermesDesktop', { getConnection: vi.fn(async () => ({ profile: 'test' })) })
+    $voicePlayback.set({ audioElement: null, messageId: null, sequence: 0, source: null, status: 'idle' })
+  })
+
+  afterEach(() => {
+    stopVoicePlayback()
+    FakeAudioContext.instances.forEach(context => void context.close())
+    FakeAudioContext.requireGesture = false
+    vi.unstubAllGlobals()
+    vi.useRealTimers()
+  })
+
+  async function streamReply() {
+    await vi.advanceTimersByTimeAsync(0)
+    const ws = FakeSocket.instances.at(-1)!
+
+    ws.serverOpen()
+    ws.serverFrame({ type: 'start', sample_rate: 24_000 })
+    ws.serverPcm(4_800)
+
+    return ws
+  }
+
+  it('plays a reply read aloud when its audio arrives after the tap', async () => {
+    let playback!: Promise<boolean>
+
+    tap(() => {
+      playback = playSpeechText('Hello there.', { messageId: 'm1', source: 'read-aloud' })
+    })
+
+    const ws = await streamReply()
+
+    expect(FakeAudioContext.instances).toHaveLength(1)
+    expect(FakeAudioContext.instances[0]?.state).toBe('running')
+    expect($voicePlayback.get().status).toBe('speaking')
+
+    ws.serverFrame({ type: 'end' })
+    await vi.runAllTimersAsync()
+
+    await expect(playback).resolves.toBe(true)
+    expect($voicePlayback.get().status).toBe('idle')
+  })
+
+  it('plays every later reply through the context the first tap unlocked', async () => {
+    tap(() => void playSpeechText('First.', { messageId: 'm1', source: 'read-aloud' }))
+    ;(await streamReply()).serverFrame({ type: 'end' })
+    await vi.runAllTimersAsync()
+
+    // An automatic read: no tap at all.
+    void playSpeechText('Second.', { messageId: 'm2', source: 'read-aloud' })
+    await streamReply()
+
+    expect(FakeAudioContext.instances).toHaveLength(1)
+    expect(FakeAudioContext.instances[0]?.state).toBe('running')
+    expect($voicePlayback.get()).toMatchObject({ messageId: 'm2', status: 'speaking' })
+  })
+
+  it('plays an automatic read after an earlier unrelated tap unlocked audio', async () => {
+    tap(unlockSpeechAudio)
+
+    void playSpeechText('A new reply.', { messageId: 'm1', source: 'read-aloud' })
+    await streamReply()
+
+    expect(FakeAudioContext.instances[0]?.state).toBe('running')
+    expect($voicePlayback.get().status).toBe('speaking')
+  })
+
+  it('resumes the unlocked context after iOS interrupted it', async () => {
+    tap(unlockSpeechAudio)
+    FakeAudioContext.requireGesture = false // once unlocked, WebKit resumes it without a tap
+    FakeAudioContext.instances[0]?.setState('interrupted')
+
+    void playSpeechText('After a phone call.', { messageId: 'm1', source: 'read-aloud' })
+    await streamReply()
+
+    expect(FakeAudioContext.instances[0]?.state).toBe('running')
+    expect($voicePlayback.get().status).toBe('speaking')
   })
 })

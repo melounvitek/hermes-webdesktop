@@ -2,6 +2,7 @@ import { resolveGatewayWsUrl } from '@hermes/shared'
 
 import type { OwnerScope } from '@/api/client'
 import { getApiRequestConnection, getApiRequestProfile, speakText } from '@/hermes'
+import { getAudioContext } from '@/lib/audio-context'
 import { directTtsConfig, type DirectTtsConfig, synthesizeSpeechClientDirect } from '@/lib/voice-client-direct'
 import { RECONNECT_ATTEMPT_TIMEOUT_MS, withTimeout } from '@/lib/with-timeout'
 import {
@@ -21,7 +22,7 @@ const PLAYBACK_STALL_MS = 15_000
 
 let currentAudio: HTMLAudioElement | null = null
 // Every live playback registers its barge-in stop here: streaming sessions
-// (kill the WebSocket + AudioContext) and data-URL audio elements (cut
+// (kill the WebSocket + the reply's audio output) and data-URL audio elements (cut
 // playback). A single slot cannot represent two overlapping playbacks — the
 // overwritten session keeps its socket open, keeps scheduling buffers, and
 // its audio resurfaces on a later turn (#91991). Draining the whole set keeps
@@ -31,34 +32,28 @@ let sequence = 0
 let claimTurnKey: string | null = null
 let inFlight: { done: Promise<boolean>; turnKey: string } | null = null
 
-// A shared, lazily-created AudioContext used only to nudge the browser's
-// autoplay state out of "suspended". A wake-word-started voice turn has no
-// preceding user gesture, so the first HTMLAudioElement.play() can be rejected
-// with NotAllowedError. resume()-ing a context is the documented way to recover
-// once the app is allowed to make sound; on Electron chat windows the
-// no-user-gesture-required policy means this is already unlocked, so this is a
-// cheap no-op fallback for other surfaces.
-let unlockCtx: AudioContext | null = null
-
+// A wake-word-started voice turn has no preceding user gesture, so the first
+// HTMLAudioElement.play() can be rejected with NotAllowedError. resume()-ing a
+// context is the documented way to recover once the app is allowed to make
+// sound; on Electron chat windows the no-user-gesture-required policy means
+// this is already unlocked, so this is a cheap no-op fallback for other surfaces.
 async function unlockAutoplay(): Promise<void> {
-  if (typeof window === 'undefined') {
-    return
-  }
+  const context = getAudioContext()
 
-  const Ctor =
-    window.AudioContext || (window as unknown as { webkitAudioContext?: typeof AudioContext }).webkitAudioContext
-
-  if (!Ctor) {
-    return
+  if (context && context.state !== 'running') {
+    await context.resume()
   }
+}
 
-  if (!unlockCtx) {
-    unlockCtx = new Ctor()
-  }
-
-  if (unlockCtx.state === 'suspended') {
-    await unlockCtx.resume()
-  }
+/**
+ * Let spoken replies play later. iOS WebKit starts an AudioContext only during
+ * a user gesture (or shortly after one) and lifts that per context, while reply
+ * audio arrives seconds later over the network, so every reply plays through
+ * the one shared context this resumes. Call it from a tap or key press; outside
+ * one it changes nothing.
+ */
+export function unlockSpeechAudio() {
+  getAudioContext()
 }
 
 function currentState(
@@ -374,8 +369,8 @@ function openClientDirectSpeechSession(tts: DirectTtsConfig, options: VoicePlayb
 }
 
 /**
- * Open a live speech session: one WebSocket + one AudioContext for a whole
- * reply. Text is appended as LLM deltas arrive; the server cuts sentences and
+ * Open a live speech session: one WebSocket for a whole reply, played
+ * through the shared AudioContext. Text is appended as LLM deltas arrive; the server cuts sentences and
  * streams PCM back while generation continues, so speech overlaps the text
  * stream (ChatGPT-style) with no per-sentence connection or synthesis gaps.
  */
@@ -384,6 +379,7 @@ function openSpeechStream(wsUrl: string, options: VoicePlaybackOptions): SpeechS
   ws.binaryType = 'arraybuffer'
 
   let context: AudioContext | null = null
+  let output: GainNode | null = null
   let streamRate = 24_000
   let nextStartAt = 0
   let carry: null | Uint8Array = null
@@ -395,7 +391,7 @@ function openSpeechStream(wsUrl: string, options: VoicePlaybackOptions): SpeechS
   let settle: (value: 'done' | 'fallback') => void = () => undefined
 
   // stopVoicePlayback() → immediate barge-in: kill the socket (the server
-  // aborts synthesis on disconnect) and the audio context (cuts sound now).
+  // aborts synthesis on disconnect) and this reply's output (cuts sound now).
   // Registered until settle, so a barge always reaches this session even
   // while another playback is live alongside it (#91991).
   const stop = () => settle('done')
@@ -415,8 +411,8 @@ function openSpeechStream(wsUrl: string, options: VoicePlaybackOptions): SpeechS
         // already closed
       }
 
-      void context?.close().catch(() => undefined)
-      context = null
+      // The context is shared and stays open for the next reply.
+      output?.disconnect()
       resolve(value)
     }
   })
@@ -439,7 +435,7 @@ function openSpeechStream(wsUrl: string, options: VoicePlaybackOptions): SpeechS
   }
 
   const schedule = (data: ArrayBuffer) => {
-    if (!context) {
+    if (!context || !output) {
       return
     }
 
@@ -474,7 +470,7 @@ function openSpeechStream(wsUrl: string, options: VoicePlaybackOptions): SpeechS
 
     const source = context.createBufferSource()
     source.buffer = buffer
-    source.connect(context.destination)
+    source.connect(output)
 
     const startAt = Math.max(context.currentTime + 0.05, nextStartAt)
     source.start(startAt)
@@ -507,17 +503,18 @@ function openSpeechStream(wsUrl: string, options: VoicePlaybackOptions): SpeechS
 
     if (frame.type === 'start') {
       streamRate = frame.sample_rate || 24_000
-      context = new AudioContext()
+      // Resumes a context that autoplay policy suspended (a wake-word-started
+      // turn has no gesture) or iOS interrupted, where allowed.
+      context = getAudioContext()
 
-      // Autoplay policy can hand back a suspended context when playback wasn't
-      // started by a user gesture (e.g. a wake-word-started voice turn). Resume
-      // it so the first reply is audible instead of silently buffering. Electron
-      // chat windows also set autoplayPolicy: no-user-gesture-required, but the
-      // dashboard-embedded surface relies on this resume.
-      if (context.state === 'suspended') {
-        void context.resume().catch(() => undefined)
+      if (!context) {
+        settle('fallback')
+
+        return
       }
 
+      output = context.createGain()
+      output.connect(context.destination)
       nextStartAt = 0
     } else if (frame.type === 'end') {
       finishWhenDrained()
@@ -716,6 +713,10 @@ async function playSpeechDataUrl(
 }
 
 export async function playSpeechText(text: string, options: VoicePlaybackOptions): Promise<boolean> {
+  // Read aloud calls this from its click handler, and code before the first
+  // await still runs inside that tap.
+  unlockSpeechAudio()
+
   if (options.turnKey && (claimTurnKey === options.turnKey || inFlight?.turnKey === options.turnKey)) {
     return inFlight?.turnKey === options.turnKey ? inFlight.done : Promise.resolve(true)
   }

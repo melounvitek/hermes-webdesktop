@@ -2,7 +2,7 @@ import { useStore } from '@nanostores/react'
 import { useEffect, useRef } from 'react'
 
 import { releaseUnplayedSpokenReply, spokenReplyOf } from '@/lib/spoken-reply'
-import { playSpeechText } from '@/lib/voice-playback'
+import { playSpeechText, unlockSpeechAudio } from '@/lib/voice-playback'
 import { ownsAmbientCue } from '@/store/ambient'
 import { notifyError } from '@/store/notifications'
 import { $voicePlayback } from '@/store/voice-playback'
@@ -49,6 +49,22 @@ export function useAutoSpeakReplies({
   const { $messages, connectionId, profile } = useComposerScope()
   const latest = useRef({ connectionId, conversationActive, failureLabel, markSpoken, pendingReply, profile })
   latest.current = { connectionId, conversationActive, failureLabel, markSpoken, pendingReply, profile }
+
+  // A reply lands long after the tap that asked for it, and iOS WebKit plays
+  // audio only after a gesture: let every tap or key press unlock it.
+  useEffect(() => {
+    if (!enabled) {
+      return undefined
+    }
+
+    // Its own function: the DOM merges identical listeners, so a shared one
+    // would be removed for every composer when one of them unmounts.
+    const unlock = () => unlockSpeechAudio()
+    const gestures = ['click', 'keydown', 'touchend'] as const
+    gestures.forEach(type => document.addEventListener(type, unlock, { capture: true, passive: true }))
+
+    return () => gestures.forEach(type => document.removeEventListener(type, unlock, { capture: true }))
+  }, [enabled])
 
   useEffect(() => {
     if (!enabled) {
