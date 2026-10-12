@@ -1622,7 +1622,7 @@
   "settings.notifications.browser.status.off": ["de","es","fr"],
   "settings.notifications.browser.status.otherTab": ["de","es","fr"],
   "settings.notifications.browser.status.requested": ["de","es","fr"],
-  "settings.notifications.browser.status.reset": ["de","es","fr"],
+  "settings.notifications.browser.status.signedOut": ["de","es","fr"],
   "settings.notifications.browser.status.unsupported": ["de","es","fr"],
   "settings.notifications.browser.test": ["de","es","fr"],
   "settings.notifications.browser.title": ["de","es","fr"],

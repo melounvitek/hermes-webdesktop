@@ -6,7 +6,6 @@ import {
   type ServerRequestContext
 } from '@/app/session/hooks/use-message-stream/gateway-event/server-requests'
 import { startBrowserAttention } from '@/browser/attention-notifications'
-import { createBrowserBridge } from '@/browser/bridge'
 import type { HermesGateway } from '@/hermes'
 import { createClientSessionState } from '@/lib/chat-runtime'
 import { sessionClarifyRequest } from '@/store/clarify'
@@ -288,37 +287,48 @@ describe('browser attention settings and request admission', () => {
     expect(notices).toHaveLength(0)
   })
 
-  it.each(['closed', 'rehome', 'pagehide', 'freeze', 'auth'])(
-    'disables on %s, closes notices and ignores old clicks',
-    async reason => {
+  it('pauses while disconnected and keeps alerting after a reconnect, a replaced socket or a profile switch', async () => {
+    const gateway = { connectionState: 'open' } as HermesGateway
+
+    try {
       mount()
       await enable()
-      request(`lifecycle-${reason}`)
-      const click = notices[0].onclick
-      await act(async () => {
-        if (reason === 'closed') {
-          reportPrimaryGatewayState('closed')
-        } else if (reason === 'rehome') {
-          setActiveProfile('b')
-        } else if (reason === 'auth') {
-          vi.mocked(fetch).mockResolvedValue(new Response('expired', { status: 401 }))
-          await createBrowserBridge({ token: '', authRequired: true })
-            .api({ path: '/api/config' })
-            .catch(() => {})
-        } else {
-          ;(reason === 'freeze' ? document : window).dispatchEvent(new Event(reason))
-        }
-      })
-      reportPrimaryGatewayState('open')
-      request(`after-${reason}`)
-      expect(notices).toHaveLength(1)
-      expect(notices[0].close).toHaveBeenCalled()
-      click?.(new Event('click'))
-      expect(window.focus).not.toHaveBeenCalled()
-      expect(locked).toBe(false)
-      expect(screen.getByRole('button', { name: 'Enable attention notifications in this tab' })).toBeTruthy()
+      await act(async () => reportPrimaryGatewayState('closed'))
+      expect(screen.getByRole('status').textContent).toMatch(/^Paused/)
+      request('while-closed')
+      expect(notices).toHaveLength(0)
+      await act(async () => reportPrimaryGatewayState('open'))
+      request('after-reconnect')
+      await act(async () => setActiveProfile('b'))
+      request('after-profile-switch')
+      await act(async () => setPrimaryGateway(gateway, 'default'))
+      await act(async () => ensureGatewayForProfile('default'))
+      request('after-socket-replacement')
+      expect(notices).toHaveLength(3)
+      expect(screen.getByRole('status').textContent).toMatch(/^Enabled/)
+    } finally {
+      setPrimaryGateway(null, 'default')
     }
-  )
+  })
+
+  it.each([
+    ['pagehide', 'pageshow'],
+    ['freeze', 'resume']
+  ] as const)('releases on %s, ignores old clicks and resumes on %s', async (leave, back) => {
+    const target = leave === 'freeze' ? document : window
+    mount()
+    await enable()
+    request(`before-${leave}`)
+    const click = notices[0].onclick
+    await act(async () => target.dispatchEvent(new Event(leave)))
+    expect(notices[0].close).toHaveBeenCalled()
+    expect(locked).toBe(false)
+    click?.(new Event('click'))
+    expect(window.focus).not.toHaveBeenCalled()
+    await act(async () => target.dispatchEvent(new Event(back)))
+    request(`after-${back}`)
+    expect(notices).toHaveLength(2)
+  })
 
   it('does not enable from a late permission answer after lifecycle reset', async () => {
     let grant!: (v: NotificationPermission) => void
@@ -406,26 +416,6 @@ describe('browser attention settings and request admission', () => {
       requestId: 'denied-in-app',
       questions: [{ question: 'PRIVATE QUESTION' }]
     })
-  })
-
-  it('keeps monitoring on same-route activation but disables when the primary socket is replaced', async () => {
-    const gateway = { connectionState: 'open' } as HermesGateway
-
-    try {
-      setPrimaryGateway(gateway, 'default')
-      await ensureGatewayForProfile('default')
-      mount()
-      await enable()
-      await act(async () => ensureGatewayForProfile('default'))
-      request('same-route')
-      expect(notices).toHaveLength(1)
-      await act(async () => setPrimaryGateway({ connectionState: 'open' } as HermesGateway, 'default'))
-      request('replacement-route')
-      expect(notices).toHaveLength(1)
-      expect(locked).toBe(false)
-    } finally {
-      setPrimaryGateway(null, 'default')
-    }
   })
 
   it('ignores a late lock callback after disable', async () => {

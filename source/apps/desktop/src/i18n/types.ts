@@ -805,9 +805,9 @@ export interface Translations extends NoticeTranslations {
           | 'insecure'
           | 'unsupported'
           | 'disconnected'
+          | 'signedOut'
           | 'otherTab'
           | 'failed'
-          | 'reset'
           | 'limit',
           string
         >

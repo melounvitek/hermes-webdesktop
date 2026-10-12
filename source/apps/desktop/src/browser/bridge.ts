@@ -2,7 +2,7 @@ import { buildHermesWebSocketUrl, GatewayReauthRequiredError } from '@hermes/sha
 
 import type { DesktopBootProgress, HermesApiRequest, HermesConnection } from '../global'
 
-import { setBrowserAttentionConnected } from './attention-notifications'
+import { pauseBrowserAttentionForSignIn } from './attention-notifications'
 import { createBrowserDownloads } from './downloads'
 import { createBrowserZoom } from './zoom'
 
@@ -96,7 +96,7 @@ export function createBrowserBridge({ token, authRequired }: BrowserConfig) {
         authRequired &&
         (response.status === 401 || (response.status === 403 && url.pathname === '/api/auth/ws-ticket'))
       ) {
-        setBrowserAttentionConnected(false)
+        pauseBrowserAttentionForSignIn()
         authError = `Gateway sign-in required. ${message}`
 
         for (const listener of bootListeners) {
@@ -122,7 +122,7 @@ export function createBrowserBridge({ token, authRequired }: BrowserConfig) {
     browser: {
       authRequired,
       signIn() {
-        setBrowserAttentionConnected(false)
+        pauseBrowserAttentionForSignIn()
         const { pathname, search, hash } = window.location
         window.location.assign(`/login?${new URLSearchParams({ next: pathname + search + hash })}`)
       }

@@ -16,6 +16,7 @@ let connected = false
 let generation = 0
 let listening = false
 let pending = false
+let signedOut = false
 let releaseLock: (() => void) | undefined
 const notifications = new Set<Notification>()
 // Document lifetime, including disabled periods: re-enabling must not announce
@@ -24,7 +25,7 @@ const seen = new Set<string>()
 const MAX_SEEN = 1024
 
 /** Release this tab's alerts without changing the stored opt-in. */
-export function stopBrowserAttention(status: BrowserAttentionStatus = 'off'): void {
+function stop(status: BrowserAttentionStatus = 'off'): void {
   generation++
   pending = false
   releaseLock?.()
@@ -41,15 +42,19 @@ export function stopBrowserAttention(status: BrowserAttentionStatus = 'off'): vo
 export function disableBrowserAttention(): void {
   persistBoolean(STORAGE_KEY, false)
   $browserAttentionWanted.set(false)
-  stopBrowserAttention()
+  stop()
 }
 
+/** Pause while the active socket is unavailable; resume when it opens again. */
 export function setBrowserAttentionConnected(value: boolean): void {
   connected = value
+  sync()
+}
 
-  if (!value) {
-    stopBrowserAttention('disconnected')
-  }
+/** A failed sign-in pauses this tab until it reloads; the opt-in stays. */
+export function pauseBrowserAttentionForSignIn(): void {
+  signedOut = true
+  sync()
 }
 
 function unavailable(): BrowserAttentionStatus | undefined {
@@ -67,6 +72,10 @@ function unavailable(): BrowserAttentionStatus | undefined {
     !navigator.locks?.request
   ) {
     return 'unsupported'
+  }
+
+  if (signedOut) {
+    return 'signedOut'
   }
 
   if (!connected) {
@@ -91,7 +100,7 @@ function sync(): void {
   if (reason) {
     // Without an opt-in, keep the message from a declined Enable.
     if (wanted || releaseLock || pending) {
-      stopBrowserAttention(reason)
+      stop(reason)
     }
 
     return
@@ -124,7 +133,7 @@ function acquire(): void {
       pending = false
 
       if (!lock) {
-        stopBrowserAttention('otherTab')
+        stop('otherTab')
 
         return
       }
@@ -141,7 +150,7 @@ function acquire(): void {
     })
     .catch(() => {
       if (epoch === generation) {
-        stopBrowserAttention('failed')
+        stop('failed')
       }
     })
 }
@@ -152,9 +161,12 @@ function listen(): void {
   }
 
   listening = true
-  const reset = () => stopBrowserAttention('reset')
-  window.addEventListener('pagehide', reset)
-  document.addEventListener('freeze', reset)
+  // A hidden or frozen page cannot alert; let another tab take over meanwhile.
+  const leave = () => stop()
+  window.addEventListener('pagehide', leave)
+  document.addEventListener('freeze', leave)
+  window.addEventListener('pageshow', sync)
+  document.addEventListener('resume', sync)
   window.addEventListener('focus', sync)
 }
 
@@ -175,7 +187,7 @@ export async function enableBrowserAttention(): Promise<void> {
   const reason = unavailable()
 
   if (reason) {
-    stopBrowserAttention(reason)
+    stop(reason)
 
     return
   }
@@ -192,7 +204,7 @@ export async function enableBrowserAttention(): Promise<void> {
     }
 
     if (permission !== 'granted') {
-      stopBrowserAttention(permission)
+      stop(permission)
 
       return
     }
@@ -201,7 +213,7 @@ export async function enableBrowserAttention(): Promise<void> {
 
     if (!storedBoolean(STORAGE_KEY, false)) {
       // Storage is blocked, so the opt-in could not be kept.
-      stopBrowserAttention('failed')
+      stop('failed')
 
       return
     }
@@ -209,7 +221,7 @@ export async function enableBrowserAttention(): Promise<void> {
     sync()
   } catch {
     if (epoch === generation) {
-      stopBrowserAttention('failed')
+      stop('failed')
     }
   }
 }
@@ -242,13 +254,13 @@ function show(): boolean {
 
     notification.onerror = () => {
       if (epoch === generation) {
-        stopBrowserAttention('failed')
+        stop('failed')
       }
     }
 
     return true
   } catch {
-    stopBrowserAttention('failed')
+    stop('failed')
 
     return false
   }
@@ -286,7 +298,7 @@ export function notifyBrowserAttention(request: {
   }
 
   if (seen.size >= MAX_SEEN) {
-    stopBrowserAttention('limit')
+    stop('limit')
 
     return
   }

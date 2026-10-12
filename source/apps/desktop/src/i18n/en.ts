@@ -957,10 +957,10 @@ export const en: Translations = {
           insecure:
             'Notifications need HTTPS or a trusted localhost context. Plain HTTP LAN addresses are not supported.',
           unsupported: 'Notifications or exclusive tab coordination are unavailable in this browser.',
-          disconnected: 'Alerts are off because the connection is unavailable. Reconnect, then enable again.',
+          disconnected: 'Paused while this tab is disconnected. Alerts resume when it reconnects.',
+          signedOut: 'Paused until you sign in again.',
           otherTab: 'Another tab is handling notifications. Disable them there before enabling here.',
           failed: 'The notification request failed. Alerts are off; check browser and system settings.',
-          reset: 'Alerts were turned off after the tab or profile changed. Enable again when ready.',
           limit: 'The notification memory limit was reached. Alerts are off; reload this tab to start again.'
         }
       },

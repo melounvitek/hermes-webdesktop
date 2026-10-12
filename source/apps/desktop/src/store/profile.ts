@@ -1,7 +1,6 @@
 import { LOCAL_CONNECTION_ID, registryBackendScopeKey } from '@hermes/shared'
 import { atom, batch, computed } from 'nanostores'
 
-import { stopBrowserAttention } from '@/browser/attention-notifications'
 import type { HermesConnection } from '@/global'
 import { getProfiles, hermesApi, setApiRequestProfile, STARTUP_REQUEST_TIMEOUT_MS } from '@/hermes'
 import { sortByProfileOrder as sortProfilesByOrder } from '@/lib/profile-order'
@@ -80,10 +79,6 @@ function profileListSource(connection: HermesConnection | null): null | string {
 }
 
 export function setActiveProfile(name: string): void {
-  if ((name || 'default') !== $activeProfile.get()) {
-    stopBrowserAttention('reset')
-  }
-
   $activeProfile.set(name || 'default')
 }
 
