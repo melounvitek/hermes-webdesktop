@@ -469,7 +469,7 @@ export default {
       // zone's tab strip, so the pane stays reachable while collapsed.
       data: {
         placement: 'left',
-        width: '260px',
+        width: '16.25rem',
         collapsible: true,
         hideOnly: true,
         tabTitle: () => <LocalizedTabTitle select={t => t.common.bots} />,
@@ -517,7 +517,7 @@ export default {
           // arrives as the right edge's vertical tab and takes no width off the
           // chat until the user opens it.
           defaultCollapsed: true,
-          width: '250px'
+          width: '15.625rem'
         },
         render: () => <RoutinesPane />
       })

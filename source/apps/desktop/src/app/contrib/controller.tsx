@@ -209,9 +209,10 @@ registry.registerMany([
       hideOnly: true,
       tabTitle: () => <LocalizedTabTitle select={t => t.sidebar.sessions} />,
       tabTitleText: () => translateNow('sidebar.sessions'),
-      width: `${SIDEBAR_DEFAULT_WIDTH}px`,
-      minWidth: `${SIDEBAR_DEFAULT_WIDTH}px`,
-      maxWidth: `${SIDEBAR_MAX_WIDTH}px`
+      // rem (px / the 16px root), so the rail grows with the UI scale.
+      width: `${SIDEBAR_DEFAULT_WIDTH / 16}rem`,
+      minWidth: `${SIDEBAR_DEFAULT_WIDTH / 16}rem`,
+      maxWidth: `${SIDEBAR_MAX_WIDTH / 16}rem`
     },
     render: () => <WiredPane part="sidebar" />
   },
