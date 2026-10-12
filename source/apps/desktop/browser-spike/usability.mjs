@@ -256,14 +256,15 @@ async function menuClick(page) {
 }
 
 async function geometry(page, percent) {
-  const button = page.getByRole('button', { name: 'Open settings', exact: true })
+  // UI scale multiplies the 16px root font size, which rem-sized controls such
+  // as the composer's follow. The titlebar is sized in px and does not scale.
   await expect
-    .poll(() => button.evaluate(el => el.getBoundingClientRect().width / el.offsetWidth))
-    .toBeCloseTo(percent / 100, 2)
+    .poll(() => page.evaluate(() => parseFloat(getComputedStyle(document.documentElement).fontSize)))
+    .toBeCloseTo((16 * percent) / 100, 2)
+  const button = page.getByRole('button', { name: 'Add context', exact: true })
   const control = await button.evaluate(el => ({
     width: el.getBoundingClientRect().width,
-    height: el.getBoundingClientRect().height,
-    layoutWidth: el.offsetWidth
+    height: el.getBoundingClientRect().height
   }))
   const layout = await page.getByRole('contentinfo').evaluate(el => ({
     shell: el.getBoundingClientRect().toJSON(),

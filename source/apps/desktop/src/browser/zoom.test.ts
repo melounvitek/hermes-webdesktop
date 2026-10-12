@@ -10,6 +10,9 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
+// jsdom resolves neither calc() nor var(), so read the scale the stylesheet multiplies by.
+const rootScale = () => Number(document.documentElement.style.getPropertyValue('--hermes-ui-scale'))
+
 it('applies document-wide UI scale, reports changes and restores it independently of profiles', async () => {
   vi.spyOn(globalThis, 'fetch').mockResolvedValue(
     new Response('<script>window.__HERMES_SESSION_TOKEN__="test";</script>')
@@ -19,8 +22,8 @@ it('applies document-wide UI scale, reports changes and restores it independentl
   const changed = vi.fn()
   const unsubscribe = bridge.zoom.onChanged(changed)
   bridge.zoom.setPercent(125)
-  expect(bridge.zoom.factor()).toBeCloseTo(1.25)
-  expect(Number(document.documentElement.style.zoom)).toBe(bridge.zoom.factor())
+  expect(rootScale()).toBeCloseTo(1.25)
+  expect(document.documentElement.style.zoom).toBe('')
   expect(changed).toHaveBeenLastCalledWith(await bridge.zoom.get())
   await bridge.getConnection('another-profile')
   const reloaded = createBrowserBridge({ token: '', authRequired: false })
@@ -35,7 +38,7 @@ it('applies document-wide UI scale, reports changes and restores it independentl
       const event = new KeyboardEvent('keydown', { key, ...modifier, cancelable: true })
       window.dispatchEvent(event)
       expect(event.defaultPrevented).toBe(false)
-      expect(bridge.zoom.factor()).toBe(1)
+      expect(rootScale()).toBe(1)
     }
   }
 })
