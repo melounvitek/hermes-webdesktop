@@ -363,7 +363,6 @@ export const UserMessage: FC<{
   const clampInnerRef = useRef<HTMLDivElement | null>(null)
   const [bodyClamped, setBodyClamped] = useState(false)
   const lastClampHeightRef = useRef(-1)
-  const lineHeightRef = useRef(0)
 
   // Watch windows spectate a subagent run driven elsewhere — prompts can't be
   // edited, restored, or stopped from here. The bubble stays a button that
@@ -374,16 +373,13 @@ export const UserMessage: FC<{
 
   const measureClamp = useCallback((entries: readonly ResizeObserverEntry[]) => {
     const inner = clampInnerRef.current
-    const outer = inner?.parentElement
 
-    if (!inner || !outer) {
+    if (!inner) {
       return
     }
 
     // Prefer the size the ResizeObserver already computed — reading
-    // `scrollHeight` outside RO timing forces a synchronous layout, and with
-    // many user bubbles observed at once those reads interleave with the
-    // style write below into a read-write-read reflow cascade.
+    // `scrollHeight` outside RO timing forces a synchronous layout.
     const entryHeight = entries.find(entry => entry.target === inner)?.borderBoxSize?.[0]?.blockSize
     const fullHeight = Math.ceil(entryHeight ?? inner.scrollHeight)
 
@@ -393,15 +389,12 @@ export const UserMessage: FC<{
 
     lastClampHeightRef.current = fullHeight
 
-    // Line-height is stable for the life of the bubble (font settings don't
-    // change under it) — resolve the computed style once.
-    if (!lineHeightRef.current) {
-      const styles = getComputedStyle(inner)
-      lineHeightRef.current = parseFloat(styles.lineHeight) || 1.5 * parseFloat(styles.fontSize) || 20
-    }
+    // Resolved on every size change: the UI scale and chat text size change the
+    // line height under a mounted bubble.
+    const styles = getComputedStyle(inner)
+    const lineHeight = parseFloat(styles.lineHeight) || 1.5 * parseFloat(styles.fontSize) || 20
 
-    outer.style.setProperty('--human-msg-full', `${fullHeight}px`)
-    setBodyClamped(fullHeight > lineHeightRef.current * 2 + 1)
+    setBodyClamped(fullHeight > lineHeight * 2 + 1)
   }, [])
 
   useResizeObserver(measureClamp, clampInnerRef)
