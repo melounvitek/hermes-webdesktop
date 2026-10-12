@@ -5,6 +5,7 @@ import {
   handleServerRequest,
   type ServerRequestContext
 } from '@/app/session/hooks/use-message-stream/gateway-event/server-requests'
+import { startBrowserAttention } from '@/browser/attention-notifications'
 import { createBrowserBridge } from '@/browser/bridge'
 import type { HermesGateway } from '@/hermes'
 import { createClientSessionState } from '@/lib/chat-runtime'
@@ -95,6 +96,7 @@ function mount() {
 }
 
 beforeEach(() => {
+  localStorage.clear()
   notices = []
   permission = 'granted'
   locked = false
@@ -463,6 +465,46 @@ describe('browser attention settings and request admission', () => {
     expect(locked).toBe(false)
     expect(screen.getByRole('status').textContent).toMatch(/blocked|failed/i)
     expect(screen.getByRole('button', { name: 'Enable attention notifications in this tab' })).toBeTruthy()
+  })
+
+  it('remembers Enable for the next document without prompting again', async () => {
+    permission = 'default'
+    requestPermission.mockImplementation(async () => (permission = 'granted'))
+    mount()
+    await enable()
+    await act(async () => window.dispatchEvent(new Event('pagehide')))
+    await act(async () => startBrowserAttention())
+    expect(requestPermission).toHaveBeenCalledOnce()
+    expect(screen.getByRole('status').textContent).toMatch(/^Enabled/)
+    request('next-document')
+    expect(notices).toHaveLength(1)
+  })
+
+  it('forgets the opt-in after Disable', async () => {
+    mount()
+    await enable()
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Disable in this tab' })))
+    expect(screen.getByRole('status').textContent).toMatch(/^Off/)
+    expect(screen.queryByRole('button', { name: 'Disable in this tab' })).toBeNull()
+    await act(async () => window.dispatchEvent(new Event('pagehide')))
+    await act(async () => startBrowserAttention())
+    request('after-disable')
+    expect(notices).toHaveLength(0)
+  })
+
+  it('offers Disable for a remembered opt-in whose permission was reset', async () => {
+    mount()
+    await enable()
+    await act(async () => window.dispatchEvent(new Event('pagehide')))
+    permission = 'default'
+    await act(async () => startBrowserAttention())
+    expect(requestPermission).not.toHaveBeenCalled()
+    expect(screen.getByRole('status').textContent).toMatch(/not granted/i)
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Disable in this tab' })))
+    expect(screen.getByRole('status').textContent).toMatch(/^Off/)
+    permission = 'granted'
+    await act(async () => startBrowserAttention())
+    expect(screen.getByRole('status').textContent).toMatch(/^Off/)
   })
 
   it('fails closed on conflicting stored owners and row-order reversal, but admits a unique shared-primary owner', async () => {

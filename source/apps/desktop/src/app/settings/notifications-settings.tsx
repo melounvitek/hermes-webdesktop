@@ -3,6 +3,7 @@ import type { ReactNode } from 'react'
 
 import {
   $browserAttentionStatus,
+  $browserAttentionWanted,
   disableBrowserAttention,
   enableBrowserAttention,
   testBrowserAttention
@@ -40,6 +41,7 @@ function BrowserAttentionSettings() {
   const { t } = useI18n()
   const copy = t.settings.notifications.browser
   const status = useStore($browserAttentionStatus)
+  const wanted = useStore($browserAttentionWanted)
   const enabled = status === 'enabled' || status === 'requested'
 
   return (
@@ -54,7 +56,7 @@ function BrowserAttentionSettings() {
         >
           {copy.enable}
         </Button>
-        {(enabled || status === 'enabling') && (
+        {(wanted || status === 'enabling') && (
           <Button onClick={() => disableBrowserAttention()} size="sm" variant="outline">
             {copy.disable}
           </Button>

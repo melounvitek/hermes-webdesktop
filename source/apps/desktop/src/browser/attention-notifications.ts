@@ -3,26 +3,32 @@ import { atom } from 'nanostores'
 import { translateNow } from '@/i18n'
 import type { Translations } from '@/i18n/types'
 import { isBrowserClient } from '@/lib/platform'
+import { persistBoolean, storedBoolean } from '@/lib/storage'
 
 export type BrowserAttentionStatus = keyof Translations['settings']['notifications']['browser']['status']
 
+// One opt-in for every tab on this origin. Only Disable clears it.
+const STORAGE_KEY = 'hermes:browser:global:attentionNotifications'
+
 export const $browserAttentionStatus = atom<BrowserAttentionStatus>('off')
+export const $browserAttentionWanted = atom(false)
 let connected = false
 let generation = 0
+let listening = false
+let pending = false
 let releaseLock: (() => void) | undefined
-let removeListeners: (() => void) | undefined
 const notifications = new Set<Notification>()
 // Document lifetime, including disabled periods: re-enabling must not announce
 // a previously observed request. On exhaustion require reload, not silent eviction.
 const seen = new Set<string>()
 const MAX_SEEN = 1024
 
-export function disableBrowserAttention(status: BrowserAttentionStatus = 'off'): void {
+/** Release this tab's alerts without changing the stored opt-in. */
+export function stopBrowserAttention(status: BrowserAttentionStatus = 'off'): void {
   generation++
+  pending = false
   releaseLock?.()
   releaseLock = undefined
-  removeListeners?.()
-  removeListeners = undefined
 
   for (const notification of notifications) {
     notification.close()
@@ -32,11 +38,17 @@ export function disableBrowserAttention(status: BrowserAttentionStatus = 'off'):
   $browserAttentionStatus.set(seen.size >= MAX_SEEN ? 'limit' : status)
 }
 
+export function disableBrowserAttention(): void {
+  persistBoolean(STORAGE_KEY, false)
+  $browserAttentionWanted.set(false)
+  stopBrowserAttention()
+}
+
 export function setBrowserAttentionConnected(value: boolean): void {
   connected = value
 
   if (!value) {
-    disableBrowserAttention('disconnected')
+    stopBrowserAttention('disconnected')
   }
 }
 
@@ -70,49 +82,107 @@ function unavailable(): BrowserAttentionStatus | undefined {
   }
 }
 
-function allowed(): boolean {
-  const reason = unavailable() ?? (Notification.permission !== 'granted' ? 'default' : undefined)
+/** Start or stop this tab to match the stored opt-in. Never prompts. */
+function sync(): void {
+  const wanted = storedBoolean(STORAGE_KEY, false)
+  $browserAttentionWanted.set(wanted)
+  const reason = wanted ? (unavailable() ?? (Notification.permission === 'granted' ? undefined : 'default')) : 'off'
 
   if (reason) {
-    disableBrowserAttention(reason)
+    // Without an opt-in, keep the message from a declined Enable.
+    if (wanted || releaseLock || pending) {
+      stopBrowserAttention(reason)
+    }
+
+    return
   }
 
-  return !reason && Boolean(releaseLock)
+  if (!releaseLock && !pending) {
+    acquire()
+  }
+}
+
+/** Recheck the opt-in and permission before acting as the alerting tab. */
+function running(): boolean {
+  sync()
+
+  return Boolean(releaseLock)
+}
+
+function acquire(): void {
+  const epoch = ++generation
+  pending = true
+
+  // Do not await the lock's lifetime. ifAvailable refuses peers, never queues
+  // automatic takeover; generation also cancels a late granted callback.
+  void navigator.locks
+    .request('hermes:browser-attention', { mode: 'exclusive', ifAvailable: true }, async lock => {
+      if (epoch !== generation) {
+        return
+      }
+
+      pending = false
+
+      if (!lock) {
+        stopBrowserAttention('otherTab')
+
+        return
+      }
+
+      const hold = new Promise<void>(resolve => {
+        releaseLock = resolve
+      })
+
+      if (running()) {
+        $browserAttentionStatus.set('enabled')
+      }
+
+      await hold
+    })
+    .catch(() => {
+      if (epoch === generation) {
+        stopBrowserAttention('failed')
+      }
+    })
+}
+
+function listen(): void {
+  if (listening) {
+    return
+  }
+
+  listening = true
+  const reset = () => stopBrowserAttention('reset')
+  window.addEventListener('pagehide', reset)
+  document.addEventListener('freeze', reset)
+  window.addEventListener('focus', sync)
+}
+
+/** Browser boot: resume a stored opt-in once the bridge is installed. */
+export function startBrowserAttention(): void {
+  if (isBrowserClient()) {
+    listen()
+    sync()
+  }
 }
 
 /** Call directly from the Enable click: no await before requestPermission. */
 export async function enableBrowserAttention(): Promise<void> {
-  if (releaseLock || $browserAttentionStatus.get() === 'enabling') {
+  if (releaseLock || pending || $browserAttentionStatus.get() === 'enabling') {
     return
   }
 
   const reason = unavailable()
 
   if (reason) {
-    disableBrowserAttention(reason)
+    stopBrowserAttention(reason)
 
     return
   }
 
+  listen()
   const epoch = ++generation
   $browserAttentionStatus.set('enabling')
-  const reset = () => disableBrowserAttention('reset')
-
-  const recheck = () => {
-    if (releaseLock) {
-      allowed()
-    }
-  }
-
-  window.addEventListener('pagehide', reset)
-  document.addEventListener('freeze', reset)
-  window.addEventListener('focus', recheck)
-
-  removeListeners = () => {
-    window.removeEventListener('pagehide', reset)
-    document.removeEventListener('freeze', reset)
-    window.removeEventListener('focus', recheck)
-  }
 
   try {
     const permission = Notification.permission === 'granted' ? 'granted' : await Notification.requestPermission()
@@ -122,49 +192,30 @@ export async function enableBrowserAttention(): Promise<void> {
     }
 
     if (permission !== 'granted') {
-      disableBrowserAttention(permission)
+      stopBrowserAttention(permission)
 
       return
     }
 
-    // Do not await the lock's lifetime. ifAvailable refuses peers, never queues
-    // automatic takeover; generation also cancels a late granted callback.
-    void navigator.locks
-      .request('hermes:browser-attention', { mode: 'exclusive', ifAvailable: true }, async lock => {
-        if (epoch !== generation) {
-          return
-        }
+    persistBoolean(STORAGE_KEY, true)
 
-        if (!lock) {
-          disableBrowserAttention('otherTab')
+    if (!storedBoolean(STORAGE_KEY, false)) {
+      // Storage is blocked, so the opt-in could not be kept.
+      stopBrowserAttention('failed')
 
-          return
-        }
+      return
+    }
 
-        const hold = new Promise<void>(resolve => {
-          releaseLock = resolve
-        })
-
-        if (allowed()) {
-          $browserAttentionStatus.set('enabled')
-        }
-
-        await hold
-      })
-      .catch(() => {
-        if (epoch === generation) {
-          disableBrowserAttention('failed')
-        }
-      })
+    sync()
   } catch {
     if (epoch === generation) {
-      disableBrowserAttention('failed')
+      stopBrowserAttention('failed')
     }
   }
 }
 
 function show(): boolean {
-  if (!releaseLock || !allowed()) {
+  if (!releaseLock || !running()) {
     return false
   }
 
@@ -182,7 +233,7 @@ function show(): boolean {
       notification.close()
       notifications.delete(notification)
 
-      if (epoch === generation && allowed()) {
+      if (epoch === generation && running()) {
         window.focus()
       }
     }
@@ -191,13 +242,13 @@ function show(): boolean {
 
     notification.onerror = () => {
       if (epoch === generation) {
-        disableBrowserAttention('failed')
+        stopBrowserAttention('failed')
       }
     }
 
     return true
   } catch {
-    disableBrowserAttention('failed')
+    stopBrowserAttention('failed')
 
     return false
   }
@@ -235,7 +286,7 @@ export function notifyBrowserAttention(request: {
   }
 
   if (seen.size >= MAX_SEEN) {
-    disableBrowserAttention('limit')
+    stopBrowserAttention('limit')
 
     return
   }

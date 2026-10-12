@@ -10,7 +10,7 @@ import {
 } from '@hermes/shared'
 import { atom } from 'nanostores'
 
-import { disableBrowserAttention, setBrowserAttentionConnected } from '@/browser/attention-notifications'
+import { setBrowserAttentionConnected, stopBrowserAttention } from '@/browser/attention-notifications'
 import type { HermesConnection } from '@/global'
 import { HermesGateway, setApiRequestConnection } from '@/hermes'
 import { translateNow } from '@/i18n'
@@ -655,7 +655,7 @@ function reportGatewayState(profile: string, state: ConnectionState): void {
     setBrowserAttentionConnected(state === 'open')
     setGatewayState(state)
   } else if (state !== 'open') {
-    disableBrowserAttention('disconnected')
+    stopBrowserAttention('disconnected')
   }
 }
 
@@ -684,7 +684,7 @@ function applyActive(profile: string, activationEpoch: number): boolean {
   const gateway = activeGateway()
 
   if (previousKey !== g.activeKey || g.$gateway.get() !== gateway) {
-    disableBrowserAttention('reset')
+    stopBrowserAttention('reset')
   }
 
   setBrowserAttentionConnected(gateway?.connectionState === 'open')
