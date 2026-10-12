@@ -940,17 +940,17 @@ export const en: Translations = {
       browser: {
         title: 'Hermes',
         body: 'A conversation needs your attention.',
-        enable: 'Enable attention notifications in this tab',
-        disable: 'Disable in this tab',
+        enable: 'Enable attention notifications',
+        disable: 'Disable',
         test: 'Send test notification',
         description:
-          'Generic alerts for new approval and input requests received by this tab. No conversation text is shared. Clicking an alert only focuses this tab.',
+          'Generic alerts for new approval and input requests. No conversation text is shared. Clicking an alert only focuses the tab that sent it.',
         limits:
-          'Desktop only, while this tab is open and connected. The active chat stays quiet while focused. Other tabs and browser profiles may see different requests; enable in one browser only. Reload, disconnect, profile changes or suspension turn alerts off. No completion, mobile or closed-tab alerts. Browser and OS settings can still block presentation.',
+          'Desktop only. Stays on in this browser until you disable it, but only an open Hermes tab can alert. One tab sends alerts at a time; when it closes, another open tab takes over. The active chat stays quiet while focused. Other browsers and browser profiles need their own opt-in. No completion or mobile alerts. Browser and OS settings can still block presentation.',
         status: {
-          off: 'Off in this tab, even if browser permission is already granted.',
-          enabling: 'Waiting for permission and exclusive access to notifications…',
-          enabled: 'Enabled in this tab. Other tabs on this origin cannot enable at the same time.',
+          off: 'Off in this browser, even if notification permission is already granted.',
+          enabling: 'Waiting for notification permission…',
+          enabled: 'On. This tab sends the alerts for this browser.',
           requested: 'Notification requested. If nothing appeared, check browser and system notification settings.',
           denied: 'Notifications are blocked. Change permission in browser site settings before enabling again.',
           default: 'Permission was not granted. Alerts remain off; you can try Enable again.',
@@ -959,7 +959,7 @@ export const en: Translations = {
           unsupported: 'Notifications or exclusive tab coordination are unavailable in this browser.',
           disconnected: 'Paused while this tab is disconnected. Alerts resume when it reconnects.',
           signedOut: 'Paused until you sign in again.',
-          otherTab: 'Another tab is handling notifications. Disable them there before enabling here.',
+          otherTab: 'Another tab is sending alerts. This tab takes over when that tab closes.',
           failed: 'The notification request failed. Alerts are off; check browser and system settings.',
           limit: 'The notification memory limit was reached. Alerts are off; reload this tab to start again.'
         }

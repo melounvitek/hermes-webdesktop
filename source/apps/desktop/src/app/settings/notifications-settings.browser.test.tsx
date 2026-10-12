@@ -27,6 +27,7 @@ let permission: NotificationPermission
 let requestPermission: ReturnType<typeof vi.fn<() => Promise<NotificationPermission>>>
 let requestLock: ReturnType<typeof vi.fn>
 let locked: boolean
+let waiting: (() => void)[]
 let failConstruction: boolean
 let notices: FakeNotification[]
 
@@ -86,8 +87,22 @@ function request(id: string, sessionId = 'owned-a', method = 'clarify', replayed
 
 async function enable() {
   await act(async () =>
-    fireEvent.click(screen.getByRole('button', { name: 'Enable attention notifications in this tab' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Enable attention notifications' }))
   )
+}
+
+// Another tab on this origin holding the alert lock until it closes.
+function otherTab(): () => Promise<void> {
+  let close!: () => void
+  void navigator.locks.request('hermes:browser-attention', {}, () => new Promise<void>(resolve => (close = resolve)))
+
+  return async () => act(async () => close())
+}
+
+function otherTabStores(on: boolean) {
+  const key = 'hermes:browser:global:attentionNotifications'
+  localStorage.setItem(key, String(on))
+  window.dispatchEvent(new StorageEvent('storage', { key }))
 }
 
 function mount() {
@@ -101,11 +116,21 @@ beforeEach(() => {
   locked = false
   failConstruction = false
   requestPermission = vi.fn(async () => permission)
-  requestLock = vi.fn(async (_name, options, callback) => {
-    expect(options).toEqual({ mode: 'exclusive', ifAvailable: true })
-
+  waiting = []
+  // One origin-wide exclusive lock, queued like navigator.locks.
+  requestLock = vi.fn(async (_name, options: LockOptions, callback) => {
     if (locked) {
-      return callback(null)
+      if (options.ifAvailable) {
+        return callback(null)
+      }
+
+      await new Promise<void>((resolve, reject) => {
+        waiting.push(resolve)
+        options.signal?.addEventListener('abort', () => {
+          waiting.splice(waiting.indexOf(resolve), 1)
+          reject(options.signal?.reason)
+        })
+      })
     }
 
     locked = true
@@ -113,7 +138,13 @@ beforeEach(() => {
     try {
       return await callback({ name: 'test' })
     } finally {
-      locked = false
+      const next = waiting.shift()
+
+      if (next) {
+        next()
+      } else {
+        locked = false
+      }
     }
   })
   vi.stubGlobal('Notification', FakeNotification)
@@ -152,7 +183,7 @@ describe('browser attention settings and request admission', () => {
     // Seen requests survive disable/remount for the document's lifetime.
     request(`default-off-${subpage ?? 'all'}`)
     expect(notices).toHaveLength(0)
-    expect(screen.getByRole('button', { name: 'Enable attention notifications in this tab' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Enable attention notifications' })).toBeTruthy()
     expect(screen.queryAllByRole('switch')).toHaveLength(0)
     expect(requestPermission).not.toHaveBeenCalled()
     await enable()
@@ -172,7 +203,7 @@ describe('browser attention settings and request admission', () => {
 
       return Promise.resolve(permission)
     })
-    fireEvent.click(screen.getByRole('button', { name: 'Enable attention notifications in this tab' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Enable attention notifications' }))
     expect(requestPermission).toHaveBeenCalledOnce()
     await act(async () => {})
     request('permission-fresh')
@@ -275,16 +306,42 @@ describe('browser attention settings and request admission', () => {
     expect(screen.getByRole('status').textContent).toMatch(/requested/i)
   })
 
-  it('refuses an occupied lock without queued takeover', async () => {
-    locked = true
+  it('waits behind the alerting tab and takes over when it closes', async () => {
+    const close = otherTab()
     mount()
     await enable()
-    request('contended')
-    expect(notices).toHaveLength(0)
     expect(screen.getByRole('status').textContent).toMatch(/another tab/i)
-    locked = false
-    request('no-takeover')
+    request('while-waiting')
     expect(notices).toHaveLength(0)
+    await close()
+    expect(screen.getByRole('status').textContent).toMatch(/^On/)
+    request('after-takeover')
+    expect(notices).toHaveLength(1)
+  })
+
+  it('follows Enable and Disable from another tab', async () => {
+    mount()
+    startBrowserAttention()
+    await act(async () => otherTabStores(true))
+    expect(screen.getByRole('status').textContent).toMatch(/^On/)
+    request('enabled-elsewhere')
+    expect(notices).toHaveLength(1)
+    await act(async () => otherTabStores(false))
+    expect(locked).toBe(false)
+    expect(screen.getByRole('status').textContent).toMatch(/^Off/)
+    expect(screen.queryByRole('button', { name: 'Disable' })).toBeNull()
+  })
+
+  it('stops waiting when another tab disables alerts', async () => {
+    const close = otherTab()
+    mount()
+    await enable()
+    await act(async () => otherTabStores(false))
+    await close()
+    expect(locked).toBe(false)
+    request('after-disable-elsewhere')
+    expect(notices).toHaveLength(0)
+    expect(screen.getByRole('status').textContent).toMatch(/^Off/)
   })
 
   it('pauses while disconnected and keeps alerting after a reconnect, a replaced socket or a profile switch', async () => {
@@ -305,7 +362,7 @@ describe('browser attention settings and request admission', () => {
       await act(async () => ensureGatewayForProfile('default'))
       request('after-socket-replacement')
       expect(notices).toHaveLength(3)
-      expect(screen.getByRole('status').textContent).toMatch(/^Enabled/)
+      expect(screen.getByRole('status').textContent).toMatch(/^On/)
     } finally {
       setPrimaryGateway(null, 'default')
     }
@@ -339,7 +396,7 @@ describe('browser attention settings and request admission', () => {
       })
     )
     mount()
-    fireEvent.click(screen.getByRole('button', { name: 'Enable attention notifications in this tab' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Enable attention notifications' }))
     act(() => document.dispatchEvent(new Event('freeze')))
     await act(async () => {
       permission = 'granted'
@@ -404,7 +461,7 @@ describe('browser attention settings and request admission', () => {
     mount()
     await enable()
     request('before-disable')
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Disable in this tab' })))
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Disable' })))
     await enable()
     request('before-disable')
     request('after-enable')
@@ -454,7 +511,7 @@ describe('browser attention settings and request admission', () => {
     await act(async () => {})
     expect(locked).toBe(false)
     expect(screen.getByRole('status').textContent).toMatch(/blocked|failed/i)
-    expect(screen.getByRole('button', { name: 'Enable attention notifications in this tab' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Enable attention notifications' })).toBeTruthy()
   })
 
   it('remembers Enable for the next document without prompting again', async () => {
@@ -465,7 +522,7 @@ describe('browser attention settings and request admission', () => {
     await act(async () => window.dispatchEvent(new Event('pagehide')))
     await act(async () => startBrowserAttention())
     expect(requestPermission).toHaveBeenCalledOnce()
-    expect(screen.getByRole('status').textContent).toMatch(/^Enabled/)
+    expect(screen.getByRole('status').textContent).toMatch(/^On/)
     request('next-document')
     expect(notices).toHaveLength(1)
   })
@@ -473,9 +530,9 @@ describe('browser attention settings and request admission', () => {
   it('forgets the opt-in after Disable', async () => {
     mount()
     await enable()
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Disable in this tab' })))
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Disable' })))
     expect(screen.getByRole('status').textContent).toMatch(/^Off/)
-    expect(screen.queryByRole('button', { name: 'Disable in this tab' })).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Disable' })).toBeNull()
     await act(async () => window.dispatchEvent(new Event('pagehide')))
     await act(async () => startBrowserAttention())
     request('after-disable')
@@ -490,7 +547,7 @@ describe('browser attention settings and request admission', () => {
     await act(async () => startBrowserAttention())
     expect(requestPermission).not.toHaveBeenCalled()
     expect(screen.getByRole('status').textContent).toMatch(/not granted/i)
-    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Disable in this tab' })))
+    await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Disable' })))
     expect(screen.getByRole('status').textContent).toMatch(/^Off/)
     permission = 'granted'
     await act(async () => startBrowserAttention())

@@ -9,13 +9,15 @@ export type BrowserAttentionStatus = keyof Translations['settings']['notificatio
 
 // One opt-in for every tab on this origin. Only Disable clears it.
 const STORAGE_KEY = 'hermes:browser:global:attentionNotifications'
+// Held by the one tab that alerts; the other tabs queue behind it.
+const LOCK_NAME = 'hermes:browser-attention'
 
 export const $browserAttentionStatus = atom<BrowserAttentionStatus>('off')
 export const $browserAttentionWanted = atom(false)
 let connected = false
 let generation = 0
 let listening = false
-let pending = false
+let pending: AbortController | undefined
 let signedOut = false
 let releaseLock: (() => void) | undefined
 const notifications = new Set<Notification>()
@@ -27,7 +29,8 @@ const MAX_SEEN = 1024
 /** Release this tab's alerts without changing the stored opt-in. */
 function stop(status: BrowserAttentionStatus = 'off'): void {
   generation++
-  pending = false
+  pending?.abort()
+  pending = undefined
   releaseLock?.()
   releaseLock = undefined
 
@@ -120,39 +123,41 @@ function running(): boolean {
 
 function acquire(): void {
   const epoch = ++generation
-  pending = true
+  const controller = new AbortController()
+  pending = controller
 
-  // Do not await the lock's lifetime. ifAvailable refuses peers, never queues
-  // automatic takeover; generation also cancels a late granted callback.
-  void navigator.locks
-    .request('hermes:browser-attention', { mode: 'exclusive', ifAvailable: true }, async lock => {
-      if (epoch !== generation) {
-        return
-      }
+  // Do not await the lock's lifetime. A late grant after a stop finds a newer
+  // generation and returns, which releases the lock again.
+  const run = async (lock: Lock | null): Promise<void> => {
+    if (epoch !== generation) {
+      return
+    }
 
-      pending = false
+    if (!lock) {
+      $browserAttentionStatus.set('otherTab')
 
-      if (!lock) {
-        stop('otherTab')
+      return navigator.locks.request(LOCK_NAME, { signal: controller.signal }, run)
+    }
 
-        return
-      }
+    pending = undefined
 
-      const hold = new Promise<void>(resolve => {
-        releaseLock = resolve
-      })
-
-      if (running()) {
-        $browserAttentionStatus.set('enabled')
-      }
-
-      await hold
+    const hold = new Promise<void>(resolve => {
+      releaseLock = resolve
     })
-    .catch(() => {
-      if (epoch === generation) {
-        stop('failed')
-      }
-    })
+
+    if (running()) {
+      $browserAttentionStatus.set('enabled')
+    }
+
+    await hold
+  }
+
+  // Try first, so a free lock never shows the waiting status.
+  void navigator.locks.request(LOCK_NAME, { ifAvailable: true }, run).catch(() => {
+    if (epoch === generation) {
+      stop('failed')
+    }
+  })
 }
 
 function listen(): void {
@@ -168,6 +173,12 @@ function listen(): void {
   window.addEventListener('pageshow', sync)
   document.addEventListener('resume', sync)
   window.addEventListener('focus', sync)
+  // Another tab turned alerts on or off; a null key means storage was cleared.
+  window.addEventListener('storage', event => {
+    if (event.key === STORAGE_KEY || event.key === null) {
+      sync()
+    }
+  })
 }
 
 /** Browser boot: resume a stored opt-in once the bridge is installed. */
