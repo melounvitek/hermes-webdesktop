@@ -14,7 +14,7 @@ import {
   COMPOSER_COMPACT_PILL_PX,
   COMPOSER_FOLD_VOICE_PX,
   COMPOSER_MINIMAL_PX,
-  COMPOSER_SINGLE_LINE_MAX_PX,
+  COMPOSER_SINGLE_LINE_MAX_REM,
   COMPOSER_STACK_BREAKPOINT_PX
 } from '../composer-utils'
 
@@ -146,7 +146,9 @@ export function useComposerMetrics({
     // oscillating across the wrap boundary as the input switches widths.
     const editor = editorRef.current
 
-    if (editor && editor.scrollHeight > COMPOSER_SINGLE_LINE_MAX_PX) {
+    const rootFontPx = parseFloat(getComputedStyle(document.documentElement).fontSize) || 16
+
+    if (editor && editor.scrollHeight > COMPOSER_SINGLE_LINE_MAX_REM * rootFontPx) {
       setExpanded(true)
     }
 

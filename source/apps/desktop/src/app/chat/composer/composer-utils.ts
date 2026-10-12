@@ -44,8 +44,9 @@ export const COMPOSER_MINIMAL_PX = 180
 
 // A single editor line is ~28px (--composer-input-min-height 1.625rem + 0.5rem
 // vertical padding). Anything taller means the text wrapped to a second line,
-// which is when the composer should expand to the stacked layout.
-export const COMPOSER_SINGLE_LINE_MAX_PX = 36
+// which is when the composer should expand to the stacked layout. In rem, as
+// the line grows with the UI scale.
+export const COMPOSER_SINGLE_LINE_MAX_REM = 2.25
 
 export const COMPOSER_FADE_BACKGROUND =
   'linear-gradient(to bottom, transparent, color-mix(in srgb, var(--dt-background) 10%, transparent))'
