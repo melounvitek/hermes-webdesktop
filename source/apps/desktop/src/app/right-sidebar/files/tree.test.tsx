@@ -114,3 +114,26 @@ describe('ProjectTree context-menu clicks', () => {
     expect(onPreviewFile).toHaveBeenCalledWith('/w/a.ts')
   })
 })
+
+describe('ProjectTree row sizing', () => {
+  beforeEach(() => {
+    vi.stubGlobal('ResizeObserver', undefined)
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(() => DOM_RECT)
+  })
+
+  afterEach(() => {
+    cleanup()
+    globalThis.document.documentElement.style.removeProperty('font-size')
+    vi.restoreAllMocks()
+    vi.unstubAllGlobals()
+  })
+
+  it('spaces rows by the rem row height so they grow with the UI scale', async () => {
+    globalThis.document.documentElement.style.fontSize = '20px'
+    renderTree()
+
+    const row = await screen.findByText('src')
+
+    expect(row.closest<HTMLElement>('[role="treeitem"]')?.style.top).toBe('27.5px')
+  })
+})

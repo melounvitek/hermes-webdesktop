@@ -17,7 +17,9 @@ import { FileEntryContextMenu, InlineRenameInput, isRenameShortcut } from '../fi
 import { getFileTreeDndManager } from './dnd-manager'
 import type { TreeNode } from './use-project-tree'
 
-const ROW_HEIGHT = 22
+// --file-tree-row-height. In rem so rows grow with the UI scale; a scale
+// change also resizes the tree's box, which re-renders it at the new height.
+const ROW_HEIGHT_REM = 1.375
 const INDENT = 10
 /** Fixed base inset (`px-6.5`) layered on top of arborist's depth indent. */
 const TREE_ROW_INSET = '17px'
@@ -202,7 +204,7 @@ export function ProjectTree({
           padding={0}
           ref={treeRef}
           renderRow={ProjectTreeRowContainer}
-          rowHeight={ROW_HEIGHT}
+          rowHeight={ROW_HEIGHT_REM * (parseFloat(getComputedStyle(document.documentElement).fontSize) || 16)}
           width={size.width}
         >
           {props => (
