@@ -12,7 +12,8 @@ export interface TextLineChunk extends LineChunk<string> {
 
 interface FixedRowWindowOptions {
   overscanRows: number
-  rowPx: number
+  /** In rem, like the rows and spacers, so the window follows the UI scale. */
+  rowRem: number
   rowsPerChunk: number
   totalRows: number
 }
@@ -51,7 +52,7 @@ type ChunkWindow = Pick<FixedRowWindow, 'afterRows' | 'beforeRows' | 'endChunk' 
 
 export function useFixedRowWindow({
   overscanRows,
-  rowPx,
+  rowRem,
   rowsPerChunk,
   totalRows
 }: FixedRowWindowOptions): FixedRowWindow {
@@ -62,6 +63,7 @@ export function useFixedRowWindow({
   // can compare results and skip a re-render unless the window actually moved.
   const compute = useCallback(
     (node: HTMLDivElement | null): ChunkWindow => {
+      const rowPx = rowRem * (parseFloat(getComputedStyle(document.documentElement).fontSize) || 16)
       const height = node?.clientHeight || 800
       const scrollTop = node?.scrollTop ?? 0
       const firstRow = Math.max(0, Math.floor(scrollTop / rowPx) - overscanRows)
@@ -76,7 +78,7 @@ export function useFixedRowWindow({
         startChunk
       }
     },
-    [overscanRows, rowPx, rowsPerChunk, totalRows]
+    [overscanRows, rowRem, rowsPerChunk, totalRows]
   )
 
   const [win, setWin] = useState<ChunkWindow>(() => compute(null))

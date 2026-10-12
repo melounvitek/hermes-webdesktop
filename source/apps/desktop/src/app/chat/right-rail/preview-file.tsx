@@ -66,7 +66,8 @@ import { notifyWorkspaceChanged } from '@/store/workspace-events'
 const SHIKI_THEME = { dark: 'github-dark-default', light: 'github-light-default' } as const
 const TEXT_PREVIEW_MAX_BYTES = 512 * 1024
 const SOURCE_CHUNK_LINES = 200
-const SOURCE_LINE_PX = 20
+// Matches the rows' `h-5`.
+const SOURCE_LINE_REM = 1.25
 const SOURCE_OVERSCAN_LINES = 400
 
 // Math plugin for the static file preview, configured once at module scope.
@@ -641,7 +642,7 @@ export function SourceView({ filePath, language, text }: { filePath?: string; la
 
   const { afterRows, beforeRows, endChunk, onScroll, scrollerRef, startChunk } = useFixedRowWindow({
     overscanRows: SOURCE_OVERSCAN_LINES,
-    rowPx: SOURCE_LINE_PX,
+    rowRem: SOURCE_LINE_REM,
     rowsPerChunk: SOURCE_CHUNK_LINES,
     totalRows: totalLines
   })
@@ -715,7 +716,9 @@ export function SourceView({ filePath, language, text }: { filePath?: string; la
   return (
     <div className="h-full overflow-auto" onScroll={onScroll} ref={scrollerRef}>
       <div className="grid min-w-max grid-cols-[auto_minmax(0,1fr)] font-mono text-[0.7rem] leading-relaxed">
-        {beforeRows > 0 && <div aria-hidden className="col-span-2" style={{ height: beforeRows * SOURCE_LINE_PX }} />}
+        {beforeRows > 0 && (
+          <div aria-hidden className="col-span-2" style={{ height: `${beforeRows * SOURCE_LINE_REM}rem` }} />
+        )}
         {visibleChunks.map(chunk => (
           <Fragment key={chunk.start}>
             <div className="select-none text-right text-muted-foreground/55">
@@ -748,7 +751,9 @@ export function SourceView({ filePath, language, text }: { filePath?: string; la
             </div>
           </Fragment>
         ))}
-        {afterRows > 0 && <div aria-hidden className="col-span-2" style={{ height: afterRows * SOURCE_LINE_PX }} />}
+        {afterRows > 0 && (
+          <div aria-hidden className="col-span-2" style={{ height: `${afterRows * SOURCE_LINE_REM}rem` }} />
+        )}
       </div>
     </div>
   )

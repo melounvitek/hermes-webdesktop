@@ -54,7 +54,8 @@ const DIFF_KIND_TEXT: Record<DiffKind, string> = {
 const DIFF_LINE_BASE = 'block min-w-max whitespace-pre border-l-2 px-2.5 py-px'
 const PREVIEW_DIFF_LINE_BASE = 'block h-5 min-w-max whitespace-pre px-2.5 leading-5'
 const PREVIEW_CHUNK_LINES = 200
-const PREVIEW_LINE_PX = 20
+// Matches the rows' `h-5`.
+const PREVIEW_LINE_REM = 1.25
 const PREVIEW_OVERSCAN_LINES = 400
 
 // Bleed out of the tool-card body's `p-1.5` so tints/borders run flush to the
@@ -334,7 +335,7 @@ function PreviewDiffRows({
 }) {
   return (
     <>
-      {beforeLines > 0 && <div aria-hidden style={{ height: beforeLines * PREVIEW_LINE_PX }} />}
+      {beforeLines > 0 && <div aria-hidden style={{ height: `${beforeLines * PREVIEW_LINE_REM}rem` }} />}
       {chunks.map(chunk => (
         <div className="block" key={chunk.start}>
           {chunk.lines.map((line, offset) => {
@@ -355,7 +356,7 @@ function PreviewDiffRows({
           })}
         </div>
       ))}
-      {afterLines > 0 && <div aria-hidden style={{ height: afterLines * PREVIEW_LINE_PX }} />}
+      {afterLines > 0 && <div aria-hidden style={{ height: `${afterLines * PREVIEW_LINE_REM}rem` }} />}
     </>
   )
 }
@@ -546,7 +547,7 @@ function DiffOverviewRuler({ lines }: { lines: DiffLine[] }) {
           short diff renders thin, line-aligned ticks instead of stretching a few
           changes into gross full-height blocks. A long diff hits the 100% cap and
           compresses into a true overview. */}
-      <div className="relative w-full" style={{ height: `min(100%, ${lines.length * PREVIEW_LINE_PX}px)` }}>
+      <div className="relative w-full" style={{ height: `min(100%, ${lines.length * PREVIEW_LINE_REM}rem)` }}>
         {runs.map((run, index) => (
           <div
             className={cn(
@@ -597,7 +598,7 @@ export function FileDiffPanel({
 
   const { afterRows, beforeRows, endChunk, onScroll, scrollerRef, startChunk } = useFixedRowWindow({
     overscanRows: PREVIEW_OVERSCAN_LINES,
-    rowPx: PREVIEW_LINE_PX,
+    rowRem: PREVIEW_LINE_REM,
     rowsPerChunk: PREVIEW_CHUNK_LINES,
     totalRows: lines.length
   })
@@ -661,7 +662,7 @@ export function FileDiffPanel({
               // `[data-glass-opaque]` in styles.css.
               data-glass-opaque=""
             >
-              {beforeRows > 0 && <div aria-hidden style={{ height: beforeRows * PREVIEW_LINE_PX }} />}
+              {beforeRows > 0 && <div aria-hidden style={{ height: `${beforeRows * PREVIEW_LINE_REM}rem` }} />}
               {visibleLineChunks.map(chunk => (
                 <div className="block" key={chunk.start}>
                   {chunk.lines.map((line, offset) => {
@@ -678,7 +679,7 @@ export function FileDiffPanel({
                   })}
                 </div>
               ))}
-              {afterRows > 0 && <div aria-hidden style={{ height: afterRows * PREVIEW_LINE_PX }} />}
+              {afterRows > 0 && <div aria-hidden style={{ height: `${afterRows * PREVIEW_LINE_REM}rem` }} />}
             </div>
             <div className="min-w-0">{windowedBody}</div>
           </div>
