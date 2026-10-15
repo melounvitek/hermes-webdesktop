@@ -133,14 +133,24 @@ export interface TerminalEntry {
    *  background process (`terminal(background=true)`), keyed by `procId`. */
   kind: 'user' | 'agent'
   procId?: string
+  /** Browser: the plugin shell this tab owns, remembered so a reload reattaches to it. */
+  session?: TerminalSession
+}
+
+/** A live browser plugin shell: its server id and resolved shell name. */
+export interface TerminalSession {
+  id: string
+  shell: string
 }
 
 interface PersistedTerminalEntry {
   auto: boolean
   cwd: string
   id: string
+  profile?: string
   restoreCwd?: string
   reviveBuffer?: string
+  session?: TerminalSession
   title: string
 }
 
@@ -150,12 +160,23 @@ interface PersistedTerminalState {
 }
 
 const TERMINALS_STORAGE_KEY = 'hermes.desktop.terminals.v1'
+// Browser tabs persist only references to their live plugin shells, scoped to
+// this browser tab (sessionStorage), so a reload reattaches. Never any output.
+const BROWSER_TERMINALS_STORAGE_KEY = 'hermes.desktop.terminals.window.v1'
 const browser = import.meta.env.VITE_BROWSER === '1'
 
 // Cap a single tab's replayed history so the persisted layout can't blow the
 // localStorage quota. Roughly mirrors VS Code's persistentSessionScrollback
 // default (100 lines) once the serialized escape codes are counted in.
 const MAX_REVIVE_BUFFER_CHARS = 48_000
+
+function sanitizeSession(value: unknown): TerminalSession | null {
+  const record = value && typeof value === 'object' ? (value as Record<string, unknown>) : {}
+
+  return typeof record.id === 'string' && record.id && typeof record.shell === 'string'
+    ? { id: record.id, shell: record.shell }
+    : null
+}
 
 function sanitizePersistedTerminal(value: unknown): PersistedTerminalEntry | null {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
@@ -168,8 +189,11 @@ function sanitizePersistedTerminal(value: unknown): PersistedTerminalEntry | nul
   const cwd = typeof record.cwd === 'string' ? record.cwd : ''
   const restoreCwd = typeof record.restoreCwd === 'string' && record.restoreCwd ? record.restoreCwd : undefined
   const reviveBuffer = typeof record.reviveBuffer === 'string' ? record.reviveBuffer : undefined
+  const profile = typeof record.profile === 'string' ? record.profile : ''
+  const session = browser ? sanitizeSession(record.session) : null
 
-  if (!id) {
+  // A browser tab comes back only as its profile's live shell.
+  if (!id || (browser && !(profile && session))) {
     return null
   }
 
@@ -177,9 +201,31 @@ function sanitizePersistedTerminal(value: unknown): PersistedTerminalEntry | nul
     auto: typeof record.auto === 'boolean' ? record.auto : true,
     cwd,
     id,
+    ...(session ? { profile, session } : {}),
     ...(restoreCwd ? { restoreCwd } : {}),
     ...(reviveBuffer ? { reviveBuffer } : {}),
     title: title || 'Terminal'
+  }
+}
+
+// Best-effort like lib/storage: sessionStorage can be unavailable.
+function readBrowserTerminals(): null | string {
+  try {
+    return window.sessionStorage.getItem(BROWSER_TERMINALS_STORAGE_KEY)
+  } catch {
+    return null
+  }
+}
+
+function writeBrowserTerminals(value: null | string) {
+  try {
+    if (value === null) {
+      window.sessionStorage.removeItem(BROWSER_TERMINALS_STORAGE_KEY)
+    } else {
+      window.sessionStorage.setItem(BROWSER_TERMINALS_STORAGE_KEY, value)
+    }
+  } catch {
+    // A tab that cannot remember its shells still works until it reloads.
   }
 }
 
@@ -189,11 +235,9 @@ function loadPersistedTerminals(): PersistedTerminalState {
   if (browser) {
     // Old browser tabs have no ownership; never respawn them or retain output.
     writeKey(TERMINALS_STORAGE_KEY, null)
-
-    return fallback
   }
 
-  const raw = readKey(TERMINALS_STORAGE_KEY)
+  const raw = browser ? readBrowserTerminals() : readKey(TERMINALS_STORAGE_KEY)
 
   if (!raw) {
     return fallback
@@ -227,29 +271,28 @@ function loadPersistedTerminals(): PersistedTerminalState {
 // / layout.ts). Capturing history this way means a snapshot is already on disk
 // well before the renderer tears down, so app quit needs no unload hook.
 function persistTerminals(list: readonly TerminalEntry[], activeTerminalId: null | string) {
-  if (browser) {
-    return
-  }
+  const write = browser ? writeBrowserTerminals : (value: null | string) => writeKey(TERMINALS_STORAGE_KEY, value)
 
   const terminals = list
-    .filter(term => term.kind === 'user')
+    .filter(term => term.kind === 'user' && (!browser || (term.profile && term.session)))
     .map(term => ({
       auto: term.auto,
       cwd: term.cwd,
       id: term.id,
+      ...(browser ? { profile: term.profile, session: term.session } : {}),
       ...(term.restoreCwd ? { restoreCwd: term.restoreCwd } : {}),
       ...(term.reviveBuffer ? { reviveBuffer: term.reviveBuffer } : {}),
       title: term.title
     }))
 
   if (!terminals.length) {
-    writeKey(TERMINALS_STORAGE_KEY, null)
+    write(null)
 
     return
   }
 
   const active = terminals.some(term => term.id === activeTerminalId) ? activeTerminalId : (terminals[0]?.id ?? null)
-  writeKey(TERMINALS_STORAGE_KEY, JSON.stringify({ activeTerminalId: active, terminals }))
+  write(JSON.stringify({ activeTerminalId: active, terminals }))
 }
 
 const restored = loadPersistedTerminals()
@@ -429,8 +472,8 @@ export function cycleTerminal(direction: 1 | -1): void {
 }
 
 /** Drop a terminal. Focus slides to the neighbor that fills its slot; closing
- *  the last one closes the whole pane. */
-export function closeTerminal(id: string): void {
+ *  the last one closes the whole pane unless `keepPane` (nobody asked to close). */
+export function closeTerminal(id: string, { keepPane = false } = {}): void {
   const list = $terminals.get()
   const index = list.findIndex(term => term.id === id)
 
@@ -446,7 +489,7 @@ export function closeTerminal(id: string): void {
     $activeTerminalId.set((next[index] ?? next[index - 1])?.id ?? null)
   }
 
-  if (wasVisible && !$visibleTerminals.get().length) {
+  if (wasVisible && !keepPane && !$visibleTerminals.get().length) {
     setTerminalTakeover(false)
   }
 }
@@ -533,6 +576,15 @@ export function updateTerminalRestoreCwd(id: string, restoreCwd: string): void {
       return { ...term, restoreCwd: next }
     })
   )
+}
+
+/** Browser: remember the plugin shell a tab owns, so a reload reattaches to it. */
+export function rememberTerminalSession(id: string, session: TerminalSession): void {
+  if (!browser) {
+    return
+  }
+
+  $terminals.set($terminals.get().map(term => (term.id === id && term.kind === 'user' ? { ...term, session } : term)))
 }
 
 export function renameTerminal(id: string, title: string): void {

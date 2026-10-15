@@ -45,3 +45,39 @@ it('keeps browser terminals runtime-only and isolates selection and close operat
   expect(bootProfile.get()).toBe('default')
   expect(localStorage.getItem('hermes.desktop.terminals.v1')).toBeNull()
 })
+
+it('remembers only live shells, never their output, in this browser tab across a reload', async () => {
+  vi.stubEnv('VITE_BROWSER', '1')
+  vi.resetModules()
+  gatewayProfile.set('alpha')
+  const key = 'hermes.desktop.terminals.window.v1'
+  const first = await import('./terminals')
+  const live = first.createTerminal()
+  first.createTerminal() // Its start failed: no shell to come back to.
+  first.rememberTerminalSession(live, { id: 'sid-live', shell: 'zsh' })
+  first.renameTerminal(live, 'build')
+  first.updateTerminalReviveBuffer(live, 'password output')
+  first.selectTerminal(live)
+  expect(sessionStorage.getItem(key)).not.toContain('password output')
+  expect(localStorage.getItem('hermes.desktop.terminals.v1')).toBeNull()
+  const stored = JSON.parse(sessionStorage.getItem(key)!)
+  stored.terminals.push({ id: 'no-shell', title: 'x', auto: true, cwd: '/repo', profile: 'alpha' })
+  sessionStorage.setItem(key, JSON.stringify(stored))
+
+  vi.resetModules() // Page reload.
+  const reloaded = await import('./terminals')
+  expect(reloaded.$terminals.get()).toEqual([
+    {
+      id: live,
+      title: 'build',
+      auto: false,
+      cwd: '/repo',
+      kind: 'user',
+      profile: 'alpha',
+      session: { id: 'sid-live', shell: 'zsh' }
+    }
+  ])
+  expect(reloaded.$activeTerminalId.get()).toBe(live)
+  reloaded.closeTerminal(live)
+  expect(sessionStorage.getItem(key)).toBeNull()
+})

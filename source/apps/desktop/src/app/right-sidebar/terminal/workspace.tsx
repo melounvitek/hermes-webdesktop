@@ -81,6 +81,7 @@ export function TerminalWorkspace({ onAddSelectionToChat }: TerminalWorkspacePro
             profile={term.profile}
             restoreCwd={term.restoreCwd}
             reviveBuffer={term.reviveBuffer}
+            session={term.session}
           />
         )
       )}

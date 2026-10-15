@@ -8,7 +8,13 @@ import { ScrollArea } from '@/components/ui/scroll-area'
 import { useI18n } from '@/i18n'
 import { cn } from '@/lib/utils'
 
-import { closeTerminal, createTerminal, reportTerminalShell } from './terminals'
+import {
+  closeTerminal,
+  createTerminal,
+  rememberTerminalSession,
+  reportTerminalShell,
+  type TerminalSession
+} from './terminals'
 import { useAgentTerminal } from './use-agent-terminal'
 import { useTerminalSession } from './use-terminal-session'
 
@@ -30,6 +36,7 @@ interface TerminalInstanceProps {
   onAddSelectionToChat: (text: string, label?: string) => void
   restoreCwd?: string
   reviveBuffer?: string
+  session?: TerminalSession
 }
 
 /** One persistent xterm+PTY. Every open tab stays mounted (so its shell and
@@ -41,7 +48,8 @@ export function TerminalInstance({
   onAddSelectionToChat,
   restoreCwd,
   reviveBuffer,
-  profile
+  profile,
+  session
 }: TerminalInstanceProps) {
   const { t } = useI18n()
   const errors = t.rightSidebar.terminalErrors
@@ -55,7 +63,9 @@ export function TerminalInstance({
       onAddSelectionToChat,
       restoreCwd,
       reviveBuffer,
-      onShell: shell => reportTerminalShell(id, shell)
+      session,
+      onShell: shell => reportTerminalShell(id, shell),
+      onSession: live => rememberTerminalSession(id, live)
     })
 
   return (

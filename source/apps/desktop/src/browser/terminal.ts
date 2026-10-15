@@ -48,8 +48,8 @@ function failure(error: unknown, starting = false): Error & { reason: Reason; de
 
   if (isGatewayReauthRequired(error) || status === 401 || status === 403) {
     reason = 'auth'
-  } else if (status === 404 || (starting && status === 405)) {
-    // Without the plugin, the SPA fallback rejects POST /sessions with 405.
+  } else if (status === 404 || status === 405) {
+    // Without the plugin, the SPA fallback rejects plugin POSTs with 405.
     reason = starting ? 'missing-plugin' : 'missing-session'
   } else if (starting && status === 429) {
     reason = 'limit'
@@ -61,10 +61,23 @@ function failure(error: unknown, starting = false): Error & { reason: Reason; de
   return Object.assign(error instanceof Error ? error : new Error(message), { reason, ...(detail ? { detail } : {}) })
 }
 
-/** Runtime-only ownership. A reconnect can attach only to an id created here,
- * with the profile captured at creation, never to the currently selected profile. */
+/** A reconnect can attach only to an id created here or remembered by this
+ * browser tab, with the profile captured at creation, never to the currently
+ * selected profile. */
 export function createBrowserTerminal(api: <T>(request: HermesApiRequest) => Promise<T>): TerminalApi {
   const sessions = new Map<string, Session>()
+
+  const own = (id: string, profile: string, size: Session['size']) =>
+    sessions.set(id, {
+      profile,
+      status: { state: 'connecting' },
+      data: new Set(),
+      exits: new Set(),
+      statuses: new Set(),
+      retries: 0,
+      generation: 0,
+      size
+    })
 
   const publish = (session: Session, status: HermesTerminalStatus) => {
     session.status = status
@@ -304,18 +317,14 @@ export function createBrowserTerminal(api: <T>(request: HermesApiRequest) => Pro
         throw failure(error, true)
       }
 
-      sessions.set(result.id, {
-        profile,
-        status: { state: 'connecting' },
-        data: new Set(),
-        exits: new Set(),
-        statuses: new Set(),
-        retries: 0,
-        generation: 0,
-        size: { cols, rows }
-      })
+      own(result.id, profile, { cols, rows })
 
       return result
+    },
+    resume(id, { profile = 'default', cols = 80, rows = 24 } = {}) {
+      if (!sessions.has(id)) {
+        own(id, profile, { cols, rows })
+      }
     },
     async attach(id) {
       const session = sessions.get(id)
@@ -342,6 +351,12 @@ export function createBrowserTerminal(api: <T>(request: HermesApiRequest) => Pro
       session.data.clear()
       session.exits.clear()
       session.statuses.clear()
+
+      // Another browser tab took this shell over (a duplicated tab reattaches
+      // the shells it copied); closing the view here must not kill it there.
+      if (session.status.reason === 'superseded') {
+        return true
+      }
 
       // Closing is synchronous locally; an unreachable server must not strand
       // retries or produce an unhandled rejection during React cleanup.

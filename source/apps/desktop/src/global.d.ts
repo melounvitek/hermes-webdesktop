@@ -563,6 +563,8 @@ declare global {
         /** Browser transport health; native PTYs do not need reconnect state. */
         onStatus?: (id: string, callback: (status: HermesTerminalStatus) => void) => () => void
         resize: (id: string, size: { cols: number; rows: number }) => Promise<boolean>
+        /** Browser: adopt a live shell this tab remembered across a reload; attach() then reconnects it. */
+        resume?: (id: string, options?: { cols?: number; rows?: number; profile?: string }) => void
         start: (options?: {
           cols?: number
           cwd?: string

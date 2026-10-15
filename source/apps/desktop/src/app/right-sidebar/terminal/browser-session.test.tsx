@@ -4,7 +4,7 @@ import { afterEach, expect, it, vi } from 'vitest'
 import type { HermesTerminalStatus } from '@/global'
 
 import { TerminalInstance } from './instance'
-import { closeTerminal } from './terminals'
+import { closeTerminal, rememberTerminalSession } from './terminals'
 
 const mocks = vi.hoisted(() => ({
   write: vi.fn(),
@@ -86,6 +86,7 @@ vi.mock('./buffer', () => ({ registerTerminalReader: () => () => {}, makeTermina
 vi.mock('./terminals', () => ({
   reportTerminalShell: vi.fn(),
   closeTerminal: vi.fn(),
+  rememberTerminalSession: vi.fn(),
   updateTerminalRestoreCwd: vi.fn(),
   updateTerminalReviveBuffer: vi.fn(),
   registerWebglRefresh: () => () => {},
@@ -152,6 +153,7 @@ it('shows actionable start errors and reconnect state, retries the owned session
   fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
   await waitFor(() => expect(attach).toHaveBeenCalledTimes(1))
   expect(start).toHaveBeenLastCalledWith(expect.objectContaining({ profile: 'alpha' }))
+  expect(rememberTerminalSession).toHaveBeenCalledWith('tab', { id: 'owned', shell: 'bash' })
   // An explicit retry opens the shell for typing, as a new terminal does.
   await waitFor(() => expect(mocks.focus).toHaveBeenCalled())
   await act(async () => new Promise<void>(resolve => requestAnimationFrame(() => resolve())))
@@ -357,4 +359,76 @@ it.each([
   render(<TerminalInstance active cwd="/repo" id="failed-tab" onAddSelectionToChat={vi.fn()} profile="alpha" />)
   expect(await screen.findByText(copy)).toBeTruthy()
   expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy()
+})
+
+it('reattaches a shell remembered across a reload without taking focus, and quietly drops one the server forgot', async () => {
+  vi.stubEnv('VITE_BROWSER', '1')
+  let status!: (value: HermesTerminalStatus) => void
+  const start = vi.fn()
+  const resume = vi.fn()
+
+  const attach = vi.fn(async () => {
+    status({ state: 'open' })
+
+    return true
+  })
+
+  window.hermesDesktop = {
+    ...window.hermesDesktop,
+    terminal: {
+      start,
+      resume,
+      attach,
+      dispose: async () => true,
+      cwd: async () => null,
+      write: async () => true,
+      resize: async () => true,
+      onData: () => () => {},
+      onExit: () => () => {},
+      onStatus: (_id, callback) => {
+        status = callback
+
+        return () => {}
+      }
+    }
+  }
+  const composer = document.createElement('textarea')
+  document.body.append(composer)
+  composer.focus()
+  const frame = () => act(async () => new Promise<void>(resolve => requestAnimationFrame(() => resolve())))
+
+  const props = {
+    id: 'restored',
+    cwd: '/repo',
+    profile: 'alpha',
+    active: true,
+    onAddSelectionToChat: vi.fn(),
+    session: { id: 'sid', shell: 'zsh' }
+  }
+
+  // At boot another profile can be in front until the gateway route settles.
+  const view = render(<TerminalInstance {...props} active={false} />)
+  await waitFor(() => expect(attach).toHaveBeenCalledWith('sid'))
+  expect(resume).toHaveBeenCalledWith('sid', expect.objectContaining({ profile: 'alpha' }))
+  expect(start).not.toHaveBeenCalled()
+  await frame()
+  view.rerender(<TerminalInstance {...props} />)
+  await frame()
+  await frame()
+  expect(mocks.focus).not.toHaveBeenCalled()
+  expect(document.activeElement).toBe(composer)
+  view.rerender(<TerminalInstance {...props} active={false} />)
+  view.rerender(<TerminalInstance {...props} />) // The user comes back to it.
+  await waitFor(() => expect(mocks.focus).toHaveBeenCalled())
+  view.unmount()
+  composer.remove()
+
+  attach.mockImplementationOnce(async () => {
+    status({ state: 'disconnected', reason: 'missing-session' })
+
+    return false
+  })
+  render(<TerminalInstance {...props} id="gone" session={{ id: 'gone-sid', shell: 'zsh' }} />)
+  await waitFor(() => expect(closeTerminal).toHaveBeenCalledWith('gone', { keepPane: true }))
+  expect(screen.queryByText(/server no longer has this terminal/)).toBeNull()
 })

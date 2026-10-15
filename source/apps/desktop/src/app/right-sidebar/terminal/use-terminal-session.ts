@@ -7,7 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 
 import { writeClipboardText } from '@/components/ui/copy-button'
-import type { HermesTerminalStatus } from '@/global'
+import type { HermesTerminalSession, HermesTerminalStatus } from '@/global'
 import { triggerHaptic } from '@/lib/haptics'
 import { isComposerChord } from '@/lib/keybinds/chords'
 import { $previewTarget } from '@/store/preview'
@@ -32,6 +32,7 @@ import {
   closeTerminal,
   redrawAllTerminals,
   registerWebglRefresh,
+  type TerminalSession,
   updateTerminalRestoreCwd,
   updateTerminalReviveBuffer
 } from './terminals'
@@ -251,6 +252,11 @@ interface UseTerminalSessionOptions {
   reviveBuffer?: string
   /** Reports the resolved shell name once the PTY is live (for the tab label). */
   onShell?: (shell: string) => void
+  /** Browser: a live plugin shell this tab owned before a reload. The tab
+   *  reattaches to it instead of starting a new one. */
+  session?: TerminalSession
+  /** Reports the live shell so a browser tab can reattach after a reload. */
+  onSession?: (session: TerminalSession) => void
 }
 
 // Parse a working directory out of a cwd-reporting OSC payload. Covers OSC 7
@@ -394,7 +400,9 @@ export function useTerminalSession({
   restoreCwd,
   reviveBuffer,
   onShell,
-  profile
+  profile,
+  session,
+  onSession
 }: UseTerminalSessionOptions) {
   // Key off renderedMode (the painted surface type), not resolvedMode (the
   // clicked switch) — a skin can keep a light surface in "dark" mode, and we
@@ -414,9 +422,12 @@ export function useTerminalSession({
   const sessionIdRef = useRef<string | null>(null)
   const profileRef = useRef(profile)
   const retryRef = useRef<(() => void) | null>(null)
-  // Only an explicit open, activation or retry takes keyboard focus. A browser
-  // reconnect also passes through 'open' and must leave the composer focused.
-  const focusOnOpenRef = useRef(true)
+  // Only an explicit open, retry or return to this tab takes keyboard focus. A
+  // browser reconnect, or reattaching after a reload, also reaches 'open' and
+  // must leave the composer (or whatever else has focus) alone.
+  const focusOnOpenRef = useRef(!session)
+  const wasActiveRef = useRef(active)
+  const rememberedSessionRef = useRef(session)
   const [connectionStatus, setConnectionStatus] = useState<HermesTerminalStatus>({ state: 'connecting' })
 
   const retry = useCallback(() => {
@@ -441,6 +452,7 @@ export function useTerminalSession({
   const selectionRef = useRef('')
   const onAddSelectionToChatRef = useRef(onAddSelectionToChat)
   const onShellRef = useRef(onShell)
+  const onSessionRef = useRef(onSession)
   // Re-fit on activation: a tab hidden via display:none has a 0×0 host, so its
   // last fit is stale by the time it's shown again.
   const fitRef = useRef<(() => void) | null>(null)
@@ -454,7 +466,8 @@ export function useTerminalSession({
   useEffect(() => {
     onAddSelectionToChatRef.current = onAddSelectionToChat
     onShellRef.current = onShell
-  }, [onAddSelectionToChat, onShell])
+    onSessionRef.current = onSession
+  }, [onAddSelectionToChat, onShell, onSession])
 
   // Live selection at call time. A redraw-heavy TUI (spinners, clocks) outruns
   // onSelectionChange, so trust xterm directly — fall back to the native
@@ -945,11 +958,22 @@ export function useTerminalSession({
       return false
     })
 
+    // Set while reattaching a shell remembered from before a reload.
+    let resuming = false
+
     const reportConnection = (next: HermesTerminalStatus) => {
       if (disposed) {
         return
       }
 
+      if (resuming && next.reason === 'missing-session') {
+        // It exited or expired while the page was away: drop the tab quietly.
+        closeTerminal(id, { keepPane: true })
+
+        return
+      }
+
+      resuming &&= next.state !== 'open'
       setConnectionStatus(next)
       setStatus(next.state === 'open' ? 'open' : next.state === 'disconnected' ? 'closed' : 'starting')
     }
@@ -964,16 +988,28 @@ export function useTerminalSession({
         return
       }
 
-      void terminalApi
+      const openSession = async (): Promise<HermesTerminalSession> => {
+        const remembered = rememberedSessionRef.current
+
+        if (remembered && terminalApi.resume) {
+          resuming = true
+          terminalApi.resume(remembered.id, { cols: term.cols, rows: term.rows, profile: profileRef.current })
+
+          return { ...remembered, cwd }
+        }
+
         // Prefer the prior session's last cwd so a reopened tab lands where the
         // user last `cd`'d; the main side falls back to the launch cwd (then
         // home) if that dir no longer exists.
-        .start({
+        return terminalApi.start({
           cols: term.cols,
           cwd: initialRestoreCwdRef.current || cwd,
           rows: term.rows,
           ...(import.meta.env.VITE_BROWSER === '1' ? { profile: profileRef.current } : {})
         })
+      }
+
+      void openSession()
         .then(async session => {
           if (disposed) {
             void terminalApi.dispose(session.id)
@@ -986,6 +1022,7 @@ export function useTerminalSession({
           shellNameRef.current = session.shell || 'shell'
           setShellName(session.shell || 'shell')
           onShellRef.current?.(session.shell || 'shell')
+          onSessionRef.current?.({ id: session.id, shell: session.shell || 'shell' })
 
           const initial = term.hasSelection() ? term.getSelection() : ''
           selectionRef.current = initial
@@ -1035,7 +1072,10 @@ export function useTerminalSession({
           window.requestAnimationFrame(() => {
             fitAndResize()
             term.clearSelection() // drop any selection painted over transient boot rows
-            term.focus()
+
+            if (focusOnOpenRef.current) {
+              term.focus()
+            }
           })
         })
         .catch(error => {
@@ -1075,7 +1115,10 @@ export function useTerminalSession({
       term.open(host)
       mountedRef.current = true
       mounted = true
-      term.focus()
+
+      if (focusOnOpenRef.current) {
+        term.focus()
+      }
 
       // WebGL renderer matches the dashboard ChatPage path; xterm's default DOM
       // renderer paints SGR via CSS classes that visibly mute against our skins.
@@ -1225,10 +1268,14 @@ export function useTerminalSession({
   // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
   useEffect(() => {
     if (!active) {
-      focusOnOpenRef.current = true
+      // Returning to a tab the user left is an explicit activation.
+      focusOnOpenRef.current ||= wasActiveRef.current
+      wasActiveRef.current = false
 
       return
     }
+
+    wasActiveRef.current = true
 
     if (status !== 'open') {
       return

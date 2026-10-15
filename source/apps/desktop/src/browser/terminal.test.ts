@@ -358,7 +358,7 @@ it('times out a silent dial and exposes missing-plugin separately from authentic
 
 it.each([
   [404, 'missing-plugin', 'missing-session'],
-  [405, 'missing-plugin', 'connection'],
+  [405, 'missing-plugin', 'missing-session'],
   [401, 'auth', 'auth'],
   [403, 'auth', 'auth'],
   [429, 'limit', 'connection'],
@@ -422,6 +422,33 @@ it.each([
 ])('explains a plugin that cannot start shells: %s', async (detail, reason) => {
   vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ detail }), { status: 503 }))
   await expect(bridge().start({ profile: 'alpha' })).rejects.toMatchObject({ reason, detail })
+})
+
+it('reattaches a remembered shell under its own profile and leaves a superseded shell running', async () => {
+  const terminal = bridge()
+  terminal.resume!('remembered', { profile: 'alpha', cols: 100, rows: 40 })
+  const output: string[] = []
+  terminal.onData('remembered', text => output.push(text))
+  const status = vi.fn()
+  terminal.onStatus!('remembered', status)
+  const attached = terminal.attach('remembered')
+  await flush()
+  const socket = Socket.instances[0]
+  socket.open()
+  expect(await attached).toBe(true)
+  expect(requests.map(({ url }) => [url.pathname, url.searchParams.get('profile')])).toEqual([
+    ['/api/plugins/browser-terminal/sessions/remembered/ticket', 'alpha']
+  ])
+  expect(JSON.parse(socket.sent[0] as string)).toEqual({ type: 'resize', cols: 100, rows: 40 })
+  expect(output).toEqual(['\x1bc']) // Cleared before the server replays its tail.
+
+  // A duplicated browser tab reattached the same shell; it now owns it.
+  socket.close(4409)
+  expect(status).toHaveBeenLastCalledWith({ state: 'disconnected', reason: 'superseded' })
+  await terminal.dispose('remembered')
+  await vi.advanceTimersByTimeAsync(120_000)
+  expect(requests.some(({ init }) => init.method === 'DELETE')).toBe(false)
+  expect(Socket.instances).toHaveLength(1)
 })
 
 it('aborts a stalled start through the stock authenticated HTTP path', async () => {
