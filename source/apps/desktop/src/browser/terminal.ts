@@ -352,9 +352,13 @@ export function createBrowserTerminal(api: <T>(request: HermesApiRequest) => Pro
       session.exits.clear()
       session.statuses.clear()
 
-      // Another browser tab took this shell over (a duplicated tab reattaches
-      // the shells it copied); closing the view here must not kill it there.
-      if (session.status.reason === 'superseded') {
+      // Delete only a shell the server may still hold for this tab. An exited
+      // shell (no reason) or a missing one is gone, and a superseded one now
+      // belongs to the browser tab that took it over: a duplicated tab
+      // reattaches the shells it copied.
+      const { state, reason } = session.status
+
+      if (state === 'disconnected' && reason !== 'connection' && reason !== 'auth') {
         return true
       }
 

@@ -451,6 +451,23 @@ it('reattaches a remembered shell under its own profile and leaves a superseded 
   expect(Socket.instances).toHaveLength(1)
 })
 
+it('deletes no shell that exited or that the server no longer has', async () => {
+  const terminal = bridge()
+  const { id } = await terminal.start({ profile: 'alpha' })
+  const attached = terminal.attach(id)
+  await flush()
+  Socket.instances[0].open()
+  await attached
+  Socket.instances[0].close(4410)
+  await terminal.dispose(id)
+
+  ticketStatus = 404
+  const { id: gone } = await terminal.start({ profile: 'alpha' })
+  expect(await terminal.attach(gone)).toBe(false)
+  await terminal.dispose(gone)
+  expect(requests.filter(({ init }) => init.method === 'DELETE')).toEqual([])
+})
+
 it('aborts a stalled start through the stock authenticated HTTP path', async () => {
   vi.spyOn(AbortSignal, 'timeout').mockImplementation(ms => {
     const controller = new AbortController()
