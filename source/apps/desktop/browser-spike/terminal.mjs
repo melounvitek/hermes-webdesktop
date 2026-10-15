@@ -180,6 +180,8 @@ async function openPage(state, sessionStorage) {
   }
   await p.goto(state.r.url)
   await expect(p.getByRole('textbox', { name: 'Message', exact: true })).toBeVisible({ timeout: 60000 })
+  // A cold backend can still put its loading screen over the ready shell.
+  await expect(p.getByRole('status', { name: 'Loading Hermes…', exact: true })).toHaveCount(0, { timeout: 60000 })
   return p
 }
 
@@ -545,6 +547,19 @@ try {
     await tabs().nth(1).click()
     assert.equal(await identity(state, a2, runtime, baselineHome, baselineCwd, 'A-second'), a2Pid)
     await tabs().nth(0).click()
+    // A closed pane must not leave remembered shells detached until they expire.
+    await page.getByRole('button', { name: 'Hide terminal', exact: true }).click()
+    const [hidden, hidden2] = [socketsFor(state, a.id).length, socketsFor(state, a2.id).length]
+    await page.reload()
+    await expect(composer()).toBeVisible({ timeout: 60000 })
+    await expect.poll(() => socketsFor(state, a.id).length).toBe(hidden + 1)
+    await expect.poll(() => socketsFor(state, a2.id).length).toBe(hidden2 + 1)
+    await expect(page.getByRole('tablist', { name: 'Terminals', exact: true })).not.toBeVisible()
+    assert.equal(await terminalFocus(), 0, 'A hidden reattach must not move focus into the terminal')
+    assert.equal(state.sessions.length, count, 'A hidden reattach must not start shells')
+    await page.keyboard.press('Control+Backquote')
+    await tabs().nth(0).click()
+    assert.equal(await identity(state, a, runtime, baselineHome, baselineCwd, 'A-owned'), aPid)
     const stored = await page.evaluate(() => JSON.stringify(Object.entries(sessionStorage)))
     assert.ok(stored.includes(a.id) && stored.includes(a2.id), 'Each live shell is remembered for this browser tab')
     assert.ok(!stored.includes('BEFORE-RELOAD') && !stored.includes('Unicode'), 'Terminal output is never stored')
