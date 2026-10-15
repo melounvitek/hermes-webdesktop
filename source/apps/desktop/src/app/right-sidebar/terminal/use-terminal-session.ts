@@ -426,7 +426,7 @@ export function useTerminalSession({
   // browser reconnect, or reattaching after a reload, also reaches 'open' and
   // must leave the composer (or whatever else has focus) alone.
   const focusOnOpenRef = useRef(!session)
-  const wasActiveRef = useRef(active)
+  const activeRef = useRef(active)
   const rememberedSessionRef = useRef(session)
   const [connectionStatus, setConnectionStatus] = useState<HermesTerminalStatus>({ state: 'connecting' })
 
@@ -973,10 +973,11 @@ export function useTerminalSession({
         return
       }
 
-      if (next.state === 'open') {
-        opened = true
-      } else if (next.state === 'reconnecting' && !opened) {
-        // The first connection failed; the user may have moved on meanwhile.
+      opened ||= next.state === 'open'
+
+      // The user may have moved on while the visible shell reconnects. A tab in
+      // the background keeps its focus for when the user returns to it.
+      if (next.state === 'reconnecting' && activeRef.current) {
         focusOnOpenRef.current = false
       }
 
@@ -1274,13 +1275,13 @@ export function useTerminalSession({
   useEffect(() => {
     if (!active) {
       // Returning to a tab the user left is an explicit activation.
-      focusOnOpenRef.current ||= wasActiveRef.current
-      wasActiveRef.current = false
+      focusOnOpenRef.current ||= activeRef.current
+      activeRef.current = false
 
       return
     }
 
-    wasActiveRef.current = true
+    activeRef.current = true
 
     if (status !== 'open') {
       return

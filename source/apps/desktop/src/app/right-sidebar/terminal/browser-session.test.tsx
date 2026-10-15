@@ -473,3 +473,70 @@ it('does not take focus when a new shell first connects only after a retry', asy
   expect(document.activeElement).toBe(composer)
   composer.remove()
 })
+
+it('drops the pending focus when the first connection breaks before the terminal painted', async () => {
+  vi.stubEnv('VITE_BROWSER', '1')
+  const frames = new Map<number, FrameRequestCallback>()
+  let nextFrame = 0
+  vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+    frames.set(++nextFrame, callback)
+
+    return nextFrame
+  })
+  vi.stubGlobal('cancelAnimationFrame', (id: number) => frames.delete(id))
+  vi.stubGlobal(
+    'ResizeObserver',
+    class {
+      observe() {}
+      disconnect() {}
+    }
+  )
+
+  const flush = () =>
+    act(() => {
+      const pending = [...frames.values()]
+      frames.clear()
+      pending.forEach(callback => callback(0))
+    })
+
+  let status!: (value: HermesTerminalStatus) => void
+
+  const attach = vi.fn(async () => {
+    status({ state: 'open' })
+
+    return true
+  })
+
+  window.hermesDesktop = {
+    ...window.hermesDesktop,
+    terminal: {
+      start: async () => ({ id: 'flaky', cwd: '/repo', shell: 'bash' }),
+      attach,
+      dispose: async () => true,
+      cwd: async () => null,
+      write: async () => true,
+      resize: async () => true,
+      onData: () => () => {},
+      onExit: () => () => {},
+      onStatus: (_id, callback) => {
+        status = callback
+
+        return () => {}
+      }
+    }
+  }
+  render(<TerminalInstance active cwd="/repo" id="flaky-tab" onAddSelectionToChat={vi.fn()} profile="alpha" />)
+  await waitFor(() => expect(attach).toHaveBeenCalled())
+  await act(async () => {}) // The opened shell queued its ready-time focus.
+  act(() => status({ state: 'reconnecting' }))
+  const composer = document.createElement('textarea')
+  document.body.append(composer)
+  composer.focus()
+  mocks.focus.mockClear()
+  flush()
+  act(() => status({ state: 'open' }))
+  flush()
+  expect(mocks.focus).not.toHaveBeenCalled()
+  expect(document.activeElement).toBe(composer)
+  composer.remove()
+})
