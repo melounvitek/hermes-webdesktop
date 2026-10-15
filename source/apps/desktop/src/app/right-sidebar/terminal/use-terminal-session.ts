@@ -958,22 +958,28 @@ export function useTerminalSession({
       return false
     })
 
-    // Set while reattaching a shell remembered from before a reload.
-    let resuming = false
+    const resuming = Boolean(rememberedSessionRef.current && terminalApi.resume)
+    let opened = false
 
     const reportConnection = (next: HermesTerminalStatus) => {
       if (disposed) {
         return
       }
 
-      if (resuming && next.reason === 'missing-session') {
+      if (resuming && !opened && next.reason === 'missing-session') {
         // It exited or expired while the page was away: drop the tab quietly.
         closeTerminal(id, { keepPane: true })
 
         return
       }
 
-      resuming &&= next.state !== 'open'
+      if (next.state === 'open') {
+        opened = true
+      } else if (next.state === 'reconnecting' && !opened) {
+        // The first connection failed; the user may have moved on meanwhile.
+        focusOnOpenRef.current = false
+      }
+
       setConnectionStatus(next)
       setStatus(next.state === 'open' ? 'open' : next.state === 'disconnected' ? 'closed' : 'starting')
     }
@@ -992,7 +998,6 @@ export function useTerminalSession({
         const remembered = rememberedSessionRef.current
 
         if (remembered && terminalApi.resume) {
-          resuming = true
           terminalApi.resume(remembered.id, { cols: term.cols, rows: term.rows, profile: profileRef.current })
 
           return { ...remembered, cwd }

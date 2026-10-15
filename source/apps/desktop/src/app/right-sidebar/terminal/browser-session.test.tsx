@@ -432,3 +432,44 @@ it('reattaches a shell remembered across a reload without taking focus, and quie
   await waitFor(() => expect(closeTerminal).toHaveBeenCalledWith('gone', { keepPane: true }))
   expect(screen.queryByText(/server no longer has this terminal/)).toBeNull()
 })
+
+it('does not take focus when a new shell first connects only after a retry', async () => {
+  vi.stubEnv('VITE_BROWSER', '1')
+  let status!: (value: HermesTerminalStatus) => void
+
+  const attach = vi.fn(async () => {
+    status({ state: 'reconnecting' })
+
+    return false
+  })
+
+  window.hermesDesktop = {
+    ...window.hermesDesktop,
+    terminal: {
+      start: async () => ({ id: 'slow', cwd: '/repo', shell: 'bash' }),
+      attach,
+      dispose: async () => true,
+      cwd: async () => null,
+      write: async () => true,
+      resize: async () => true,
+      onData: () => () => {},
+      onExit: () => () => {},
+      onStatus: (_id, callback) => {
+        status = callback
+
+        return () => {}
+      }
+    }
+  }
+  render(<TerminalInstance active cwd="/repo" id="slow-tab" onAddSelectionToChat={vi.fn()} profile="alpha" />)
+  await waitFor(() => expect(attach).toHaveBeenCalled())
+  const composer = document.createElement('textarea')
+  document.body.append(composer)
+  composer.focus()
+  mocks.focus.mockClear()
+  act(() => status({ state: 'open' }))
+  await act(async () => new Promise<void>(resolve => requestAnimationFrame(() => resolve())))
+  expect(mocks.focus).not.toHaveBeenCalled()
+  expect(document.activeElement).toBe(composer)
+  composer.remove()
+})
