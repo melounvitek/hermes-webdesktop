@@ -24,6 +24,10 @@ interface Session {
   retries: number
   generation: number
   size: { cols: number; rows: number }
+  /** The shell exited, is gone, or another browser tab took it over (a
+   *  duplicated tab reattaches the shells it copied) and this tab has not
+   *  attached again since. Closing the view must not delete it then. */
+  released?: boolean
 }
 
 const httpStatus = (error: unknown) =>
@@ -81,6 +85,13 @@ export function createBrowserTerminal(api: <T>(request: HermesApiRequest) => Pro
 
   const publish = (session: Session, status: HermesTerminalStatus) => {
     session.status = status
+
+    if (status.state === 'open') {
+      session.released = false
+    } else if (status.reason === 'superseded' || status.reason === 'missing-session') {
+      session.released = true
+    }
+
     session.statuses.forEach(callback => callback(status))
   }
 
@@ -242,6 +253,7 @@ export function createBrowserTerminal(api: <T>(request: HermesApiRequest) => Pro
           if (reason === 'exited') {
             // Exit closes the tab through onExit; it is not a recoverable error.
             session.status = { state: 'disconnected' }
+            session.released = true
             session.exits.forEach(callback => callback({ code: null, signal: null }))
           } else {
             publish(session, { state: 'disconnected', reason })
@@ -352,13 +364,7 @@ export function createBrowserTerminal(api: <T>(request: HermesApiRequest) => Pro
       session.exits.clear()
       session.statuses.clear()
 
-      // Delete only a shell the server may still hold for this tab. An exited
-      // shell (no reason) or a missing one is gone, and a superseded one now
-      // belongs to the browser tab that took it over: a duplicated tab
-      // reattaches the shells it copied.
-      const { state, reason } = session.status
-
-      if (state === 'disconnected' && reason !== 'connection' && reason !== 'auth') {
+      if (session.released) {
         return true
       }
 

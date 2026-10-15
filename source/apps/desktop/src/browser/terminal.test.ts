@@ -325,8 +325,9 @@ it('bounds retry, cancels pending dials on close, and never creates a replacemen
   expect(await pending).toBe(false)
   socket.open()
   await vi.advanceTimersByTimeAsync(120_000)
-  expect(requests.at(-1)?.init.method).toBe('DELETE')
-  expect(requests.filter(({ init }) => init.method === 'DELETE')).toHaveLength(1)
+  expect(Socket.instances.at(-1)).toBe(socket)
+  // The server already said this shell is gone; closing does not ask again.
+  expect(requests.filter(({ init }) => init.method === 'DELETE')).toEqual([])
 })
 
 it.each([4401, 4409, 4410])('does not auto-reconnect terminal close code %s', async code => {
@@ -442,9 +443,13 @@ it('reattaches a remembered shell under its own profile and leaves a superseded 
   expect(JSON.parse(socket.sent[0] as string)).toEqual({ type: 'resize', cols: 100, rows: 40 })
   expect(output).toEqual(['\x1bc']) // Cleared before the server replays its tail.
 
-  // A duplicated browser tab reattached the same shell; it now owns it.
+  // A duplicated browser tab reattached the same shell; it now owns it, even
+  // when taking it back here fails.
   socket.close(4409)
   expect(status).toHaveBeenLastCalledWith({ state: 'disconnected', reason: 'superseded' })
+  ticketStatus = 503
+  expect(await terminal.attach('remembered')).toBe(false)
+  expect(status).toHaveBeenLastCalledWith({ state: 'disconnected', reason: 'connection' })
   await terminal.dispose('remembered')
   await vi.advanceTimersByTimeAsync(120_000)
   expect(requests.some(({ init }) => init.method === 'DELETE')).toBe(false)
