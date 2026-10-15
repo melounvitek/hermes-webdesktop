@@ -11,7 +11,7 @@ import { $terminalTakeover } from '../store'
 
 import { TerminalPaneChrome } from './chrome'
 import { PersistentTerminal, TerminalSlot } from './persistent'
-import { $terminals } from './terminals'
+import { $terminals, ensureTerminal } from './terminals'
 
 vi.mock('../store', async () => ({
   $terminalTakeover: (await import('nanostores')).atom(false)
@@ -388,6 +388,19 @@ describe('PersistentTerminal rect tracking', () => {
     act(() => window.dispatchEvent(new Event('focus')))
 
     expect(raf.pending()).toBe(1)
+  })
+
+  it('reattaches shells remembered across a reload while the pane stays closed, starting none', () => {
+    installRaf()
+    vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockReturnValue(rect(10, 20, 0, 0))
+    const session = { id: 'remembered', shell: 'zsh' }
+    $terminals.set([{ id: 'kept', auto: true, title: 'zsh', cwd: '/', kind: 'user', profile: 'default', session }])
+    vi.mocked(ensureTerminal).mockClear()
+
+    mount.render(<Harness />)
+
+    expect(mount.container!.querySelector('[data-testid="terminal-workspace"]')).not.toBeNull()
+    expect(ensureTerminal).not.toHaveBeenCalled()
   })
 
   it('hides the overlay but keeps its workspace mounted when the terminal tab becomes inactive', () => {

@@ -74,8 +74,10 @@ export function PersistentTerminal({ onAddSelectionToChat }: PersistentTerminalP
   // mounted — and their shells alive — even while hidden. Hiding the pane just
   // collapses the slot, so the overlay below goes invisible; nothing is torn
   // down. Only an explicit per-tab close kills a PTY. Re-opening re-ensures one
-  // terminal exists (covers having closed the last tab).
-  const [mounted, setMounted] = useState(false)
+  // terminal exists (covers having closed the last tab). Browser shells
+  // remembered across a reload reattach at once, so a closed pane does not
+  // let them expire while the page is open.
+  const [mounted, setMounted] = useState(() => $terminals.get().some(term => term.session))
 
   useEffect(() => {
     if (terminalTakeover && ready) {
