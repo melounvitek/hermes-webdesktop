@@ -53,6 +53,7 @@ type RfbLike = {
   disconnect: () => void
   focus: () => void
   clipboardPasteFrom: (text: string) => void
+  sendKey: (keysym: number, code: string, down?: boolean) => void
 }
 
 type ConnState = 'idle' | 'attaching' | 'live' | 'error'
@@ -65,6 +66,12 @@ const MAX_RAPID_EVICTIONS = 3
 /** Mirrors tools/bot_desktop/rfb_filter.py's _MAX_CUT_TEXT: the bridge closes the display
  *  socket on any ClientCutText over this, so an oversized paste must never reach the client. */
 const MAX_PASTE_CUT_TEXT = 256 * 1024
+// X11 keysyms for the Ctrl+V a paste chord becomes on the remote.
+const XK_CONTROL_L = 0xffe3
+const XK_ALT_L = 0xffe9
+const XK_SUPER_L = 0xffeb
+const XK_V = 0x56
+const XK_LOWER_V = 0x76
 
 async function loadRfb(): Promise<
   new (target: HTMLElement, socket: WebSocket, options?: Record<string, unknown>) => RfbLike
@@ -288,22 +295,69 @@ export function BotScreenPane({ bot }: { bot: RosterRow }) {
         // paste after control changes hands mid-session is silently dropped, same as the gateway's
         // own lease-gated RFB filter would drop it.
         const pasteTarget = canvasHost.current
+        // Same test noVNC uses to remap ⌘ (left → Alt_L, right → Super_L), which a ⌘V must undo.
+        const mac = /mac|iphone|ipad|ipod/i.test(navigator.platform)
+        let pasteChord: KeyboardEvent | null = null
+
+        // noVNC cancels every key it handles, so the paste chord never became a native `paste`;
+        // it only replayed Ctrl+V against the bot's own clipboard. Capture runs before noVNC's
+        // listener on its canvas: stopping propagation, but not the default, hides the chord from
+        // noVNC and lets the browser (or Electron's Edit menu on macOS) fire `paste` with the local
+        // clipboard, no clipboard permission needed. Ctrl+V on macOS never pastes, so it stays remote.
+        const handleKeyDown = (event: KeyboardEvent) => {
+          const chord = mac
+            ? event.metaKey && !event.ctrlKey && !event.altKey && !event.shiftKey
+            : event.ctrlKey && !event.metaKey && !event.altKey
+
+          if (chord && !client.viewOnly && event.key.toLowerCase() === 'v') {
+            event.stopPropagation()
+            pasteChord = event
+          }
+        }
 
         const handlePaste = (event: ClipboardEvent) => {
+          // Only the paste a chord caused types Ctrl+V, so a repeated `paste` can't paste twice.
+          const chord = pasteChord
+          pasteChord = null
+
           if (client.viewOnly) {
             return
           }
 
           const text = event.clipboardData?.getData('text')
 
-          if (text && text.length <= MAX_PASTE_CUT_TEXT) {
-            event.preventDefault()
-            client.clipboardPasteFrom(text)
+          if (!text || text.length > MAX_PASTE_CUT_TEXT) {
+            return
+          }
+
+          event.preventDefault()
+          client.clipboardPasteFrom(text)
+
+          if (chord) {
+            // Same socket, so the cut text reaches the server first. Ctrl is pressed explicitly
+            // (on Windows noVNC holds a left Ctrl back for up to 100 ms to detect AltGr) and
+            // released again so nothing stays down; noVNC's own later release is then a no-op.
+            client.sendKey(XK_CONTROL_L, 'ControlLeft', true)
+
+            if (mac) {
+              // Release ⌘ for good: pressing it again would end in a lone modifier tap when
+              // the user lets go, which opens menus in some Linux desktops and apps.
+              client.sendKey(XK_ALT_L, 'MetaLeft', false)
+              client.sendKey(XK_SUPER_L, 'MetaRight', false)
+            }
+
+            client.sendKey(chord.shiftKey ? XK_V : XK_LOWER_V, 'KeyV')
+            client.sendKey(XK_CONTROL_L, 'ControlLeft', false)
           }
         }
 
+        pasteTarget.addEventListener('keydown', handleKeyDown, true)
         pasteTarget.addEventListener('paste', handlePaste)
-        pasteCleanup.current = () => pasteTarget.removeEventListener('paste', handlePaste)
+
+        pasteCleanup.current = () => {
+          pasteTarget.removeEventListener('keydown', handleKeyDown, true)
+          pasteTarget.removeEventListener('paste', handlePaste)
+        }
       } catch (err) {
         if (generation === attachGeneration.current) {
           setConn('error')
