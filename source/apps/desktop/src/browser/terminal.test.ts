@@ -361,7 +361,8 @@ it.each([
   [405, 'missing-plugin', 'connection'],
   [401, 'auth', 'auth'],
   [403, 'auth', 'auth'],
-  [503, 'connection', 'connection']
+  [429, 'limit', 'connection'],
+  [503, 'unavailable', 'connection']
 ] as const)('classifies HTTP %s separately for start and attach', async (httpStatus, startReason, attachReason) => {
   const terminal = bridge()
   vi.mocked(fetch).mockResolvedValueOnce(new Response('request failed', { status: httpStatus }))
@@ -391,6 +392,36 @@ it.each([undefined, '', '/repo'])('only sends an explicit nonempty cwd (%s)', as
   }
 
   await terminal.dispose(id)
+})
+
+it('retries a start whose cwd no longer exists in the profile default directory', async () => {
+  const terminal = bridge()
+  vi.mocked(fetch).mockImplementationOnce(async (url, init) => {
+    requests.push({ url: new URL(String(url)), init: init! })
+
+    return new Response('{"detail":"cwd must resolve to an existing absolute host directory"}', { status: 400 })
+  })
+  const session = await terminal.start({ profile: 'alpha', cwd: '/gone', cols: 90, rows: 30 })
+  expect(session.id).toBe('owned')
+  const creates = requests.filter(({ url }) => url.pathname.endsWith('/sessions'))
+  expect(creates.map(({ url }) => url.searchParams.get('profile'))).toEqual(['alpha', 'alpha'])
+  expect(creates.map(({ init }) => JSON.parse(init.body as string))).toEqual([
+    { cwd: '/gone', cols: 90, rows: 30 },
+    { cols: 90, rows: 30 }
+  ])
+  await terminal.dispose(session.id)
+
+  vi.mocked(fetch).mockResolvedValueOnce(new Response('{"detail":"bad"}', { status: 400 }))
+  await expect(terminal.start({ profile: 'alpha' })).rejects.toMatchObject({ reason: 'connection' })
+})
+
+it.each([
+  ['Browser terminal unavailable: router lifespan or settings unsupported; restart the server', 'restart'],
+  ['Browser terminal currently requires Linux', 'unavailable'],
+  ['Browser terminal requires Hermes PTY support', 'unavailable']
+])('explains a plugin that cannot start shells: %s', async (detail, reason) => {
+  vi.mocked(fetch).mockResolvedValueOnce(new Response(JSON.stringify({ detail }), { status: 503 }))
+  await expect(bridge().start({ profile: 'alpha' })).rejects.toMatchObject({ reason, detail })
 })
 
 it('aborts a stalled start through the stock authenticated HTTP path', async () => {

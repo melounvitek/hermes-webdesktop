@@ -44,6 +44,7 @@ export function TerminalInstance({
   profile
 }: TerminalInstanceProps) {
   const { t } = useI18n()
+  const errors = t.rightSidebar.terminalErrors
 
   const { addSelectionToChat, hostRef, selection, selectionStyle, status, connectionStatus, retry } =
     useTerminalSession({
@@ -86,7 +87,11 @@ export function TerminalInstance({
         <ScrollArea className="absolute inset-0 z-10 bg-(--ui-terminal-surface-background)" role="status">
           <div className="p-4">
             <ErrorState
-              description={t.rightSidebar.terminalErrors[connectionStatus.reason ?? 'connection']}
+              description={
+                connectionStatus.reason === 'unavailable'
+                  ? errors.unavailable(connectionStatus.detail ?? '')
+                  : errors[connectionStatus.reason ?? 'connection']
+              }
               title={t.rightSidebar.terminalDisconnected}
             >
               {connectionStatus.reason === 'missing-session' ? (

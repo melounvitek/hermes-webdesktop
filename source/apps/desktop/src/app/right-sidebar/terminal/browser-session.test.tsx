@@ -336,3 +336,25 @@ it.each(['0', '1'])(
     }
   }
 )
+
+it.each([
+  [
+    { reason: 'unavailable', detail: 'Browser terminal currently requires Linux' },
+    /cannot open a browser terminal: Browser terminal currently requires Linux/
+  ],
+  [{ reason: 'restart' }, /Restart the dashboard so it loads the browser-terminal plugin/],
+  [{ reason: 'limit' }, /maximum number of browser terminals/]
+])('explains why the plugin could not start a shell (%o)', async (failure, copy) => {
+  vi.stubEnv('VITE_BROWSER', '1')
+  window.hermesDesktop = {
+    ...window.hermesDesktop,
+    terminal: {
+      ...window.hermesDesktop.terminal,
+      start: vi.fn().mockRejectedValue(Object.assign(new Error('HTTP 503'), failure)),
+      dispose: async () => true
+    }
+  }
+  render(<TerminalInstance active cwd="/repo" id="failed-tab" onAddSelectionToChat={vi.fn()} profile="alpha" />)
+  expect(await screen.findByText(copy)).toBeTruthy()
+  expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy()
+})

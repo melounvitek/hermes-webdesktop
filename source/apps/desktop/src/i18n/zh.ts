@@ -4270,7 +4270,12 @@ export const zhOverrides = {
       'missing-plugin': '请在 Hermes 服务器上安装并启用 browser-terminal 插件，然后重启仪表盘。',
       'missing-session': '服务器上已不存在此终端。请关闭此标签页并打开新终端以启动另一个 shell。',
       auth: '终端身份验证失败。请重新登录后重试。',
-      superseded: '此终端已在其他位置连接。重试以在此处重新连接。'
+      superseded: '此终端已在其他位置连接。重试以在此处重新连接。',
+      restart:
+        '请重启仪表盘以加载 browser-terminal 插件，然后重试。如果问题仍然存在，请检查 config.yaml 中的插件设置。',
+      unavailable: detail => `此 Hermes 服务器无法打开浏览器终端：${detail}`,
+      limit:
+        '服务器上的浏览器终端已达上限（默认 8 个）。请关闭一个后重试。已关闭浏览器标签页中的 shell 会在 5 分钟后结束。'
     },
     aria: '右侧边栏',
     panelsAria: '右侧边栏面板',

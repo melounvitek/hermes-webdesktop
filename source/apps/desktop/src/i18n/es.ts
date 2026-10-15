@@ -4842,7 +4842,12 @@ export const esOverrides = {
       'missing-session':
         'El servidor ya no tiene este terminal. Cierra esta pestaña y abre un terminal nuevo para iniciar otro shell.',
       auth: 'Falló la autenticación del terminal. Vuelve a iniciar sesión e inténtalo de nuevo.',
-      superseded: 'Este terminal se conectó desde otro lugar. Reintenta para conectarlo aquí.'
+      superseded: 'Este terminal se conectó desde otro lugar. Reintenta para conectarlo aquí.',
+      restart:
+        'Reinicia el panel para que cargue el plugin browser-terminal y vuelve a intentarlo. Si continúa, revisa los ajustes del plugin en config.yaml.',
+      unavailable: detail => `Este servidor de Hermes no puede abrir un terminal del navegador: ${detail}`,
+      limit:
+        'El servidor ya ejecuta el máximo de terminales del navegador (8 por defecto). Cierra uno y vuelve a intentarlo. Los shells de pestañas cerradas terminan a los 5 minutos.'
     },
     terminalHide: 'Ocultar terminal',
     terminalsAria: 'Terminales',

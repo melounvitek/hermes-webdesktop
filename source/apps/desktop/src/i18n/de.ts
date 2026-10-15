@@ -4848,7 +4848,12 @@ export const deOverrides = {
       'missing-session':
         'Der Server kennt dieses Terminal nicht mehr. Schließen Sie diesen Tab und öffnen Sie ein neues Terminal, um eine andere Shell zu starten.',
       auth: 'Die Anmeldung für das Terminal ist fehlgeschlagen. Melden Sie sich erneut an und versuchen Sie es dann noch einmal.',
-      superseded: 'Dieses Terminal wurde an anderer Stelle verbunden. Versuchen Sie es erneut, um es hier zu verbinden.'
+      superseded: 'Dieses Terminal wurde an anderer Stelle verbunden. Versuchen Sie es erneut, um es hier zu verbinden.',
+      restart:
+        'Starten Sie das Dashboard neu, damit es das Plugin browser-terminal lädt, und versuchen Sie es dann erneut. Wenn das Problem bleibt, prüfen Sie die Plugin-Einstellungen in config.yaml.',
+      unavailable: detail => `Dieser Hermes-Server kann kein Browser-Terminal öffnen: ${detail}`,
+      limit:
+        'Auf dem Server laufen bereits so viele Browser-Terminals wie erlaubt (standardmäßig 8). Schließen Sie eines und versuchen Sie es dann erneut. Shells aus geschlossenen Browser-Tabs enden nach 5 Minuten.'
     },
     terminalHide: 'Terminal ausblenden',
     terminalsAria: 'Terminals',

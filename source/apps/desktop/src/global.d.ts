@@ -727,7 +727,10 @@ export interface HermesTerminalSession {
 
 export interface HermesTerminalStatus {
   state: 'connecting' | 'open' | 'reconnecting' | 'disconnected'
-  reason?: 'connection' | 'missing-plugin' | 'missing-session' | 'auth' | 'superseded'
+  reason?:
+    'connection' | 'missing-plugin' | 'missing-session' | 'auth' | 'superseded' | 'restart' | 'unavailable' | 'limit'
+  /** The plugin's explanation for `unavailable`. */
+  detail?: string
 }
 
 export interface HermesTerminalExit {

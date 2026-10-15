@@ -1043,7 +1043,7 @@ export function useTerminalSession({
             return
           }
 
-          reportConnection({ state: 'disconnected', reason: error?.reason ?? 'connection' })
+          reportConnection({ state: 'disconnected', reason: error?.reason ?? 'connection', detail: error?.detail })
 
           if (import.meta.env.VITE_BROWSER !== '1') {
             term.write(`Terminal failed to start: ${error instanceof Error ? error.message : String(error)}\r\n`)

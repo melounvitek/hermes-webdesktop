@@ -431,7 +431,12 @@ export const zhHantChrome = {
       'missing-plugin': '請在 Hermes 伺服器上安裝並啟用 browser-terminal 外掛，然後重新啟動儀表板。',
       'missing-session': '伺服器上已不存在此終端機。請關閉此分頁並開啟新終端機以啟動另一個 shell。',
       auth: '終端機驗證失敗。請重新登入後重試。',
-      superseded: '此終端機已在其他位置連線。重試以在此處重新連線。'
+      superseded: '此終端機已在其他位置連線。重試以在此處重新連線。',
+      restart:
+        '請重新啟動儀表板以載入 browser-terminal 外掛，然後重試。如果問題仍然存在，請檢查 config.yaml 中的外掛設定。',
+      unavailable: detail => `此 Hermes 伺服器無法開啟瀏覽器終端機：${detail}`,
+      limit:
+        '伺服器上的瀏覽器終端機已達上限（預設 8 個）。請關閉一個後重試。已關閉瀏覽器分頁中的 shell 會在 5 分鐘後結束。'
     },
     terminalReadOnly: '唯讀輸出',
     terminalReadOnlyHelp:

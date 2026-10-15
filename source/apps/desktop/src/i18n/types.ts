@@ -3829,6 +3829,9 @@ export interface Translations extends NoticeTranslations {
       'missing-session': string
       auth: string
       superseded: string
+      restart: string
+      unavailable: (detail: string) => string
+      limit: string
     }
     aria: string
     panelsAria: string

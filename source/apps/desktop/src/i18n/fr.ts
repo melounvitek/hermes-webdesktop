@@ -4859,7 +4859,12 @@ export const frOverrides = {
       'missing-session':
         'Le serveur ne connaît plus ce terminal. Fermez cet onglet et ouvrez un nouveau terminal pour démarrer un autre shell.',
       auth: "L'authentification du terminal a échoué. Reconnectez-vous, puis réessayez.",
-      superseded: 'Ce terminal a été connecté ailleurs. Réessayez pour le connecter ici.'
+      superseded: 'Ce terminal a été connecté ailleurs. Réessayez pour le connecter ici.',
+      restart:
+        'Redémarrez le tableau de bord pour qu’il charge le plugin browser-terminal, puis réessayez. Si le problème persiste, vérifiez les réglages du plugin dans config.yaml.',
+      unavailable: detail => `Ce serveur Hermes ne peut pas ouvrir de terminal de navigateur : ${detail}`,
+      limit:
+        'Le serveur exécute déjà le nombre maximal de terminaux de navigateur (8 par défaut). Fermez-en un, puis réessayez. Les shells des onglets fermés se terminent après 5 minutes.'
     },
     terminalHide: 'Masquer le terminal',
     terminalsAria: 'Terminaux',

@@ -26,15 +26,39 @@ interface Session {
   size: { cols: number; rows: number }
 }
 
-function failure(error: unknown, missing: Reason = 'missing-session'): Error & { reason: Reason } {
+const httpStatus = (error: unknown) =>
+  Number(/^HTTP (\d{3})\b/.exec(error instanceof Error ? error.message : String(error))?.[1])
+
+// The plugin's 503 detail names the cause (restart, Linux only, PTY support).
+function errorDetail(message: string): string {
+  try {
+    const { detail } = JSON.parse(message.replace(/^HTTP \d{3}: /, '')) as { detail?: unknown }
+
+    return typeof detail === 'string' ? detail : message
+  } catch {
+    return message
+  }
+}
+
+function failure(error: unknown, starting = false): Error & { reason: Reason; detail?: string } {
   const message = error instanceof Error ? error.message : String(error)
+  const status = httpStatus(error)
+  let reason: Reason = 'connection'
+  let detail: string | undefined
 
-  // Without the plugin, the SPA fallback rejects POST /sessions with 405.
-  const missingStatus = missing === 'missing-plugin' ? /^HTTP 40[45]\b/ : /^HTTP 404\b/
-  const auth = isGatewayReauthRequired(error) || /^HTTP 40[13]\b/.test(message)
-  const reason: Reason = auth ? 'auth' : missingStatus.test(message) ? missing : 'connection'
+  if (isGatewayReauthRequired(error) || status === 401 || status === 403) {
+    reason = 'auth'
+  } else if (status === 404 || (starting && status === 405)) {
+    // Without the plugin, the SPA fallback rejects POST /sessions with 405.
+    reason = starting ? 'missing-plugin' : 'missing-session'
+  } else if (starting && status === 429) {
+    reason = 'limit'
+  } else if (starting && status === 503) {
+    detail = errorDetail(message)
+    reason = /\brestart\b/i.test(detail) ? 'restart' : 'unavailable'
+  }
 
-  return Object.assign(error instanceof Error ? error : new Error(message), { reason })
+  return Object.assign(error instanceof Error ? error : new Error(message), { reason, ...(detail ? { detail } : {}) })
 }
 
 /** Runtime-only ownership. A reconnect can attach only to an id created here,
@@ -251,20 +275,33 @@ export function createBrowserTerminal(api: <T>(request: HermesApiRequest) => Pro
       const { profile = 'default', cwd, cols = 80, rows = 24 } = options
       let result: HermesTerminalSession
 
-      try {
-        result = await api<HermesTerminalSession>({
+      const create = (directory?: string) =>
+        api<HermesTerminalSession>({
           path: `${BASE}/sessions`,
           profile,
           method: 'POST',
-          body: { cwd: cwd || undefined, cols, rows },
+          body: { cwd: directory || undefined, cols, rows },
           timeoutMs: TIMEOUT_MS
         })
+
+      try {
+        try {
+          result = await create(cwd)
+        } catch (error) {
+          // Like Electron, a start directory that no longer exists falls back
+          // to the profile's terminal.cwd or home, which the plugin picks.
+          if (!cwd || httpStatus(error) !== 400) {
+            throw error
+          }
+
+          result = await create()
+        }
 
         if (!result?.id) {
           throw new Error('No terminal session returned')
         }
       } catch (error) {
-        throw failure(error, 'missing-plugin')
+        throw failure(error, true)
       }
 
       sessions.set(result.id, {

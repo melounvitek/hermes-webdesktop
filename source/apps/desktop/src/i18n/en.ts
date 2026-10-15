@@ -4404,7 +4404,12 @@ export const en: Translations = {
       'missing-session':
         'The server no longer has this terminal. Close this tab and open a new terminal to start another shell.',
       auth: 'Terminal authentication failed. Sign in again, then retry.',
-      superseded: 'This terminal was attached elsewhere. Retry to reconnect here.'
+      superseded: 'This terminal was attached elsewhere. Retry to reconnect here.',
+      restart:
+        'Restart the dashboard so it loads the browser-terminal plugin, then retry. If this persists, check the plugin settings in config.yaml.',
+      unavailable: detail => `This Hermes server cannot open a browser terminal: ${detail}`,
+      limit:
+        'The server already runs its maximum number of browser terminals (8 by default). Close one, then retry. Shells left by closed browser tabs end after 5 minutes.'
     },
     aria: 'Right sidebar',
     panelsAria: 'Right sidebar panels',
