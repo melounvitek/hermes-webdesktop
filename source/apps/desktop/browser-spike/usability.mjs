@@ -57,7 +57,6 @@ function forbiddenBoundaryPath(url, method) {
   const pathname = decodeURIComponent(new URL(url).pathname)
   return (
     /^\/api\/hermes\/update(?:\/|$)/.test(pathname) ||
-    /^\/api\/plugins\/browser-terminal(?:\/|$)/.test(pathname) ||
     /^\/api\/fs\/write-text(?:\/|$)/.test(pathname) ||
     (pathname.startsWith('/api/fs/') && !['GET', 'HEAD'].includes(method))
   )
@@ -979,9 +978,13 @@ try {
       ).toHaveCount(0)
       await palette.getByRole('combobox').fill('Toggle terminal')
       await palette.getByRole('option', { name: /^Toggle terminal/ }).click()
-      await expect(page.getByText('No terminal in this profile', { exact: true })).toBeVisible()
-      await expect(page.getByRole('button', { name: 'New terminal', exact: true })).toHaveCount(0)
-      await expect(page.getByRole('textbox', { name: /Terminal input/i })).toHaveCount(0)
+      // This fixture has no optional terminal plugin; the pane says how to add it.
+      await expect(
+        page.getByText(
+          'Install and enable the browser-terminal plugin on the Hermes server, then restart the dashboard.',
+          { exact: true }
+        )
+      ).toBeVisible()
       await expect(
         page.getByRole('contentinfo').getByRole('button', { name: /Update Hermes|Install update/ })
       ).toHaveCount(0)
