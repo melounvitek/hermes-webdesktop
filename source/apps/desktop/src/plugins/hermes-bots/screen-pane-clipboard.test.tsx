@@ -278,6 +278,20 @@ it('leaves no Ctrl down after pasting with the right Ctrl', async () => {
   view.unmount()
 })
 
+it('releases its own Ctrl when the window loses focus before the user lets go', async () => {
+  const { view, rfb } = await renderInControl()
+
+  // Ctrl went down before the canvas had focus, so noVNC never saw it.
+  fireEvent.keyDown(rfb.canvas, { key: 'v', code: 'KeyV', ctrlKey: true })
+  fireEvent.paste(rfb.canvas, clipboard('secret'))
+  fireEvent.keyUp(rfb.canvas, { key: 'v', code: 'KeyV', ctrlKey: true })
+  fireEvent.blur(window)
+
+  expect(rfb.remote.seen).toEqual(['cut:secret', 'key:Control_L+v'])
+  expect(rfb.remote.down.size).toBe(0)
+  view.unmount()
+})
+
 it('pastes on Windows although noVNC holds a fresh left Ctrl back to detect AltGr', async () => {
   vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Win32')
   const { view, rfb } = await renderInControl()
@@ -298,7 +312,13 @@ it('does not type a later standalone paste for a chord the browser never pasted'
   fireEvent.keyUp(rfb.canvas, { key: 'Control', code: 'ControlLeft' })
   fireEvent.paste(rfb.canvas, clipboard('later'))
 
-  expect(rfb.remote.seen).toEqual(['cut:later'])
+  fireEvent.keyDown(rfb.canvas, { key: 'Control', code: 'ControlLeft', ctrlKey: true })
+  fireEvent.keyDown(rfb.canvas, { key: 'v', code: 'KeyV', ctrlKey: true })
+  // Switched windows; the keys come up over there.
+  fireEvent.blur(window)
+  fireEvent.paste(rfb.canvas, clipboard('after blur'))
+
+  expect(rfb.remote.seen).toEqual(['cut:later', 'cut:after blur'])
   view.unmount()
 })
 

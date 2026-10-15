@@ -317,17 +317,20 @@ export function BotScreenPane({ bot }: { bot: RosterRow }) {
           }
         }
 
-        const handleKeyUp = (event: KeyboardEvent) => {
-          if (event.key !== 'Control' && event.key !== 'Meta') {
-            return
-          }
-
-          // The chord ends with its modifier; one whose paste never came is abandoned.
+        // The chord ends when its modifier comes up or, as for noVNC's own keys, when the window
+        // loses focus: a chord whose paste never came is abandoned, and the pane's Ctrl released.
+        const endChord = () => {
           pasteChord = null
 
-          if (pastedCtrl && event.key === 'Control') {
+          if (pastedCtrl) {
             pastedCtrl = false
             client.sendKey(XK_CONTROL_L, 'ControlLeft', false)
+          }
+        }
+
+        const handleKeyUp = (event: KeyboardEvent) => {
+          if (event.key === 'Control' || event.key === 'Meta') {
+            endChord()
           }
         }
 
@@ -376,11 +379,13 @@ export function BotScreenPane({ bot }: { bot: RosterRow }) {
         pasteTarget.addEventListener('keydown', handleKeyDown, true)
         pasteTarget.addEventListener('keyup', handleKeyUp, true)
         pasteTarget.addEventListener('paste', handlePaste)
+        window.addEventListener('blur', endChord)
 
         pasteCleanup.current = () => {
           pasteTarget.removeEventListener('keydown', handleKeyDown, true)
           pasteTarget.removeEventListener('keyup', handleKeyUp, true)
           pasteTarget.removeEventListener('paste', handlePaste)
+          window.removeEventListener('blur', endChord)
         }
       } catch (err) {
         if (generation === attachGeneration.current) {
