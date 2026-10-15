@@ -75,6 +75,33 @@ Paste the outputs into the matching fields, then restart the browser launcher wh
 
 Open the public URL in a private browser window and confirm it requires login before showing your chats.
 
+## Optional terminal
+
+The terminal pane can open real shells on the Hermes host through the optional `browser-terminal` dashboard plugin in this repository. Without it, the pane shows only the read-only output of the agent's background commands and explains how to install the plugin.
+
+**Security:** the plugin gives everyone who can use the web desktop an interactive shell on the Hermes host, running as the user that runs Hermes, with that user's files and network. It is not a sandbox: a profile only selects its `HERMES_HOME` and start directory. Without the dashboard login from [Remote access](#remote-access), the plugin accepts only browsers on the same machine; remote access requires that login, which the plugin enforces.
+
+Install it into the Hermes home the web desktop runs from (`~/.hermes` unless you set `HERMES_HOME`):
+
+```sh
+git clone https://github.com/melounvitek/hermes-webdesktop.git
+mkdir -p ~/.hermes/plugins
+cp -r hermes-webdesktop/source/apps/desktop/browser-terminal-plugin ~/.hermes/plugins/browser-terminal
+hermes plugins enable browser-terminal
+```
+
+Enabling can take a minute while Hermes prepares its plugin environment. Then restart the web desktop when no work is running: press Ctrl-C where `hermes-browser start` runs and start it again. The plugin loads only when the server starts. To remove it, run `hermes plugins remove browser-terminal` and restart the same way; `hermes plugins disable browser-terminal` keeps the files.
+
+In the browser:
+
+- The plugin works only when Hermes runs on Linux.
+- A server runs at most 8 shells, counting every browser tab and user.
+- A shell whose browser tab closed or lost its connection keeps running for 5 minutes. Reloading the tab within that time reattaches it with its recent output. Closing a terminal tab ends its shell.
+- A duplicated browser tab takes over the original tab's shells; the original offers Retry to take them back.
+- `plugins.entries.browser-terminal.settings` in the server profile's `config.yaml` can change the limits: `max_sessions`, and `detached_ttl` in seconds.
+- Chrome reserves Ctrl+W, Ctrl+T, Ctrl+N, their Shift variants and Ctrl+Tab, so the terminal never receives them: Ctrl+W closes the browser tab instead of deleting a word (Alt+Backspace does that in bash and zsh). Ctrl+Shift+X closes the active terminal.
+- Paste with Ctrl+Shift+V (Cmd+V on macOS). The right-click Paste item needs the browser's clipboard permission.
+
 ## Development
 
 A normal clone includes the editable UI, tests and build configuration in
@@ -163,16 +190,22 @@ env -i HOME="$scratch/home" PATH=/usr/bin:/bin LANG=C.UTF-8 \
 Open the loopback URL in the `READY` line and try `spike: hello`. Rebuild the UI
 and reload to check edits; Ctrl-C stops the fixture. Use a development account or
 VM: disposable profiles do not make agent tools a security sandbox. Vite preview
-alone does not provide the backend APIs or authentication setup.
+alone does not provide the backend APIs or authentication setup. Add
+`--terminal-plugin` to install the optional terminal plugin into the disposable
+home; its shells are real shells on your machine.
 
 The browser harness needs `/usr/bin/bwrap` with working PID/network namespaces.
 From `source/`, run `npm run test:browser-compat:harness --workspace apps/desktop`
 to check it. For the broader Chromium API checks, run
 `npm run test:browser-compat --workspace apps/desktop --` followed by
 `--backend-root`, `--python`, `--chrome`, `--web-dist` and a new `--evidence`
-directory, all with absolute paths. The October 7 update passes all five
-Chromium groups against the stock revision above, including syntax-highlighting
-recovery, profile isolation and transcript freshness. File editing, conflict
+directory, all with absolute paths. The October 7 update passed the five
+Chromium groups that existed then against the stock revision above, including
+syntax-highlighting recovery, profile isolation and transcript freshness. A
+sixth group, `terminal`, installs the optional plugin into its disposable home
+and checks shells: typing, resizing, UI scales, pastes, reconnects, reloads, a
+duplicated tab, profile isolation and the missing-plugin recovery. All six
+passed on October 15. File editing, conflict
 handling and draft retention also pass separate Chromium checks. This does not
 certify other backend revisions, physical mobile devices or external providers.
 
