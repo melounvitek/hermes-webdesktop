@@ -145,7 +145,9 @@ vi.mock('@novnc/novnc', async () => {
           queueMicrotask(() => callback({}))
         }
       }
-      disconnect() {}
+      disconnect() {
+        this.keyboard.ungrab()
+      }
       focus() {}
     }
   }
@@ -186,8 +188,8 @@ async function renderInControl() {
 
 /** Ctrl(+Shift)+V the way a browser delivers it to the focused remote canvas: keydown, then
  *  (only if nothing cancelled the keydown) a native `paste` carrying the local clipboard. */
-function pressCtrlV(canvas: HTMLElement, text: string, { shift = false } = {}) {
-  fireEvent.keyDown(canvas, { key: 'Control', code: 'ControlLeft', ctrlKey: true })
+function pressCtrlV(canvas: HTMLElement, text: string, { shift = false, ctrl = 'ControlLeft', release = true } = {}) {
+  fireEvent.keyDown(canvas, { key: 'Control', code: ctrl, location: ctrl === 'ControlLeft' ? 1 : 2, ctrlKey: true })
 
   if (shift) {
     fireEvent.keyDown(canvas, { key: 'Shift', code: 'ShiftLeft', ctrlKey: true, shiftKey: true })
@@ -206,7 +208,9 @@ function pressCtrlV(canvas: HTMLElement, text: string, { shift = false } = {}) {
     fireEvent.keyUp(canvas, { key: 'Shift', code: 'ShiftLeft', ctrlKey: true })
   }
 
-  fireEvent.keyUp(canvas, { key: 'Control', code: 'ControlLeft' })
+  if (release) {
+    fireEvent.keyUp(canvas, { key: 'Control', code: ctrl })
+  }
 }
 
 beforeEach(() => {
@@ -251,6 +255,53 @@ it('pastes the local clipboard into the focused remote app on Ctrl+V', async () 
   view.unmount()
 })
 
+it('keeps Ctrl down on the remote while it is held, so the next shortcut still has it', async () => {
+  const { view, rfb } = await renderInControl()
+
+  pressCtrlV(rfb.canvas, 'oops', { release: false })
+  fireEvent.keyDown(rfb.canvas, { key: 'z', code: 'KeyZ', ctrlKey: true })
+  fireEvent.keyUp(rfb.canvas, { key: 'z', code: 'KeyZ', ctrlKey: true })
+  fireEvent.keyUp(rfb.canvas, { key: 'Control', code: 'ControlLeft' })
+
+  expect(rfb.remote.seen).toEqual(['cut:oops', 'key:Control_L+v', 'key:Control_L+z'])
+  expect(rfb.remote.down.size).toBe(0)
+  view.unmount()
+})
+
+it('leaves no Ctrl down after pasting with the right Ctrl', async () => {
+  const { view, rfb } = await renderInControl()
+
+  pressCtrlV(rfb.canvas, 'secret', { ctrl: 'ControlRight' })
+
+  expect(rfb.remote.seen).toEqual(['cut:secret', expect.stringMatching(/^key:Control_R\+.*v$/)])
+  expect(rfb.remote.down.size).toBe(0)
+  view.unmount()
+})
+
+it('pastes on Windows although noVNC holds a fresh left Ctrl back to detect AltGr', async () => {
+  vi.spyOn(navigator, 'platform', 'get').mockReturnValue('Win32')
+  const { view, rfb } = await renderInControl()
+
+  pressCtrlV(rfb.canvas, 'secret')
+
+  expect(rfb.remote.seen).toEqual(['cut:secret', 'key:Control_L+v'])
+  expect(rfb.remote.down.size).toBe(0)
+  view.unmount()
+})
+
+it('does not type a later standalone paste for a chord the browser never pasted', async () => {
+  const { view, rfb } = await renderInControl()
+
+  fireEvent.keyDown(rfb.canvas, { key: 'Control', code: 'ControlLeft', ctrlKey: true })
+  fireEvent.keyDown(rfb.canvas, { key: 'v', code: 'KeyV', ctrlKey: true })
+  fireEvent.keyUp(rfb.canvas, { key: 'v', code: 'KeyV', ctrlKey: true })
+  fireEvent.keyUp(rfb.canvas, { key: 'Control', code: 'ControlLeft' })
+  fireEvent.paste(rfb.canvas, clipboard('later'))
+
+  expect(rfb.remote.seen).toEqual(['cut:later'])
+  view.unmount()
+})
+
 it('keeps Shift for Ctrl+Shift+V so remote terminals paste too', async () => {
   const { view, rfb } = await renderInControl()
 
@@ -268,8 +319,9 @@ it('turns ⌘V on macOS into Ctrl+V on the remote without leaving ⌘ held there
   fireEvent.keyDown(rfb.canvas, { key: 'Meta', code: 'MetaLeft', metaKey: true })
   // Not cancelled, so the Edit menu's Paste (Electron's role, the browser's own) can fire `paste`.
   expect(fireEvent.keyDown(rfb.canvas, { key: 'v', code: 'KeyV', metaKey: true })).toBe(true)
+  // The menu's `paste` may even trail V's release.
+  fireEvent.keyUp(rfb.canvas, { key: 'v', code: 'KeyV', metaKey: true })
   fireEvent.paste(rfb.canvas, clipboard('secret'))
-  // macOS sends no keyup for V while ⌘ is held; ⌘'s own release follows.
   fireEvent.keyUp(rfb.canvas, { key: 'Meta', code: 'MetaLeft' })
 
   expect(rfb.remote.seen).toEqual(['cut:secret', 'key:Control_L+v'])

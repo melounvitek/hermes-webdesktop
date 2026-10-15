@@ -298,6 +298,8 @@ export function BotScreenPane({ bot }: { bot: RosterRow }) {
         // Same test noVNC uses to remap ⌘ (left → Alt_L, right → Super_L), which a ⌘V must undo.
         const mac = /mac|iphone|ipad|ipod/i.test(navigator.platform)
         let pasteChord: KeyboardEvent | null = null
+        // The pane's own Ctrl press for a pasted Ctrl+V, kept down while the user's Ctrl is.
+        let pastedCtrl = false
 
         // noVNC cancels every key it handles, so the paste chord never became a native `paste`;
         // it only replayed Ctrl+V against the bot's own clipboard. Capture runs before noVNC's
@@ -312,6 +314,20 @@ export function BotScreenPane({ bot }: { bot: RosterRow }) {
           if (chord && !client.viewOnly && event.key.toLowerCase() === 'v') {
             event.stopPropagation()
             pasteChord = event
+          }
+        }
+
+        const handleKeyUp = (event: KeyboardEvent) => {
+          if (event.key !== 'Control' && event.key !== 'Meta') {
+            return
+          }
+
+          // The chord ends with its modifier; one whose paste never came is abandoned.
+          pasteChord = null
+
+          if (pastedCtrl && event.key === 'Control') {
+            pastedCtrl = false
+            client.sendKey(XK_CONTROL_L, 'ControlLeft', false)
           }
         }
 
@@ -334,9 +350,9 @@ export function BotScreenPane({ bot }: { bot: RosterRow }) {
           client.clipboardPasteFrom(text)
 
           if (chord) {
-            // Same socket, so the cut text reaches the server first. Ctrl is pressed explicitly
-            // (on Windows noVNC holds a left Ctrl back for up to 100 ms to detect AltGr) and
-            // released again so nothing stays down; noVNC's own later release is then a no-op.
+            // Same socket, so the server learns of the new clipboard before the key. Ctrl is
+            // pressed explicitly: on Windows noVNC holds a left Ctrl back for up to 100 ms to
+            // detect AltGr, and it never saw a Ctrl pressed before the canvas had focus.
             client.sendKey(XK_CONTROL_L, 'ControlLeft', true)
 
             if (mac) {
@@ -347,15 +363,23 @@ export function BotScreenPane({ bot }: { bot: RosterRow }) {
             }
 
             client.sendKey(chord.shiftKey ? XK_V : XK_LOWER_V, 'KeyV')
-            client.sendKey(XK_CONTROL_L, 'ControlLeft', false)
+
+            if (chord.ctrlKey) {
+              // Released with the user's Ctrl, so a following Ctrl+Z still reaches the remote as one.
+              pastedCtrl = true
+            } else {
+              client.sendKey(XK_CONTROL_L, 'ControlLeft', false)
+            }
           }
         }
 
         pasteTarget.addEventListener('keydown', handleKeyDown, true)
+        pasteTarget.addEventListener('keyup', handleKeyUp, true)
         pasteTarget.addEventListener('paste', handlePaste)
 
         pasteCleanup.current = () => {
           pasteTarget.removeEventListener('keydown', handleKeyDown, true)
+          pasteTarget.removeEventListener('keyup', handleKeyUp, true)
           pasteTarget.removeEventListener('paste', handlePaste)
         }
       } catch (err) {
