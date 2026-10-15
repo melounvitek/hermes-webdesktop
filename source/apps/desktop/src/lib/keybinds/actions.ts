@@ -198,7 +198,13 @@ export const KEYBIND_ACTIONS: readonly KeybindActionMeta[] = [
   // so these stay on `ctrl` — distinct on macOS, folding to Ctrl elsewhere.
   { id: 'view.nextTerminal', category: 'view', defaults: ['ctrl+shift+down'] },
   { id: 'view.prevTerminal', category: 'view', defaults: ['ctrl+shift+up'] },
-  { id: 'view.closeTerminal', category: 'view', defaults: ['ctrl+shift+w'] },
+  // Chrome keeps Ctrl+Shift+W (close window) and never delivers it to a page,
+  // so the browser build closes the terminal with Ctrl+Shift+X instead.
+  {
+    id: 'view.closeTerminal',
+    category: 'view',
+    defaults: [import.meta.env.VITE_BROWSER === '1' ? 'ctrl+shift+x' : 'ctrl+shift+w']
+  },
   // ⌘\ — the backslash reads like a mirror line flipping the layout.
   { id: 'view.flipPanes', category: 'view', defaults: ['mod+\\'] },
   // ⌘W closes the focused zone's active tab — its own tab strip (preview) or

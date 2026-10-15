@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { TRANSLATIONS } from '@/i18n/catalog'
 import { en } from '@/i18n/en'
@@ -26,6 +26,27 @@ describe('KEYBIND_ACTIONS', () => {
     const missing = KEYBIND_ACTIONS.filter(action => !labels[action.id]).map(action => action.id)
 
     expect(missing).toEqual([])
+  })
+
+  it('keeps the Chrome close-window chord out of the browser terminal defaults', async () => {
+    expect(defaultBindings()['view.closeTerminal']).toEqual(['ctrl+shift+w'])
+    vi.stubEnv('VITE_BROWSER', '1')
+    vi.resetModules()
+
+    try {
+      const browserDefaults = (await import('./actions')).defaultBindings()
+      const [close, ...extra] = browserDefaults['view.closeTerminal']
+
+      expect(close).not.toBe('ctrl+shift+w')
+      expect(extra).toEqual([])
+      // Chrome also keeps Ctrl+Shift+N/T/Q and Ctrl+(Shift+)Tab for itself.
+      expect(['ctrl+shift+n', 'ctrl+shift+t', 'ctrl+shift+q', 'ctrl+tab', 'ctrl+shift+tab']).not.toContain(close)
+      expect(Object.keys(browserDefaults).filter(id => browserDefaults[id].includes(close))).toEqual([
+        'view.closeTerminal'
+      ])
+    } finally {
+      vi.unstubAllEnvs()
+    }
   })
 
   it('keeps session archive registered and unbound by default', () => {
