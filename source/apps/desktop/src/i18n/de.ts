@@ -4838,6 +4838,8 @@ export const deOverrides = {
     loadingFiles: 'Dateien werden geladen',
     terminalDisconnected: 'Terminal getrennt',
     terminalReconnecting: 'Terminal wird neu verbunden…',
+    terminalPasteBlocked: combo =>
+      `Der Browser hat das Lesen der Zwischenablage nicht erlaubt. Klicken Sie in das Terminal und drücken Sie ${combo}, um einzufügen.`,
     terminalErrors: {
       connection:
         'Keine Verbindung zum Terminal. Prüfen Sie die Verbindung und versuchen Sie es erneut. Nicht gesendete Eingaben werden nicht nachgesendet.',

@@ -20,9 +20,9 @@ import { type Translations, useI18n } from '@/i18n'
 import { hostPathLabel, hudForcesNativeLinks, normalizeExternalUrl, openExternalLink } from '@/lib/external-link'
 import { formatCombo } from '@/lib/keybinds/combo'
 import { isRemoteGateway } from '@/lib/media'
-import { isBrowserClient } from '@/lib/platform'
+import { isBrowserClient, isMacPlatform } from '@/lib/platform'
 import { reachablePreviewUrl } from '@/lib/preview-reach'
-import { notifyError } from '@/store/notifications'
+import { notify, notifyError } from '@/store/notifications'
 import { openPreview } from '@/store/preview'
 
 import { ShellMenuItems } from './shell-menu-items'
@@ -111,7 +111,20 @@ function terminalSections(open: Extract<OpenContextMenu, { kind: 'terminal' }>, 
             void window.hermesDesktop
               ?.readClipboard()
               .then(text => (text ? terminal.paste?.(text) : undefined))
-              .catch(error => notifyError(error, t.desktop.clipboardPasteFailed))
+              .catch(error =>
+                // A browser can refuse the read (permission, plain http). Its
+                // keyboard paste still works through the native paste event.
+                isBrowserClient()
+                  ? notify({
+                      id: 'terminal-paste-blocked',
+                      kind: 'warning',
+                      title: t.desktop.clipboardPasteFailed,
+                      message: t.rightSidebar.terminalPasteBlocked(
+                        formatCombo(isMacPlatform() ? 'mod+v' : 'mod+shift+v')
+                      )
+                    })
+                  : notifyError(error, t.desktop.clipboardPasteFailed)
+              )
           }
         />
       ) : null,

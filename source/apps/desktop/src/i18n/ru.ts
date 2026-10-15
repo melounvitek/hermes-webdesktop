@@ -3559,6 +3559,8 @@ export const ruOverrides = {
   rightSidebar: {
     terminalDisconnected: 'Терминал отключён',
     terminalReconnecting: 'Переподключение к терминалу…',
+    terminalPasteBlocked: combo =>
+      `Браузер не разрешил чтение буфера обмена. Щёлкните в терминале и нажмите ${combo}, чтобы вставить.`,
     terminalEmpty: 'В этом профиле нет терминалов',
     terminalReadOnly: 'Вывод только для чтения',
     terminalReadOnlyHelp:

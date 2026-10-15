@@ -912,6 +912,13 @@ export function useTerminalSession({
         return true
       }
 
+      // In a browser, the native paste event reaches xterm's textarea, which
+      // applies bracketed paste. A clipboard API read would ask for permission
+      // and needs a secure context.
+      if (intent === 'paste' && import.meta.env.VITE_BROWSER === '1') {
+        return false
+      }
+
       event.preventDefault()
 
       if (intent === 'copy') {

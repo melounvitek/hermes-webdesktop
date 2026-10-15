@@ -6,7 +6,15 @@ import type { HermesTerminalStatus } from '@/global'
 import { TerminalInstance } from './instance'
 import { closeTerminal } from './terminals'
 
-const mocks = vi.hoisted(() => ({ write: vi.fn(), dispose: vi.fn(), focus: vi.fn(), fit: vi.fn() }))
+const mocks = vi.hoisted(() => ({
+  write: vi.fn(),
+  dispose: vi.fn(),
+  focus: vi.fn(),
+  fit: vi.fn(),
+  paste: vi.fn(),
+  keyHandler: null as ((event: KeyboardEvent) => boolean) | null
+}))
+
 vi.mock('@xterm/xterm', () => ({
   Terminal: class {
     cols = 80
@@ -24,7 +32,9 @@ vi.mock('@xterm/xterm', () => ({
     focus = mocks.focus
     refresh() {}
     clearSelection() {}
-    attachCustomKeyEventHandler() {}
+    attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean) {
+      mocks.keyHandler = handler
+    }
     getSelection() {
       return ''
     }
@@ -37,6 +47,7 @@ vi.mock('@xterm/xterm', () => ({
     onSelectionChange() {
       return { dispose() {} }
     }
+    paste = mocks.paste
     write = mocks.write
     dispose = mocks.dispose
   }
@@ -91,6 +102,7 @@ afterEach(() => {
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
   vi.clearAllMocks()
+  mocks.keyHandler = null
 })
 
 it('shows actionable start errors and reconnect state, retries the owned session, and keeps it alive while hidden', async () => {
@@ -286,5 +298,41 @@ it.each(['0', '1'])(
     expect(mocks.focus).toHaveBeenCalledTimes(focusCount + 1)
     view.unmount()
     expect(dispose).toHaveBeenCalledExactlyOnceWith('owned-fit')
+  }
+)
+
+it.each(['0', '1'])(
+  'pastes the terminal chord without a clipboard read only in the browser (browser=%s)',
+  async browser => {
+    vi.stubEnv('VITE_BROWSER', browser)
+    const readClipboard = vi.fn(async () => 'clipboard text')
+    window.hermesDesktop = {
+      ...window.hermesDesktop,
+      readClipboard,
+      terminal: {
+        start: async () => ({ id: 'owned-paste', cwd: '/repo', shell: 'bash' }),
+        attach: async () => true,
+        dispose: async () => true,
+        cwd: async () => null,
+        write: async () => true,
+        resize: async () => true,
+        onData: () => () => {},
+        onExit: () => () => {}
+      }
+    }
+    render(<TerminalInstance active cwd="/repo" id="paste-tab" onAddSelectionToChat={vi.fn()} profile="alpha" />)
+    await waitFor(() => expect(mocks.keyHandler).not.toBeNull())
+    const chord = new KeyboardEvent('keydown', { key: 'V', ctrlKey: true, shiftKey: true, cancelable: true })
+
+    expect(mocks.keyHandler!(chord)).toBe(false) // Never sent to the shell as a key.
+
+    if (browser === '1') {
+      // The browser's own paste event reaches xterm's textarea: no permission prompt.
+      expect(chord.defaultPrevented).toBe(false)
+      expect(readClipboard).not.toHaveBeenCalled()
+    } else {
+      expect(chord.defaultPrevented).toBe(true)
+      await waitFor(() => expect(mocks.paste).toHaveBeenCalledWith('clipboard text'))
+    }
   }
 )

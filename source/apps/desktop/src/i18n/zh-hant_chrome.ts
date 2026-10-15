@@ -425,6 +425,7 @@ export const zhHantChrome = {
     terminalEmpty: '此設定檔中沒有終端機',
     terminalDisconnected: '終端機已中斷連線',
     terminalReconnecting: '正在重新連線至終端機…',
+    terminalPasteBlocked: combo => `瀏覽器不允許讀取剪貼簿。請點選終端機並按 ${combo} 貼上。`,
     terminalErrors: {
       connection: '無法連線至終端機。請檢查連線後重試。未傳送的輸入不會重新傳送。',
       'missing-plugin': '請在 Hermes 伺服器上安裝並啟用 browser-terminal 外掛，然後重新啟動儀表板。',

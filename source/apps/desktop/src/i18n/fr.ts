@@ -4849,6 +4849,8 @@ export const frOverrides = {
     loadingFiles: 'Chargement des fichiers',
     terminalDisconnected: 'Terminal déconnecté',
     terminalReconnecting: 'Reconnexion au terminal…',
+    terminalPasteBlocked: combo =>
+      `Le navigateur n’a pas autorisé la lecture du presse-papiers. Cliquez dans le terminal et appuyez sur ${combo} pour coller.`,
     terminalErrors: {
       connection:
         'Impossible de se connecter au terminal. Vérifiez la connexion et réessayez. Les saisies non envoyées ne sont pas renvoyées.',

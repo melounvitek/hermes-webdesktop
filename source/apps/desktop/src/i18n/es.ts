@@ -4832,6 +4832,8 @@ export const esOverrides = {
     loadingFiles: 'Cargando archivos',
     terminalDisconnected: 'Terminal desconectado',
     terminalReconnecting: 'Reconectando con el terminal…',
+    terminalPasteBlocked: combo =>
+      `El navegador no permitió leer el portapapeles. Haz clic en el terminal y pulsa ${combo} para pegar.`,
     terminalErrors: {
       connection:
         'No se pudo conectar con el terminal. Comprueba la conexión e inténtalo de nuevo. La entrada no enviada no se reenvía.',

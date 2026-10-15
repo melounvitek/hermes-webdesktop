@@ -3266,6 +3266,8 @@ export const jaOverrides = {
   rightSidebar: {
     terminalDisconnected: 'ターミナルが切断されました',
     terminalReconnecting: 'ターミナルに再接続中…',
+    terminalPasteBlocked: combo =>
+      `ブラウザーがクリップボードの読み取りを許可しませんでした。ターミナルをクリックし、${combo} を押して貼り付けてください。`,
     terminalEmpty: 'このプロファイルにはターミナルがありません',
     terminalReadOnly: '読み取り専用の出力',
     terminalReadOnlyHelp:

@@ -481,6 +481,7 @@ export const arChrome = {
     terminalEmpty: 'لا توجد طرفية في هذا الملف الشخصي',
     terminalDisconnected: 'انقطع اتصال الطرفية',
     terminalReconnecting: 'جارٍ إعادة الاتصال بالطرفية…',
+    terminalPasteBlocked: combo => `لم يسمح المتصفح بقراءة الحافظة. انقر داخل الطرفية واضغط ${combo} للصق.`,
     terminalErrors: {
       connection: 'تعذّر الاتصال بالطرفية. تحقّق من الاتصال وأعد المحاولة. لن تتم إعادة إرسال المدخلات غير المرسلة.',
       'missing-plugin': 'ثبّت إضافة browser-terminal وفعّلها على خادم Hermes، ثم أعد تشغيل لوحة التحكم.',

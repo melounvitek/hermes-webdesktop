@@ -4391,6 +4391,8 @@ export const en: Translations = {
   rightSidebar: {
     terminalDisconnected: 'Terminal disconnected',
     terminalReconnecting: 'Reconnecting to terminal…',
+    terminalPasteBlocked: combo =>
+      `The browser did not allow reading the clipboard. Click the terminal and press ${combo} to paste.`,
     terminalEmpty: 'No terminal in this profile',
     terminalReadOnly: 'Read-only output',
     terminalReadOnlyHelp:

@@ -596,7 +596,7 @@ describe('AppContextMenu', () => {
   })
 
   it.each(['read denied', 'Clipboard API unavailable'])(
-    'reports the first browser terminal clipboard failure: %s',
+    'points to the keyboard paste when the browser refuses a clipboard read: %s',
     async message => {
       const readClipboard = vi.fn().mockRejectedValue(new Error(message))
       installBridge({ browser: { authRequired: false, signIn: vi.fn() }, readClipboard })
@@ -618,7 +618,11 @@ describe('AppContextMenu', () => {
         expect(readClipboard).not.toHaveBeenCalled()
         expect(item.closest('[role="menuitem"]')?.getAttribute('data-disabled')).toBeNull()
         fireEvent.click(item)
-        await waitFor(() => expect($notifications.get()).toEqual([expect.objectContaining({ kind: 'error', message })]))
+        await waitFor(() =>
+          expect($notifications.get()).toEqual([
+            expect.objectContaining({ kind: 'warning', message: expect.stringContaining('Ctrl+Shift+V') })
+          ])
+        )
         expect(readClipboard).toHaveBeenCalledOnce()
         expect(paste).not.toHaveBeenCalled()
       } finally {

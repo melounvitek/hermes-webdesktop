@@ -4259,6 +4259,7 @@ export const zhOverrides = {
   rightSidebar: {
     terminalDisconnected: '终端已断开连接',
     terminalReconnecting: '正在重新连接终端…',
+    terminalPasteBlocked: combo => `浏览器不允许读取剪贴板。请点击终端并按 ${combo} 粘贴。`,
     terminalEmpty: '此配置中没有终端',
     terminalReadOnly: '只读输出',
     terminalReadOnlyHelp:
