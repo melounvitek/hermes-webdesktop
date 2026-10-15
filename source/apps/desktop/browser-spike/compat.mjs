@@ -9,7 +9,7 @@ import { parseArgs } from 'node:util'
 import { startProcess, stopProcess, waitFor } from './processes.mjs'
 
 const here = path.dirname(fileURLToPath(import.meta.url))
-const groups = ['recovery', 'smoke', 'usability', 'profile-isolation', 'transcript-freshness']
+const groups = ['recovery', 'smoke', 'usability', 'profile-isolation', 'transcript-freshness', 'terminal']
 export const usage = 'npm run test:browser-compat -- --backend-root /ABS/stock --python /ABS/test-venv/bin/python --chrome /ABS/chromium --web-dist /ABS/dist-browser --evidence /ABS/new-private-directory'
 
 export function options(argv) {
@@ -51,7 +51,7 @@ async function bundleIdentity(root) {
 
 function initialSummary(inputs) {
   return { inputs, started: new Date().toISOString(), status: 'FAIL',
-    limitations: ['Five scripts including read-only/native-action checks; not a comprehensive boundary/auth matrix',
+    limitations: ['Six scripts including read-only/native-action checks; not a comprehensive boundary/auth matrix',
       'Group receipts confirm direct-child termination only; detached descendants are killed at whole-gate namespace exit',
       'Read-only host files remain visible; this is not a confidentiality sandbox',
       'UI upstream revision is not inferred from a built bundle; local git identity and bundle digest are recorded'],
@@ -124,8 +124,8 @@ export async function run(inputs) {
         }
       }
     })
-    // Five sequential groups have a 20-minute bound each; leave room for fixture setup/teardown.
-    timer = setTimeout(() => stop('whole-gate timeout'), 110 * 60 * 1000)
+    // Six sequential groups have a 20-minute bound each; leave room for fixture setup/teardown.
+    timer = setTimeout(() => stop('whole-gate timeout'), 130 * 60 * 1000)
     const exit = await new Promise((resolve, reject) => {
       child.once('error', reject)
       child.once('exit', (code, signal) => resolve({ code, signal }))
@@ -189,7 +189,9 @@ export async function runGate(inputs) {
         let args = [inputs['web-dist'], dir]
         let fixture
         if (result.name !== 'recovery') {
-          fixture = startProcess(inputs.python, fixtureArgs, { cwd: home, env, logPath: path.join(dir, 'fixture.log') })
+          // Only the terminal group installs the optional plugin, into its disposable home.
+          const launch = result.name === 'terminal' ? [...fixtureArgs, '--terminal-plugin'] : fixtureArgs
+          fixture = startProcess(inputs.python, launch, { cwd: home, env, logPath: path.join(dir, 'fixture.log') })
           owned.push(fixture)
           await fixture.ready
           const ready = await waitFor(() => {
