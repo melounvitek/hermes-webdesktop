@@ -94,28 +94,31 @@ export function TerminalInstance({
         </div>
       )}
       {import.meta.env.VITE_BROWSER === '1' && connectionStatus.state === 'disconnected' && (
-        <ScrollArea className="absolute inset-0 z-10 bg-(--ui-terminal-surface-background)" role="status">
-          <div className="p-4">
-            <ErrorState
-              description={
-                connectionStatus.reason === 'unavailable'
-                  ? errors.unavailable(connectionStatus.detail ?? '')
-                  : errors[connectionStatus.reason ?? 'connection']
-              }
-              title={t.rightSidebar.terminalDisconnected}
-            >
-              {connectionStatus.reason === 'missing-session' ? (
-                <Button onClick={() => closeTerminal(id)} size="sm" variant="secondary">
-                  {t.common.close}
-                </Button>
-              ) : (
-                <Button onClick={retry} size="sm" variant="secondary">
-                  {t.common.retry}
-                </Button>
-              )}
-            </ErrorState>
-          </div>
-        </ScrollArea>
+        // Radix pins the scroll root to position: relative, so cover the terminal from a wrapper.
+        <div className="absolute inset-0 z-10 bg-(--ui-terminal-surface-background)" role="status">
+          <ScrollArea className="h-full">
+            <div className="p-4">
+              <ErrorState
+                description={
+                  connectionStatus.reason === 'unavailable'
+                    ? errors.unavailable(connectionStatus.detail ?? '')
+                    : errors[connectionStatus.reason ?? 'connection']
+                }
+                title={t.rightSidebar.terminalDisconnected}
+              >
+                {connectionStatus.reason === 'missing-session' ? (
+                  <Button onClick={() => closeTerminal(id)} size="sm" variant="secondary">
+                    {t.common.close}
+                  </Button>
+                ) : (
+                  <Button onClick={retry} size="sm" variant="secondary">
+                    {t.common.retry}
+                  </Button>
+                )}
+              </ErrorState>
+            </div>
+          </ScrollArea>
+        </div>
       )}
       {selection.trim() && (
         <div className="absolute z-50 flex items-center gap-1" style={selectionStyle ?? { right: 12, top: 8 }}>
