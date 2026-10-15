@@ -103,7 +103,7 @@ function terminalSections(open: Extract<OpenContextMenu, { kind: 'terminal' }>, 
       ) : null,
       terminal.paste ? (
         <Item
-          disabled={!open.clipboardHasText}
+          disabled={!isBrowserClient() && !open.clipboardHasText}
           icon="clippy"
           key="terminal-paste"
           label={t.contextMenu.edit.paste}

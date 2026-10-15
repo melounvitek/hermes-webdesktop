@@ -246,8 +246,7 @@ if (typeof window !== 'undefined' && !window.__PERF_DRIVE__) {
       }
 
       setCurrentCwdTransient(cwd)
-      const userId = createTerminal(cwd)
-      const terminalIds: string[] = userId ? [userId] : []
+      const terminalIds = [createTerminal(cwd)]
       let procId = ''
 
       for (let index = 1; index < Math.max(1, terminals); index += 1) {
@@ -259,8 +258,8 @@ if (typeof window !== 'undefined' && !window.__PERF_DRIVE__) {
         }
       }
 
-      if (terminalIds.length) {
-        selectTerminal(terminalIds.at(-1)!)
+      if (procId) {
+        selectTerminal(terminalIds.at(-1) ?? terminalIds[0])
       }
 
       setTerminalTakeover(true)

@@ -4836,6 +4836,18 @@ export const deOverrides = {
     tryAgain: 'Erneut versuchen',
     loadingTree: 'Dateibaum wird geladen',
     loadingFiles: 'Dateien werden geladen',
+    terminalDisconnected: 'Terminal getrennt',
+    terminalReconnecting: 'Terminal wird neu verbunden…',
+    terminalErrors: {
+      connection:
+        'Keine Verbindung zum Terminal. Prüfen Sie die Verbindung und versuchen Sie es erneut. Nicht gesendete Eingaben werden nicht nachgesendet.',
+      'missing-plugin':
+        'Installieren und aktivieren Sie das Plugin browser-terminal auf dem Hermes-Server und starten Sie dann das Dashboard neu.',
+      'missing-session':
+        'Der Server kennt dieses Terminal nicht mehr. Schließen Sie diesen Tab und öffnen Sie ein neues Terminal, um eine andere Shell zu starten.',
+      auth: 'Die Anmeldung für das Terminal ist fehlgeschlagen. Melden Sie sich erneut an und versuchen Sie es dann noch einmal.',
+      superseded: 'Dieses Terminal wurde an anderer Stelle verbunden. Versuchen Sie es erneut, um es hier zu verbinden.'
+    },
     terminalHide: 'Terminal ausblenden',
     terminalsAria: 'Terminals',
     terminalNew: 'Neues Terminal',

@@ -23,23 +23,13 @@ it('keeps browser terminals runtime-only and isolates selection and close operat
   )
   const store = await import('./terminals')
   expect(store.$terminals.get()).toEqual([])
-  // Restoring an open pane and invoking a stale creation action cannot spawn a shell.
-  store.ensureTerminal()
-  expect(store.$terminals.get()).toEqual([])
-  expect(store.createTerminal()).toBeNull()
-  localStorage.setItem('hermes.desktop.keybinds', JSON.stringify({ 'view.newTerminal': ['mod+shift+t'] }))
-  const { $comboIndex } = await import('@/store/keybinds')
-  expect([...$comboIndex.get().values()]).not.toContain('view.newTerminal')
-  const { createBrowserBridge } = await import('@/browser/bridge')
-  expect(createBrowserBridge({ token: '', authRequired: false })).not.toHaveProperty('terminal')
-
-  const a = store.ensureAgentTerminal('proc', 'A job', 'alpha')!
+  const a = store.createTerminal()
   store.updateTerminalReviveBuffer(a, 'password output')
   expect(store.$terminals.get().find(term => term.id === a)?.profile).toBe('alpha')
   gatewayProfile.set('beta')
   expect(store.$visibleTerminals.get()).toEqual([])
   expect(store.$visibleActiveTerminalId.get()).toBeNull()
-  const b = store.ensureAgentTerminal('proc', 'B job', 'beta')!
+  const b = store.createTerminal()
   expect(store.$visibleTerminals.get().map(term => term.id)).toEqual([b])
   expect(store.$terminals.get().find(term => term.id === b)?.profile).toBe('beta')
   store.selectTerminal(a)

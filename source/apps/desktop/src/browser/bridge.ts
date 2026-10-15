@@ -4,6 +4,7 @@ import type { DesktopBootProgress, HermesApiRequest, HermesConnection } from '..
 
 import { pauseBrowserAttentionForSignIn } from './attention-notifications'
 import { createBrowserDownloads } from './downloads'
+import { createBrowserTerminal } from './terminal'
 import { createBrowserZoom } from './zoom'
 
 interface BrowserConfig {
@@ -130,6 +131,7 @@ export function createBrowserBridge({ token, authRequired }: BrowserConfig) {
     // Never forward the gateway's custom auth header through a redirect.
     ...createBrowserDownloads(request => fetchResponse(request, 'error')),
     zoom: createBrowserZoom(),
+    terminal: createBrowserTerminal(api),
     glassSupported: false,
     translucencySupported: false,
     guestOnboardingEnabled: false,

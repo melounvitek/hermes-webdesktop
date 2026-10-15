@@ -3264,11 +3264,21 @@ export const jaOverrides = {
   },
 
   rightSidebar: {
+    terminalDisconnected: 'ターミナルが切断されました',
+    terminalReconnecting: 'ターミナルに再接続中…',
     terminalEmpty: 'このプロファイルにはターミナルがありません',
     terminalReadOnly: '読み取り専用の出力',
     terminalReadOnlyHelp:
       'プロンプトに応答するには、バックグラウンドのコマンドを停止し、新しいターミナルで実行してください。新しいターミナルは別のシェルを開き、このプロセスには接続しません。',
     terminalOpenInteractive: '新しいターミナルを開く',
+    terminalErrors: {
+      connection: 'ターミナルに接続できません。接続を確認して再試行してください。未送信の入力は再送されません。',
+      'missing-plugin':
+        'Hermes サーバーに browser-terminal プラグインをインストールして有効にし、ダッシュボードを再起動してください。',
+      'missing-session': 'このターミナルはサーバーに存在しません。このタブを閉じて新しいターミナルを開いてください。',
+      auth: 'ターミナルの認証に失敗しました。再度ログインして再試行してください。',
+      superseded: 'このターミナルは別の場所に接続されています。ここで再接続するには再試行してください。'
+    },
     aria: '右サイドバー',
     panelsAria: '右サイドバーパネル',
     files: 'ファイルシステム',

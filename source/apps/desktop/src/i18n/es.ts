@@ -4830,6 +4830,18 @@ export const esOverrides = {
     tryAgain: 'Intentar de nuevo',
     loadingTree: 'Cargando árbol de archivos',
     loadingFiles: 'Cargando archivos',
+    terminalDisconnected: 'Terminal desconectado',
+    terminalReconnecting: 'Reconectando con el terminal…',
+    terminalErrors: {
+      connection:
+        'No se pudo conectar con el terminal. Comprueba la conexión e inténtalo de nuevo. La entrada no enviada no se reenvía.',
+      'missing-plugin':
+        'Instala y activa el plugin browser-terminal en el servidor de Hermes y luego reinicia el panel.',
+      'missing-session':
+        'El servidor ya no tiene este terminal. Cierra esta pestaña y abre un terminal nuevo para iniciar otro shell.',
+      auth: 'Falló la autenticación del terminal. Vuelve a iniciar sesión e inténtalo de nuevo.',
+      superseded: 'Este terminal se conectó desde otro lugar. Reintenta para conectarlo aquí.'
+    },
     terminalHide: 'Ocultar terminal',
     terminalsAria: 'Terminales',
     terminalNew: 'Nueva terminal',

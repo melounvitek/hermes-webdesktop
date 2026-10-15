@@ -7,7 +7,7 @@
 
 import { registry } from '@/contrib/registry'
 import type { Contribution } from '@/contrib/types'
-import { isMacPlatform, supportsInteractiveTerminal } from '@/lib/platform'
+import { isMacPlatform } from '@/lib/platform'
 
 export type KeybindCategory = 'composer' | 'profiles' | 'session' | 'navigation' | 'view'
 
@@ -192,9 +192,7 @@ export const KEYBIND_ACTIONS: readonly KeybindActionMeta[] = [
   // every platform. Off macOS `ctrl` folds to `mod` (= Ctrl), so it's unchanged.
   // Toggle reveals the terminal (opening one if none exist); Shift spawns a new one.
   { id: 'view.showTerminal', category: 'view', defaults: ['ctrl+`'] },
-  ...(supportsInteractiveTerminal
-    ? [{ id: 'view.newTerminal', category: 'view' as const, defaults: ['ctrl+shift+`'] }]
-    : []),
+  { id: 'view.newTerminal', category: 'view', defaults: ['ctrl+shift+`'] },
   // Same Ctrl(+Shift) terminal family: arrows walk the (vertical) tab rail, W
   // kills the active one. ⌘W is taken (close preview tab) and ⌘⇧[ ] are profiles,
   // so these stay on `ctrl` — distinct on macOS, folding to Ctrl elsewhere.

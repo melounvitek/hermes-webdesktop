@@ -4847,6 +4847,18 @@ export const frOverrides = {
     tryAgain: 'Réessayer',
     loadingTree: "Chargement de l'arborescence des fichiers",
     loadingFiles: 'Chargement des fichiers',
+    terminalDisconnected: 'Terminal déconnecté',
+    terminalReconnecting: 'Reconnexion au terminal…',
+    terminalErrors: {
+      connection:
+        'Impossible de se connecter au terminal. Vérifiez la connexion et réessayez. Les saisies non envoyées ne sont pas renvoyées.',
+      'missing-plugin':
+        'Installez et activez le plugin browser-terminal sur le serveur Hermes, puis redémarrez le tableau de bord.',
+      'missing-session':
+        'Le serveur ne connaît plus ce terminal. Fermez cet onglet et ouvrez un nouveau terminal pour démarrer un autre shell.',
+      auth: "L'authentification du terminal a échoué. Reconnectez-vous, puis réessayez.",
+      superseded: 'Ce terminal a été connecté ailleurs. Réessayez pour le connecter ici.'
+    },
     terminalHide: 'Masquer le terminal',
     terminalsAria: 'Terminaux',
     terminalNew: 'Nouveau terminal',

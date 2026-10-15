@@ -7,6 +7,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import type { CSSProperties } from 'react'
 
 import { writeClipboardText } from '@/components/ui/copy-button'
+import type { HermesTerminalStatus } from '@/global'
 import { triggerHaptic } from '@/lib/haptics'
 import { isComposerChord } from '@/lib/keybinds/chords'
 import { $previewTarget } from '@/store/preview'
@@ -239,6 +240,7 @@ interface UseTerminalSessionOptions {
   /** Renderer-side terminal id (the tab handle), used to key the agent reader. */
   id: string
   cwd: string
+  profile?: string
   /** Only the active tab is visible, owns the agent reader, and runs injections. */
   active: boolean
   onAddSelectionToChat: (text: string, label?: string) => void
@@ -391,7 +393,8 @@ export function useTerminalSession({
   onAddSelectionToChat,
   restoreCwd,
   reviveBuffer,
-  onShell
+  onShell,
+  profile
 }: UseTerminalSessionOptions) {
   // Key off renderedMode (the painted surface type), not resolvedMode (the
   // clicked switch) — a skin can keep a light surface in "dark" mode, and we
@@ -409,6 +412,18 @@ export function useTerminalSession({
   const termRef = useRef<Terminal | null>(null)
   const webglRef = useRef<WebglAddon | null>(null)
   const sessionIdRef = useRef<string | null>(null)
+  const profileRef = useRef(profile)
+  const retryRef = useRef<(() => void) | null>(null)
+  // Only an explicit open, activation or retry takes keyboard focus. A browser
+  // reconnect also passes through 'open' and must leave the composer focused.
+  const focusOnOpenRef = useRef(true)
+  const [connectionStatus, setConnectionStatus] = useState<HermesTerminalStatus>({ state: 'connecting' })
+
+  const retry = useCallback(() => {
+    focusOnOpenRef.current = true
+    retryRef.current?.()
+  }, [])
+
   // Snapshot the revive buffer once: live snapshots feed updateTerminalReviveBuffer
   // and would otherwise re-arm replay on every store-driven re-render.
   const initialReviveBufferRef = useRef(reviveBuffer)
@@ -514,6 +529,7 @@ export function useTerminalSession({
 
     if (!host || !terminalApi) {
       setStatus('closed')
+      setConnectionStatus({ state: 'disconnected', reason: 'missing-plugin' })
 
       return
     }
@@ -669,6 +685,10 @@ export function useTerminalSession({
     }
 
     const scheduleSnapshot = () => {
+      if (import.meta.env.VITE_BROWSER === '1') {
+        return
+      }
+
       if (snapshotTimer) {
         return
       }
@@ -918,12 +938,35 @@ export function useTerminalSession({
       return false
     })
 
-    const startSession = () =>
+    const reportConnection = (next: HermesTerminalStatus) => {
+      if (disposed) {
+        return
+      }
+
+      setConnectionStatus(next)
+      setStatus(next.state === 'open' ? 'open' : next.state === 'disconnected' ? 'closed' : 'starting')
+    }
+
+    const startSession = () => {
+      reportConnection({ state: 'connecting' })
+
+      if (sessionIdRef.current) {
+        // Explicit recovery reattaches the owned shell; never start a replacement.
+        void terminalApi.attach(sessionIdRef.current)
+
+        return
+      }
+
       void terminalApi
         // Prefer the prior session's last cwd so a reopened tab lands where the
         // user last `cd`'d; the main side falls back to the launch cwd (then
         // home) if that dir no longer exists.
-        .start({ cols: term.cols, cwd: initialRestoreCwdRef.current || cwd, rows: term.rows })
+        .start({
+          cols: term.cols,
+          cwd: initialRestoreCwdRef.current || cwd,
+          rows: term.rows,
+          ...(import.meta.env.VITE_BROWSER === '1' ? { profile: profileRef.current } : {})
+        })
         .then(async session => {
           if (disposed) {
             void terminalApi.dispose(session.id)
@@ -965,9 +1008,18 @@ export function useTerminalSession({
             })
           )
 
+          if (terminalApi.onStatus) {
+            cleanup.push(terminalApi.onStatus(session.id, reportConnection))
+          }
+
           const attached = await terminalApi.attach(session.id)
 
           if (!attached) {
+            // The browser adapter publishes its own recovery state.
+            if (terminalApi.onStatus) {
+              return
+            }
+
             throw new Error('Terminal session disappeared before its output stream attached')
           }
 
@@ -980,9 +1032,19 @@ export function useTerminalSession({
           })
         })
         .catch(error => {
-          setStatus('closed')
-          term.write(`Terminal failed to start: ${error instanceof Error ? error.message : String(error)}\r\n`)
+          if (disposed) {
+            return
+          }
+
+          reportConnection({ state: 'disconnected', reason: error?.reason ?? 'connection' })
+
+          if (import.meta.env.VITE_BROWSER !== '1') {
+            term.write(`Terminal failed to start: ${error instanceof Error ? error.message : String(error)}\r\n`)
+          }
         })
+    }
+
+    retryRef.current = startSession
 
     // Open + fit + start only once webfonts settle. Fitting with fallback metrics
     // picks the wrong row count, the shell boots at that size, then the real font
@@ -1086,6 +1148,7 @@ export function useTerminalSession({
 
     return () => {
       disposed = true
+      retryRef.current = null
       mountedRef.current = false
       cancelMountWatch()
       cleanup.forEach(run => run())
@@ -1152,8 +1215,15 @@ export function useTerminalSession({
   // every terminal with the same render config, so rebuild ALL of them (see
   // redrawAllTerminals) — refreshing only this one leaves its siblings drawing
   // from wiped atlas pages.
+  // eslint-disable-next-line no-restricted-syntax -- legitimate non-atom ref write (see eslint rule comment)
   useEffect(() => {
-    if (!active || status !== 'open') {
+    if (!active) {
+      focusOnOpenRef.current = true
+
+      return
+    }
+
+    if (status !== 'open') {
       return
     }
 
@@ -1162,7 +1232,11 @@ export function useTerminalSession({
 
       fitRef.current?.()
       redrawAllTerminals()
-      term?.focus()
+
+      if (focusOnOpenRef.current) {
+        focusOnOpenRef.current = false
+        term?.focus()
+      }
     })
 
     return () => cancelAnimationFrame(frame)
@@ -1195,6 +1269,8 @@ export function useTerminalSession({
 
   return {
     addSelectionToChat,
+    connectionStatus,
+    retry,
     hostRef,
     selection,
     selectionStyle,

@@ -2,7 +2,6 @@ import type { WebglAddon } from '@xterm/addon-webgl'
 import type { Terminal } from '@xterm/xterm'
 import { atom, computed } from 'nanostores'
 
-import { supportsInteractiveTerminal } from '@/lib/platform'
 import { readKey, writeKey } from '@/lib/storage'
 import { $activeGatewayProfile } from '@/store/profile'
 import { $currentCwd } from '@/store/session'
@@ -110,7 +109,7 @@ if (typeof window !== 'undefined') {
  *  PTY session id the main process mints); each instance owns its own shell. */
 export interface TerminalEntry {
   id: string
-  /** Browser agent mirrors belong to their session's profile for their whole lifetime. */
+  /** Browser tabs belong to their shell or agent session's profile for their whole lifetime. */
   profile?: string
   /** Display label. `auto` adopts the resolved shell name until the user renames. */
   title: string
@@ -264,7 +263,7 @@ $terminals.subscribe(list => persistTerminals(list, $activeTerminalId.get()))
 $activeTerminalId.subscribe(active => persistTerminals($terminals.get(), active))
 
 export const $visibleTerminals = computed([$terminals, $activeGatewayProfile], (list, profile) =>
-  browser ? list.filter(term => term.kind === 'agent' && Boolean(term.profile) && term.profile === profile) : list
+  browser ? list.filter(term => Boolean(term.profile) && term.profile === profile) : list
 )
 export const $visibleActiveTerminalId = computed([$visibleTerminals, $activeTerminalId], (list, id) =>
   !browser || list.some(term => term.id === id) ? id : (list[0]?.id ?? null)
@@ -279,13 +278,8 @@ const newId = () =>
   globalThis.crypto?.randomUUID?.() ?? `term-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
 
 /** Append a fresh terminal and focus it. Captures the current cwd once (its only
- *  tie to session/project state); pass an explicit cwd to override.
- *  Returns null when this client has no interactive terminal capability. */
-export function createTerminal(cwd: string = $currentCwd.get()): string | null {
-  if (!supportsInteractiveTerminal) {
-    return null
-  }
-
+ *  tie to session/project state); pass an explicit cwd to override. Returns the id. */
+export function createTerminal(cwd: string = $currentCwd.get()): string {
   const id = newId()
   $terminals.set([
     ...$terminals.get(),
@@ -294,7 +288,8 @@ export function createTerminal(cwd: string = $currentCwd.get()): string | null {
       title: 'Terminal',
       auto: true,
       cwd,
-      kind: 'user'
+      kind: 'user',
+      ...(browser ? { profile: $activeGatewayProfile.get() } : {})
     }
   ])
   $activeTerminalId.set(id)

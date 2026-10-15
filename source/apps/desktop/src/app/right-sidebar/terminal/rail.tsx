@@ -12,7 +12,6 @@ import { Tip, TipHintLabel } from '@/components/ui/tooltip'
 import { useI18n } from '@/i18n'
 import { formatCombo } from '@/lib/keybinds/combo'
 import { isMetaClose, middleClickHandlers } from '@/lib/middle-click'
-import { supportsInteractiveTerminal } from '@/lib/platform'
 import { cn } from '@/lib/utils'
 import { $bindings } from '@/store/keybinds'
 
@@ -67,23 +66,21 @@ export function TerminalRail() {
             toggleHint={toggleHint}
           />
         ))}
-        {supportsInteractiveTerminal && (
-          <li className="flex w-full justify-center">
-            <Tip
-              label={<TipHintLabel hint={newHint && formatCombo(newHint)} text={t.rightSidebar.terminalNew} />}
-              placement="right-rail"
+        <li className="flex w-full justify-center">
+          <Tip
+            label={<TipHintLabel hint={newHint && formatCombo(newHint)} text={t.rightSidebar.terminalNew} />}
+            placement="right-rail"
+          >
+            <button
+              aria-label={t.rightSidebar.terminalNew}
+              className={cn(RAIL_ACTION, 'size-7 text-(--ui-text-quaternary)')}
+              onClick={() => createTerminal()}
+              type="button"
             >
-              <button
-                aria-label={t.rightSidebar.terminalNew}
-                className={cn(RAIL_ACTION, 'size-7 text-(--ui-text-quaternary)')}
-                onClick={() => createTerminal()}
-                type="button"
-              >
-                <Codicon name="add" size="0.8125rem" />
-              </button>
-            </Tip>
-          </li>
-        )}
+              <Codicon name="add" size="0.8125rem" />
+            </button>
+          </Tip>
+        </li>
       </ul>
 
       <div className="flex shrink-0 flex-col items-center pb-1.5">

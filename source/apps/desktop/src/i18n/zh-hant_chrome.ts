@@ -423,6 +423,15 @@ export const zhHantChrome = {
 
   rightSidebar: {
     terminalEmpty: '此設定檔中沒有終端機',
+    terminalDisconnected: '終端機已中斷連線',
+    terminalReconnecting: '正在重新連線至終端機…',
+    terminalErrors: {
+      connection: '無法連線至終端機。請檢查連線後重試。未傳送的輸入不會重新傳送。',
+      'missing-plugin': '請在 Hermes 伺服器上安裝並啟用 browser-terminal 外掛，然後重新啟動儀表板。',
+      'missing-session': '伺服器上已不存在此終端機。請關閉此分頁並開啟新終端機以啟動另一個 shell。',
+      auth: '終端機驗證失敗。請重新登入後重試。',
+      superseded: '此終端機已在其他位置連線。重試以在此處重新連線。'
+    },
     terminalReadOnly: '唯讀輸出',
     terminalReadOnlyHelp:
       '如需回應提示，請停止背景命令，再於新終端機中執行。新終端機會開啟獨立的 shell，不會連線至此程序。',
