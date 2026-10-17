@@ -1,5 +1,6 @@
 import { startBrowserAttention } from './attention-notifications'
 import { createBrowserBridge } from './bridge'
+import { stopIosTypingZoom } from './ios-typing-zoom'
 import { quietPasswordFields } from './password-fields'
 
 declare global {
@@ -19,5 +20,6 @@ if (import.meta.env.VITE_BROWSER === '1' && !window.hermesDesktop) {
     authRequired: window.__HERMES_AUTH_REQUIRED__ === true
   }) as unknown as Window['hermesDesktop']
   quietPasswordFields()
+  stopIosTypingZoom()
   startBrowserAttention()
 }
