@@ -2,11 +2,11 @@
   "repository": "https://github.com/NousResearch/hermes-agent.git",
   "directory": "source",
   "current_layout": "Frontend-focused selection: desktop/shared workspaces, optional terminal plugin, browser harness, installer tools and their tests. Backend implementations, other applications and unrelated tests were removed after import. Existing Git history was not rewritten.",
-  "upstream_base": "8a33891bdd58c3e0795ebfb277bcdde1003e91ea",
+  "upstream_base": "22063fc099ec9ad8357d7f8f6e6248a0400680d3",
   "frontend_update": {
-    "upstream_commit": "8a33891bdd58c3e0795ebfb277bcdde1003e91ea",
-    "upstream_ref": "main, 2026-10-07; no stable tag exists after v2026.9.24",
-    "previous_upstream_base": "f4d3e626a732010d23d02c24018091b311a2eb06",
+    "upstream_commit": "22063fc099ec9ad8357d7f8f6e6248a0400680d3",
+    "upstream_ref": "main, 2026-10-18; the latest tag, v0.22.2, predates the session edit checks this backend requires",
+    "previous_upstream_base": "8a33891bdd58c3e0795ebfb277bcdde1003e91ea",
     "scope": "Desktop renderer, retained Electron code, shared frontend and the frontend checks in tests-js; retained the selected source layout and browser adaptations. Added the few upstream helper files that selected sources import. Backend and optional terminal plugin unchanged."
   },
   "browser_updater_integration": {

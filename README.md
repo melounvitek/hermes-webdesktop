@@ -4,7 +4,7 @@ The [Hermes Desktop](https://hermes-agent.nousresearch.com/desktop), just runnin
 
 ## Install
 
-Requires Linux, a configured Hermes installation updated since 2026-10-07 (`hermes update`), and `curl`:
+Requires Linux, a configured Hermes installation updated since 2026-10-18 (`hermes update`), and `curl`:
 
 ```sh
 curl -qfsS --proto '=https' --max-time 60 --max-filesize 65536 https://raw.githubusercontent.com/melounvitek/hermes-webdesktop/main/install.sh -o hermes-browser-install.sh && sh ./hermes-browser-install.sh
@@ -115,7 +115,7 @@ it does not contain the Hermes backend or other applications. Electron
 code and the optional terminal plugin are retained. Native application packaging
 is not supported by this repository's release workflow.
 
-The renderer follows upstream `main` as of 2026-10-07, including Simple/Advanced mode,
+The renderer follows upstream `main` as of 2026-10-18, including Simple/Advanced mode,
 custom model entry and additional languages. Native package installation/removal
 remains unavailable in the browser. Account-wide connector management, which
 stock Hermes now supports, has not been checked in the browser.
@@ -142,9 +142,11 @@ npm run build:browser --workspace apps/desktop
 
 Edit `source/apps/desktop/src/`; the output is
 `source/apps/desktop/dist-browser/`. Shared frontend code is in `source/apps/shared/`.
-For wider UI coverage, omit `-- src/browser`. The October 7 update passes the
-full UI suite. The plain desktop-workspace `dev` and `build` commands are for Electron,
-not the browser edition. Generated frontend API contracts stay committed; updating
+For wider UI coverage, omit `-- src/browser`. The October 18 update passes the
+full UI suite except `dead-session-prune.test.ts`, an unchanged upstream test
+that fails the same way in upstream's own tree on Node 22. The plain
+desktop-workspace `dev` and `build` commands are for Electron, not the browser
+edition. Generated frontend API contracts stay committed; updating
 them is a separate compatibility task against stock Hermes.
 
 To run the installer tests, from `source/`:
@@ -175,7 +177,7 @@ local fake model. No provider key is needed:
 scratch=$(mktemp -d)
 stock="$scratch/stock"
 git clone https://github.com/NousResearch/hermes-agent.git "$stock"
-git -C "$stock" checkout --detach 8a33891bdd58c3e0795ebfb277bcdde1003e91ea
+git -C "$stock" checkout --detach 22063fc099ec9ad8357d7f8f6e6248a0400680d3
 UV_PROJECT_ENVIRONMENT="$scratch/venv" \
   uv sync --project "$stock" --locked --python 3.14 --extra web --no-install-project
 python="$scratch/venv/bin/python"

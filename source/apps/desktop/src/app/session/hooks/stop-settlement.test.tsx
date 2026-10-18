@@ -53,7 +53,10 @@ function mountStop() {
   ])
 
   const request = vi.fn(
-    async (_method: string, _params?: Record<string, unknown>, _timeout?: number) => ({ status: 'streaming' }) as never
+    async (method: string, params?: Record<string, unknown>, _timeout?: number) =>
+      (method === 'prompt.submit'
+        ? { admission_id: params?.submission_id, status: 'started' }
+        : { status: 'streaming' }) as never
   )
 
   const update = (id: string, change: (state: ClientSessionState) => ClientSessionState) => {

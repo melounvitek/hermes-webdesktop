@@ -134,7 +134,6 @@ export function createBrowserBridge({ token, authRequired }: BrowserConfig) {
     terminal: createBrowserTerminal(api),
     glassSupported: false,
     translucencySupported: false,
-    guestOnboardingEnabled: false,
     localModelsEnabled: false,
     api,
     async getConnection(profile?: string | null): Promise<HermesConnection> {

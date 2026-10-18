@@ -386,6 +386,9 @@ async function check(fixture, name, body, { ticket503 = false, shiki503 = false 
     } else await completed(turn)
     return turn
   }
+  // Stock `hermes serve` refuses submission_id before admitting anything; the UI then retries once without it.
+  const refusedBeforeAdmission = request => frames.some(f => f.direction === 'received' && f.socket === request.socket &&
+    f.id === request.id && f.error?.code === 4000 && /submission_id/.test(f.error.message))
   async function retained(turn) {
     const users = page.locator('[data-slot="aui_user-message-root"]')
     await expect.poll(async () => occurrences(
@@ -397,7 +400,8 @@ async function check(fixture, name, body, { ticket503 = false, shiki503 = false 
     assert.equal(occurrences(rows[0][1], turn.text), 1, 'A merged DB row must not duplicate an original turn')
     if (turn.reply) await visibleReply(turn.reply)
     assert.equal(
-      frames.filter(f => f.direction === 'sent' && f.method === 'prompt.submit' && f.params?.text === turn.text).length,
+      frames.filter(f => f.direction === 'sent' && f.method === 'prompt.submit' && f.params?.text === turn.text &&
+        !refusedBeforeAdmission(f)).length,
       1,
       'Recovery must never replay prompt.submit'
     )

@@ -60,6 +60,7 @@ it.each([
   function Footer() {
     const { statusbarItems } = useStatusbarItems({
       agentsOpen: false,
+      changeSessionCwd: async () => {},
       chatOpen: false,
       commandCenterOpen: false,
       extraLeftItems: [],

@@ -107,17 +107,21 @@ async function check(name, body) {
         transportProfile: new URL(ws.url()).searchParams.get('profile'), ...JSON.parse(String(payload)) }))
     }
   })
-  const sent = method => frames.filter(f => f.direction === 'sent' && f.method === method)
+  // Stock `hermes serve` refuses submission_id before admitting anything; the UI then retries once without it.
+  const refusedBeforeAdmission = request => frames.some(f => f.direction === 'received' && f.socket === request.socket &&
+    f.id === request.id && f.error?.code === 4000 && /submission_id/.test(f.error.message))
+  const sent = method => frames.filter(f => f.direction === 'sent' && f.method === method && !refusedBeforeAdmission(f))
   const events = (turn, type) => frames.slice(turn.start).filter(f => f.direction === 'received' && f.method === 'event' &&
     f.params.session_id === turn.live && f.params.type === type)
   async function submit(profile, text) {
     const start = frames.length
     await input(page).fill(text)
     await input(page).press('Enter')
-    await expect.poll(() => sent('prompt.submit').findLast(f => f.params.text === text), { timeout: 60000 }).toBeTruthy()
-    const request = sent('prompt.submit').findLast(f => f.params.text === text)
-    await expect.poll(() => frames.find(f => f.direction === 'received' && f.socket === request.socket &&
-      f.id === request.id)?.result?.status, { timeout: 60000 }).toBe('streaming')
+    const accepted = () => sent('prompt.submit').findLast(request => request.params.text === text &&
+      frames.some(f => f.direction === 'received' && f.socket === request.socket && f.id === request.id &&
+        f.result?.status === 'streaming'))
+    await expect.poll(accepted, { timeout: 60000 }).toBeTruthy()
+    const request = accepted()
     const live = request.params.session_id
     const owner = frames.findLast(f => f.direction === 'received' && f.result?.session_id === live)?.result
     assert.equal(owner?.info?.profile_name, profile, 'Correlate owner by runtime id, never shared socket profile')

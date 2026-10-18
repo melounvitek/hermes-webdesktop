@@ -89,7 +89,12 @@ async function startDelivery(responseAfterMs?: number, failure?: Error) {
               if (failure) {
                 reject(failure)
               } else {
-                resolve({ reply: 'Research complete' })
+                resolve({
+                  admission_id: 'admission-1',
+                  delivery_id: envelope.id,
+                  reply: 'Research complete',
+                  status: 'settled'
+                })
               }
             }, responseAfterMs)
           }
@@ -106,8 +111,9 @@ async function startDelivery(responseAfterMs?: number, failure?: Error) {
   const deliveries = hostMock.requestProfile.mock.calls.filter(([, method]) => method === 'bot_relay.deliver')
   expect(deliveries).toHaveLength(1)
   const [route, , params, timeoutMs] = deliveries[0]
-  expect(route).toEqual(target)
+  expect(route).toEqual({ ...target, profile: 'ops', targetProfile: 'ops' })
   expect(params).toEqual({
+    id: envelope.id,
     profile: 'ops',
     message: envelope.message,
     from_profile: envelope.from_profile,
@@ -167,16 +173,14 @@ describe('bot_relay.deliver request budget', () => {
     expect(replies()).toHaveLength(1)
   })
 
-  it('posts a timeout to the sender only when the supplied request budget expires', async () => {
+  it('flags the bot only when the supplied request budget expires', async () => {
     const timeoutMs = await startDelivery()
     await vi.advanceTimersByTimeAsync(timeoutMs - 1)
-    expect(replies()).toEqual([])
     expect(noteBotAttentionMock).not.toHaveBeenCalled()
 
     await vi.advanceTimersByTimeAsync(1)
-    expect(replies()).toEqual([
-      [sender, 'bot_relay.reply', { id: envelope.id, error: 'request timed out' }]
-    ])
+    // The delivery may have been admitted before the transport gave up, so no failure is settled.
+    expect(replies()).toEqual([])
     expect(noteBotAttentionMock).toHaveBeenCalledExactlyOnceWith('b::ops', 'request timed out')
     expect(clearBotAttentionMock).not.toHaveBeenCalled()
   })

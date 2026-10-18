@@ -125,6 +125,7 @@ it.each([true, false])('gates statusbar update gestures despite cached offers fo
 
   const options = {
     agentsOpen: false,
+    changeSessionCwd: async () => {},
     chatOpen: false,
     commandCenterOpen: false,
     extraLeftItems: [],

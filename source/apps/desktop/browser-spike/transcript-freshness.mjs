@@ -52,14 +52,19 @@ try {
       http.push({ time: Date.now(), event: 'initiator', url: e.request.url, initiator: e.initiator })
   })
   page.on('pageerror', error => errors.push(String(error)))
+  let sockets = 0
   page.on('websocket', ws => {
+    const socket = ++sockets
     for (const [event, direction] of [
       ['framesent', 'sent'],
       ['framereceived', 'received']
     ]) {
-      ws.on(event, ({ payload }) => frames.push({ time: Date.now(), direction, ...JSON.parse(String(payload)) }))
+      ws.on(event, ({ payload }) => frames.push({ time: Date.now(), socket, direction, ...JSON.parse(String(payload)) }))
     }
   })
+  // Stock `hermes serve` refuses submission_id before admitting anything; the UI then retries once without it.
+  const refusedBeforeAdmission = request => frames.some(f => f.direction === 'received' && f.socket === request.socket &&
+    f.id === request.id && f.error?.code === 4000 && /submission_id/.test(f.error.message))
   let stopping = false,
     held,
     deliver,
@@ -160,7 +165,8 @@ try {
     await visibleReply('Spike tu Response stopped')
     await visibleReply(reply.text)
     assert.deepEqual(
-      frames.filter(f => f.direction === 'sent' && f.method === 'prompt.submit').map(f => f.params.text),
+      frames.filter(f => f.direction === 'sent' && f.method === 'prompt.submit' && !refusedBeforeAdmission(f))
+        .map(f => f.params.text),
       [original, followup]
     )
     const requests = (await readFile(path.join(runtime.run_dir, 'model-requests.jsonl'), 'utf8'))

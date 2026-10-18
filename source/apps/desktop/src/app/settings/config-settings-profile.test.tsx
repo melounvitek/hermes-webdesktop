@@ -1,5 +1,6 @@
 import { QueryClientProvider } from '@tanstack/react-query'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { atom } from 'nanostores'
 import { createRef } from 'react'
 import { MemoryRouter } from 'react-router'
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -32,6 +33,7 @@ vi.mock('./profile-scope', () => ({ SettingsProfileScope: () => null }))
 vi.mock('./memory/connect', () => ({ MemoryConnect: () => null }))
 vi.mock('./memory/provider-config-panel', () => ({ ProviderConfigPanel: () => null }))
 vi.mock('@/store/projects', () => ({
+  $worktreeRefreshToken: atom(0),
   repoDiscoveryPolicyFromConfig: () => ({}),
   repoDiscoveryPolicySignature: () => '',
   scanAndRecordRepos: vi.fn()

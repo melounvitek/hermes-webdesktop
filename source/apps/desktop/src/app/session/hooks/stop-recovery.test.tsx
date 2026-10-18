@@ -74,10 +74,15 @@ function deferred<T>() {
   return { promise, resolve }
 }
 
+// prompt.submit answers with this send's admission receipt, as the owner does.
+function ownerReply(method: string, params?: Record<string, unknown>): object {
+  return method === 'prompt.submit' ? { admission_id: params?.submission_id, status: 'started' } : {}
+}
+
 function mount(surface: 'main' | 'tile') {
   setActiveSessionId(surface === 'main' ? A : C)
   $sessionTiles.set([{ runtimeId: A, storedSessionId: STORED, ownerRoute: owner }])
-  const request = vi.fn(async (_method: string, _params?: Record<string, unknown>) => ({}))
+  const request = vi.fn(async (method: string, params?: Record<string, unknown>) => ownerReply(method, params))
   vi.mocked(requestGatewayForAgent).mockImplementation((connection, profile, method, params) => {
     expect([connection, profile]).toEqual([owner.connectionId, owner.profile])
 
@@ -103,7 +108,7 @@ function mount(surface: 'main' | 'tile') {
       archiveSession: async () => {},
       branchLoadedSession: async () => false,
       branchStoredSession: async () => {},
-      executeSlashCommand: async () => {},
+      executeSlashCommand: async () => false,
       removeSession: async () => {},
       requestGateway: request as never,
       runtimeIdByStoredSessionIdRef: cache.runtimeIdByStoredSessionIdRef,
@@ -225,7 +230,7 @@ it.each(['main', 'tile'] as const)(
         return { sessions: [{ id: B, status: 'streaming' }] }
       }
 
-      return {}
+      return ownerReply(method, params)
     })
     let stopping!: Promise<void>
     act(() => {
@@ -324,7 +329,7 @@ it.each(['main', 'tile'] as const)('advances past a missing cached replacement f
       return { sessions: [{ id: fresh, status: 'streaming' }] }
     }
 
-    return {}
+    return ownerReply(method, params)
   })
   await act(() => h.actions.cancelRun())
   expect(h.cache.getRuntimeIdForStoredSession(STORED)).toBe(fresh)
@@ -383,7 +388,7 @@ it.each(['main', 'tile'] as const)('ignores a held recovery idle response after 
       return status.promise
     }
 
-    return {}
+    return ownerReply(method, params)
   })
   let stopping!: Promise<void>
   act(() => {
@@ -440,7 +445,7 @@ it.each(['main', 'tile'] as const)('does not steal a changed view or owner durin
       return { sessions: [{ id: B, status: 'idle' }] }
     }
 
-    return {}
+    return ownerReply(method, params)
   })
   let stopping!: Promise<void>
   act(() => {
