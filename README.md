@@ -201,23 +201,25 @@ From `source/`, run `npm run test:browser-compat:harness --workspace apps/deskto
 to check it. For the broader Chromium API checks, run
 `npm run test:browser-compat --workspace apps/desktop --` followed by
 `--backend-root`, `--python`, `--chrome`, `--web-dist` and a new `--evidence`
-directory, all with absolute paths. The October 7 update passed the five
-Chromium groups that existed then against the stock revision above, including
-syntax-highlighting recovery, profile isolation and transcript freshness. A
-sixth group, `terminal`, installs the optional plugin into its disposable home
-and checks shells: typing, resizing, UI scales, pastes, reconnects, reloads, a
-duplicated tab, profile isolation and the missing-plugin recovery. All six
-passed on October 15. File editing, conflict
-handling and draft retention also pass separate Chromium checks. This does not
+directory, all with absolute paths. Against the stock revision above, the
+October 18 update passes five groups, including syntax-highlighting recovery,
+profile isolation and transcript freshness. The sixth group, `terminal`,
+installs the optional plugin into its disposable home and checks shells:
+typing, resizing, UI scales, pastes, reconnects, reloads, a duplicated tab,
+profile isolation and the missing-plugin recovery. It fails its profile check:
+this backend revision refuses the plugin's shell requests for a non-default
+profile, with the previous UI too. File editing, conflict handling and draft
+retention passed separate Chromium checks for earlier updates. This does not
 certify other backend revisions, physical mobile devices or external providers.
 
 ### Optional terminal plugin tests
 
 The plugin is unchanged. Its integration suite is separate from installer tests
 because it imports stock server/authentication/PTY modules. Against the stock
-revision above it passes 16 of 18 cases; two job-cleanup cases fail in the
-test's signal guard, as on the previous stock revision, and are not yet
-investigated.
+revision above it passes 13 of 18 cases. Two job-cleanup cases fail in the
+test's signal guard, as on earlier stock revisions, and are not yet
+investigated. Three cases that open shells in non-default profiles get
+"Plugin not found" from this backend revision.
 Using the disposable `scratch`, `stock` and `python` from above, after stopping
 the UI fixture:
 
