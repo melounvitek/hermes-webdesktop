@@ -1,6 +1,6 @@
 import { useStore } from '@nanostores/react'
 import type * as React from 'react'
-import { useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 
 import { type NewSessionSplitHandler, startNewSessionDrag } from '@/app/chat/new-session-drag'
 import { Codicon } from '@/components/ui/codicon'
@@ -9,7 +9,7 @@ import type { SessionInfo } from '@/hermes'
 import { useI18n } from '@/i18n'
 import { cn } from '@/lib/utils'
 import { $sidebarShowAllSessions } from '@/store/layout'
-import { fetchProjectSessions, projectProfile } from '@/store/projects'
+import { $projectOwnerBySessionId, fetchProjectSessions, projectProfile } from '@/store/projects'
 
 import {
   SIDEBAR_LEAD_ICON_SIZE,
@@ -34,7 +34,7 @@ import {
   useWorkspaceNodeOpen
 } from './model'
 import { ProjectContextMenu, ProjectMenu } from './project-menu'
-import { excludeProjectSessions, type SidebarProjectTree } from './workspace-groups'
+import { excludeProjectSessions, ownerOf, type SidebarProjectTree } from './workspace-groups'
 import { WorkspaceAddButton, WorkspaceShowMoreRow } from './workspace-header'
 
 // A bare color dot (no icon) or an icon glyph — tinted by `color` when set, else
@@ -127,17 +127,50 @@ export function ProjectOverviewRow({
   // the sidebar's content edge regardless of which side the sidebar is on.
   const rowRef = useRef<HTMLDivElement>(null)
   const showAllSessions = useStore($sidebarShowAllSessions)
+  const owners = useStore($projectOwnerBySessionId)
   // The tree payload previews only the most-recent few sessions per project
   // (kept light on purpose); "Show all" hydrates THIS project's lanes on demand
-  // rather than widening every project's preview window.
-  const [expanded, setExpanded] = useState<SidebarProjectTree | null>(null)
+  // rather than widening every project's preview window. The lanes are kept
+  // with the membership they were fetched for, and refetched when a session
+  // moves in or out (the tree's session ids change), not on every refresh.
+  // Sorted: the tree lists the ids by activity, which reorders them.
+  const membership = useMemo(() => [...(project.sessionIds ?? [])].sort().join('\n'), [project.sessionIds])
+  const [expanded, setExpanded] = useState<{ membership: string; tree: SidebarProjectTree } | null>(null)
   const [expanding, setExpanding] = useState(false)
+
+  useEffect(() => {
+    if (!expanded || expanded.membership === membership) {
+      return
+    }
+
+    let current = true
+
+    fetchProjectSessions(project.id, { supersedable: false })
+      .then(tree => void (current && tree && setExpanded({ membership, tree })))
+      // Keep the lanes already shown; the next membership change retries.
+      .catch(() => undefined)
+
+    return () => {
+      current = false
+    }
+  }, [expanded, membership, project.id])
+
   const limit = showAllSessions || expanded ? Infinity : PROJECT_PREVIEW_COUNT
   const fetched = (previewSessions ?? []).slice(0, limit)
   const recent = fetched.length ? fetched : latestProjectSessions(project, limit)
+
   // The hydrated lanes come straight from the backend, so — like the drill-in
   // (index.tsx) — they haven't been through the tree's exclusion filter yet.
-  const visible = expanded && isSessionHidden ? excludeProjectSessions(expanded, isSessionHidden) : expanded
+  // A session the refreshed tree already files under another project (a move)
+  // is dropped here too, without waiting for the refetch above.
+  const visible =
+    expanded &&
+    excludeProjectSessions(expanded.tree, session => {
+      const owner = ownerOf(owners, session)
+
+      return Boolean(isSessionHidden?.(session)) || (owner !== undefined && owner !== project.id)
+    })
+
   const preview = renderRows ? (visible ? expandedProjectSessions(recent, visible) : recent) : []
   // Once hydrated, the whole project is reachable but mounts a page at a time
   // (a project can hold thousands of chats; the collapsed preview stays 3).
@@ -168,7 +201,7 @@ export function ProjectOverviewRow({
 
     setExpanding(true)
     fetchProjectSessions(project.id, { supersedable: false })
-      .then(tree => void (tree && setExpanded(tree)))
+      .then(tree => void (tree && setExpanded({ membership, tree })))
       .catch(() => onEnter?.(project.id))
       .finally(() => setExpanding(false))
   }

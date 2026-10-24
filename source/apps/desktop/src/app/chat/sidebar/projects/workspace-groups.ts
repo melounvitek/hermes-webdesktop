@@ -591,7 +591,7 @@ function sameConversationAs(session: SessionInfo): (row: SessionInfo) => boolean
 }
 
 /** The snapshot's owner for a live row, found by any id its conversation has had. */
-function ownerOf(owners: ReadonlyMap<string, string>, session: SessionInfo): string | undefined {
+export function ownerOf(owners: ReadonlyMap<string, string>, session: SessionInfo): string | undefined {
   for (const id of conversationIds(session)) {
     const owner = owners.get(id)
 

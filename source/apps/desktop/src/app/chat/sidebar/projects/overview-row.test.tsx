@@ -1,8 +1,9 @@
-import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import type { SessionInfo } from '@/hermes'
+import { $projectTree } from '@/store/projects'
 import type * as ProjectsStore from '@/store/projects'
 
 import type * as Model from './model'
@@ -66,6 +67,7 @@ const session = (id: string, updated: number): SessionInfo => ({ id, updated_at:
 describe('ProjectOverviewRow', () => {
   afterEach(() => {
     workspaceOpen.value = false
+    $projectTree.set([])
     projectsStore.fetchProjectSessions.mockReset()
     projectsStore.projectProfile.mockReset().mockReturnValue('default')
   })
@@ -163,6 +165,76 @@ describe('ProjectOverviewRow', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Show all 3 sessions' }))
 
     await waitFor(() => expect(screen.getByTestId('rows').textContent).toBe('s1,s3,s4'))
+  })
+
+  // "Show all" loads the project's sessions once. A session moved to another
+  // project afterwards must leave this list as soon as the refreshed project
+  // tree files it elsewhere, not linger until a page reload.
+  it('drops a session from the expanded list once the project tree files it under another project', async () => {
+    workspaceOpen.value = true
+    const five = Array.from({ length: 5 }, (_, index) => session(`s${index + 1}`, 500 - index))
+    const busy = { ...project, sessionCount: 5 } as SidebarProjectTree
+    projectsStore.fetchProjectSessions.mockResolvedValue({
+      ...busy,
+      repos: [{ groups: [{ sessions: five }] }]
+    } as unknown as SidebarProjectTree)
+
+    render(
+      <ProjectOverviewRow
+        previewSessions={five.slice(0, 3)}
+        project={busy}
+        renderRows={items => <div data-testid="rows">{items.map(item => item.id).join(',')}</div>}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Show all 5 sessions' }))
+    await waitFor(() => expect(screen.getByTestId('rows').textContent).toBe('s1,s2,s3,s4,s5'))
+
+    act(() =>
+      $projectTree.set([
+        { ...busy, repos: [], sessionCount: 4, sessionIds: ['s1', 's2', 's3', 's5'] },
+        { id: 'p2', label: 'Other', repos: [], sessionCount: 1, sessionIds: ['s4'] }
+      ] as unknown as SidebarProjectTree[])
+    )
+
+    expect(screen.getByTestId('rows').textContent).toBe('s1,s2,s3,s5')
+  })
+
+  // An older session moved INTO an already-expanded project is in neither the
+  // three-row preview nor the list loaded at expansion: the list is refetched
+  // when the project's membership changes. The tree lists ids by activity, so
+  // a chat becoming active only reorders them, which must not refetch.
+  it('refetches the expanded list when a session moves into the project, not when activity reorders it', async () => {
+    workspaceOpen.value = true
+    const five = Array.from({ length: 5 }, (_, index) => session(`s${index + 1}`, 500 - index))
+    const moved = session('s0', 100)
+    const lanes = (sessions: SessionInfo[]) => ({ repos: [{ groups: [{ sessions }] }] })
+    const busy = { ...project, sessionCount: 5, sessionIds: five.map(item => item.id) } as SidebarProjectTree
+    projectsStore.fetchProjectSessions.mockResolvedValue({ ...busy, ...lanes(five) } as unknown as SidebarProjectTree)
+
+    const row = (node: SidebarProjectTree) => (
+      <ProjectOverviewRow
+        previewSessions={five.slice(0, 3)}
+        project={node}
+        renderRows={items => <div data-testid="rows">{items.map(item => item.id).join(',')}</div>}
+      />
+    )
+
+    const { rerender } = render(row(busy))
+    fireEvent.click(screen.getByRole('button', { name: 'Show all 5 sessions' }))
+    await waitFor(() => expect(screen.getByTestId('rows').textContent).toBe('s1,s2,s3,s4,s5'))
+
+    rerender(row({ ...busy, sessionIds: [...busy.sessionIds!].reverse() }))
+    expect(projectsStore.fetchProjectSessions).toHaveBeenCalledTimes(1)
+
+    const arrived = { ...busy, sessionCount: 6, sessionIds: [...busy.sessionIds!, 's0'] } as SidebarProjectTree
+    projectsStore.fetchProjectSessions.mockResolvedValue({
+      ...arrived,
+      ...lanes([...five, moved])
+    } as unknown as SidebarProjectTree)
+    rerender(row(arrived))
+
+    await waitFor(() => expect(screen.getByTestId('rows').textContent).toBe('s1,s2,s3,s4,s5,s0'))
   })
 
   it('offers the "new session" add button on Home, which starts one with no folder', () => {
