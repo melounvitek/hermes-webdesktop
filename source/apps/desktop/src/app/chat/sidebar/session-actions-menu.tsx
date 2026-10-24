@@ -34,6 +34,7 @@ import { exportSession } from '@/lib/session-export'
 import { activeGateway } from '@/store/gateway'
 import { notify, notifyError } from '@/store/notifications'
 import {
+  $projectOwnerBySessionId,
   $projectTree,
   applyRenamedSessionTitle,
   moveSessionToProject,
@@ -58,6 +59,8 @@ import { ackStoredSessionId } from '@/store/session-unread'
 import { canOpenSessionInTerminal, canOpenSessionWindow, openSessionInTerminal } from '@/store/windows'
 
 import type { SessionTitleResponse } from '../../types'
+
+import { ownerOf } from './projects/workspace-groups'
 
 // Rename a session, preferring the gateway's session.title RPC over REST.
 //
@@ -210,9 +213,13 @@ function MoveToProjectItems({ kit, sessionId, profile }: { kit: MenuKit; session
   const { t } = useI18n()
   const p = t.sidebar.projects
   const tree = useStore($projectTree)
+  const owners = useStore($projectOwnerBySessionId)
   const session = useStore($sessions).find(s => sessionMatchesStoredId(s, sessionId))
+  const owner = session && ownerOf(owners, session)
   const cwd = session?.cwd?.trim() || ''
-  const currentProjectId = cwd ? projectIdForCwd(cwd) : null
+  // Same rule as a drag onto a project row (session-drag.ts): the project the
+  // sidebar files the session under wins over a possibly stale cached folder.
+  const currentProjectId = owner ?? (cwd ? projectIdForCwd(cwd) : null)
   const targets = tree.filter(node => node.id !== currentProjectId && !node.isNoProject && projectRootCwd(node))
 
   // The flat (non-grouped) sidebar view only warms $projectTree on a

@@ -50,13 +50,13 @@ import type { EngineZone, ZoneRect } from '@/components/pane-shell/tree/zones-en
 import { translateNow } from '@/i18n'
 import { notifyError } from '@/store/notifications'
 import { requestFreshSession } from '@/store/profile'
-import { moveSessionToProject, projectIdForCwd } from '@/store/projects'
+import { $projectOwnerBySessionId, moveSessionToProject, projectIdForCwd } from '@/store/projects'
 import { $selectedStoredSessionId, $sessions, sessionMatchesStoredId } from '@/store/session'
 import { $sessionTiles, nextSessionTileForWorkspace, openSessionTile, type TileDock } from '@/store/session-states'
 
 import { requestComposerInsertRefs } from './composer/focus'
 import { type SessionDragPayload, sessionInlineRef, sessionLabel } from './composer/inline-refs'
-import { NO_PROJECT_ID } from './sidebar/projects/workspace-groups'
+import { NO_PROJECT_ID, ownerOf } from './sidebar/projects/workspace-groups'
 import { tileZoneHost } from './tile-zone-host'
 
 const PROJECT_ROW_DROP_ATTR = 'data-session-drop-hover'
@@ -168,7 +168,11 @@ export function startSessionDrag(
       // survive the row's own reorder/rename churn while a drag is armed.
       const draggedSession = $sessions.get().find(s => sessionMatchesStoredId(s, payload.id))
       const cwd = draggedSession?.cwd?.trim() || ''
-      projectRows = snapshotProjectRows(cwd ? projectIdForCwd(cwd) : null)
+      // The project the sidebar files the session under is its own. Right after
+      // a move, the session list can still carry the folder it left (served
+      // from the backend's response cache), so the folder is only a fallback.
+      const owner = draggedSession && ownerOf($projectOwnerBySessionId.get(), draggedSession)
+      projectRows = snapshotProjectRows(owner ?? (cwd ? projectIdForCwd(cwd) : null))
       source?.style.setProperty('opacity', '0.45')
       // The same sentinel the zone overlay + chat surfaces key off — the
       // whole drop language (sheets, pills, caret, link overlay) lights up.

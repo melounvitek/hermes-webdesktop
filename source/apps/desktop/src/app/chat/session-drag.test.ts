@@ -1,10 +1,11 @@
+import type { WritableAtom } from 'nanostores'
 import type { PointerEvent as ReactPointerEvent } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { group } from '@/components/pane-shell/tree/model'
 import { $layoutTree, closeTreePane } from '@/components/pane-shell/tree/store'
 import { requestFreshSession } from '@/store/profile'
-import { moveSessionToProject, projectIdForCwd } from '@/store/projects'
+import { $projectOwnerBySessionId, moveSessionToProject, projectIdForCwd } from '@/store/projects'
 import { $selectedStoredSessionId, $sessions } from '@/store/session'
 import { $sessionTiles, nextSessionTileForWorkspace, openSessionTile } from '@/store/session-states'
 
@@ -33,10 +34,15 @@ vi.mock('@/components/pane-shell/tree/store', async importOriginal => ({
   closeTreePane: vi.fn()
 }))
 vi.mock('./composer/focus', () => ({ requestComposerInsertRefs: vi.fn() }))
-vi.mock('@/store/projects', () => ({
-  moveSessionToProject: vi.fn().mockResolvedValue(undefined),
-  projectIdForCwd: vi.fn(() => null)
-}))
+vi.mock('@/store/projects', async () => {
+  const { atom } = await import('nanostores')
+
+  return {
+    $projectOwnerBySessionId: atom(new Map()),
+    moveSessionToProject: vi.fn().mockResolvedValue(undefined),
+    projectIdForCwd: vi.fn(() => null)
+  }
+})
 vi.mock('@/store/notifications', () => ({ notifyError: vi.fn() }))
 
 const ZONE = { left: 0, top: 0, right: 1000, bottom: 800 }
@@ -192,8 +198,11 @@ function mountProjectRow(id: string, box = { left: 0, top: 0, right: 200, bottom
 }
 
 describe('session drop targeting onto a sidebar project row', () => {
+  const projectOwners = $projectOwnerBySessionId as WritableAtom<ReadonlyMap<string, string>>
+
   beforeEach(() => {
     $sessions.set([{ id: 'dragged', cwd: '', _lineage_root_id: null } as never])
+    projectOwners.set(new Map())
   })
 
   it('moves the dragged session to the project row it is dropped on', () => {
@@ -225,6 +234,37 @@ describe('session drop targeting onto a sidebar project row', () => {
     mountProjectRow('proj-a')
     vi.mocked(projectIdForCwd).mockReturnValue('proj-a')
     $sessions.set([{ id: 'dragged', cwd: '/repos/proj-a', _lineage_root_id: null } as never])
+
+    dragTo(document.getElementById('row')!, 100, 20)
+
+    expect(moveSessionToProject).not.toHaveBeenCalled()
+  })
+
+  // Right after a move, the session list can briefly come back from the
+  // backend's response cache with the folder the session left. The project
+  // the sidebar files it under decides which project is its own.
+  it('accepts the project a moved session left while its cached row still names that folder', () => {
+    mountStackedTabs()
+    $layoutTree.set(group(['sessions'], { id: 'g1' }))
+    mountProjectRow('proj-a')
+    vi.mocked(projectIdForCwd).mockReturnValue('proj-a')
+    $sessions.set([{ id: 'dragged', cwd: '/repos/proj-a', _lineage_root_id: null } as never])
+    projectOwners.set(new Map([['dragged', 'proj-b']]))
+
+    dragTo(document.getElementById('row')!, 100, 20)
+
+    expect(moveSessionToProject).toHaveBeenCalledWith('dragged', 'proj-a', 'default')
+  })
+
+  // Compression can leave the tree listing the conversation under a newer id
+  // than the dragged row: it is still the same conversation, in the same project.
+  it('finds the session’s project in the tree under any id its conversation has had', () => {
+    mountStackedTabs()
+    $layoutTree.set(group(['sessions'], { id: 'g1' }))
+    mountProjectRow('proj-b')
+    vi.mocked(projectIdForCwd).mockReturnValue(null)
+    $sessions.set([{ id: 'dragged', cwd: '', _lineage_ids: ['dragged', 'tip'], _lineage_root_id: null } as never])
+    projectOwners.set(new Map([['tip', 'proj-b']]))
 
     dragTo(document.getElementById('row')!, 100, 20)
 

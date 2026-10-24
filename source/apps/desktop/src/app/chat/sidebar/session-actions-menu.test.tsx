@@ -1,8 +1,15 @@
 import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { atom } from 'nanostores'
+import { atom, type WritableAtom } from 'nanostores'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { refreshProjectTree } from '@/store/projects'
+import {
+  $projectOwnerBySessionId,
+  $projectTree,
+  projectIdForCwd,
+  projectRootCwd,
+  refreshProjectTree
+} from '@/store/projects'
+import { $sessions, sessionMatchesStoredId } from '@/store/session'
 
 import { SessionActionsMenu, SessionContextMenu } from './session-actions-menu'
 
@@ -79,6 +86,7 @@ vi.mock('@/lib/session-export', () => ({ exportSession: vi.fn() }))
 vi.mock('@/store/gateway', () => ({ activeGateway: vi.fn(() => null) }))
 vi.mock('@/store/notifications', () => ({ notify: vi.fn(), notifyError: vi.fn() }))
 vi.mock('@/store/projects', () => ({
+  $projectOwnerBySessionId: atom<ReadonlyMap<string, string>>(new Map()),
   $projectTree: atom<unknown[]>([]),
   moveSessionToProject: vi.fn(),
   projectIdForCwd: vi.fn(() => null),
@@ -399,5 +407,53 @@ describe('SessionActionsMenu', () => {
     fireEvent.click(screen.getByRole('menuitem', { name: 'Move to project' }))
 
     await waitFor(() => expect(refreshProjectTree).toHaveBeenCalledTimes(1))
+  })
+
+  describe('Move to project targets', () => {
+    afterEach(() => {
+      $projectTree.set([])
+      ;($projectOwnerBySessionId as WritableAtom<ReadonlyMap<string, string>>).set(new Map())
+      $sessions.set([])
+      vi.mocked(projectIdForCwd).mockImplementation(() => null)
+      vi.mocked(projectRootCwd).mockImplementation(() => '')
+      vi.mocked(sessionMatchesStoredId).mockImplementation(() => false)
+    })
+
+    // Right after a move, the session list can briefly come back from the
+    // backend's response cache with the folder the session left. The project
+    // the sidebar files it under decides which projects the menu offers.
+    // The session's cached row names the folder it left ('/a'); the tree files
+    // it under Beta, keyed by `ownerKey`.
+    async function openMoveTargets(row: Record<string, unknown>, ownerKey: string) {
+      $projectTree.set([
+        { id: 'a', label: 'Alpha', path: '/a' },
+        { id: 'b', label: 'Beta', path: '/b' }
+      ] as never)
+      ;($projectOwnerBySessionId as WritableAtom<ReadonlyMap<string, string>>).set(new Map([[ownerKey, 'b']]))
+      $sessions.set([{ cwd: '/a', ...row }] as never)
+      vi.mocked(sessionMatchesStoredId).mockImplementation((session, id) => session.id === id)
+      vi.mocked(projectIdForCwd).mockImplementation(cwd => (cwd === '/a' ? 'a' : null))
+      vi.mocked(projectRootCwd).mockImplementation(node => node?.path ?? '')
+      renderMenu()
+
+      const trigger = screen.getByRole('button', { name: 'Session actions' })
+      fireEvent.pointerDown(trigger, { button: 0, pointerType: 'mouse' })
+      fireEvent.pointerUp(trigger, { button: 0, pointerType: 'mouse' })
+      fireEvent.click(trigger)
+      await screen.findByRole('menu')
+      fireEvent.click(screen.getByRole('menuitem', { name: 'Move to project' }))
+      await screen.findByRole('menuitem', { name: /Alpha|Beta/ })
+
+      return ['Alpha', 'Beta'].filter(name => screen.queryByRole('menuitem', { name }))
+    }
+
+    it('offers the project a moved session left while its cached row still names that folder', async () => {
+      expect(await openMoveTargets({ id: 's1' }, 's1')).toEqual(['Alpha'])
+    })
+
+    // Compression can leave the tree listing the conversation under a newer id.
+    it('finds the session’s project in the tree under any id its conversation has had', async () => {
+      expect(await openMoveTargets({ id: 's1', _lineage_ids: ['s1', 'tip'] }, 'tip')).toEqual(['Alpha'])
+    })
   })
 })
