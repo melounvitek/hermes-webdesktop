@@ -315,6 +315,9 @@ export function ChatRuntimeBoundary({
   // value must come from a ref rather than the stale render closure.
   const runtimeIdRef = useRef(runtimeId)
   runtimeIdRef.current = runtimeId
+  // Bumped by collapseWindow so an older page still in flight cannot regrow
+  // the window the reader has just left.
+  const collapsesRef = useRef(0)
 
   // Reset the window on session swap during RENDER, so a large expand from the
   // previous chat can't leak into the next one's first paint (#55191). The
@@ -374,13 +377,17 @@ export function ChatRuntimeBoundary({
         transcriptBackfillAvailable(storedId, tailProfile)
       ) {
         let grew = false
+        const collapses = collapsesRef.current
         await backfillOlderTranscriptPage({
           storedSessionId: storedId,
           profile: tailProfile,
           // Stale-response guard: a session switch remounts/re-keys this view;
           // checking the live atoms (not captured props) discards a page that
           // resolves after the user moved on — same pattern as isCurrentResume.
-          isCurrent: () => view.$storedId.get() === storedId && view.$runtimeId.get() === runtimeId,
+          isCurrent: () =>
+            view.$storedId.get() === storedId &&
+            view.$runtimeId.get() === runtimeId &&
+            collapsesRef.current === collapses,
           applyOlderPage: olderPage => {
             const current = view.$messages.get()
 
@@ -412,7 +419,10 @@ export function ChatRuntimeBoundary({
     [runtimeId, storedId, tailProfile, view, history.page, history.revealOlder]
   )
 
-  const collapseWindow = useCallback(() => setWindowPages(1), [])
+  const collapseWindow = useCallback(() => {
+    collapsesRef.current += 1
+    setWindowPages(1)
+  }, [])
 
   // An open history page carries its own reach: its first prompt is the anchor,
   // and the around window reports whether rows precede it. Reading that as
