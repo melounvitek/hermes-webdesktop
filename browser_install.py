@@ -220,8 +220,10 @@ def command_lock(base, exclusive=True):
         yield stream
 
 
-def confirm(preview):
+def confirm(preview, yes=False):
     print(preview, flush=True)
+    if yes:
+        return True
     try:
         with (
             open("/dev/tty", "w", buffering=1, encoding="utf-8") as output,
@@ -494,7 +496,8 @@ def manage(args):
                 )
                 if not confirm(
                     f"Remove the verified owned controller and command left by interrupted publication/removal?\n"
-                    f"Profile: {selection['profile']}. No installation exists. Hermes stays untouched; stable locks remain."
+                    f"Profile: {selection['profile']}. No installation exists. Hermes stays untouched; stable locks remain.",
+                    args.yes,
                 ):
                     print("Cancelled; controller preserved.")
                     return 0
@@ -518,7 +521,8 @@ def manage(args):
                 else f"{args.command.capitalize()} browser {manifest['release']} to {target['release']}"
             )
             accepted = confirm(
-                f"{action}?\nProfile: {selection['profile']}\nHermes, data and plugins stay untouched. Nothing starts or stops automatically.\nStable ownership locks remain after uninstall.\nUpdates replace browser assets, not the controller; controller replacement requires explicit uninstall/reinstall."
+                f"{action}?\nProfile: {selection['profile']}\nHermes, data and plugins stay untouched. Nothing starts or stops automatically.\nStable ownership locks remain after uninstall.\nUpdates replace browser assets, not the controller; controller replacement requires explicit uninstall/reinstall.",
+                args.yes,
             )
             locations()
             namespace(base)
@@ -619,6 +623,13 @@ def main():
         if name in ("start", "stop"):
             child.add_argument(
                 "--timeout", type=float, default=60 if name == "start" else 10
+            )
+        if name in ("update", "rollback", "uninstall"):
+            child.add_argument(
+                "-y",
+                "--yes",
+                action="store_true",
+                help="Confirm without prompting; still prints what will change",
             )
         if name == "rollback":
             child.add_argument(
