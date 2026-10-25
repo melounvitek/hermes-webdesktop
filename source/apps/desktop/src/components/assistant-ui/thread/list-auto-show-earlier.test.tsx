@@ -125,4 +125,27 @@ describe('top-edge auto Show earlier', () => {
 
     expect(mountedGroups(container)).toBeGreaterThan(windowed)
   })
+
+  it('unmounts paged-in turns again once the reader returns to the bottom', async () => {
+    const turns = 60
+    const { container } = render(<Harness messages={heavyTranscript(turns)} />)
+    const viewport = container.querySelector('[data-slot="aui_thread-viewport"]') as HTMLElement
+    const windowed = await settledGroupCount(container)
+
+    viewport.scrollTop = scrollHeightNow() - CLIENT_H
+    act(() => viewport.dispatchEvent(new Event('scroll')))
+    viewport.scrollTop = 0
+    act(() => viewport.dispatchEvent(new Event('scroll')))
+    await settle(5)
+    act(() => viewport.dispatchEvent(new WheelEvent('wheel', { deltaY: -120 })))
+    await settle()
+
+    expect(mountedGroups(container)).toBeGreaterThan(windowed)
+
+    viewport.scrollTop = scrollHeightNow() - CLIENT_H
+    act(() => viewport.dispatchEvent(new Event('scroll')))
+    await settle()
+
+    expect(mountedGroups(container)).toBe(windowed)
+  })
 })

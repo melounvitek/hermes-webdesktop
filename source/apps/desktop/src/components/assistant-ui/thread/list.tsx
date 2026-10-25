@@ -1457,6 +1457,17 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
     }
   }, [hiddenCount, isAtBottom, olderAvailable, scrollRef, showEarlier])
 
+  // Paging only ever grows the mounted transcript, so after a long scroll-back
+  // every paged-in turn stayed mounted at the bottom too — enough to crash
+  // memory-limited mobile tabs. Returning to the live bottom drops back to one
+  // page. Keyed on reaching the bottom, not on the budget, so a Show earlier
+  // click on a transcript short enough to stay at the bottom still pages.
+  useEffect(() => {
+    if (isAtBottom && !isHistorical) {
+      setRenderBudget(budget => Math.min(budget, paneBudget))
+    }
+  }, [isAtBottom, isHistorical, paneBudget])
+
   useLayoutEffect(() => {
     const el = scrollRef.current
     const restoreFromBottom = restoreFromBottomRef.current
