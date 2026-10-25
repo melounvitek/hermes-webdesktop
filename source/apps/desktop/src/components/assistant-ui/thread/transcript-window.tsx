@@ -17,11 +17,14 @@ export interface TranscriptWindowValue {
    * A remote page resolves false on failure; callers can retry without growing
    * an empty render window or holding the reader still during network I/O. */
   expandWindow: (beforePrepend?: () => void) => void | Promise<boolean>
+  /** Shrink an expanded window back to its first page. */
+  collapseWindow?: () => void
 }
 
 const DEFAULT_TRANSCRIPT_WINDOW: Required<TranscriptWindowValue> = {
   olderAvailable: false,
   expandWindow: () => {},
+  collapseWindow: () => {},
   revealRow: async () => null,
   returnToLatest: () => {},
   isHistorical: false,

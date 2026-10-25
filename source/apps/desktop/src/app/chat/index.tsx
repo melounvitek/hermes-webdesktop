@@ -412,6 +412,8 @@ export function ChatRuntimeBoundary({
     [runtimeId, storedId, tailProfile, view, history.page, history.revealOlder]
   )
 
+  const collapseWindow = useCallback(() => setWindowPages(1), [])
+
   // An open history page carries its own reach: its first prompt is the anchor,
   // and the around window reports whether rows precede it. Reading that as
   // "nothing earlier" (the live-tail flags) retired every way back — the rail
@@ -425,13 +427,23 @@ export function ChatRuntimeBoundary({
     () => ({
       olderAvailable,
       expandWindow,
+      collapseWindow,
       revealRow,
       returnToLatest,
       currentMessages,
       isHistorical,
       newerAvailable
     }),
-    [expandWindow, olderAvailable, revealRow, returnToLatest, currentMessages, isHistorical, newerAvailable]
+    [
+      expandWindow,
+      collapseWindow,
+      olderAvailable,
+      revealRow,
+      returnToLatest,
+      currentMessages,
+      isHistorical,
+      newerAvailable
+    ]
   )
 
   const runtime = useIncrementalExternalStoreRuntime<ThreadMessage>({
