@@ -294,7 +294,6 @@ def test_uninstall_serializes_controller_cleanup(
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    monkeypatch.setattr(module, "confirm", lambda preview: True)
     root = d["base"] / "installation"
     controls = snapshot(d["base"] / "control")
     command_bytes = d["command"].read_bytes()
@@ -336,13 +335,13 @@ def test_uninstall_serializes_controller_cleanup(
 
     if interloper == "engine":
         monkeypatch.setattr(module, "remove_controller", concurrent_engine)
-        module.manage(argparse.Namespace(command="uninstall"))
+        module.manage(argparse.Namespace(command="uninstall", yes=True))
         assert not interleaved, "Controller cleanup allowed an intervening engine owner"
         assert not root.exists() and not d["command"].exists()
     else:
         monkeypatch.setattr(module.E, "maintenance", history_after_uninstall)
         with pytest.raises(ValueError, match="Installation/history appeared"):
-            module.manage(argparse.Namespace(command="uninstall"))
+            module.manage(argparse.Namespace(command="uninstall", yes=True))
         assert snapshot(d["base"] / "control") == controls
         assert d["command"].read_bytes() == command_bytes
         assert (

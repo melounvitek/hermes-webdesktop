@@ -43,6 +43,20 @@ def confirmed(d, action, *args, answer="yes\n"):
     return terminal([str(d["command"]), action, *args], d["env"], answer=answer)
 
 
+def unattended(d, action):
+    # A new session has no controlling terminal, as under an agent or cron.
+    result = subprocess.run(
+        [str(d["command"]), action, "--yes"],
+        env=d["env"],
+        stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=20,
+        start_new_session=True,
+    )
+    return result.returncode, result.stdout + result.stderr
+
+
 def serve(d, archive, launcher=None):
     descriptor = json.loads((d["root"] / "CURRENT.json").read_bytes())
     for key, data in (
@@ -134,6 +148,23 @@ def test_confirmed_update_rollback_uninstall_and_stable_reinstall(
         assert code == 0, output
         assert (d["base"] / "installation.run").stat().st_ino == inode
     assert snapshot(d["home"] / ".hermes") == preserved
+
+
+def test_yes_confirms_maintenance_without_terminal(installed, release, tmp_path):
+    d = installed
+    root = d["base"] / "installation"
+    baseline = snapshot(root)
+    serve(d, candidate(release, tmp_path, "next"))
+    code, output = unattended(d, "update")
+    assert code == 0, output
+    assert "Update browser" in output and "Type yes" not in output
+    assert "next" in command(d, "inspect").stdout
+    code, output = unattended(d, "rollback")
+    assert code == 0, output
+    assert snapshot(root) == baseline
+    code, output = unattended(d, "uninstall")
+    assert code == 0, output
+    assert not d["command"].exists()
 
 
 @pytest.mark.parametrize("foreign", ["command", "control", "history", "installation"])

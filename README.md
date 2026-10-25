@@ -32,6 +32,16 @@ stopped. That is the case for installations made before updating from the
 browser was added on 2026-10-04, and for profiles whose terminal backend is a
 remote SSH host.
 
+To run `update`, `rollback` or `uninstall` without a prompt, for example from
+a script or an agent, add `--yes`; the command still prints what it changes.
+Installations made before `--yes` was added on 2026-10-25 lack it until
+reinstalled as described below. There, `script` provides the terminal the
+prompt needs:
+
+```sh
+printf 'yes\n' | script -qec 'hermes-browser update' /dev/null
+```
+
 Updates replace the UI, not the launcher. To get a release that changes the
 launcher, such as the one that added updating from the browser, stop the web
 desktop, run `hermes-browser uninstall` and run the install command again.
