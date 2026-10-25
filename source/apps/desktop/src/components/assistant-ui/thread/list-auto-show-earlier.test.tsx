@@ -148,4 +148,29 @@ describe('top-edge auto Show earlier', () => {
 
     expect(mountedGroups(container)).toBe(windowed)
   })
+
+  it('keeps paged-in turns while the reader selects text in them', async () => {
+    const { container } = render(<Harness messages={heavyTranscript(60)} />)
+    const viewport = container.querySelector('[data-slot="aui_thread-viewport"]') as HTMLElement
+    await settledGroupCount(container)
+
+    viewport.scrollTop = scrollHeightNow() - CLIENT_H
+    act(() => viewport.dispatchEvent(new Event('scroll')))
+    viewport.scrollTop = 0
+    act(() => viewport.dispatchEvent(new Event('scroll')))
+    await settle(5)
+    act(() => viewport.dispatchEvent(new WheelEvent('wheel', { deltaY: -120 })))
+    await settle()
+    const pagedIn = mountedGroups(container)
+
+    const range = new Range()
+    range.selectNodeContents(container.querySelector('[data-slot="aui_message-group"]') as HTMLElement)
+    getSelection()?.addRange(range)
+    viewport.scrollTop += 100
+    act(() => viewport.dispatchEvent(new Event('scroll')))
+    await settle()
+    getSelection()?.removeAllRanges()
+
+    expect(mountedGroups(container)).toBe(pagedIn)
+  })
 })

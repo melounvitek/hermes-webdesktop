@@ -1462,13 +1462,14 @@ const ThreadMessageListInner: FC<ThreadMessageListProps> = ({
   // bottom too — enough to crash memory-limited mobile tabs. Returning to the
   // live bottom drops both back to one page. Keyed on reaching the bottom, not
   // on the budget, so a Show earlier click on a transcript short enough to
-  // stay at the bottom still pages.
+  // stay at the bottom still pages. A transcript selection pins the bottom
+  // target to scrollTop, so isAtBottom then reads true deep in history too.
   useEffect(() => {
-    if (isAtBottom && !isHistorical) {
+    if (isAtBottom && !isHistorical && !hasTranscriptTextSelection(scrollRef.current)) {
       setRenderBudget(budget => Math.min(budget, paneBudget))
       collapseWindow()
     }
-  }, [collapseWindow, isAtBottom, isHistorical, paneBudget])
+  }, [collapseWindow, isAtBottom, isHistorical, paneBudget, scrollRef])
 
   useLayoutEffect(() => {
     const el = scrollRef.current
